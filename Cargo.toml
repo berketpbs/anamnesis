@@ -1,0 +1,129 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/anamnesis-core",
+    "crates/anamnesis-store",
+    "crates/anamnesis-wiki",
+    "crates/anamnesis-mcp",
+    "crates/anamnesis-hooks",
+    "crates/anamnesis-llm",
+    "crates/anamnesis-consolidate",
+    "crates/anamnesis-web",
+    "crates/anamnesis-cli",
+    "crates/anamnesis-workstream",
+    "evals",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+repository = "https://github.com/berketpbs/anamnesis"
+authors = ["Berke Topbas <berketopbas126@gmail.com>"]
+
+[workspace.dependencies]
+# Inter-crate dependencies.
+anamnesis-core = { path = "crates/anamnesis-core", version = "0.1.0" }
+anamnesis-store = { path = "crates/anamnesis-store", version = "0.1.0" }
+anamnesis-wiki = { path = "crates/anamnesis-wiki", version = "0.1.0" }
+anamnesis-mcp = { path = "crates/anamnesis-mcp", version = "0.1.0" }
+anamnesis-hooks = { path = "crates/anamnesis-hooks", version = "0.1.0" }
+anamnesis-llm = { path = "crates/anamnesis-llm", version = "0.1.0" }
+anamnesis-consolidate = { path = "crates/anamnesis-consolidate", version = "0.1.0" }
+anamnesis-web = { path = "crates/anamnesis-web", version = "0.1.0" }
+anamnesis-workstream = { path = "crates/anamnesis-workstream", version = "0.1.0" }
+
+# Error handling.
+anyhow = "1"
+thiserror = "2"
+
+# Serialization.
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+serde_yaml = "0.9"
+jsonc-parser = { version = "0.33", features = ["cst", "serde_json"] }
+
+# Async runtime.
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt", "io"] }
+
+# Logging / tracing.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tracing-appender = "0.2"
+
+# Time & IDs.
+jiff = { version = "0.2", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
+
+# Config & CLI.
+figment = { version = "0.10", features = ["toml", "env"] }
+clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
+crossterm = "0.29"
+dirs = "5"
+toml_edit = "0.22"
+
+# Secrets + constant-time / RNG primitives for bearer-token auth.
+secrecy = { version = "0.10", features = ["serde"] }
+subtle = "2"
+getrandom = "0.3"
+base64 = "0.22"
+
+# Storage.
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+refinery = { version = "0.8", features = ["rusqlite"] }
+sha2 = "0.10"
+parking_lot = "0.12"
+
+# Filesystem watcher + process inspection.
+notify = "8"
+notify-debouncer-full = "0.6"
+sysinfo = "0.32"
+fs2 = "0.4"
+
+# Windows NTFS file-index (inode equivalent) for own-write detection.
+winapi-util = "0.1"
+
+# MCP server SDK.
+rmcp = { version = "1.7", features = ["server", "macros", "transport-io", "transport-streamable-http-server", "schemars"] }
+schemars = "1"
+axum = "0.8"
+http = "1"
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["fs", "cors"] }
+
+# Backup / restore archive format.
+tar = "0.4"
+flate2 = "1"
+
+# Text munging / hook payload sanitisation.
+regex = "1"
+
+# Wiki git versioning.
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
+
+# LLM provider HTTP.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+futures-util = "0.3"
+async-trait = "0.1"
+
+# Testing.
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[profile.dev]
+opt-level = 0
+debug = true

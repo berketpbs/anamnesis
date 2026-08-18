@@ -1,42 +1,65 @@
-# Dependencies
+# Rust build artefacts
+/target/
+/companions/*/target/
+/dist/
+**/*.rs.bk
+**/*.rs.orig
+
+# Local environment overrides
+.env
+.env.local
+/.local-data/
+
+# Homelab deploy config — committed as .example variants only
+/bin/deploy.env
+/docker/docker-compose.prod.yml
+/docker/.env.production
+
+# Editor / OS noise
+.DS_Store
+*.tmp
+*.swp
+*.swo
+.idea/
+.vscode/
+.vscode/settings.json
+
+# Local debugging
+*.log
+flamegraph.svg
+perf.data*
+
+# Sandbox marker (not project content)
+.ai-jail
+.claude/
+.slim/deepwork/
+evals/runs/
+
+# ai-memory atomic-write backups (apply_atomic in apply_shared.rs)
+*.bak-*
+
+# Node/Python build artefacts (if needed later)
 node_modules/
 *.egg-info/
 .eggs/
 *.egg
-dist/
-build/
-*.pyc
 __pycache__/
+*.pyc
+*.pyo
+
+# IDE and build artifacts
+build/
+dist/
 .cargo/
-target/
 
-# Environment
-.env
-.env.local
-.vscode/settings.json
-.idea/
-
-# OS
-.DS_Store
-Thumbs.db
-*.swp
-*.swo
+# Temporary files
 *~
+*.tmp
+npm-debug.log*
 
-# Build outputs
+# OS files
+Thumbs.db
 *.o
 *.so
 *.dylib
-.dll
-
-# Logs
-*.log
-npm-debug.log*
-
-# Memory system (SQLite DB and indexes managed by ai-memory server)
-.memory/.db/
-.memory/*.db
-.memory/**/*.db
-
-# Session state
-.claude/sessions/
+*.dll

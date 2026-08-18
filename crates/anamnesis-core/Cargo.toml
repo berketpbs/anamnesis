@@ -1,0 +1,19 @@
+[package]
+name = "anamnesis-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+uuid = { workspace = true, features = ["v4", "v7", "serde"] }
+jiff.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+async-trait.workspace = true

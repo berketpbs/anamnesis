@@ -1,0 +1,23 @@
+[package]
+name = "anamnesis-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+anamnesis-core.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+rusqlite = { workspace = true, features = ["bundled", "backup"] }
+refinery = { workspace = true, features = ["rusqlite"] }
+sha2.workspace = true
+uuid = { workspace = true, features = ["v4", "v7", "serde"] }
+jiff.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+parking_lot.workspace = true

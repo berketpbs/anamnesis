@@ -1,0 +1,34 @@
+[package]
+name = "anamnesis-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "anamnesis"
+path = "src/main.rs"
+
+[dependencies]
+anamnesis-core.workspace = true
+anamnesis-store.workspace = true
+anamnesis-wiki.workspace = true
+anamnesis-mcp.workspace = true
+anamnesis-hooks.workspace = true
+anamnesis-consolidate.workspace = true
+anamnesis-web.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+serde_yaml.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+clap = { workspace = true, features = ["derive", "env"] }
+clap_complete.workspace = true
+dirs.workspace = true
+figment = { workspace = true, features = ["toml", "env"] }
+crossterm.workspace = true

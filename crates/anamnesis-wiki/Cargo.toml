@@ -1,0 +1,20 @@
+[package]
+name = "anamnesis-wiki"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+anamnesis-core.workspace = true
+anamnesis-store.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+git2 = { workspace = true, default-features = false, features = ["vendored-libgit2"] }
+tracing.workspace = true
+tokio.workspace = true
+regex.workspace = true

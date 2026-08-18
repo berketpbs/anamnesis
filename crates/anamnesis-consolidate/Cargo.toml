@@ -1,0 +1,20 @@
+[package]
+name = "anamnesis-consolidate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+anamnesis-core.workspace = true
+anamnesis-store.workspace = true
+anamnesis-wiki.workspace = true
+anamnesis-llm.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
