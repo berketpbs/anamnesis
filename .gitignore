@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+*.egg-info/
+.eggs/
+*.egg
+dist/
+build/
+*.pyc
+__pycache__/
+.cargo/
+target/
+
+# Environment
+.env
+.env.local
+.vscode/settings.json
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Build outputs
+*.o
+*.so
+*.dylib
+.dll
+
+# Logs
+*.log
+npm-debug.log*
+
+# Memory system (SQLite DB and indexes managed by ai-memory server)
+.memory/.db/
+.memory/*.db
+.memory/**/*.db
+
+# Session state
+.claude/sessions/
