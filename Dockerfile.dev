@@ -1,0 +1,36 @@
+# Development Dockerfile with hot reload support
+FROM rust:1.95-slim
+
+WORKDIR /app
+
+# Install development dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    git \
+    sqlite3 \
+    curl \
+    jq \
+    vim \
+    cargo-watch \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy workspace
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates ./crates
+COPY evals ./evals
+
+# Set environment
+ENV ANAMNESIS_DB=/app/data
+
+# Create data directory
+RUN mkdir -p /app/data
+
+# Default: watch for changes and rebuild
+CMD ["cargo", "watch", "-x", "build", "-w", "crates", "-w", "evals"]
+
+# Expose ports
+EXPOSE 8080
+
+# Volume for persistent data
+VOLUME ["/app/data"]

@@ -1,0 +1,54 @@
+# Git and version control
+.git
+.gitignore
+.gitattributes
+.github
+
+# Rust build artifacts
+target/
+Cargo.lock
+
+# Development and IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Documentation
+docs/
+README.md
+CONTRIBUTING.md
+CHANGELOG.md
+
+# CI/CD
+.gitlab-ci.yml
+.circleci
+azure-pipelines.yml
+
+# Local environment
+.env
+.env.local
+.ai-memory.toml.local
+
+# Docker files (not needed in image)
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Temporary files
+*.tmp
+*.log
+*.bak
+
+# Node modules and other non-Rust deps
+node_modules/
+__pycache__/
+*.egg-info/
+
+# Build and dist
+build/
+dist/
+.local-data/

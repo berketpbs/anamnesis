@@ -1,0 +1,76 @@
+version: '3.8'
+
+services:
+  # Development service - builds and watches for changes
+  anamnesis-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: anamnesis-dev
+    environment:
+      RUST_LOG: debug
+      ANAMNESIS_DB: /app/data
+    volumes:
+      - .:/app
+      - anamnesis-data:/app/data
+    ports:
+      - "8080:8080"
+    working_dir: /app
+    profiles:
+      - dev
+
+  # Production service - lightweight runtime
+  anamnesis:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: anamnesis
+    environment:
+      RUST_LOG: info
+      ANAMNESIS_DB: /root/.anamnesis
+    volumes:
+      - anamnesis-data:/root/.anamnesis
+      - /workspace:/workspace
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "anamnesis", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    profiles:
+      - prod
+
+  # PostgreSQL for future support (optional)
+  postgres:
+    image: postgres:16-alpine
+    container_name: anamnesis-postgres
+    environment:
+      POSTGRES_DB: anamnesis
+      POSTGRES_USER: anamnesis
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-anamnesis}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U anamnesis"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles:
+      - postgres
+
+volumes:
+  anamnesis-data:
+    driver: local
+  postgres-data:
+    driver: local
+
+networks:
+  default:
+    name: anamnesis-network
+    driver: bridge
