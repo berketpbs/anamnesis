@@ -4,9 +4,10 @@ Project-wide memory for anamnesis - persistent wiki for decisions, procedures, a
 
 ## Project Status
 
-**Phase**: Initial setup and architecture definition
+**Phase**: Core infrastructure setup (Steps 1-3 complete)
 **Repository**: https://github.com/berketpbs/anamnesis
-**Tech Stack**: Rust, Tokio, SQLite, Axum, MCP
+**Tech Stack**: Rust, Tokio, SQLite, Axum, MCP, Docker
+**Commits**: 5 (workspace structure, Step 1+2, Docker support)
 
 ## Active Pages
 
