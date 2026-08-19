@@ -290,7 +290,7 @@ mod tests {
             harness.state.store.page_count(scope.project_id).expect("count"),
             1
         );
-        assert!(harness.state.wiki.commit_count().expect("commits") >= 1);
+        assert!(harness.state.wiki.lock().commit_count().expect("commits") >= 1);
     }
 
     #[test]
@@ -434,7 +434,7 @@ mod tests {
         let harness = harness();
         let payload = json!({"session_id": "s", "hook_event_name": "SessionStart"});
         let hook = anamnesis_hooks::parse(&AgentKind::ClaudeCode, &payload).expect("parse");
-        let result = ingest(&harness.state.store, &harness.state.wiki, &hook, now());
+        let result = ingest(&harness.state.store, &harness.state.wiki.lock(), &hook, now());
         assert!(matches!(result, Err(WebError::BadRequest(_))));
     }
 }
