@@ -182,6 +182,7 @@ dependencies = [
  "anamnesis-consolidate",
  "anamnesis-core",
  "anamnesis-hooks",
+ "anamnesis-llm",
  "anamnesis-store",
  "anamnesis-wiki",
  "anyhow",
