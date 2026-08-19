@@ -28,7 +28,7 @@ The project is organized as a multi-crate Rust workspace:
 
 ## Key Concepts
 
-- **Wiki**: Git-versioned markdown files stored in `.memory/` directory
+- **Wiki**: Git-versioned markdown under `<data_dir>/wiki/<workspace>/<project>/`, outside the project repository
 - **Session**: Bounded work within an agent session
 - **Observation**: Capture of lifecycle events (prompts, tool calls, outputs)
 - **Consolidation**: LLM-powered synthesis of session observations into wiki pages
@@ -39,4 +39,5 @@ The project is organized as a multi-crate Rust workspace:
 - Run `cargo build` to compile all crates
 - Run `cargo test` to execute tests
 - Lints require `unsafe_code = "forbid"` and `missing_docs = "warn"`
-- Memory wiki structure and .ai-memory.toml configuration in root
+- Per-project scope is pinned by `.anamnesis.toml` in the repository root
+- The data directory (`ANAMNESIS_DATA_DIR`, or the platform data dir) holds `wiki/`, `raw/`, `db/`, `models/`, `logs/`
