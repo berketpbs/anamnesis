@@ -360,29 +360,28 @@ mod tests {
     use anamnesis_core::session::{AgentKind, SessionState};
     use anamnesis_llm::{CompletionOutput, LlmError};
     use async_trait::async_trait;
-    use jiff::Timestamp;
 
     fn session() -> Session {
         Session {
-            id: SessionId::from(uuid::Uuid::new_v4()),
+            id: SessionId::new(),
             agent: AgentKind::ClaudeCode,
-            workspace_id: WorkspaceId::from(uuid::Uuid::new_v4()),
-            project_id: ProjectId::from(uuid::Uuid::new_v4()),
-            checkout_path: std::path::PathBuf::from("/repo"),
+            workspace_id: WorkspaceId::from_uuid(uuid::Uuid::nil()),
+            project_id: ProjectId::from_uuid(uuid::Uuid::nil()),
+            checkout_path: "/repo".into(),
             started_at: "2026-08-20T09:00:00Z".parse().expect("timestamp"),
             ended_at: Some("2026-08-20T10:00:00Z".parse().expect("timestamp")),
-            state: SessionState::Ended,
+            state: SessionState::Closed,
         }
     }
 
     fn observation(kind: EventKind, body: &str, tool: Option<ToolRef>) -> Observation {
         Observation {
-            id: ObservationId::from(uuid::Uuid::new_v4()),
-            session_id: SessionId::from(uuid::Uuid::new_v4()),
+            id: ObservationId::new(),
+            session_id: SessionId::new(),
             kind,
             tool,
             at: "2026-08-20T09:30:00Z".parse().expect("timestamp"),
-            body: BoundedBody::truncating(body, kind.body_limit()),
+            body: BoundedBody::truncating(body, BoundedBody::DEFAULT_LIMIT),
             sanitized: false,
         }
     }
