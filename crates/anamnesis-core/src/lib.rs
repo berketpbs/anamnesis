@@ -19,6 +19,7 @@
 
 pub mod config;
 pub mod datadir;
+pub mod decay;
 pub mod error;
 pub mod handoff;
 pub mod ids;

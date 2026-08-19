@@ -219,19 +219,51 @@ impl PageStatus {
 }
 
 /// YAML frontmatter carried at the top of every page.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+///
+/// This is the wiki-side view: everything here is authored, and the markdown
+/// file is its source of truth. Index-side statistics that the wiki cannot
+/// know — access counts, last-read times, whether a newer page has superseded
+/// this one — live in the database instead, and are rebuilt, not restored.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Frontmatter {
     /// Human-facing title.
     pub title: String,
+    /// Which temporal tier the page belongs to.
+    pub tier: Tier,
     /// Trust level.
     pub status: PageStatus,
     /// Exempt from the decay sweep.
     pub pinned: bool,
+    /// Declared the authoritative page on its subject.
+    pub canonical: bool,
+    /// Page this one replaces, if any.
+    ///
+    /// Supersession is recorded rather than the old page being deleted, so a
+    /// later reader can still see what was believed before and why it changed.
+    pub supersedes: Option<PagePath>,
+    /// Importance assigned when written; the first term of the decay score.
+    pub salience: f64,
     /// Canonical names this page is about.
     pub entities: Vec<Entity>,
     /// When the page should be forgotten.
     pub expires_at: Option<Timestamp>,
+}
+
+impl Default for Frontmatter {
+    fn default() -> Self {
+        Self {
+            title: String::new(),
+            tier: Tier::default(),
+            status: PageStatus::default(),
+            pinned: false,
+            canonical: false,
+            supersedes: None,
+            salience: 1.0,
+            entities: Vec::new(),
+            expires_at: None,
+        }
+    }
 }
 
 impl Frontmatter {
@@ -363,6 +395,46 @@ mod tests {
 
         fm.expires_at = Some("2026-08-19T00:00:01Z".parse().unwrap());
         assert!(!fm.is_expired_at(now));
+    }
+
+    #[test]
+    fn working_tier_is_kept_but_not_recalled() {
+        assert!(!Tier::Working.is_recallable());
+        assert!(Tier::Episodic.is_recallable());
+    }
+
+    #[test]
+    fn durable_tiers_are_the_distilled_ones() {
+        assert!(Tier::Semantic.is_durable());
+        assert!(Tier::Procedural.is_durable());
+        assert!(!Tier::Episodic.is_durable());
+    }
+
+    #[test]
+    fn tier_round_trips_through_serde() {
+        let json = serde_json::to_string(&Tier::Procedural).unwrap();
+        assert_eq!(json, "\"procedural\"");
+        assert_eq!(
+            serde_json::from_str::<Tier>(&json).unwrap(),
+            Tier::Procedural
+        );
+    }
+
+    #[test]
+    fn supersession_names_the_page_it_replaces() {
+        let mut fm = Frontmatter::new("Storage, revised", Vec::new()).unwrap();
+        fm.status = PageStatus::Active;
+        fm.supersedes = Some(PagePath::parse("decisions/0001-storage.md").unwrap());
+        assert_eq!(
+            fm.supersedes.as_ref().map(PagePath::as_str),
+            Some("decisions/0001-storage.md")
+        );
+    }
+
+    #[test]
+    fn default_frontmatter_carries_full_salience() {
+        assert!((Frontmatter::default().salience - 1.0).abs() < f64::EPSILON);
+        assert_eq!(Frontmatter::default().tier, Tier::Episodic);
     }
 
     #[test]
