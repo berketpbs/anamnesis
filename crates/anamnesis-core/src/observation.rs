@@ -120,6 +120,18 @@ impl BoundedBody {
         })
     }
 
+    /// Rebuild a body from storage, where the bound was already applied.
+    ///
+    /// Only for reading back what was written. New content must go through
+    /// [`BoundedBody::truncating`] or [`BoundedBody::strict`] so the budget is
+    /// enforced exactly once, at capture time.
+    pub fn from_stored(text: impl Into<String>, truncated: bool) -> Self {
+        Self {
+            text: text.into(),
+            truncated,
+        }
+    }
+
     /// Borrow the retained text.
     pub fn as_str(&self) -> &str {
         &self.text

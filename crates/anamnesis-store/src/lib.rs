@@ -24,6 +24,10 @@ mod embedded {
     refinery::embed_migrations!("migrations");
 }
 
+mod ops;
+
+pub use ops::{new_handoff, new_observation, new_session};
+
 /// Errors produced by the storage layer.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
