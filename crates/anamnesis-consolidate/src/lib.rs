@@ -18,8 +18,10 @@ use anamnesis_core::observation::{EventKind, Observation};
 use anamnesis_core::session::Session;
 
 mod files;
+mod llm;
 
 pub use files::mentioned_files;
+pub use llm::{PREFERENCES_PAGE, consolidate_with_llm, render_prompt, schema};
 
 /// Longest handoff this module will produce, in bytes.
 ///
@@ -250,7 +252,7 @@ fn sorted_by_count(tools: &BTreeMap<String, usize>) -> Vec<(String, usize)> {
 }
 
 /// Shorten to `max` characters, marking the cut.
-fn clip(text: &str, max: usize) -> String {
+pub(crate) fn clip(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_owned();
     }
@@ -259,7 +261,7 @@ fn clip(text: &str, max: usize) -> String {
 }
 
 /// Shorten to `max` bytes on a character boundary.
-fn clip_bytes(text: &str, max: usize) -> String {
+pub(crate) fn clip_bytes(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_owned();
     }
