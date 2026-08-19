@@ -35,11 +35,12 @@ pub use error::{CoreError, Result};
 pub mod prelude {
     pub use crate::config::MarkerConfig;
     pub use crate::datadir::DataDir;
+    pub use crate::decay::{DecayInputs, DecayParams, retention_score};
     pub use crate::error::{CoreError, Result};
     pub use crate::handoff::{Handoff, HandoffState};
     pub use crate::ids::{HandoffId, ObservationId, PageId, ProjectId, SessionId, WorkspaceId};
     pub use crate::observation::{BoundedBody, EventKind, Observation, ToolRef};
-    pub use crate::page::{Entity, Frontmatter, Page, PagePath, PageStatus};
+    pub use crate::page::{Entity, Frontmatter, Page, PagePath, PageStatus, Tier};
     pub use crate::sanitize::{Redacted, Redactor};
     pub use crate::scope::{
         ProjectKey, ProjectName, ResolvedScope, Scope, ScopeSource, WorkspaceName, resolve_scope,
