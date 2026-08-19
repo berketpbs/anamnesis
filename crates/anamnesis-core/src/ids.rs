@@ -137,6 +137,23 @@ impl SessionId {
     pub fn new() -> Self {
         Self(Uuid::now_v7())
     }
+
+    /// Derive the identifier for a session the harness already named.
+    ///
+    /// Hooks arrive one event at a time, each carrying the harness's own
+    /// session id and nothing else to correlate on. Deriving our identifier
+    /// from that string means any event can compute the row it belongs to
+    /// without first querying for it — which is what keeps the capture path
+    /// a single insert.
+    ///
+    /// This is the one place a [`SessionId`] is a v5 rather than a v7, so
+    /// ordering by identifier is only chronological for minted ones.
+    pub fn derive(project: ProjectId, agent_session_id: &str) -> Self {
+        Self(Uuid::new_v5(
+            project.as_uuid(),
+            format!("session:{agent_session_id}").as_bytes(),
+        ))
+    }
 }
 
 impl Default for SessionId {
