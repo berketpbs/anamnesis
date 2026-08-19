@@ -516,6 +516,14 @@ mod tests {
         assert_eq!(loaded[0].body.len(), 10);
     }
 
+    /// Record a second session, as the SessionStart hook does before claiming.
+    fn next_session(store: &Store, project: ProjectId, workspace: WorkspaceId) -> SessionId {
+        let mut session = session_for(project, workspace);
+        session.id = SessionId::derive(project, "agent-session-2");
+        store.ensure_session(&session).expect("second session");
+        session.id
+    }
+
     #[test]
     fn a_handoff_can_only_be_claimed_once() {
         let (_dir, store, project, workspace) = fixture();
@@ -525,15 +533,29 @@ mod tests {
             .record_handoff(&new_handoff(project, session.id, "carry on", now()))
             .expect("record");
 
-        let first = store
-            .claim_handoff(project, SessionId::new(), now())
-            .expect("claim");
+        let claimant = next_session(&store, project, workspace);
+        let first = store.claim_handoff(project, claimant, now()).expect("claim");
         assert_eq!(first.as_deref(), Some("carry on"));
 
-        let second = store
-            .claim_handoff(project, SessionId::new(), now())
-            .expect("claim");
+        let second = store.claim_handoff(project, claimant, now()).expect("claim");
         assert_eq!(second, None, "a handoff is single use");
+    }
+
+    #[test]
+    fn a_claimant_must_be_a_real_session() {
+        // The foreign key is the reason a handoff can never be attributed to a
+        // session that was never recorded.
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+        store
+            .record_handoff(&new_handoff(project, session.id, "carry on", now()))
+            .expect("record");
+
+        assert!(
+            store.claim_handoff(project, SessionId::new(), now()).is_err(),
+            "an unknown claimant should be rejected"
+        );
     }
 
     #[test]
@@ -549,19 +571,17 @@ mod tests {
             .record_handoff(&new_handoff(project, session.id, "newer", now()))
             .expect("second");
 
-        let claimed = store
-            .claim_handoff(project, SessionId::new(), now())
-            .expect("claim");
+        let claimant = next_session(&store, project, workspace);
+        let claimed = store.claim_handoff(project, claimant, now()).expect("claim");
         assert_eq!(claimed.as_deref(), Some("newer"));
     }
 
     #[test]
     fn claiming_with_nothing_pending_returns_nothing() {
-        let (_dir, store, project, _workspace) = fixture();
+        let (_dir, store, project, workspace) = fixture();
+        let claimant = next_session(&store, project, workspace);
         assert_eq!(
-            store
-                .claim_handoff(project, SessionId::new(), now())
-                .expect("claim"),
+            store.claim_handoff(project, claimant, now()).expect("claim"),
             None
         );
     }
