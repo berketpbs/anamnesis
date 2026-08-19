@@ -7,16 +7,18 @@
 
 use std::path::Path;
 
-use anamnesis_consolidate::consolidate;
+use anamnesis_consolidate::{PREFERENCES_PAGE, SessionDigest, consolidate, consolidate_with_llm};
 use anamnesis_core::ids::SessionId;
-use anamnesis_core::observation::EventKind;
+use anamnesis_core::observation::{EventKind, Observation};
 use anamnesis_core::page::{Frontmatter, Page, PagePath, Tier};
 use anamnesis_core::scope::{ResolvedScope, resolve_scope};
-use anamnesis_core::session::AgentKind;
+use anamnesis_core::session::{AgentKind, Session};
 use anamnesis_hooks::ParsedHook;
+use anamnesis_llm::Provider;
 use anamnesis_store::{Store, new_handoff, new_observation, new_session};
 use anamnesis_wiki::Wiki;
 use jiff::Timestamp;
+use parking_lot::Mutex;
 
 use crate::WebError;
 
