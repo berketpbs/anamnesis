@@ -1,5 +1,7 @@
 //! CLI entry point for anamnesis.
 
+use anamnesis_core::datadir::DataDir;
+use anamnesis_core::scope::{ScopeSource, resolve_scope};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -14,9 +16,9 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    /// Path to database directory
-    #[arg(long, global = true, env = "ANAMNESIS_DB")]
-    db: Option<PathBuf>,
+    /// Root of the anamnesis data directory (wiki, raw, db, models, logs)
+    #[arg(long, global = true, env = "ANAMNESIS_DATA_DIR")]
+    data_dir: Option<PathBuf>,
 
     /// Enable debug logging
     #[arg(long, global = true)]
@@ -143,7 +145,7 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Status { verbose } => {
-            cmd_status(verbose)?;
+            cmd_status(verbose, cli.data_dir.clone())?;
         }
         Commands::Search { query, limit, path } => {
             cmd_search(&query, limit, path)?;
@@ -183,17 +185,59 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_status(verbose: bool) -> anyhow::Result<()> {
+fn cmd_status(verbose: bool, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    let scope = resolve_scope(&cwd)?;
+    let data = DataDir::resolve(data_dir)?;
+
     println!("📚 Anamnesis Memory Status");
     println!();
-    println!("  Project: anamnesis");
-    println!("  Status: Initializing");
+    println!("  Workspace: {}", scope.scope.workspace);
+    println!("  Project:   {}", scope.scope.project);
+    println!("  Identity:  {}", describe_source(&scope.source));
+
     if verbose {
-        println!("  Database: ~/.anamnesis/default/anamnesis/memory.db");
-        println!("  Wiki Path: .memory/");
-        println!("  Config: .ai-memory.toml");
+        println!();
+        println!("  Project key:  {}", scope.key);
+        println!("  Project id:   {}", scope.project_id);
+        println!("  Workspace id: {}", scope.workspace_id);
+        println!("  Data dir:     {}", data.root().display());
+        println!("  Wiki:         {}", data.wiki_scope(&scope.scope).display());
+        println!("  Index:        {}", data.db_file().display());
+        match &scope.marker {
+            Some(path) => println!("  Marker:       {}", path.display()),
+            None => println!("  Marker:       (none)"),
+        }
     }
+
+    if !data.root().exists() {
+        println!();
+        println!("  Not initialized yet — run `anamnesis init`.");
+    }
+
     Ok(())
+}
+
+/// Explain, in one line, how the project was identified.
+///
+/// A wrong scope is the likeliest reason memory appears empty, so this is the
+/// first thing `status` should make visible.
+fn describe_source(source: &ScopeSource) -> String {
+    match source {
+        ScopeSource::Marker { path, legacy } => {
+            let name = if *legacy {
+                "legacy marker"
+            } else {
+                "marker"
+            };
+            format!("pinned by {name} at {}", path.display())
+        }
+        ScopeSource::GitRemote { normalized } => format!("git remote {normalized}"),
+        ScopeSource::GitRoot { path } => format!("git working tree {}", path.display()),
+        ScopeSource::CwdBasename { path } => {
+            format!("directory name {}", path.display())
+        }
+    }
 }
 
 fn cmd_search(query: &str, limit: usize, path: Option<String>) -> anyhow::Result<()> {

@@ -51,12 +51,15 @@ pub enum CoreError {
     },
 
     /// Configuration could not be loaded or deserialized.
+    ///
+    /// Boxed: `figment::Error` is large enough that carrying it inline would
+    /// widen every `Result` in the crate.
     #[error("configuration error: {0}")]
-    Config(#[from] figment::Error),
+    Config(Box<figment::Error>),
 
     /// A git operation failed while inspecting the repository.
     #[error("git error: {0}")]
-    Git(#[from] git2::Error),
+    Git(Box<git2::Error>),
 
     /// A filesystem operation failed.
     #[error("io error at {path}: {source}")]
@@ -67,6 +70,18 @@ pub enum CoreError {
         #[source]
         source: std::io::Error,
     },
+}
+
+impl From<figment::Error> for CoreError {
+    fn from(source: figment::Error) -> Self {
+        Self::Config(Box::new(source))
+    }
+}
+
+impl From<git2::Error> for CoreError {
+    fn from(source: git2::Error) -> Self {
+        Self::Git(Box::new(source))
+    }
 }
 
 impl CoreError {

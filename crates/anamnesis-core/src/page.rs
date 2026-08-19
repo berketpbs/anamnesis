@@ -64,7 +64,7 @@ impl PagePath {
             if component == "." || component == ".." {
                 return Err(invalid("must not contain relative path components"));
             }
-            if component.ends_with('.') && component != "." || component.ends_with(' ') {
+            if component.ends_with('.') || component.ends_with(' ') {
                 return Err(invalid("components must not end with a dot or space"));
             }
         }
@@ -177,7 +177,7 @@ impl PageStatus {
 }
 
 /// YAML frontmatter carried at the top of every page.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Frontmatter {
     /// Human-facing title.
@@ -190,18 +190,6 @@ pub struct Frontmatter {
     pub entities: Vec<Entity>,
     /// When the page should be forgotten.
     pub expires_at: Option<Timestamp>,
-}
-
-impl Default for Frontmatter {
-    fn default() -> Self {
-        Self {
-            title: String::new(),
-            status: PageStatus::default(),
-            pinned: false,
-            entities: Vec::new(),
-            expires_at: None,
-        }
-    }
 }
 
 impl Frontmatter {

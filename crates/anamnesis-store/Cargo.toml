@@ -21,3 +21,6 @@ jiff.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 parking_lot.workspace = true
+
+[lints]
+workspace = true

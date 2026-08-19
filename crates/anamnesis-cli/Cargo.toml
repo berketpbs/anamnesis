@@ -34,3 +34,6 @@ dirs.workspace = true
 figment = { workspace = true, features = ["toml", "env"] }
 crossterm.workspace = true
 uuid = { workspace = true, features = ["v4", "v7"] }
+
+[lints]
+workspace = true

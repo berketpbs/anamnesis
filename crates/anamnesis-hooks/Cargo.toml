@@ -17,3 +17,6 @@ serde_yaml.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 reqwest = { workspace = true, features = ["json"] }
+
+[lints]
+workspace = true

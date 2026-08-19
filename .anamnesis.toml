@@ -1,0 +1,26 @@
+# Anamnesis project marker.
+#
+# Its presence pins the memory scope for this directory and everything below
+# it. Without it, the project identity is derived from the git remote.
+
+[scope]
+workspace = "default"
+project = "anamnesis"
+
+[capture]
+# Glob patterns whose file events never reach the spool.
+ignore_paths = ["target/**", "Cargo.lock", ".memory/**"]
+
+[slots]
+# Per-operator memory slots, for shared servers.
+per_user = false
+
+[auto_improve]
+enabled = true
+require_approval = true
+
+# A single table, not a list. `[[auto_improve.scheduler]]` would declare an
+# array of tables and the schedule would be silently ignored.
+[auto_improve.scheduler]
+enabled = false
+interval_minutes = 60

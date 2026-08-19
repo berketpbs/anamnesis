@@ -313,19 +313,19 @@ fn discover_repository(cwd: &Path) -> Option<RepositoryFacts> {
 
 /// Pick `origin` when present, otherwise the first remote in alphabetical order.
 fn preferred_remote(repo: &git2::Repository) -> Option<String> {
-    if let Ok(origin) = repo.find_remote("origin") {
-        if let Some(url) = origin.url() {
-            return Some(url.to_owned());
-        }
+    if let Ok(origin) = repo.find_remote("origin")
+        && let Ok(url) = origin.url()
+    {
+        return Some(url.to_owned());
     }
     let remotes = repo.remotes().ok()?;
-    let mut names: Vec<&str> = remotes.iter().flatten().collect();
+    let mut names: Vec<&str> = remotes.iter().filter_map(|n| n.ok().flatten()).collect();
     names.sort_unstable();
     for name in names {
-        if let Ok(remote) = repo.find_remote(name) {
-            if let Some(url) = remote.url() {
-                return Some(url.to_owned());
-            }
+        if let Ok(remote) = repo.find_remote(name)
+            && let Ok(url) = remote.url()
+        {
+            return Some(url.to_owned());
         }
     }
     None
@@ -641,6 +641,49 @@ mod tests {
         assert_eq!(resolved.scope.workspace.as_str(), "client-work");
         assert_eq!(resolved.key.as_str(), "name:pinned");
         assert!(matches!(resolved.source, ScopeSource::Marker { .. }));
+    }
+
+    #[test]
+    fn git_remote_drives_identity_when_no_marker_pins_it() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let repo = git2::Repository::init(root.path()).expect("init repo");
+        repo.remote("origin", "git@github.com:Acme/Widget-API.git")
+            .expect("add remote");
+        let nested = root.path().join("src").join("deep");
+        std::fs::create_dir_all(&nested).expect("create dirs");
+
+        let resolved = resolve_scope(&nested).expect("resolves");
+        assert_eq!(resolved.key.as_str(), "git:github.com/acme/widget-api");
+        assert_eq!(resolved.scope.project.as_str(), "widget-api");
+        assert!(matches!(resolved.source, ScopeSource::GitRemote { .. }));
+    }
+
+    #[test]
+    fn a_second_clone_of_one_repository_shares_its_identity() {
+        // The whole point of keying on the remote: two checkouts, one memory.
+        let make = |dir: &Path, url: &str| {
+            let repo = git2::Repository::init(dir).expect("init repo");
+            repo.remote("origin", url).expect("add remote");
+            resolve_scope(dir).expect("resolves").project_id
+        };
+
+        let first = tempfile::tempdir().expect("tempdir");
+        let second = tempfile::tempdir().expect("tempdir");
+
+        assert_eq!(
+            make(first.path(), "https://github.com/acme/widget-api.git"),
+            make(second.path(), "git@github.com:acme/widget-api.git")
+        );
+    }
+
+    #[test]
+    fn repository_without_remote_falls_back_to_its_path() {
+        let root = tempfile::tempdir().expect("tempdir");
+        git2::Repository::init(root.path()).expect("init repo");
+
+        let resolved = resolve_scope(root.path()).expect("resolves");
+        assert!(matches!(resolved.source, ScopeSource::GitRoot { .. }));
+        assert!(resolved.key.as_str().starts_with("path:"));
     }
 
     #[test]
