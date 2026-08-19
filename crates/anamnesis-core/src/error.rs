@@ -1,0 +1,83 @@
+//! Error type shared by the core primitives.
+
+use std::path::PathBuf;
+
+/// Errors produced by core identity, scope, config, and validation routines.
+#[derive(Debug, thiserror::Error)]
+pub enum CoreError {
+    /// The data directory could not be located or created.
+    #[error("data directory could not be resolved: {reason}")]
+    DataDir {
+        /// Human-readable explanation of what went wrong.
+        reason: String,
+    },
+
+    /// Scope resolution failed for the given working directory.
+    #[error("scope could not be resolved from {cwd}: {reason}")]
+    Scope {
+        /// Directory the resolution started from.
+        cwd: PathBuf,
+        /// Human-readable explanation of what went wrong.
+        reason: String,
+    },
+
+    /// A workspace or project name failed validation.
+    #[error("invalid {kind} name {value:?}: {reason}")]
+    InvalidName {
+        /// Which kind of name was rejected (`workspace` or `project`).
+        kind: &'static str,
+        /// The offending value.
+        value: String,
+        /// Why it was rejected.
+        reason: &'static str,
+    },
+
+    /// A wiki page path failed validation.
+    #[error("invalid page path {path:?}: {reason}")]
+    InvalidPagePath {
+        /// The offending path.
+        path: String,
+        /// Why it was rejected.
+        reason: &'static str,
+    },
+
+    /// An observation body exceeded its byte budget.
+    #[error("body of {actual} bytes exceeds the {limit} byte limit")]
+    BodyTooLarge {
+        /// Size of the supplied body.
+        actual: usize,
+        /// Maximum permitted size.
+        limit: usize,
+    },
+
+    /// Configuration could not be loaded or deserialized.
+    #[error("configuration error: {0}")]
+    Config(#[from] figment::Error),
+
+    /// A git operation failed while inspecting the repository.
+    #[error("git error: {0}")]
+    Git(#[from] git2::Error),
+
+    /// A filesystem operation failed.
+    #[error("io error at {path}: {source}")]
+    Io {
+        /// Path the operation was attempted on.
+        path: PathBuf,
+        /// Underlying cause.
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+impl CoreError {
+    /// Build an [`CoreError::Io`] carrying the path that failed.
+    pub fn io(path: impl Into<PathBuf>, source: std::io::Error) -> Self {
+        Self::Io {
+            path: path.into(),
+            source,
+        }
+    }
+}
+
+/// Convenience alias for results produced by this crate.
+pub type Result<T> = std::result::Result<T, CoreError>;
