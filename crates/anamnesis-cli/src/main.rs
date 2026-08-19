@@ -87,6 +87,32 @@ enum Commands {
         bind: String,
     },
 
+    /// Forward one lifecycle event, read as JSON on stdin
+    ///
+    /// Invoked by agent hooks, not by hand. Always exits 0: a memory system
+    /// that can break someone's editing session is worse than one that
+    /// occasionally misses an event.
+    Hook {
+        /// Which harness is calling
+        #[arg(long, default_value = "claude-code")]
+        agent: String,
+
+        /// Server to deliver to
+        #[arg(long, env = "ANAMNESIS_SERVER", default_value = "http://127.0.0.1:8080")]
+        server: String,
+    },
+
+    /// Print the hook configuration to add to the agent's settings
+    InstallHooks {
+        /// Which harness to print configuration for
+        #[arg(long, default_value = "claude-code")]
+        agent: String,
+
+        /// Server the hooks should deliver to
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        server: String,
+    },
+
     /// Bootstrap from git history
     Bootstrap {
         /// Repository path
@@ -158,7 +184,13 @@ fn main() -> anyhow::Result<()> {
             cmd_init(cli.data_dir.clone())?;
         }
         Commands::Serve { port, bind } => {
-            cmd_serve(&bind, port)?;
+            cmd_serve(&bind, port, cli.data_dir.clone())?;
+        }
+        Commands::Hook { agent, server } => {
+            cmd_hook(&agent, &server);
+        }
+        Commands::InstallHooks { agent, server } => {
+            cmd_install_hooks(&agent, &server)?;
         }
         Commands::Bootstrap { repo } => {
             cmd_bootstrap(&repo)?;
