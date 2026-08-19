@@ -14,13 +14,12 @@ use anamnesis_core::page::{Frontmatter, Page, PagePath, Tier};
 use anamnesis_core::scope::{ResolvedScope, resolve_scope};
 use anamnesis_core::session::{AgentKind, Session};
 use anamnesis_hooks::ParsedHook;
-use anamnesis_llm::Provider;
 use anamnesis_store::{Store, new_handoff, new_observation, new_session};
 use anamnesis_wiki::Wiki;
 use jiff::Timestamp;
 use parking_lot::Mutex;
 
-use crate::WebError;
+use crate::{LlmSettings, WebError};
 
 /// Outcome of ingesting one hook payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,9 +136,7 @@ pub async fn finalize_with_llm(
     scope: &ResolvedScope,
     session_id: SessionId,
     now: Timestamp,
-    provider: &dyn Provider,
-    max_input_tokens: usize,
-    max_output_tokens: u32,
+    llm: &LlmSettings,
 ) -> Result<Option<String>, WebError> {
     let Some((session, observations)) = prepare(store, session_id, now)? else {
         return Ok(None);
@@ -151,12 +148,12 @@ pub async fn finalize_with_llm(
     };
 
     let digest = consolidate_with_llm(
-        provider,
+        llm.provider.as_ref(),
         &session,
         &observations,
         preferences.as_deref(),
-        max_input_tokens,
-        max_output_tokens,
+        llm.max_input_tokens,
+        llm.max_output_tokens,
     )
     .await;
 

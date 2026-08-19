@@ -229,9 +229,7 @@ async fn receive_hook(
                 &scope,
                 session_id,
                 now,
-                settings.provider.as_ref(),
-                settings.max_input_tokens,
-                settings.max_output_tokens,
+                &settings,
             )
             .await;
 
@@ -598,6 +596,15 @@ mod tests {
         }
     }
 
+    /// The budgets every test uses, around whichever provider it supplies.
+    fn settings(provider: Arc<dyn Provider>) -> LlmSettings {
+        LlmSettings {
+            provider,
+            max_input_tokens: 6_500,
+            max_output_tokens: 2_000,
+        }
+    }
+
     /// Record a small session without closing it, and hand back its scope.
     fn recorded(
         harness: &Harness,
@@ -628,11 +635,11 @@ mod tests {
         let harness = harness();
         let (scope, session_id) = recorded(&harness);
 
-        let provider = Fake::answering(json!({
+        let provider = Arc::new(Fake::answering(json!({
             "title": "LLM provider wired in",
             "body": "## Why. The deterministic path needed a second opinion.",
             "handoff": "The provider is wired; nothing else was touched.",
-        }));
+        })));
 
         let page = finalize_with_llm(
             &harness.state.store,
@@ -640,9 +647,7 @@ mod tests {
             &scope,
             session_id,
             now(),
-            &provider,
-            6_500,
-            2_000,
+            &settings(provider.clone()),
         )
         .await
         .expect("finalized")
@@ -686,9 +691,7 @@ mod tests {
             &scope,
             session_id,
             now(),
-            &Fake::broken(),
-            6_500,
-            2_000,
+            &settings(Arc::new(Fake::broken())),
         )
         .await
         .expect("finalized")
@@ -718,11 +721,11 @@ mod tests {
         std::fs::create_dir_all(preferences.parent().expect("parent")).expect("dir");
         std::fs::write(&preferences, "Always name the migration numbers.").expect("write");
 
-        let provider = Fake::answering(json!({
+        let provider = Arc::new(Fake::answering(json!({
             "title": "t",
             "body": "b",
             "handoff": "h",
-        }));
+        })));
 
         finalize_with_llm(
             &harness.state.store,
@@ -730,9 +733,7 @@ mod tests {
             &scope,
             session_id,
             now(),
-            &provider,
-            6_500,
-            2_000,
+            &settings(provider.clone()),
         )
         .await
         .expect("finalized");
@@ -748,7 +749,7 @@ mod tests {
     async fn a_missing_preferences_page_is_not_an_error() {
         let harness = harness();
         let (scope, session_id) = recorded(&harness);
-        let provider = Fake::answering(json!({"title": "t", "body": "b", "handoff": "h"}));
+        let provider = Arc::new(Fake::answering(json!({"title": "t", "body": "b", "handoff": "h"}));
 
         let page = finalize_with_llm(
             &harness.state.store,
@@ -756,9 +757,7 @@ mod tests {
             &scope,
             session_id,
             now(),
-            &provider,
-            6_500,
-            2_000,
+            &settings(provider.clone()),
         )
         .await
         .expect("finalized");
