@@ -373,8 +373,15 @@ fn cmd_hook(agent: &str, server: &str) {
                 .map(str::to_owned)
         });
 
+    // These budgets are deliberately tight. A hook runs before every tool call
+    // an agent makes, so any delay here is multiplied by hundreds within one
+    // session — and the case that matters is the server being *down*, where a
+    // generous timeout turns "memory is not running" into "the agent feels
+    // broken". Losing an event costs a line in a summary; stalling the session
+    // costs the user's afternoon.
     let client = match reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
+        .connect_timeout(std::time::Duration::from_millis(250))
+        .timeout(std::time::Duration::from_millis(1_000))
         .build()
     {
         Ok(client) => client,
