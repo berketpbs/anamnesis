@@ -107,6 +107,22 @@ async fn health() -> &'static str {
     "ok\n"
 }
 
+/// Read a hook body as JSON.
+///
+/// Windows shells prepend a UTF-8 byte order mark when piping text into a
+/// native process, and a BOM is not valid JSON. Tolerating it here is what lets
+/// the same hook command work from PowerShell, cmd, and a POSIX shell alike —
+/// and the failure it prevents is an invisible one, because a rejected event
+/// looks exactly like a session where nothing happened.
+fn parse_payload(body: &str) -> Result<serde_json::Value, WebError> {
+    let trimmed = body.trim_start_matches('\u{feff}').trim();
+    if trimmed.is_empty() {
+        return Err(WebError::BadRequest("payload was empty".to_owned()));
+    }
+    serde_json::from_str(trimmed)
+        .map_err(|error| WebError::BadRequest(format!("payload is not JSON: {error}")))
+}
+
 /// Query string shared by both endpoints.
 #[derive(Debug, Deserialize)]
 struct AgentQuery {
@@ -138,11 +154,7 @@ async fn receive_hook(
     Query(query): Query<AgentQuery>,
     body: String,
 ) -> Result<Response, WebError> {
-    // Tolerate a byte order mark: some shells add one when piping a payload
-    // through a hook script, and it is not valid JSON.
-    let body = body.trim_start_matches('\u{feff}').trim();
-    let payload: serde_json::Value = serde_json::from_str(body)
-        .map_err(|error| WebError::BadRequest(format!("payload is not JSON: {error}")))?;
+    let payload = parse_payload(&body)?;
 
     let hook = anamnesis_hooks::parse(&query.agent(), &payload)
         .map_err(|error| WebError::BadRequest(error.to_string()))?;
@@ -430,6 +442,22 @@ mod tests {
         .expect("something pending");
         assert!(claimed.contains("second task"));
         assert!(!claimed.contains("first task"));
+    }
+
+    #[test]
+    fn a_payload_carrying_a_byte_order_mark_is_still_read() {
+        // PowerShell adds one when piping into a native process. Without this,
+        // every event from a Windows hook is silently rejected.
+        let value = parse_payload("\u{feff}{\"session_id\":\"s\"}").expect("parsed");
+        assert_eq!(value["session_id"], "s");
+    }
+
+    #[test]
+    fn an_empty_payload_is_reported_rather_than_guessed_at() {
+        assert!(matches!(
+            parse_payload("   \n"),
+            Err(WebError::BadRequest(_))
+        ));
     }
 
     #[test]
