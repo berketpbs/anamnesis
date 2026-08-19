@@ -61,11 +61,14 @@ dependencies = [
  "anamnesis-store",
  "anamnesis-wiki",
  "anyhow",
+ "jiff",
+ "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
