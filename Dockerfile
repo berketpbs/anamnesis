@@ -1,4 +1,4 @@
-# Multi-stage build for anamnesis
+﻿# Multi-stage build for anamnesis
 # Stage 1: Build
 FROM rust:1.95-slim as builder
 
@@ -40,7 +40,7 @@ COPY --from=builder /app/target/release/anamnesis /usr/local/bin/
 RUN mkdir -p /root/.anamnesis /workspace
 
 # Set environment
-ENV ANAMNESIS_DB=/root/.anamnesis
+ENV ANAMNESIS_DATA_DIR=/root/.anamnesis
 
 # Use tini as init system
 ENTRYPOINT ["/usr/bin/tini", "--"]

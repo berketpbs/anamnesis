@@ -1,4 +1,4 @@
-version: '3.8'
+﻿version: '3.8'
 
 services:
   # Development service - builds and watches for changes
@@ -9,7 +9,7 @@ services:
     container_name: anamnesis-dev
     environment:
       RUST_LOG: debug
-      ANAMNESIS_DB: /app/data
+      ANAMNESIS_DATA_DIR: /app/data
     volumes:
       - .:/app
       - anamnesis-data:/app/data
@@ -27,7 +27,7 @@ services:
     container_name: anamnesis
     environment:
       RUST_LOG: info
-      ANAMNESIS_DB: /root/.anamnesis
+      ANAMNESIS_DATA_DIR: /root/.anamnesis
     volumes:
       - anamnesis-data:/root/.anamnesis
       - /workspace:/workspace

@@ -1,4 +1,4 @@
-# Docker Deployment Guide
+﻿# Docker Deployment Guide
 
 Anamnesis includes complete Docker support for local development and production deployment.
 
@@ -145,7 +145,7 @@ docker run -d \
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ANAMNESIS_DB` | `/root/.anamnesis` | Database directory |
+| `ANAMNESIS_DATA_DIR` | `/root/.anamnesis` | Database directory |
 | `RUST_LOG` | `info` | Logging level (debug, info, warn, error) |
 | `PORT` | `8080` | Server port |
 | `BIND` | `0.0.0.0` | Bind address |

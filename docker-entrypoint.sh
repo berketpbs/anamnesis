@@ -1,4 +1,4 @@
-#!/bin/bash
+﻿#!/bin/bash
 set -e
 
 # Default to serving if no command given
@@ -7,7 +7,7 @@ if [ $# -eq 0 ]; then
 fi
 
 # Create .anamnesis directory if it doesn't exist
-mkdir -p "${ANAMNESIS_DB:=/root/.anamnesis}"
+mkdir -p "${ANAMNESIS_DATA_DIR:=/root/.anamnesis}"
 
 # Run the command
 exec "$@"
