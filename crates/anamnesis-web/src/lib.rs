@@ -14,7 +14,9 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anamnesis_core::observation::EventKind;
 use anamnesis_core::session::AgentKind;
+use anamnesis_llm::Provider;
 use anamnesis_store::Store;
 use anamnesis_wiki::Wiki;
 use axum::Router;
@@ -28,7 +30,7 @@ use serde::Deserialize;
 
 mod pipeline;
 
-pub use pipeline::{Ingested, claim_handoff, finalize, ingest};
+pub use pipeline::{Ingested, claim_handoff, finalize, finalize_with_llm, ingest, record};
 
 /// Errors surfaced over HTTP.
 #[derive(Debug, thiserror::Error)]
@@ -62,6 +64,26 @@ impl IntoResponse for WebError {
     }
 }
 
+/// The model to consolidate with, and the budgets it works inside.
+#[derive(Clone)]
+pub struct LlmSettings {
+    /// The provider to ask.
+    pub provider: Arc<dyn Provider>,
+    /// Prompt budget, in estimated tokens.
+    pub max_input_tokens: usize,
+    /// Reply budget, in tokens.
+    pub max_output_tokens: u32,
+}
+
+impl std::fmt::Debug for LlmSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LlmSettings")
+            .field("provider", &self.provider.name())
+            .field("model", &self.provider.model())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Everything a handler needs.
 #[derive(Clone)]
 pub struct AppState {
@@ -74,15 +96,25 @@ pub struct AppState {
     /// sessions ending at the same moment would otherwise race on both. One
     /// writer at a time is the same discipline the SQLite side follows.
     pub wiki: Arc<Mutex<Wiki>>,
+    /// The model, when one is configured. `None` means every session is
+    /// summarised by counting.
+    pub llm: Option<LlmSettings>,
 }
 
 impl AppState {
-    /// Assemble state from an open index and wiki.
+    /// Assemble state from an open index and wiki, with no model.
     pub fn new(store: Store, wiki: Wiki) -> Self {
         Self {
             store: Arc::new(store),
             wiki: Arc::new(Mutex::new(wiki)),
+            llm: None,
         }
+    }
+
+    /// Consolidate with a model, when one was configured.
+    pub fn with_llm(mut self, settings: Option<LlmSettings>) -> Self {
+        self.llm = settings;
+        self
     }
 }
 
@@ -163,12 +195,55 @@ async fn receive_hook(
         tracing::info!(rules = ?hook.redactions, "redacted secrets from hook payload");
     }
 
-    let outcome = {
-        let wiki = state.wiki.lock();
-        ingest(&state.store, &wiki, &hook, Timestamp::now())?
+    let now = Timestamp::now();
+
+    let Some(settings) = state.llm.clone() else {
+        // No model: summarising is counting, which is fast enough to finish
+        // while the hook waits.
+        let outcome = {
+            let wiki = state.wiki.lock();
+            ingest(&state.store, &wiki, &hook, now)?
+        };
+        if let Some(page) = &outcome.page {
+            tracing::info!(%page, "session consolidated");
+        }
+        return Ok((StatusCode::ACCEPTED, "accepted\n").into_response());
     };
-    if let Some(page) = &outcome.page {
-        tracing::info!(%page, "session consolidated");
+
+    // With a model the two halves come apart. Recording is synchronous and
+    // its failure is the caller's business — a rejected event is one the hook
+    // should complain about. Consolidation is not: it takes seconds, and the
+    // hook waiting for it is a subprocess of somebody's editor that gives up
+    // after one. So the response goes out now and the page is written behind
+    // it. The cost of that choice is honest: a server killed in the next few
+    // seconds loses the page, and the session stays open rather than closing
+    // with nothing in it.
+    let (scope, session_id) = record(&state.store, &hook, now)?;
+
+    if hook.kind == EventKind::SessionEnd {
+        let background = state.clone();
+        tokio::spawn(async move {
+            let outcome = finalize_with_llm(
+                &background.store,
+                &background.wiki,
+                &scope,
+                session_id,
+                now,
+                settings.provider.as_ref(),
+                settings.max_input_tokens,
+                settings.max_output_tokens,
+            )
+            .await;
+
+            match outcome {
+                Ok(Some(page)) => tracing::info!(%page, "session consolidated"),
+                Ok(None) => {}
+                // There is nothing left to report this to — the hook exited
+                // long ago — so this log line is the only record that a
+                // session ended without leaving a page.
+                Err(error) => tracing::error!(%error, %session_id, "consolidation failed"),
+            }
+        });
     }
 
     Ok((StatusCode::ACCEPTED, "accepted\n").into_response())
