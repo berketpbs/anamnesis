@@ -15,6 +15,8 @@
 
 use std::path::Path;
 
+use anamnesis_core::scope::ResolvedScope;
+use jiff::Timestamp;
 use parking_lot::{Mutex, MutexGuard};
 use rusqlite::Connection;
 
@@ -115,6 +117,40 @@ impl Store {
     /// scope tight.
     pub fn connection(&self) -> MutexGuard<'_, Connection> {
         self.conn.lock()
+    }
+
+    /// Record a project, or refresh the one already recorded under its id.
+    ///
+    /// The identifier is derived, not minted, so re-running this for the same
+    /// repository updates the existing row instead of creating a second one —
+    /// including after the database has been deleted and rebuilt.
+    pub fn upsert_project(&self, scope: &ResolvedScope, now: Timestamp) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO projects
+                 (id, workspace_id, workspace, name, project_key, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+             ON CONFLICT (id) DO UPDATE SET
+                 workspace   = excluded.workspace,
+                 name        = excluded.name,
+                 project_key = excluded.project_key,
+                 updated_at  = excluded.updated_at",
+            rusqlite::params![
+                scope.project_id.to_string(),
+                scope.workspace_id.to_string(),
+                scope.scope.workspace.as_str(),
+                scope.scope.project.as_str(),
+                scope.key.as_str(),
+                now.to_string(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// How many projects the index knows about.
+    pub fn project_count(&self) -> Result<i64> {
+        let conn = self.conn.lock();
+        Ok(conn.query_row("SELECT COUNT(*) FROM projects", [], |row| row.get(0))?)
     }
 }
 
@@ -394,6 +430,26 @@ mod tests {
             )
             .expect("count");
         assert_eq!(unresolved, 1);
+    }
+
+    #[test]
+    fn upserting_a_project_twice_keeps_one_row() {
+        use anamnesis_core::scope::resolve_scope;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(".anamnesis.toml"),
+            "[scope]\nworkspace = \"default\"\nproject = \"widget\"\n",
+        )
+        .expect("write marker");
+        let scope = resolve_scope(dir.path()).expect("resolve");
+
+        let store = migrated();
+        let now = "2026-08-19T00:00:00Z".parse::<Timestamp>().expect("parse");
+        store.upsert_project(&scope, now).expect("first upsert");
+        store.upsert_project(&scope, now).expect("second upsert");
+
+        assert_eq!(store.project_count().expect("count"), 1);
     }
 
     #[test]

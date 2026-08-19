@@ -2,7 +2,9 @@
 
 use anamnesis_core::datadir::DataDir;
 use anamnesis_core::scope::{ScopeSource, resolve_scope};
+use anamnesis_store::Store;
 use clap::{Parser, Subcommand};
+use jiff::Timestamp;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -71,15 +73,8 @@ enum Commands {
         expires_at: Option<String>,
     },
 
-    /// Initialize a new project
-    Init {
-        /// Project name
-        name: String,
-
-        /// Project path
-        #[arg(long)]
-        path: Option<PathBuf>,
-    },
+    /// Create the data directory and register this project
+    Init,
 
     /// Start the memory server
     Serve {
@@ -159,8 +154,8 @@ fn main() -> anyhow::Result<()> {
         } => {
             cmd_write_page(&path, &title, &body, pinned, expires_at)?;
         }
-        Commands::Init { name, path } => {
-            cmd_init(&name, path)?;
+        Commands::Init => {
+            cmd_init(cli.data_dir.clone())?;
         }
         Commands::Serve { port, bind } => {
             cmd_serve(&bind, port)?;
@@ -272,12 +267,25 @@ fn cmd_write_page(
     Ok(())
 }
 
-fn cmd_init(name: &str, path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
-    let p = path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| name.to_string());
-    println!("🚀 Initializing project: {}", name);
-    println!("   path: {}", p);
+fn cmd_init(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    let scope = resolve_scope(&cwd)?;
+    let data = DataDir::resolve(data_dir)?;
+
+    data.ensure_layout()?;
+    let store = Store::open(data.db_file())?;
+    store.migrate()?;
+    store.upsert_project(&scope, Timestamp::now())?;
+
+    println!("🚀 Initialized {}", scope.scope);
     println!();
-    println!("(Initialization not yet implemented)");
+    println!("  Data dir: {}", data.root().display());
+    println!("  Wiki:     {}", data.wiki_scope(&scope.scope).display());
+    println!("  Index:    {}", data.db_file().display());
+    println!("  Identity: {}", describe_source(&scope.source));
+    println!();
+    println!("  {} project(s) registered.", store.project_count()?);
+
     Ok(())
 }
 
