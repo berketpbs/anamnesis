@@ -30,6 +30,7 @@ dependencies = [
  "anamnesis-consolidate",
  "anamnesis-core",
  "anamnesis-hooks",
+ "anamnesis-llm",
  "anamnesis-mcp",
  "anamnesis-store",
  "anamnesis-web",

@@ -236,6 +236,16 @@ fn cmd_status(verbose: bool, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
             Some(path) => println!("  Marker:       {}", path.display()),
             None => println!("  Marker:       (none)"),
         }
+
+        // Reported here because the alternative is finding out from a page
+        // footer, a week later, that every summary was written by counting.
+        match anamnesis_llm::LlmConfig::from_env() {
+            Ok(llm) if llm.provider == anamnesis_llm::ProviderKind::None => {
+                println!("  Model:        (none — summaries are counted)");
+            }
+            Ok(llm) => println!("  Model:        {}", llm.model),
+            Err(error) => println!("  Model:        misconfigured — {error}"),
+        }
     }
 
     if !data.root().exists() {
@@ -330,15 +340,33 @@ fn cmd_serve(bind: &str, port: u16, data_dir: Option<PathBuf>) -> anyhow::Result
     store.migrate()?;
     let wiki = Wiki::open(data.wiki())?;
 
+    // Built before the listener binds, so a misconfigured model is a startup
+    // error someone sees rather than a warning that only surfaces hours later,
+    // after sessions have already been summarised without one.
+    let llm = anamnesis_llm::LlmConfig::from_env()?;
+    let settings = llm.build()?.map(|provider| anamnesis_web::LlmSettings {
+        provider,
+        max_input_tokens: llm.max_input_tokens,
+        max_output_tokens: llm.max_output_tokens,
+    });
+
     let address: std::net::SocketAddr = format!("{bind}:{port}").parse()?;
     println!("🌐 anamnesis serving on http://{address}");
     println!("   data dir: {}", data.root().display());
     println!("   POST /hook   GET /handoff   GET /health");
+    match &settings {
+        Some(settings) => println!(
+            "   consolidation: {} ({})",
+            settings.provider.model(),
+            settings.provider.name()
+        ),
+        None => println!("   consolidation: counted (no model configured)"),
+    }
 
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(anamnesis_web::serve(
         address,
-        anamnesis_web::AppState::new(store, wiki),
+        anamnesis_web::AppState::new(store, wiki).with_llm(settings),
     ))?;
     Ok(())
 }
