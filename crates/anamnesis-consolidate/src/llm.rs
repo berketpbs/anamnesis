@@ -600,7 +600,7 @@ mod tests {
 
     #[test]
     fn newlines_in_a_prompt_do_not_break_the_one_line_per_event_shape() {
-        let observations = vec![observation(
+        let observations = [observation(
             EventKind::UserPrompt,
             "first line\nsecond line",
             None,
