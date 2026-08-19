@@ -6,14 +6,22 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+description = "Core types, identity derivation, and scope resolution for anamnesis"
 
 [dependencies]
-anyhow.workspace = true
 thiserror.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-uuid = { workspace = true, features = ["v4", "v7", "serde"] }
+uuid = { workspace = true, features = ["v4", "v5", "v7", "serde"] }
 jiff.workspace = true
 tracing.workspace = true
-tokio.workspace = true
-async-trait.workspace = true
+figment = { workspace = true, features = ["toml", "env"] }
+git2.workspace = true
+regex.workspace = true
+dirs.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
