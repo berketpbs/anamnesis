@@ -157,11 +157,14 @@ fn builtin_rules() -> &'static [Rule] {
             ),
             rule(
                 "assignment",
-                // No leading `\b`: `_` is a word character, so a boundary would
-                // never fire inside `DATABASE_PASSWORD`. An optional quote sits
+                // The secret word can sit anywhere inside the identifier, which
+                // is why it is wrapped in wildcards rather than anchored: real
+                // names look like `AWS_SECRET_ACCESS_KEY`, `db.password`, or
+                // `githubToken`, and a `\b` would not fire inside any of them
+                // because `_` is itself a word character. An optional quote sits
                 // on both sides of the separator so JSON (`"api_key": "…"`) is
                 // caught as well as shell (`API_KEY=…`).
-                r#"(?i)(?P<head>(?:api[_\-]?key|secret[_\-]?key|client[_\-]?secret|secret|auth[_\-]?token|access[_\-]?token|token|password|passwd|pwd)["']?\s*[:=]\s*["']?)[^\s"',;]{6,}"#,
+                r#"(?i)(?P<head>[A-Za-z0-9_.\-]*(?:api[_\-]?key|access[_\-]?key|secret|token|password|passwd|pwd|credential|passphrase)[A-Za-z0-9_.\-]*["']?\s*[:=]\s*["']?)[^\s"',;]{6,}"#,
                 "${head}[redacted]",
             ),
         ]
@@ -213,6 +216,21 @@ mod tests {
         let result = redact("DATABASE_PASSWORD=hunter2000swordfish");
         assert!(!result.text().contains("hunter2000swordfish"));
         assert!(result.text().contains("DATABASE_PASSWORD="));
+    }
+
+    #[test]
+    fn the_secret_word_is_found_anywhere_in_the_identifier() {
+        // Every one of these is a name that occurs in real configuration, and
+        // in none of them does the telling word sit at a word boundary.
+        for (line, secret) in [
+            ("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCY", "wJalrXUtnFEMIK7MDENGbPxRfiCY"),
+            ("db.password: hunter2000swordfish", "hunter2000swordfish"),
+            ("githubToken = ghtoken1234567890", "ghtoken1234567890"),
+            ("MY_APP_CREDENTIALS=abcdef123456", "abcdef123456"),
+        ] {
+            let result = redact(line);
+            assert!(!result.text().contains(secret), "leaked in: {}", result.text());
+        }
     }
 
     #[test]
