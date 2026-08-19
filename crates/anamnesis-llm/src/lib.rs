@@ -79,7 +79,9 @@ impl LlmError {
     /// not, and retrying those only delays the fallback.
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Transport(error) => error.is_timeout() || error.is_connect() || error.is_request(),
+            Self::Transport(error) => {
+                error.is_timeout() || error.is_connect() || error.is_request()
+            }
             Self::Api { status, .. } => matches!(status, 408 | 409 | 429) || *status >= 500,
             // A malformed reply is worth one more roll of the dice: sampling
             // is not deterministic, and the same prompt often parses next time.

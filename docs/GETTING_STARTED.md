@@ -36,17 +36,57 @@ The data directory defaults to the platform data directory and can be overridden
 with `--data-dir` or `ANAMNESIS_DATA_DIR`. Run `anamnesis status --verbose` to
 see exactly which paths are in use.
 
-### 2. Configure LLM (Optional)
+### 2. Configure a model (optional)
 
-Create a `.env` file with your LLM provider credentials:
+Anamnesis works with no model configured. Every session still gets a page and
+a handoff — compiled by counting what happened rather than by reading it, and
+the page says so in its footer. A model replaces that counted summary with one
+that can say *why* a session did what it did.
+
+Export a key in the environment the server runs in:
 
 ```bash
-# For Anthropic (Claude)
-ANTHROPIC_API_KEY=sk-ant-...
-
-# For OpenAI
-OPENAI_API_KEY=sk-...
+export ANTHROPIC_API_KEY=sk-ant-...
 ```
+
+That alone is enough: a key present selects the Anthropic provider. Everything
+else has a default.
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `ANTHROPIC_API_KEY` | — | Credential. `ANAMNESIS_LLM_API_KEY` overrides it. |
+| `ANAMNESIS_LLM_PROVIDER` | `anthropic` when a key is set | `anthropic` or `none`. Set `none` to turn the model off without unsetting the key. |
+| `ANAMNESIS_LLM_MODEL` | `claude-opus-5` | Model id. |
+| `ANAMNESIS_LLM_BASE_URL` | `https://api.anthropic.com` | Point at a gateway or a local server. |
+| `ANAMNESIS_LLM_EFFORT` | `high` | `low`, `medium`, `high`, `xhigh`, or `max`. |
+| `ANAMNESIS_LLM_MAX_INPUT_TOKENS` | `6500` | Prompt budget. Long sessions are trimmed from the middle to fit. |
+| `ANAMNESIS_LLM_MAX_OUTPUT_TOKENS` | `2000` | Reply budget, floored at 1000. |
+| `ANAMNESIS_LLM_TIMEOUT_SECS` | `90` | Per-request timeout. |
+| `ANAMNESIS_LLM_MAX_RETRIES` | `2` | Retries, for rate limits and server faults only. |
+| `ANAMNESIS_LLM_FALLBACKS` | on | Server-side fallback to another model if a request is declined. |
+
+A typo is reported at startup rather than at the end of the first session:
+`anamnesis serve` refuses to bind if the settings do not parse, and prints
+which model it will consolidate with when they do. `anamnesis status
+--verbose` reports the same thing.
+
+**Nothing depends on the model being reachable.** If a request times out, is
+declined, or comes back as something other than a page, the counted summary is
+written instead and the reason is logged. Consolidation also runs *after* the
+hook's response is sent, so a slow model delays the page, never the session.
+
+#### Per-project style
+
+A project can say how its summaries should be written by adding a page to its
+own wiki:
+
+```text
+<data_dir>/wiki/<workspace>/<project>/_prompts/consolidation.md
+```
+
+Whatever is in it is included in the prompt — "write in Turkish", "always name
+the migration numbers", "mention ticket ids". It is guidance, not structure:
+the reply shape is fixed by a schema regardless.
 
 ### 3. Start the Memory Server
 

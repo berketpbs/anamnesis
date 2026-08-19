@@ -158,12 +158,22 @@ enum Commands {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Initialize logging
-    if cli.debug {
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .init();
-    }
+    // Logging is always on, at info, because consolidation now happens after
+    // the response has been sent — a model that refuses, times out, or answers
+    // with nonsense leaves no trace anywhere else, and the session it belonged
+    // to has already gone.
+    //
+    // To stderr, not stdout: the `hook` command writes the next session's
+    // handoff to stdout, and the harness injects whatever appears there into
+    // the model context. A log line on that stream would become part of the
+    // agent memory it was describing.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        tracing_subscriber::EnvFilter::new(if cli.debug { "debug" } else { "info" })
+    });
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
 
     match cli.command {
         Commands::Status { verbose } => {

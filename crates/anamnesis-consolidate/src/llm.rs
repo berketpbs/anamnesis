@@ -170,7 +170,10 @@ pub fn render_prompt(
     if let Some(ended) = session.ended_at {
         out.push_str(&format!("- Ended: {ended}\n"));
     }
-    out.push_str(&format!("- Working directory: {}\n", session.checkout_path.display()));
+    out.push_str(&format!(
+        "- Working directory: {}\n",
+        session.checkout_path.display()
+    ));
     out.push_str(&format!("- Events recorded: {}\n", observations.len()));
 
     if let Some(text) = preferences.map(str::trim).filter(|t| !t.is_empty()) {
@@ -566,7 +569,10 @@ mod tests {
         let prompt = render_prompt(&session(), &working_session(), Some(&preferences), 1_000);
         assert!(prompt.contains("Project preferences"));
         assert!(prompt.contains("ticket numbers matter"));
-        assert!(prompt.contains("add the llm provider"), "transcript survived");
+        assert!(
+            prompt.contains("add the llm provider"),
+            "transcript survived"
+        );
         assert!(estimate_tokens(&prompt) <= 1_100, "prompt stayed bounded");
     }
 

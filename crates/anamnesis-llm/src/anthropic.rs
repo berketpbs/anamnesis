@@ -59,9 +59,7 @@ impl Anthropic {
             .clone()
             .ok_or_else(|| LlmError::Config("anthropic provider needs an api key".to_owned()))?;
 
-        let http = reqwest::Client::builder()
-            .timeout(config.timeout)
-            .build()?;
+        let http = reqwest::Client::builder().timeout(config.timeout).build()?;
 
         Ok(Self {
             http,
@@ -229,8 +227,9 @@ fn parse_response(payload: &Value) -> Result<CompletionOutput, LlmError> {
         .and_then(Value::as_str)
         .ok_or_else(|| LlmError::Malformed("response carried no text block".to_owned()))?;
 
-    let json: Value = serde_json::from_str(text.trim())
-        .map_err(|error| LlmError::Malformed(format!("reply was not the JSON we asked for: {error}")))?;
+    let json: Value = serde_json::from_str(text.trim()).map_err(|error| {
+        LlmError::Malformed(format!("reply was not the JSON we asked for: {error}"))
+    })?;
 
     Ok(CompletionOutput {
         json,
@@ -398,7 +397,11 @@ mod tests {
             "content": [{"type": "text", "text": "{\"title\": \"half a "}],
         });
         let error = parse_response(&payload).expect_err("truncated");
-        assert!(error.to_string().contains("ANAMNESIS_LLM_MAX_OUTPUT_TOKENS"));
+        assert!(
+            error
+                .to_string()
+                .contains("ANAMNESIS_LLM_MAX_OUTPUT_TOKENS")
+        );
     }
 
     #[test]
