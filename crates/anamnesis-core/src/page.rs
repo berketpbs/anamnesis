@@ -154,6 +154,48 @@ impl<'de> serde::Deserialize<'de> for Entity {
     }
 }
 
+/// Which temporal tier a page belongs to.
+///
+/// The tier is one bounded signal applied *after* relevance candidates are
+/// generated — never an independent retriever and never an absolute override,
+/// or a targeted search for something said in one session would be buried by
+/// durable pages that merely outrank it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Tier {
+    /// The session in flight. Retained for forensics, excluded from recall.
+    Working,
+    /// One session's summary: what was touched, tried, and decided.
+    #[default]
+    Episodic,
+    /// Distilled durable knowledge. Superseded rather than deleted.
+    Semantic,
+    /// A pattern seen often enough across episodes to be worth naming.
+    Procedural,
+}
+
+impl Tier {
+    /// Canonical lowercase identifier, as stored in the database.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::Episodic => "episodic",
+            Self::Semantic => "semantic",
+            Self::Procedural => "procedural",
+        }
+    }
+
+    /// Whether pages in this tier are offered to ordinary recall.
+    pub fn is_recallable(&self) -> bool {
+        !matches!(self, Self::Working)
+    }
+
+    /// Whether pages in this tier persist until superseded rather than decaying.
+    pub fn is_durable(&self) -> bool {
+        matches!(self, Self::Semantic | Self::Procedural)
+    }
+}
+
 /// How much a page should be trusted when answering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
