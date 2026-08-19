@@ -110,12 +110,9 @@ pub fn finalize(
     session_id: SessionId,
     now: Timestamp,
 ) -> Result<Option<String>, WebError> {
-    let Some(mut session) = store.load_session(session_id)? else {
+    let Some((session, observations)) = prepare(store, session_id, now)? else {
         return Ok(None);
     };
-    session.ended_at = Some(now);
-
-    let observations = store.observations(session_id)?;
     let Some(digest) = consolidate(&session, &observations) else {
         // Nothing but boundaries. Close it and leave no trace: a wiki full of
         // empty session stubs makes every later search worse.
@@ -123,24 +120,116 @@ pub fn finalize(
         return Ok(None);
     };
 
-    let path = session_page_path(&session.started_at, session_id)?;
+    commit(store, wiki, scope, &session, &digest, now).map(Some)
+}
+
+/// Close a session, asking a model what it was about.
+///
+/// The same three steps as [`finalize`] with the middle one replaced. The
+/// shape matters more than it looks: the model call happens between the two
+/// locked sections, holding neither the wiki nor a database transaction, so a
+/// slow or hanging provider delays exactly one session's page and blocks
+/// nothing else. Holding the wiki mutex across that await would serialise
+/// every other session ending in the same minute behind it.
+pub async fn finalize_with_llm(
+    store: &Store,
+    wiki: &Mutex<Wiki>,
+    scope: &ResolvedScope,
+    session_id: SessionId,
+    now: Timestamp,
+    provider: &dyn Provider,
+    max_input_tokens: usize,
+    max_output_tokens: u32,
+) -> Result<Option<String>, WebError> {
+    let Some((session, observations)) = prepare(store, session_id, now)? else {
+        return Ok(None);
+    };
+
+    let preferences = {
+        let wiki = wiki.lock();
+        read_preferences(&wiki, scope)
+    };
+
+    let digest = consolidate_with_llm(
+        provider,
+        &session,
+        &observations,
+        preferences.as_deref(),
+        max_input_tokens,
+        max_output_tokens,
+    )
+    .await;
+
+    let Some(digest) = digest else {
+        store.close_session(session_id, now)?;
+        return Ok(None);
+    };
+
+    let wiki = wiki.lock();
+    commit(store, &wiki, scope, &session, &digest, now).map(Some)
+}
+
+/// Load what a finished session consists of.
+///
+/// `ended_at` is set on the returned copy rather than written back: nothing is
+/// committed until the page is, so a consolidation that fails leaves the
+/// session open and retryable rather than closed and empty.
+fn prepare(
+    store: &Store,
+    session_id: SessionId,
+    now: Timestamp,
+) -> Result<Option<(Session, Vec<Observation>)>, WebError> {
+    let Some(mut session) = store.load_session(session_id)? else {
+        return Ok(None);
+    };
+    session.ended_at = Some(now);
+    let observations = store.observations(session_id)?;
+    Ok(Some((session, observations)))
+}
+
+/// Write the page, record the handoff, close the session.
+fn commit(
+    store: &Store,
+    wiki: &Wiki,
+    scope: &ResolvedScope,
+    session: &Session,
+    digest: &SessionDigest,
+    now: Timestamp,
+) -> Result<String, WebError> {
+    let path = session_page_path(&session.started_at, session.id)?;
     let mut frontmatter = Frontmatter::new(&digest.title, Vec::new())?;
     frontmatter.tier = Tier::Episodic;
 
-    let mut page = Page::new(scope.project_id, path.clone(), frontmatter, digest.body);
+    let mut page = Page::new(
+        scope.project_id,
+        path.clone(),
+        frontmatter,
+        digest.body.clone(),
+    );
     let commit = wiki.write_page(&scope.scope, &page, &format!("session: {}", digest.title))?;
     page.git_commit = Some(commit);
 
     store.upsert_page(&page, now)?;
     store.record_handoff(&new_handoff(
         scope.project_id,
-        session_id,
+        session.id,
         &digest.handoff,
         now,
     ))?;
-    store.close_session(session_id, now)?;
+    store.close_session(session.id, now)?;
 
-    Ok(Some(path.as_str().to_owned()))
+    Ok(path.as_str().to_owned())
+}
+
+/// Read the project's consolidation preferences, if it has written any.
+///
+/// Absent is the normal case and not worth a log line. Unreadable is treated
+/// the same way: a preferences page is a nicety, and failing a session's
+/// consolidation because someone left a directory where a file was expected
+/// would trade something valuable for something optional.
+fn read_preferences(wiki: &Wiki, scope: &ResolvedScope) -> Option<String> {
+    let path = PagePath::parse(PREFERENCES_PAGE).ok()?;
+    std::fs::read_to_string(wiki.locate(&scope.scope, &path)).ok()
 }
 
 /// Hand the pending handoff, if any, to a starting session.
