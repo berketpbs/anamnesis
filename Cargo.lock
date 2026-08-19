@@ -62,6 +62,7 @@ dependencies = [
  "anamnesis-store",
  "anamnesis-wiki",
  "anyhow",
+ "async-trait",
  "jiff",
  "regex",
  "serde",
