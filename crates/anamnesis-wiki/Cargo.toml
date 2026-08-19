@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 name = "anamnesis-wiki"
 version.workspace = true
 edition.workspace = true
@@ -14,10 +14,15 @@ anyhow.workspace = true
 thiserror.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+serde_yaml.workspace = true
 git2 = { workspace = true, default-features = false, features = ["vendored-libgit2"] }
 tracing.workspace = true
 tokio.workspace = true
 regex.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+uuid = { workspace = true, features = ["v4"] }
 
 [lints]
 workspace = true
