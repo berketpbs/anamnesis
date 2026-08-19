@@ -494,7 +494,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_session_gets_no_page_even_with_a_model() {
-        let boundaries = vec![
+        let boundaries = [
             observation(EventKind::SessionStart, "", None),
             observation(EventKind::SessionEnd, "", None),
         ];

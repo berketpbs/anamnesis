@@ -749,7 +749,8 @@ mod tests {
     async fn a_missing_preferences_page_is_not_an_error() {
         let harness = harness();
         let (scope, session_id) = recorded(&harness);
-        let provider = Arc::new(Fake::answering(json!({"title": "t", "body": "b", "handoff": "h"}));
+        let provider =
+            Arc::new(Fake::answering(json!({"title": "t", "body": "b", "handoff": "h"})));
 
         let page = finalize_with_llm(
             &harness.state.store,
