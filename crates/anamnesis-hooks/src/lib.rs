@@ -144,16 +144,14 @@ fn body_for(kind: EventKind, object: &serde_json::Map<String, Value>) -> String 
             .or_else(|| string_field(object, "user_prompt"))
             .unwrap_or_default(),
 
-        EventKind::ToolUse => {
-            // The input is what the agent decided to do; the response is often
-            // large and mostly noise, so only its shape is kept.
-            let input = object
-                .get("tool_input")
-                .or_else(|| object.get("toolInput"))
-                .map(render_compact)
-                .unwrap_or_default();
-            input
-        }
+        // The input is what the agent decided to do. The response is kept out
+        // of the body on purpose: it is usually the largest part of the payload
+        // and the least informative once the outcome flag has been read from it.
+        EventKind::ToolUse => object
+            .get("tool_input")
+            .or_else(|| object.get("toolInput"))
+            .map(render_compact)
+            .unwrap_or_default(),
 
         EventKind::PreCompact | EventKind::PostCompact => string_field(object, "trigger")
             .or_else(|| string_field(object, "summary"))
