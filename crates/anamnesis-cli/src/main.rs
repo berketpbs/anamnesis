@@ -377,12 +377,25 @@ fn cmd_hook(agent: &str, server: &str) {
     let post = client
         .post(format!("{server}/hook"))
         .query(&[("agent", agent)])
+        .header("content-type", "application/json")
         .body(payload.clone())
         .send();
 
-    if let Err(error) = post {
-        eprintln!("anamnesis: could not reach {server}: {error}");
-        return;
+    match post {
+        Err(error) => {
+            eprintln!("anamnesis: could not reach {server}: {error}");
+            return;
+        }
+        // A refused event is still an event lost. Saying so on stderr costs the
+        // session nothing and is the only way anyone finds out that capture
+        // has quietly stopped working.
+        Ok(response) if !response.status().is_success() => {
+            let status = response.status();
+            let detail = response.text().unwrap_or_default();
+            eprintln!("anamnesis: server rejected event ({status}): {}", detail.trim());
+            return;
+        }
+        Ok(_) => {}
     }
 
     // Only a starting session has anything to collect, and whatever comes back
