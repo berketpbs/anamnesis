@@ -243,7 +243,7 @@ mod tests {
     fn run(harness: &Harness, event: &str, extra: serde_json::Value) -> Ingested {
         ingest(
             &harness.state.store,
-            &harness.state.wiki,
+            &harness.state.wiki.lock(),
             &hook(harness, event, extra),
             now(),
         )
@@ -281,6 +281,7 @@ mod tests {
         let read = harness
             .state
             .wiki
+            .lock()
             .read_page(&scope.scope, &path)
             .expect("page readable");
         assert!(read.body.contains("wire up the storage layer"));
@@ -375,6 +376,7 @@ mod tests {
         let read = harness
             .state
             .wiki
+            .lock()
             .read_page(&scope.scope, &path)
             .expect("read");
         assert!(!read.body.contains("wJalrXUtnFEMIK7MDENG"));
@@ -400,7 +402,7 @@ mod tests {
         };
         ingest(
             &harness.state.store,
-            &harness.state.wiki,
+            &harness.state.wiki.lock(),
             &parse(&payload),
             now(),
         )
@@ -408,7 +410,7 @@ mod tests {
         payload["hook_event_name"] = json!("SessionEnd");
         ingest(
             &harness.state.store,
-            &harness.state.wiki,
+            &harness.state.wiki.lock(),
             &parse(&payload),
             now(),
         )
