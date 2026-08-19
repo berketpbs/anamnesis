@@ -3,6 +3,7 @@
 use anamnesis_core::datadir::DataDir;
 use anamnesis_core::scope::{ScopeSource, resolve_scope};
 use anamnesis_store::Store;
+use anamnesis_wiki::Wiki;
 use clap::{Parser, Subcommand};
 use jiff::Timestamp;
 use std::path::PathBuf;
