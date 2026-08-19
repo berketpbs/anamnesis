@@ -543,4 +543,227 @@ mod tests {
         let result = ingest(&harness.state.store, &harness.state.wiki.lock(), &hook, now());
         assert!(matches!(result, Err(WebError::BadRequest(_))));
     }
+
+    /// A provider that answers from a script and remembers what it was asked,
+    /// so the wiring can be tested without a network or a key.
+    struct Fake {
+        reply: Option<serde_json::Value>,
+        seen: Mutex<Option<String>>,
+    }
+
+    impl Fake {
+        fn answering(reply: serde_json::Value) -> Self {
+            Self {
+                reply: Some(reply),
+                seen: Mutex::new(None),
+            }
+        }
+
+        fn broken() -> Self {
+            Self {
+                reply: None,
+                seen: Mutex::new(None),
+            }
+        }
+
+        fn prompt(&self) -> String {
+            self.seen.lock().clone().unwrap_or_default()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for Fake {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+
+        fn model(&self) -> &str {
+            "fake-1"
+        }
+
+        async fn complete(
+            &self,
+            request: &anamnesis_llm::Completion,
+        ) -> Result<anamnesis_llm::CompletionOutput, anamnesis_llm::LlmError> {
+            *self.seen.lock() = Some(request.user.clone());
+            match &self.reply {
+                Some(json) => Ok(anamnesis_llm::CompletionOutput {
+                    json: json.clone(),
+                    model: "fake-1".to_owned(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                }),
+                None => Err(anamnesis_llm::LlmError::Config("no model".to_owned())),
+            }
+        }
+    }
+
+    /// Record a small session without closing it, and hand back its scope.
+    fn recorded(
+        harness: &Harness,
+    ) -> (
+        anamnesis_core::scope::ResolvedScope,
+        anamnesis_core::ids::SessionId,
+    ) {
+        record(
+            &harness.state.store,
+            &hook(harness, "SessionStart", json!({"source": "startup"})),
+            now(),
+        )
+        .expect("start");
+        record(
+            &harness.state.store,
+            &hook(
+                harness,
+                "UserPromptSubmit",
+                json!({"prompt": "wire up the llm provider"}),
+            ),
+            now(),
+        )
+        .expect("prompt")
+    }
+
+    #[tokio::test]
+    async fn a_configured_model_writes_the_page() {
+        let harness = harness();
+        let (scope, session_id) = recorded(&harness);
+
+        let provider = Fake::answering(json!({
+            "title": "LLM provider wired in",
+            "body": "## Why. The deterministic path needed a second opinion.",
+            "handoff": "The provider is wired; nothing else was touched.",
+        }));
+
+        let page = finalize_with_llm(
+            &harness.state.store,
+            &harness.state.wiki,
+            &scope,
+            session_id,
+            now(),
+            &provider,
+            6_500,
+            2_000,
+        )
+        .await
+        .expect("finalized")
+        .expect("a page");
+
+        let path = anamnesis_core::page::PagePath::parse(&page).expect("path");
+        let read = harness
+            .state
+            .wiki
+            .lock()
+            .read_page(&scope.scope, &path)
+            .expect("page readable");
+
+        assert!(
+            read.body
+                .contains("The deterministic path needed a second opinion")
+        );
+        // And not the counted page, which would mean the model was skipped.
+        assert!(!read.body.contains("Compiled without a model"));
+
+        let handoff = claim_handoff(
+            &harness.state.store,
+            &harness.cwd,
+            &AgentKind::ClaudeCode,
+            "session-next",
+            now(),
+        )
+        .expect("claim")
+        .expect("a handoff");
+        assert!(handoff.contains("The provider is wired"));
+    }
+
+    #[tokio::test]
+    async fn a_broken_model_does_not_cost_the_session_its_page() {
+        let harness = harness();
+        let (scope, session_id) = recorded(&harness);
+
+        let page = finalize_with_llm(
+            &harness.state.store,
+            &harness.state.wiki,
+            &scope,
+            session_id,
+            now(),
+            &Fake::broken(),
+            6_500,
+            2_000,
+        )
+        .await
+        .expect("finalized")
+        .expect("a page");
+
+        let path = anamnesis_core::page::PagePath::parse(&page).expect("path");
+        let read = harness
+            .state
+            .wiki
+            .lock()
+            .read_page(&scope.scope, &path)
+            .expect("page readable");
+        assert!(read.body.contains("Compiled without a model"));
+        assert!(read.body.contains("wire up the llm provider"));
+    }
+
+    #[tokio::test]
+    async fn a_projects_preferences_page_reaches_the_model() {
+        let harness = harness();
+        let (scope, session_id) = recorded(&harness);
+
+        let preferences = harness.state.wiki.lock().locate(
+            &scope.scope,
+            &anamnesis_core::page::PagePath::parse(anamnesis_consolidate::PREFERENCES_PAGE)
+                .expect("path"),
+        );
+        std::fs::create_dir_all(preferences.parent().expect("parent")).expect("dir");
+        std::fs::write(&preferences, "Always name the migration numbers.").expect("write");
+
+        let provider = Fake::answering(json!({
+            "title": "t",
+            "body": "b",
+            "handoff": "h",
+        }));
+
+        finalize_with_llm(
+            &harness.state.store,
+            &harness.state.wiki,
+            &scope,
+            session_id,
+            now(),
+            &provider,
+            6_500,
+            2_000,
+        )
+        .await
+        .expect("finalized");
+
+        assert!(
+            provider
+                .prompt()
+                .contains("Always name the migration numbers")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_preferences_page_is_not_an_error() {
+        let harness = harness();
+        let (scope, session_id) = recorded(&harness);
+        let provider = Fake::answering(json!({"title": "t", "body": "b", "handoff": "h"}));
+
+        let page = finalize_with_llm(
+            &harness.state.store,
+            &harness.state.wiki,
+            &scope,
+            session_id,
+            now(),
+            &provider,
+            6_500,
+            2_000,
+        )
+        .await
+        .expect("finalized");
+
+        assert!(page.is_some());
+        assert!(!provider.prompt().contains("Project preferences"));
+    }
 }

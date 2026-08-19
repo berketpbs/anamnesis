@@ -187,6 +187,7 @@ dependencies = [
  "anamnesis-store",
  "anamnesis-wiki",
  "anyhow",
+ "async-trait",
  "axum",
  "http",
  "jiff",
