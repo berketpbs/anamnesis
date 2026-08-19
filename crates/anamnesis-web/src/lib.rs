@@ -23,6 +23,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use jiff::Timestamp;
+use parking_lot::Mutex;
 use serde::Deserialize;
 
 mod pipeline;
@@ -147,7 +148,10 @@ async fn receive_hook(
         tracing::info!(rules = ?hook.redactions, "redacted secrets from hook payload");
     }
 
-    let outcome = ingest(&state.store, &state.wiki, &hook, Timestamp::now())?;
+    let outcome = {
+        let wiki = state.wiki.lock();
+        ingest(&state.store, &wiki, &hook, Timestamp::now())?
+    };
     if let Some(page) = &outcome.page {
         tracing::info!(%page, "session consolidated");
     }
