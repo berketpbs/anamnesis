@@ -40,6 +40,36 @@ pub fn ingest(
     hook: &ParsedHook,
     now: Timestamp,
 ) -> Result<Ingested, WebError> {
+    let (scope, session_id) = record(store, hook, now)?;
+
+    if hook.kind != EventKind::SessionEnd {
+        return Ok(Ingested {
+            session_id,
+            consolidated: false,
+            page: None,
+        });
+    }
+
+    let page = finalize(store, wiki, &scope, session_id, now)?;
+    Ok(Ingested {
+        session_id,
+        consolidated: true,
+        page,
+    })
+}
+
+/// Make one event durable, and stop there.
+///
+/// Separated from [`ingest`] because consolidation may want to take its time —
+/// a model call is seconds, and the hook that delivered this event is a
+/// subprocess of somebody's editor with a one-second patience. Recording is
+/// the part that must not be deferred; deciding what the session meant is the
+/// part that must not block.
+pub fn record(
+    store: &Store,
+    hook: &ParsedHook,
+    now: Timestamp,
+) -> Result<(ResolvedScope, SessionId), WebError> {
     let cwd = hook
         .cwd
         .as_deref()
@@ -66,20 +96,7 @@ pub fn ingest(
         now,
     ))?;
 
-    if hook.kind != EventKind::SessionEnd {
-        return Ok(Ingested {
-            session_id,
-            consolidated: false,
-            page: None,
-        });
-    }
-
-    let page = finalize(store, wiki, &scope, session_id, now)?;
-    Ok(Ingested {
-        session_id,
-        consolidated: true,
-        page,
-    })
+    Ok((scope, session_id))
 }
 
 /// Close a session: summarise it, write the page, leave a handoff.
