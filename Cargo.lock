@@ -176,14 +176,18 @@ dependencies = [
 name = "anamnesis-web"
 version = "0.1.0"
 dependencies = [
+ "anamnesis-consolidate",
  "anamnesis-core",
+ "anamnesis-hooks",
  "anamnesis-store",
  "anamnesis-wiki",
  "anyhow",
  "axum",
  "http",
+ "jiff",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tower",

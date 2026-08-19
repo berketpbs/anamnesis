@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 name = "anamnesis-web"
 version.workspace = true
 edition.workspace = true
@@ -11,16 +11,22 @@ authors.workspace = true
 anamnesis-core.workspace = true
 anamnesis-store.workspace = true
 anamnesis-wiki.workspace = true
+anamnesis-hooks.workspace = true
+anamnesis-consolidate.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+jiff.workspace = true
 axum.workspace = true
 tower-http.workspace = true
 tower.workspace = true
 http.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

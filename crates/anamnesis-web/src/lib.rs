@@ -67,7 +67,12 @@ pub struct AppState {
     /// The SQLite index.
     pub store: Arc<Store>,
     /// The markdown wiki.
-    pub wiki: Arc<Wiki>,
+    ///
+    /// Behind a mutex because a git repository is a single shared resource:
+    /// the index file and HEAD are written during every commit, and two
+    /// sessions ending at the same moment would otherwise race on both. One
+    /// writer at a time is the same discipline the SQLite side follows.
+    pub wiki: Arc<Mutex<Wiki>>,
 }
 
 impl AppState {
@@ -75,7 +80,7 @@ impl AppState {
     pub fn new(store: Store, wiki: Wiki) -> Self {
         Self {
             store: Arc::new(store),
-            wiki: Arc::new(wiki),
+            wiki: Arc::new(Mutex::new(wiki)),
         }
     }
 }
