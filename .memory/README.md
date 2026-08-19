@@ -33,4 +33,8 @@ Memory is automatically captured through:
 3. Use `memory_query X` to search across the wiki
 4. Review `MEMORY.md` for the current index of active pages
 
-See `.ai-memory.toml` for configuration.
+See `.anamnesis.toml` in the repository root for configuration.
+
+> Note: this directory predates the decision to keep the wiki in a separate data
+> directory. Generated pages now live under `<data_dir>/wiki/<workspace>/<project>/`;
+> what remains here is hand-written project context.

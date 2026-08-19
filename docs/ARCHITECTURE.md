@@ -223,7 +223,8 @@ Next Session Starts
 
 ## Configuration
 
-Projects use `.ai-memory.toml` for configuration:
+Projects use `.anamnesis.toml` for configuration. The file is optional: without
+it, the project identity is derived from the git remote.
 
 ```toml
 [scope]
@@ -231,7 +232,7 @@ workspace = "default"
 project = "anamnesis"
 
 [capture]
-ignore_paths = ["target/", "node_modules/"]
+ignore_paths = ["target/**", "node_modules/**"]
 
 [slots]
 per_user = false
@@ -239,7 +240,34 @@ per_user = false
 [auto_improve]
 enabled = true
 require_approval = true
+
+# A single table. `[[auto_improve.scheduler]]` declares an array of tables and
+# is rejected at load time rather than being silently ignored.
+[auto_improve.scheduler]
+enabled = false
+interval_minutes = 60
 ```
+
+Unknown keys are an error, so a typo surfaces instead of quietly sending memory
+to the wrong project. `.ai-memory.toml` is still read as a fallback filename for
+projects migrating from upstream `ai-memory`.
+
+### Data directory
+
+Memory lives outside the repository it describes, so the wiki can carry its own
+git history:
+
+```text
+<data_dir>/
+  wiki/     git-versioned markdown, the source of truth
+  raw/      immutable sanitized transcripts
+  db/       SQLite indexes, rebuildable from wiki/
+  models/   local embedding models
+  logs/     rolling trace output
+```
+
+Resolution order: `--data-dir`, then `ANAMNESIS_DATA_DIR`, then the platform
+data directory.
 
 ## Security Considerations
 

@@ -145,7 +145,7 @@ docker run -d \
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ANAMNESIS_DATA_DIR` | `/root/.anamnesis` | Database directory |
+| `ANAMNESIS_DATA_DIR` | `/root/.anamnesis` | Data directory root (`wiki/`, `raw/`, `db/`, `models/`, `logs/`) |
 | `RUST_LOG` | `info` | Logging level (debug, info, warn, error) |
 | `PORT` | `8080` | Server port |
 | `BIND` | `0.0.0.0` | Bind address |

@@ -28,9 +28,13 @@ cd my-project
 ```
 
 This creates:
-- `.ai-memory.toml` - Configuration file
-- `.memory/` - Wiki directory structure
-- `.git/` - Git repository for versioning
+- `.anamnesis.toml` - Marker file pinning this project's memory scope
+- `<data_dir>/wiki/<workspace>/<project>/` - Wiki pages, in their own git repository
+- `<data_dir>/db/anamnesis.db` - SQLite index, rebuildable from the wiki
+
+The data directory defaults to the platform data directory and can be overridden
+with `--data-dir` or `ANAMNESIS_DATA_DIR`. Run `anamnesis status --verbose` to
+see exactly which paths are in use.
 
 ### 2. Configure LLM (Optional)
 
@@ -96,7 +100,7 @@ anamnesis backup export --output backup.tar.gz
 
 ## Configuration
 
-Edit `.ai-memory.toml` to customize behavior:
+Edit `.anamnesis.toml` to customize behavior:
 
 ```toml
 [scope]
