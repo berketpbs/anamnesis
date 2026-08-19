@@ -138,7 +138,10 @@ async fn receive_hook(
     Query(query): Query<AgentQuery>,
     body: String,
 ) -> Result<Response, WebError> {
-    let payload: serde_json::Value = serde_json::from_str(&body)
+    // Tolerate a byte order mark: some shells add one when piping a payload
+    // through a hook script, and it is not valid JSON.
+    let body = body.trim_start_matches('\u{feff}').trim();
+    let payload: serde_json::Value = serde_json::from_str(body)
         .map_err(|error| WebError::BadRequest(format!("payload is not JSON: {error}")))?;
 
     let hook = anamnesis_hooks::parse(&query.agent(), &payload)

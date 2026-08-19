@@ -354,6 +354,16 @@ fn cmd_hook(agent: &str, server: &str) {
         return;
     }
 
+    // Windows shells prepend a UTF-8 byte order mark when piping text into a
+    // native process, and a BOM is not valid JSON. Stripping it here means the
+    // hook works the same whether it was invoked from PowerShell, cmd, or a
+    // POSIX shell.
+    let payload = payload.trim_start_matches('\u{feff}').trim().to_owned();
+    if payload.is_empty() {
+        eprintln!("anamnesis: hook payload was empty");
+        return;
+    }
+
     let event = serde_json::from_str::<serde_json::Value>(&payload)
         .ok()
         .and_then(|value| {
