@@ -16,6 +16,7 @@ anamnesis-core.workspace = true
 anamnesis-store.workspace = true
 anamnesis-wiki.workspace = true
 anamnesis-mcp.workspace = true
+rmcp.workspace = true
 anamnesis-hooks.workspace = true
 anamnesis-consolidate.workspace = true
 anamnesis-web.workspace = true

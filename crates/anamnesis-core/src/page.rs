@@ -212,6 +212,16 @@ pub enum PageStatus {
 }
 
 impl PageStatus {
+    /// Canonical lowercase identifier, as stored in the database.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Historical => "historical",
+            Self::DoNotAnswerFrom => "do-not-answer-from",
+            Self::Superseded => "superseded",
+        }
+    }
+
     /// Whether an answer may be grounded in this page.
     pub fn is_answerable(&self) -> bool {
         matches!(self, Self::Active)

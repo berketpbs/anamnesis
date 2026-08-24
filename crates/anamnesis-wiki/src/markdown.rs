@@ -84,6 +84,29 @@ pub fn parse_document(path: &str, text: &str) -> Result<ParsedPage> {
     })
 }
 
+/// Extract `[[target]]` wikilinks from a page body, in the order they appear,
+/// deduplicated by target.
+///
+/// A target is taken verbatim between the brackets and trimmed; whatever
+/// resolves it to a page (or fails to) is the retrieval layer's job, not this
+/// parser's.
+pub fn extract_links(body: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+    let mut rest = body;
+    while let Some(start) = rest.find("[[") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("]]") else {
+            break;
+        };
+        let target = after[..end].trim();
+        if !target.is_empty() && !targets.iter().any(|t: &String| t == target) {
+            targets.push(target.to_owned());
+        }
+        rest = &after[end + 2..];
+    }
+    targets
+}
+
 /// Find the closing fence and return the YAML before it and the body after.
 fn split_at_closing_fence(rest: &str) -> Option<(&str, &str)> {
     let mut offset = 0;
@@ -171,6 +194,29 @@ mod tests {
         );
         let parsed = parse_document("x.md", &text).unwrap();
         assert_eq!(parsed.frontmatter.title, "Storage engine");
+    }
+
+    #[test]
+    fn wikilinks_are_extracted_in_order_and_deduplicated() {
+        let body = "See [[decisions/0001-storage.md]] and [[gotchas/windows-bom.md]], \
+                     again [[decisions/0001-storage.md]].";
+        assert_eq!(
+            extract_links(body),
+            vec![
+                "decisions/0001-storage.md".to_owned(),
+                "gotchas/windows-bom.md".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_body_with_no_links_extracts_nothing() {
+        assert!(extract_links("Plain text, no brackets here.").is_empty());
+    }
+
+    #[test]
+    fn an_unterminated_bracket_is_ignored_rather_than_panicking() {
+        assert!(extract_links("broken [[link without a close").is_empty());
     }
 
     #[test]

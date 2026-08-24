@@ -77,6 +77,14 @@ enum Commands {
     /// Create the data directory and register this project
     Init,
 
+    /// Start the MCP server over stdio, for an agent harness to launch as a
+    /// subprocess
+    Mcp {
+        /// Repository or directory whose scope the server should resolve
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+    },
+
     /// Start the memory server
     Serve {
         /// Port to listen on
@@ -193,6 +201,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Init => {
             cmd_init(cli.data_dir.clone())?;
+        }
+        Commands::Mcp { repo } => {
+            cmd_mcp(&repo, cli.data_dir.clone())?;
         }
         Commands::Serve { port, bind } => {
             cmd_serve(&bind, port, cli.data_dir.clone())?;
@@ -339,6 +350,45 @@ fn cmd_init(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
     println!();
     println!("  {} project(s) registered.", store.project_count()?);
 
+    Ok(())
+}
+
+/// Start the MCP server bound to `repo`'s scope, speaking stdio.
+///
+/// One process per project: the scope is resolved once, at startup, the same
+/// way `serve` binds one store and wiki rather than re-resolving per request.
+/// A harness that wants a different project starts a different process.
+fn cmd_mcp(repo: &std::path::Path, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
+    let repo = repo
+        .canonicalize()
+        .unwrap_or_else(|_| repo.to_path_buf());
+    let scope = resolve_scope(&repo)?;
+    let data = DataDir::resolve(data_dir)?;
+    data.ensure_layout()?;
+
+    let store = Store::open(data.db_file())?;
+    store.migrate()?;
+    store.upsert_project(&scope, Timestamp::now())?;
+    let wiki = Wiki::open(data.wiki())?;
+
+    // Never stdout: the MCP transport owns stdout for protocol frames, so a
+    // stray print here would corrupt the stream the same way a log line would
+    // corrupt the `hook` command's handoff channel.
+    eprintln!(
+        "anamnesis: mcp server for {} ({})",
+        scope.scope,
+        describe_source(&scope.source)
+    );
+
+    let server = anamnesis_mcp::AnamnesisMcp::new(store, wiki, scope, repo);
+
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async {
+        use rmcp::ServiceExt;
+        let service = server.serve(rmcp::transport::stdio()).await?;
+        service.waiting().await?;
+        anyhow::Ok(())
+    })?;
     Ok(())
 }
 

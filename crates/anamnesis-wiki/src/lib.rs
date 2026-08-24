@@ -22,7 +22,7 @@ use anamnesis_core::scope::Scope;
 
 mod markdown;
 
-pub use markdown::{ParsedPage, parse_document, render_document};
+pub use markdown::{ParsedPage, extract_links, parse_document, render_document};
 
 /// Errors produced by the wiki layer.
 #[derive(Debug, thiserror::Error)]
