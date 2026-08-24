@@ -109,6 +109,13 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 futures-util = "0.3"
 async-trait = "0.1"
 
+# Local text embeddings (vector-cosine retrieval stream). CPU-only: no CUDA
+# feature, so no GPU toolchain is required to build or run anamnesis.
+candle-core = "0.9"
+candle-nn = "0.9"
+candle-transformers = "0.9"
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+
 # Testing.
 tempfile = "3"
 

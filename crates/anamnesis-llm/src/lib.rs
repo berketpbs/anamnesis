@@ -21,11 +21,13 @@
 mod anthropic;
 mod budget;
 mod config;
+pub mod embed;
 mod provider;
 
 pub use anthropic::Anthropic;
 pub use budget::{clip_to_tokens, estimate_tokens};
 pub use config::{Effort, LlmConfig, ProviderKind, provider_from_env};
+pub use embed::{EmbedConfig, EmbedError, Embedder, LocalEmbedder};
 pub use provider::{Completion, CompletionOutput, Provider};
 
 /// Everything that can go wrong between asking a model and having an answer.

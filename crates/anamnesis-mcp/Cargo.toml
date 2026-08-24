@@ -11,6 +11,7 @@ authors.workspace = true
 anamnesis-core.workspace = true
 anamnesis-store.workspace = true
 anamnesis-wiki.workspace = true
+anamnesis-llm.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde = { workspace = true, features = ["derive"] }

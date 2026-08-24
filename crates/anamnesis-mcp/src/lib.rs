@@ -19,6 +19,7 @@ use anamnesis_core::ids::SessionId;
 use anamnesis_core::page::{Entity, Frontmatter, Page, PagePath, PageStatus, Tier};
 use anamnesis_core::scope::ResolvedScope;
 use anamnesis_core::session::AgentKind;
+use anamnesis_llm::Embedder;
 use anamnesis_store::{Store, new_session};
 use anamnesis_wiki::Wiki;
 use jiff::Timestamp;
@@ -142,6 +143,11 @@ pub struct AnamnesisMcp {
     wiki: Arc<Mutex<Wiki>>,
     scope: ResolvedScope,
     root: PathBuf,
+    /// When present, `memory_query` runs a fourth stream (vector-cosine over
+    /// pages this embedder has embedded) and `memory_write_page` embeds every
+    /// page it writes. Absent by default: nothing here requires local
+    /// inference, the same way nothing requires a configured LLM provider.
+    embedder: Option<Arc<dyn Embedder>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -155,8 +161,15 @@ impl AnamnesisMcp {
             wiki: Arc::new(Mutex::new(wiki)),
             scope,
             root,
+            embedder: None,
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Enable the vector-cosine retrieval stream, backed by `embedder`.
+    pub fn with_embedder(mut self, embedder: Option<Arc<dyn Embedder>>) -> Self {
+        self.embedder = embedder;
+        self
     }
 
     /// The scope this server is bound to.
@@ -169,8 +182,9 @@ impl AnamnesisMcp {
 impl AnamnesisMcp {
     /// Search the project's memory wiki.
     ///
-    /// Fuses three independent relevance signals — full-text search, entity
-    /// matching, and link-neighbour expansion — so a page every signal agrees
+    /// Fuses independent relevance signals — full-text search, entity
+    /// matching, link-neighbour expansion, and (when a local embedder is
+    /// configured) vector-cosine similarity — so a page every signal agrees
     /// on outranks one signal's favorite. Pinned, canonical, and authoritative
     /// pages (`decisions/`, `_rules/`, `procedures/`, `gotchas/`) are boosted
     /// among the results a query already found relevant; a page no stream
@@ -237,9 +251,27 @@ impl ServerHandler for AnamnesisMcp {
 impl AnamnesisMcp {
     fn query(&self, request: QueryRequest) -> Result<QueryResponse, McpError> {
         let limit = request.limit.unwrap_or(10).clamp(1, 50) as usize;
-        let hits = self
-            .store
-            .query_pages(self.scope.project_id, &request.text, limit, Timestamp::now())?;
+
+        // A broken or slow-to-load embedder costs this query its fourth
+        // stream, not the whole search — the other three still run, the same
+        // way a refused LLM call still leaves the deterministic page.
+        let query_vector = self.embedder.as_ref().and_then(|embedder| {
+            match embedder.embed(&request.text) {
+                Ok(vector) => Some((embedder.model().to_owned(), vector)),
+                Err(error) => {
+                    tracing::warn!(%error, "query embedding failed; searching without the vector stream");
+                    None
+                }
+            }
+        });
+
+        let hits = self.store.query_pages(
+            self.scope.project_id,
+            &request.text,
+            limit,
+            Timestamp::now(),
+            query_vector.as_ref().map(|(model, vector)| (model.as_str(), vector.as_slice())),
+        )?;
         Ok(QueryResponse {
             hits: hits
                 .into_iter()
@@ -298,6 +330,21 @@ impl AnamnesisMcp {
         self.store.set_page_entities(self.scope.project_id, page.id, &entities)?;
         let links = anamnesis_wiki::extract_links(&request.body);
         self.store.set_page_links(self.scope.project_id, page.id, &links)?;
+
+        // Embedding failure costs this page its place in the vector stream,
+        // not the write itself — the page is already committed to the wiki
+        // and indexed by the time this runs.
+        if let Some(embedder) = &self.embedder {
+            let text = format!("{}\n\n{}", request.title, request.body);
+            match embedder.embed(&text) {
+                Ok(vector) => {
+                    self.store.set_page_embedding(page.id, embedder.model(), &vector)?;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, %path, "page embedding failed; page was still written");
+                }
+            }
+        }
 
         Ok(WritePageResponse {
             path: path.as_str().to_owned(),
@@ -485,5 +532,92 @@ mod tests {
         assert!(names.contains(&"memory_query"));
         assert!(names.contains(&"memory_write_page"));
         assert!(names.contains(&"memory_handoff_accept"));
+    }
+
+    /// Always embeds to the same vector, regardless of text. Real semantic
+    /// quality is proven once, against the real model, in
+    /// `anamnesis_llm::embed::tests::the_default_model_produces_sane_normalized_vectors`;
+    /// what this fake exists to prove is that the plumbing between an
+    /// `Embedder`, `write_page`, and `query` actually runs.
+    struct FakeEmbedder;
+
+    impl Embedder for FakeEmbedder {
+        fn model(&self) -> &str {
+            "fake-embed-1"
+        }
+        fn dimension(&self) -> usize {
+            2
+        }
+        fn embed(&self, _text: &str) -> Result<Vec<f32>, anamnesis_llm::EmbedError> {
+            Ok(vec![1.0, 0.0])
+        }
+    }
+
+    struct BrokenEmbedder;
+
+    impl Embedder for BrokenEmbedder {
+        fn model(&self) -> &str {
+            "broken"
+        }
+        fn dimension(&self) -> usize {
+            2
+        }
+        fn embed(&self, _text: &str) -> Result<Vec<f32>, anamnesis_llm::EmbedError> {
+            Err(anamnesis_llm::EmbedError::Inference("boom".to_owned()))
+        }
+    }
+
+    fn write_page(server: &AnamnesisMcp, path: &str, title: &str, body: &str) -> WritePageResponse {
+        server
+            .write_page(WritePageRequest {
+                path: path.to_owned(),
+                title: title.to_owned(),
+                body: body.to_owned(),
+                tier: None,
+                status: None,
+                pinned: None,
+                canonical: None,
+                entities: None,
+                expires_at: None,
+                supersedes: None,
+                salience: None,
+            })
+            .expect("write")
+    }
+
+    #[test]
+    fn a_page_is_findable_through_the_vector_stream_alone() {
+        let (_repo, _data, server) = harness();
+        let server = server.with_embedder(Some(Arc::new(FakeEmbedder) as Arc<dyn Embedder>));
+
+        write_page(&server, "notes/car.md", "Automobile", "A vehicle with four wheels.");
+
+        // Shares no token and no entity with the page above — only the
+        // (fake, constant) vector stream can connect the two.
+        let found = server
+            .query(QueryRequest {
+                text: "quarterly filing paperwork".to_owned(),
+                limit: None,
+            })
+            .expect("query");
+        assert_eq!(found.hits.len(), 1);
+        assert_eq!(found.hits[0].title, "Automobile");
+    }
+
+    #[test]
+    fn a_broken_embedder_costs_the_vector_stream_not_the_whole_call() {
+        let (_repo, _data, server) = harness();
+        let server = server.with_embedder(Some(Arc::new(BrokenEmbedder) as Arc<dyn Embedder>));
+
+        let written = write_page(&server, "notes/a.md", "A", "sqlite content");
+        assert_eq!(written.path, "notes/a.md");
+
+        let found = server
+            .query(QueryRequest {
+                text: "sqlite".to_owned(),
+                limit: None,
+            })
+            .expect("query should still succeed via the other streams");
+        assert_eq!(found.hits.len(), 1);
     }
 }

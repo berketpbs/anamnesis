@@ -198,14 +198,14 @@ mod tests {
         assert_eq!(store.schema_version().expect("version"), None);
 
         store.migrate().expect("migrate");
-        assert_eq!(store.schema_version().expect("version"), Some(4));
+        assert_eq!(store.schema_version().expect("version"), Some(5));
     }
 
     #[test]
     fn migrating_twice_is_a_no_op() {
         let store = migrated();
         store.migrate().expect("second migrate");
-        assert_eq!(store.schema_version().expect("version"), Some(4));
+        assert_eq!(store.schema_version().expect("version"), Some(5));
     }
 
     #[test]
@@ -223,6 +223,7 @@ mod tests {
             "page_links",
             "handoffs",
             "page_feedback",
+            "page_embeddings",
         ] {
             let found: i64 = conn
                 .query_row(
