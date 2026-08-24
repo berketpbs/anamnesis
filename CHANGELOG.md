@@ -18,7 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Session consolidation framework
 - Web UI foundation
 - CLI entry point
-- Cross-harness workstream management
+- Cross-harness workstreams: named threads of work with per-thread handoff
+  slots, plus the `workstream_start` and `workstream_status` MCP tools
 
 ### Changed
 

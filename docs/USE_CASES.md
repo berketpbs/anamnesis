@@ -186,7 +186,7 @@ Based on these use cases, implement in order:
 - [ ] Admin endpoints
 
 ### Phase 5: Multi-Agent & DevOps
-- [ ] Cross-harness workstreams
+- [x] Cross-harness workstreams
 - [ ] Managed session resume
 - [ ] Docker containerization
 - [ ] Remote server setup

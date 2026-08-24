@@ -238,22 +238,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anamnesis-workstream"
-version = "0.1.0"
-dependencies = [
- "anamnesis-core",
- "anamnesis-store",
- "anyhow",
- "jiff",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "android_system_properties"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
