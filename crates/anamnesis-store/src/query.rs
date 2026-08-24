@@ -252,13 +252,20 @@ impl Store {
         Ok(())
     }
 
-    /// Replace a page's outgoing wikilinks, resolving each target to an
-    /// existing page in the same project when one exists.
+    /// Replace a page's outgoing wikilinks, and resolve any link that was
+    /// waiting for this page to exist.
     ///
     /// An unresolved target is not an error: `[[some-page]]` pointing at a
-    /// page that does not exist yet is intent, not a mistake, and it resolves
-    /// by itself the moment that page is written (the next call to this
-    /// method, on whichever page names it, links it up).
+    /// page that does not exist yet is intent, not a mistake. Both directions
+    /// have to be handled here, and forgetting the second is a silent bug —
+    /// the link is recorded, nothing errors, and the link-neighbour retrieval
+    /// stream simply never sees that edge:
+    ///
+    /// * **outgoing** — every target this page names is resolved against the
+    ///   pages that exist now;
+    /// * **incoming** — every *other* page's unresolved link naming this
+    ///   page's path is resolved to it, which is what makes writing pages in
+    ///   any order safe.
     pub fn set_page_links(
         &self,
         project_id: ProjectId,
@@ -288,6 +295,27 @@ impl Store {
                 params![page_id.to_string(), target, resolved],
             )?;
         }
+
+        // The `to_target || '.md'` half matches the extension-less form
+        // `[[gotchas/windows-bom]]`, the same two spellings the outgoing
+        // lookup above accepts.
+        let path: Option<String> = tx
+            .query_row(
+                "SELECT path FROM pages WHERE id = ?1",
+                params![page_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(path) = path {
+            tx.execute(
+                "UPDATE page_links SET to_page_id = ?1
+                 WHERE to_page_id IS NULL
+                   AND (to_target = ?2 OR to_target || '.md' = ?2)
+                   AND from_page_id IN (SELECT id FROM pages WHERE project_id = ?3)",
+                params![page_id.to_string(), path, project_id.to_string()],
+            )?;
+        }
+
         tx.commit()?;
         Ok(())
     }
@@ -667,6 +695,75 @@ mod tests {
 
         let hits = store.query_pages(project, "sqlite", 10, now(), None).unwrap();
         assert!(hits.iter().any(|hit| hit.title == "Windows BOM"));
+    }
+
+    #[test]
+    fn a_link_written_before_its_target_resolves_when_the_target_arrives() {
+        let (_dir, store, project, _workspace) = fixture();
+
+        // Written first, naming a page that does not exist yet — the ordinary
+        // case when someone writes a decision that points at a gotcha they
+        // have not written down yet.
+        let source = write_page(
+            &store,
+            project,
+            "decisions/0001-storage.md",
+            "Storage engine",
+            "We chose SQLite. See [[gotchas/windows-bom.md]].",
+            Vec::new(),
+        );
+        store
+            .set_page_links(project, source, &["gotchas/windows-bom.md".to_owned()])
+            .unwrap();
+
+        let target = write_page(
+            &store,
+            project,
+            "gotchas/windows-bom.md",
+            "Windows BOM",
+            "PowerShell prepends a BOM when piping to a native exe.",
+            Vec::new(),
+        );
+        store.set_page_links(project, target, &[]).unwrap();
+
+        let resolved: Option<String> = store
+            .connection()
+            .query_row(
+                "SELECT to_page_id FROM page_links WHERE from_page_id = ?1",
+                params![source.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved.as_deref(),
+            Some(target.to_string().as_str()),
+            "the backlink should have been resolved when its target was written"
+        );
+
+        // And the edge is live: searching for the source's content now pulls
+        // the target in through the link-neighbour stream.
+        let hits = store.query_pages(project, "sqlite", 10, now(), None).unwrap();
+        assert!(hits.iter().any(|hit| hit.title == "Windows BOM"));
+    }
+
+    #[test]
+    fn an_extensionless_link_resolves_to_the_markdown_page() {
+        let (_dir, store, project, _workspace) = fixture();
+        let source = write_page(&store, project, "notes/a.md", "A", "See [[notes/b]].", Vec::new());
+        store.set_page_links(project, source, &["notes/b".to_owned()]).unwrap();
+
+        let target = write_page(&store, project, "notes/b.md", "B", "body", Vec::new());
+        store.set_page_links(project, target, &[]).unwrap();
+
+        let resolved: Option<String> = store
+            .connection()
+            .query_row(
+                "SELECT to_page_id FROM page_links WHERE from_page_id = ?1",
+                params![source.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(resolved.as_deref(), Some(target.to_string().as_str()));
     }
 
     #[test]
