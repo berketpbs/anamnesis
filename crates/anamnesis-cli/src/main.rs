@@ -371,6 +371,12 @@ fn cmd_mcp(repo: &std::path::Path, data_dir: Option<PathBuf>) -> anyhow::Result<
     store.upsert_project(&scope, Timestamp::now())?;
     let wiki = Wiki::open(data.wiki())?;
 
+    // Built before the transport connects, so a misconfigured or unreachable
+    // model is a startup error someone sees rather than a warning buried in a
+    // log file, the same reasoning `cmd_serve` applies to the LLM provider.
+    let embed_config = anamnesis_llm::EmbedConfig::from_env();
+    let embedder = embed_config.build(&data.models())?;
+
     // Never stdout: the MCP transport owns stdout for protocol frames, so a
     // stray print here would corrupt the stream the same way a log line would
     // corrupt the `hook` command's handoff channel.
@@ -379,8 +385,15 @@ fn cmd_mcp(repo: &std::path::Path, data_dir: Option<PathBuf>) -> anyhow::Result<
         scope.scope,
         describe_source(&scope.source)
     );
+    eprintln!(
+        "   vector search: {}",
+        match &embedder {
+            Some(embedder) => format!("enabled ({})", embedder.model()),
+            None => "disabled (set ANAMNESIS_EMBED_ENABLED=1 to turn on)".to_owned(),
+        }
+    );
 
-    let server = anamnesis_mcp::AnamnesisMcp::new(store, wiki, scope, repo);
+    let server = anamnesis_mcp::AnamnesisMcp::new(store, wiki, scope, repo).with_embedder(embedder);
 
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {

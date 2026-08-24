@@ -1,16 +1,17 @@
 //! Retrieval: fusing full-text search, entity matching, and link-neighbour
 //! expansion into one ranked list of pages.
 //!
-//! Three independent SQL queries each produce a ranked stream of page ids;
+//! Four independent queries each produce a ranked stream of page ids;
 //! turning several rankings into one is [`anamnesis_core::retrieval`], which
-//! is pure and knows nothing about SQL. Everything here is the SQL that
-//! produces the streams, plus the bookkeeping (authority multiplier, access
-//! recording) that surrounds fusing them.
+//! is pure and knows nothing about SQL. Everything here is the SQL (and, for
+//! the vector stream, the arithmetic) that produces the streams, plus the
+//! bookkeeping (authority multiplier, access recording) that surrounds fusing
+//! them.
 //!
-//! What's deliberately absent: a vector-cosine stream. That needs an
-//! embedding pipeline this crate does not have yet, so relevance today comes
-//! from three of the four signals the design calls for. A hit that all three
-//! agree on is no less real for the fourth signal's absence.
+//! The vector stream is opt-in: it only runs when a caller supplies a query
+//! embedding, because computing one means loading a local model this crate
+//! knows nothing about (see `anamnesis_llm::embed`). Without one, relevance
+//! comes from the other three signals, same as before this stream existed.
 
 use std::collections::HashMap;
 
@@ -70,12 +71,19 @@ impl Store {
     /// Every returned page has its access statistics bumped — `memory_query`
     /// finding a page is exactly the "proven useful" signal the decay formula
     /// is built to reward.
+    ///
+    /// `embedding`, when supplied, is `(model, query vector)`: the fourth
+    /// stream, cosine similarity against every page embedded under that model
+    /// name. A page embedded under a different model (or not embedded at all)
+    /// simply does not appear in that stream — it is still reachable through
+    /// the other three.
     pub fn query_pages(
         &self,
         project_id: ProjectId,
         query: &str,
         limit: usize,
         now: Timestamp,
+        embedding: Option<(&str, &[f32])>,
     ) -> Result<Vec<PageHit>> {
         let tokens = tokenize(query);
         if tokens.is_empty() || limit == 0 {
@@ -94,7 +102,14 @@ impl Store {
         seeds.truncate(STREAM_CANDIDATES);
         let links = self.link_stream(project_id, &seeds, STREAM_CANDIDATES)?;
 
-        let fused = fuse_and_rank(&[fts, entity, links], RRF_K);
+        let vectors = match embedding {
+            Some((model, vector)) if !vector.is_empty() => {
+                self.vector_stream(project_id, model, vector, STREAM_CANDIDATES)?
+            }
+            _ => Vec::new(),
+        };
+
+        let fused = fuse_and_rank(&[fts, entity, links, vectors], RRF_K);
         if fused.is_empty() {
             return Ok(Vec::new());
         }
@@ -146,6 +161,57 @@ impl Store {
             params![page_id.to_string(), now.to_string()],
         )?;
         Ok(())
+    }
+
+    /// Store (or replace) a page's embedding under one model.
+    ///
+    /// Keyed by `(page_id, model)` rather than `page_id` alone, so re-running
+    /// this under a new model name adds a second row instead of overwriting a
+    /// vector that other, not-yet-migrated queries might still compare against.
+    pub fn set_page_embedding(&self, page_id: PageId, model: &str, vector: &[f32]) -> Result<()> {
+        let conn = self.connection();
+        conn.execute(
+            "INSERT INTO page_embeddings (page_id, model, dim, vector) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (page_id, model) DO UPDATE SET dim = excluded.dim, vector = excluded.vector",
+            params![page_id.to_string(), model, vector.len() as i64, vector_to_bytes(vector)],
+        )?;
+        Ok(())
+    }
+
+    /// Vector stream: pages embedded under `model`, ranked by cosine
+    /// similarity to `query_vector`.
+    ///
+    /// Brute force — every embedded page in the project is scored on every
+    /// call. Fine at the scale this system targets (a project's wiki, not a
+    /// search engine's corpus); an ANN index is a later problem, not a
+    /// day-one dependency.
+    fn vector_stream(
+        &self,
+        project_id: ProjectId,
+        model: &str,
+        query_vector: &[f32],
+        limit: usize,
+    ) -> Result<Vec<PageId>> {
+        let conn = self.connection();
+        let mut statement = conn.prepare(
+            "SELECT pe.page_id, pe.vector FROM page_embeddings pe
+             JOIN pages p ON p.id = pe.page_id
+             WHERE pe.model = ?1 AND p.project_id = ?2
+               AND p.is_latest = 1 AND p.status != 'superseded'",
+        )?;
+        let rows = statement.query_map(params![model, project_id.to_string()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+
+        let mut scored: Vec<(PageId, f32)> = Vec::new();
+        for row in rows {
+            let (id, bytes) = row?;
+            let vector = bytes_to_vector(&bytes);
+            scored.push((parse_page_id(id), cosine_similarity(query_vector, &vector)));
+        }
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+        Ok(scored.into_iter().map(|(id, _)| id).collect())
     }
 
     /// Replace a page's declared entities, creating any new to the project.
@@ -404,6 +470,43 @@ fn placeholders(count: usize) -> String {
     vec!["?"; count].join(",")
 }
 
+/// Serialize a vector as little-endian `f32` bytes.
+fn vector_to_bytes(vector: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(vector.len() * 4);
+    for value in vector {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
+}
+
+/// Deserialize a vector written by [`vector_to_bytes`].
+///
+/// A byte count that is not a multiple of four means the row was not written
+/// by this crate; the trailing partial value is dropped rather than causing a
+/// panic, since a search stream is not worth failing a whole query over.
+fn bytes_to_vector(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect()
+}
+
+/// Cosine similarity of two vectors. `0.0` for a length mismatch or either
+/// vector being zero, rather than a divide-by-zero `NaN` that would poison
+/// every sort it touches.
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let norm_a = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    dot / (norm_a * norm_b)
+}
+
 /// Parse a page identifier written by this crate.
 fn parse_page_id(raw: String) -> PageId {
     raw.parse()
@@ -494,7 +597,7 @@ mod tests {
             Vec::new(),
         );
 
-        let hits = store.query_pages(project, "sqlite rebuildable", 10, now()).unwrap();
+        let hits = store.query_pages(project, "sqlite rebuildable", 10, now(), None).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].title, "Storage engine");
     }
@@ -517,7 +620,7 @@ mod tests {
         let page = Page::new(project, decision, frontmatter, "SQLite is the storage engine.");
         store.upsert_page(&page, now()).unwrap();
 
-        let hits = store.query_pages(project, "sqlite", 10, now()).unwrap();
+        let hits = store.query_pages(project, "sqlite", 10, now(), None).unwrap();
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].title, "Why SQLite", "authority should win the tie");
     }
@@ -534,7 +637,7 @@ mod tests {
             vec![Entity::parse("React").unwrap()],
         );
 
-        let hits = store.query_pages(project, "React", 10, now()).unwrap();
+        let hits = store.query_pages(project, "React", 10, now(), None).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].title, "Frontend framework");
     }
@@ -562,7 +665,7 @@ mod tests {
             .set_page_links(project, neighbor, &["decisions/0001-storage.md".to_owned()])
             .unwrap();
 
-        let hits = store.query_pages(project, "sqlite", 10, now()).unwrap();
+        let hits = store.query_pages(project, "sqlite", 10, now(), None).unwrap();
         assert!(hits.iter().any(|hit| hit.title == "Windows BOM"));
     }
 
@@ -575,7 +678,7 @@ mod tests {
         let page = Page::new(project, path, frontmatter, "SQLite, superseded now.");
         store.upsert_page(&page, now()).unwrap();
 
-        let hits = store.query_pages(project, "sqlite", 10, now()).unwrap();
+        let hits = store.query_pages(project, "sqlite", 10, now(), None).unwrap();
         assert!(hits.is_empty());
     }
 
@@ -583,7 +686,7 @@ mod tests {
     fn an_empty_query_returns_nothing_rather_than_everything() {
         let (_dir, store, project, _workspace) = fixture();
         write_page(&store, project, "notes/a.md", "A", "body", Vec::new());
-        assert!(store.query_pages(project, "   ", 10, now()).unwrap().is_empty());
+        assert!(store.query_pages(project, "   ", 10, now(), None).unwrap().is_empty());
     }
 
     #[test]
@@ -591,7 +694,7 @@ mod tests {
         let (_dir, store, project, _workspace) = fixture();
         let id = write_page(&store, project, "notes/a.md", "A", "sqlite notes", Vec::new());
 
-        store.query_pages(project, "sqlite", 10, now()).unwrap();
+        store.query_pages(project, "sqlite", 10, now(), None).unwrap();
 
         let conn = store.connection();
         let access_count: i64 = conn
@@ -602,5 +705,63 @@ mod tests {
             )
             .unwrap();
         assert_eq!(access_count, 1);
+    }
+
+    #[test]
+    fn a_vector_hit_is_found_even_without_a_shared_token() {
+        let (_dir, store, project, _workspace) = fixture();
+        // Nothing in this body shares a token with the query, and it names no
+        // entity — full-text and entity matching would both miss it. Only the
+        // vector stream can surface it.
+        let id = write_page(
+            &store,
+            project,
+            "notes/car.md",
+            "Automobile",
+            "A vehicle with four wheels used for transportation.",
+            Vec::new(),
+        );
+        store
+            .set_page_embedding(id, "test-model", &[1.0, 0.0, 0.0])
+            .unwrap();
+
+        let hits = store
+            .query_pages(
+                project,
+                "unrelated",
+                10,
+                now(),
+                Some(("test-model", &[1.0, 0.0, 0.0])),
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title, "Automobile");
+    }
+
+    #[test]
+    fn a_vector_under_a_different_model_is_not_matched() {
+        let (_dir, store, project, _workspace) = fixture();
+        let id = write_page(&store, project, "notes/car.md", "Automobile", "body", Vec::new());
+        store.set_page_embedding(id, "model-a", &[1.0, 0.0]).unwrap();
+
+        let hits = store
+            .query_pages(project, "nomatch", 10, now(), Some(("model-b", &[1.0, 0.0])))
+            .unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn cosine_similarity_ignores_magnitude() {
+        assert!((cosine_similarity(&[1.0, 0.0], &[2.0, 0.0]) - 1.0).abs() < 1e-6);
+        assert!((cosine_similarity(&[1.0, 0.0], &[0.0, 1.0])).abs() < 1e-6);
+        assert_eq!(cosine_similarity(&[], &[]), 0.0);
+        assert_eq!(cosine_similarity(&[1.0], &[1.0, 2.0]), 0.0);
+        assert_eq!(cosine_similarity(&[0.0, 0.0], &[1.0, 1.0]), 0.0);
+    }
+
+    #[test]
+    fn a_vector_round_trips_through_storage_bytes() {
+        let original = vec![1.5_f32, -2.25, 0.0, 3.125];
+        assert_eq!(bytes_to_vector(&vector_to_bytes(&original)), original);
     }
 }
