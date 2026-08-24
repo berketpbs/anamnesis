@@ -1,10 +1,16 @@
-//! SQLite persistence for the anamnesis memory system.
+//! Persistence for the anamnesis memory system: the SQLite index, and the
+//! raw spool behind it.
 //!
 //! This database is an *index*, never the source of truth. Every page it holds
 //! is rebuildable from the markdown wiki, and page identifiers are derived from
 //! `(project, path)` rather than minted, so a rebuild reproduces them exactly.
 //! That is what makes "delete the database and reindex" a safe operation rather
 //! than a data loss event.
+//!
+//! Pages are not the whole story, though: the *observations* a page was
+//! compiled from exist in no wiki. [`RawSpool`] is what keeps them
+//! rebuildable too, writing every captured event to append-only JSONL under
+//! `<data_dir>/raw/` at the moment it arrives.
 //!
 //! Writes are serialised through a single connection behind a mutex. SQLite
 //! permits one writer at a time regardless; making that explicit turns a
@@ -27,10 +33,12 @@ mod embedded {
 mod convert;
 mod ops;
 mod query;
+mod raw;
 mod workstream;
 
 pub use ops::{SessionSummary, new_handoff, new_observation, new_session};
 pub use query::PageHit;
+pub use raw::{RawError, RawRecord, RawSpool};
 pub use workstream::{WorkstreamHandoff, WorkstreamSession};
 
 /// Errors produced by the storage layer.

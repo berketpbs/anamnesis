@@ -17,7 +17,7 @@ use std::sync::Arc;
 use anamnesis_core::observation::EventKind;
 use anamnesis_core::session::AgentKind;
 use anamnesis_llm::Provider;
-use anamnesis_store::Store;
+use anamnesis_store::{RawSpool, Store};
 use anamnesis_wiki::Wiki;
 use axum::Router;
 use axum::extract::{Query, State};
@@ -96,6 +96,11 @@ pub struct AppState {
     /// sessions ending at the same moment would otherwise race on both. One
     /// writer at a time is the same discipline the SQLite side follows.
     pub wiki: Arc<Mutex<Wiki>>,
+    /// The durable transcript every captured observation is also written to.
+    ///
+    /// `None` disables spooling, which is what tests that only care about
+    /// the index use; a server started by the CLI always has one.
+    pub raw: Option<Arc<RawSpool>>,
     /// The model, when one is configured. `None` means every session is
     /// summarised by counting.
     pub llm: Option<LlmSettings>,
@@ -107,8 +112,15 @@ impl AppState {
         Self {
             store: Arc::new(store),
             wiki: Arc::new(Mutex::new(wiki)),
+            raw: None,
             llm: None,
         }
+    }
+
+    /// Spool every observation to a durable transcript as well as the index.
+    pub fn with_raw(mut self, raw: Option<RawSpool>) -> Self {
+        self.raw = raw.map(Arc::new);
+        self
     }
 
     /// Consolidate with a model, when one was configured.
@@ -202,7 +214,7 @@ async fn receive_hook(
         // while the hook waits.
         let outcome = {
             let wiki = state.wiki.lock();
-            ingest(&state.store, &wiki, &hook, now)?
+            ingest(&state.store, &wiki, state.raw.as_deref(), &hook, now)?
         };
         if let Some(page) = &outcome.page {
             tracing::info!(%page, "session consolidated");
@@ -218,7 +230,7 @@ async fn receive_hook(
     // it. The cost of that choice is honest: a server killed in the next few
     // seconds loses the page, and the session stays open rather than closing
     // with nothing in it.
-    let (scope, session_id) = record(&state.store, &hook, now)?;
+    let (scope, session_id) = record(&state.store, state.raw.as_deref(), &hook, now)?;
 
     if hook.kind == EventKind::SessionEnd {
         let background = state.clone();
@@ -301,10 +313,11 @@ mod tests {
         let store = Store::open(data.path().join("index.db")).expect("store");
         store.migrate().expect("migrate");
         let wiki = Wiki::open(data.path().join("wiki")).expect("wiki");
+        let raw = RawSpool::new(data.path().join("raw"));
 
         Harness {
             cwd: repo.path().to_path_buf(),
-            state: AppState::new(store, wiki),
+            state: AppState::new(store, wiki).with_raw(Some(raw)),
             _repo: repo,
             _data: data,
         }
@@ -336,6 +349,7 @@ mod tests {
         ingest(
             &harness.state.store,
             &harness.state.wiki.lock(),
+            harness.state.raw.as_deref(),
             &hook(harness, event, extra),
             now(),
         )
@@ -485,6 +499,96 @@ mod tests {
         assert!(!read.body.contains("wJalrXUtnFEMIK7MDENG"));
     }
 
+    /// Every line the spool holds for this project, across every session.
+    fn spooled(harness: &Harness) -> Vec<anamnesis_store::RawRecord> {
+        let spool = harness.state.raw.as_deref().expect("spool");
+        spool
+            .files()
+            .expect("files")
+            .iter()
+            .flat_map(|path| spool.read_file(path).expect("read"))
+            .collect()
+    }
+
+    #[test]
+    fn every_captured_observation_reaches_the_spool() {
+        let harness = harness();
+        run(&harness, "SessionStart", json!({"source": "startup"}));
+        run(
+            &harness,
+            "UserPromptSubmit",
+            json!({"prompt": "wire up the storage layer"}),
+        );
+        run(&harness, "SessionEnd", json!({}));
+
+        let records = spooled(&harness);
+        let sessions = records
+            .iter()
+            .filter(|r| matches!(r, anamnesis_store::RawRecord::Session(_)))
+            .count();
+        let observations: Vec<String> = records
+            .iter()
+            .filter_map(|r| match r {
+                anamnesis_store::RawRecord::Observation(o) => Some(o.body.as_str().to_owned()),
+                anamnesis_store::RawRecord::Session(_) => None,
+            })
+            .collect();
+
+        assert_eq!(sessions, 1, "one header for the one session");
+        assert_eq!(observations.len(), 3, "start, prompt, and end");
+        assert!(
+            observations
+                .iter()
+                .any(|body| body.contains("wire up the storage layer"))
+        );
+    }
+
+    #[test]
+    fn the_spool_survives_the_index_being_deleted() {
+        // The whole point of the spool: the wiki keeps the compiled page, but
+        // the observations it was compiled from used to live only in SQLite.
+        let harness = harness();
+        run(
+            &harness,
+            "UserPromptSubmit",
+            json!({"prompt": "the raw material"}),
+        );
+
+        let before = spooled(&harness);
+        drop(harness.state.store.connection());
+
+        assert!(
+            before.iter().any(|r| match r {
+                anamnesis_store::RawRecord::Observation(o) =>
+                    o.body.as_str().contains("the raw material"),
+                anamnesis_store::RawRecord::Session(_) => false,
+            }),
+            "the observation is on disk independently of the index"
+        );
+    }
+
+    #[test]
+    fn secrets_never_reach_the_spool_either() {
+        // The spool outlives the database, so an unredacted secret landing
+        // here would be the most durable copy of it in the system.
+        let harness = harness();
+        run(
+            &harness,
+            "UserPromptSubmit",
+            json!({"prompt": "deploy using AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENG"}),
+        );
+
+        let spool = harness.state.raw.as_deref().expect("spool");
+        for path in spool.files().expect("files") {
+            let text = std::fs::read_to_string(&path).expect("read");
+            assert!(
+                !text.contains("wJalrXUtnFEMIK7MDENG"),
+                "a secret reached {}",
+                path.display()
+            );
+        }
+    }
+
     #[test]
     fn a_second_session_supersedes_an_unread_handoff() {
         let harness = harness();
@@ -510,6 +614,7 @@ mod tests {
         ingest(
             &harness.state.store,
             &harness.state.wiki.lock(),
+            harness.state.raw.as_deref(),
             &parse(&payload),
             now(),
         )
@@ -518,6 +623,7 @@ mod tests {
         ingest(
             &harness.state.store,
             &harness.state.wiki.lock(),
+            harness.state.raw.as_deref(),
             &parse(&payload),
             now(),
         )
@@ -560,6 +666,7 @@ mod tests {
         let result = ingest(
             &harness.state.store,
             &harness.state.wiki.lock(),
+            harness.state.raw.as_deref(),
             &hook,
             now(),
         );
@@ -638,12 +745,14 @@ mod tests {
     ) {
         record(
             &harness.state.store,
+            harness.state.raw.as_deref(),
             &hook(harness, "SessionStart", json!({"source": "startup"})),
             now(),
         )
         .expect("start");
         record(
             &harness.state.store,
+            harness.state.raw.as_deref(),
             &hook(
                 harness,
                 "UserPromptSubmit",
