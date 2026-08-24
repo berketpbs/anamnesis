@@ -22,6 +22,7 @@ use jiff::Timestamp;
 use rusqlite::types::Value;
 use rusqlite::{OptionalExtension, params, params_from_iter};
 
+use crate::convert::parse_id;
 use crate::{Result, Store};
 
 /// How many candidates each individual stream contributes before fusion.
@@ -207,7 +208,7 @@ impl Store {
         for row in rows {
             let (id, bytes) = row?;
             let vector = bytes_to_vector(&bytes);
-            scored.push((parse_page_id(id), cosine_similarity(query_vector, &vector)));
+            scored.push((parse_id(id), cosine_similarity(query_vector, &vector)));
         }
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(limit);
@@ -457,13 +458,13 @@ impl Store {
         for row in rows {
             let (id, path, title, body, tier, status, pinned, canonical) = row?;
             out.insert(
-                parse_page_id(id),
+                parse_id(id),
                 PageRow {
                     path: parse_page_path(&path),
                     title,
                     body,
-                    tier: parse_tier(&tier),
-                    status: parse_page_status(&status),
+                    tier: Tier::from_storage(&tier),
+                    status: PageStatus::from_storage(&status),
                     pinned,
                     canonical,
                 },
@@ -475,7 +476,7 @@ impl Store {
 
 /// Collect a query's rows into page ids, stopping at the first parse failure.
 fn collect_ids(rows: impl Iterator<Item = rusqlite::Result<String>>) -> Result<Vec<PageId>> {
-    rows.map(|row| row.map(parse_page_id))
+    rows.map(|row| row.map(parse_id))
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
 }
@@ -552,60 +553,17 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot / (norm_a * norm_b)
 }
 
-/// Parse a page identifier written by this crate.
-fn parse_page_id(raw: String) -> PageId {
-    raw.parse()
-        .unwrap_or_else(|error| panic!("stored page id {raw:?} is not a uuid: {error:?}"))
-}
-
 /// Parse a page path written by this crate.
 fn parse_page_path(raw: &str) -> PagePath {
     PagePath::parse(raw)
         .unwrap_or_else(|error| panic!("stored page path {raw:?} is invalid: {error:?}"))
 }
 
-/// Map a stored tier back to its variant.
-fn parse_tier(raw: &str) -> Tier {
-    match raw {
-        "working" => Tier::Working,
-        "semantic" => Tier::Semantic,
-        "procedural" => Tier::Procedural,
-        _ => Tier::Episodic,
-    }
-}
-
-/// Map a stored page status back to its variant.
-fn parse_page_status(raw: &str) -> PageStatus {
-    match raw {
-        "historical" => PageStatus::Historical,
-        "do-not-answer-from" => PageStatus::DoNotAnswerFrom,
-        "superseded" => PageStatus::Superseded,
-        _ => PageStatus::Active,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anamnesis_core::ids::WorkspaceId;
+    use crate::convert::fixture;
     use anamnesis_core::page::{Frontmatter, Page, PagePath as CorePagePath, Tier as CoreTier};
-    use anamnesis_core::scope::resolve_scope;
-
-    fn fixture() -> (tempfile::TempDir, Store, ProjectId, WorkspaceId) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            dir.path().join(".anamnesis.toml"),
-            "[scope]\nworkspace = \"default\"\nproject = \"widget\"\n",
-        )
-        .expect("marker");
-        let scope = resolve_scope(dir.path()).expect("scope");
-
-        let store = Store::open_in_memory().expect("open");
-        store.migrate().expect("migrate");
-        store.upsert_project(&scope, now()).expect("project");
-
-        (dir, store, scope.project_id, scope.workspace_id)
-    }
 
     fn now() -> Timestamp {
         "2026-08-24T09:00:00Z".parse().expect("timestamp")

@@ -12,6 +12,7 @@ use anamnesis_core::workstream::{Workstream, WorkstreamSlug, WorkstreamStatus};
 use jiff::Timestamp;
 use rusqlite::{OptionalExtension, Row, params};
 
+use crate::convert::{parse_id, parse_time};
 use crate::{Result, Store};
 
 /// A session that joined a workstream, as it appears in the ledger.
@@ -121,7 +122,7 @@ impl Store {
         )?;
         let rows = statement.query_map(params![workstream_id.to_string()], |row| {
             Ok(WorkstreamSession {
-                session_id: parse_session_id(row.get(0)?),
+                session_id: parse_id(row.get(0)?),
                 agent: row.get(1)?,
                 state: row.get(2)?,
                 started_at: parse_time(&row.get::<_, String>(3)?),
@@ -158,71 +159,22 @@ impl Store {
 /// Build a [`Workstream`] from a joined row.
 fn read_workstream(row: &Row<'_>) -> rusqlite::Result<Workstream> {
     Ok(Workstream {
-        id: parse_workstream_id(row.get(0)?),
-        project_id: parse_project_id(row.get(1)?),
+        id: parse_id(row.get(0)?),
+        project_id: parse_id(row.get(1)?),
         slug: WorkstreamSlug::parse(&row.get::<_, String>(2)?)
             .expect("stored workstream slug was validated on write"),
         title: row.get(3)?,
-        status: parse_status(&row.get::<_, String>(4)?),
+        status: WorkstreamStatus::from_storage(&row.get::<_, String>(4)?),
         created_at: parse_time(&row.get::<_, String>(5)?),
         updated_at: parse_time(&row.get::<_, String>(6)?),
     })
 }
 
-/// Parse an identifier written by this crate. A value here that is not a
-/// UUID means the database was edited by hand or corrupted, the same
-/// invariant [`crate::ops`]'s own `parse_id` protects.
-fn parse_workstream_id(raw: String) -> WorkstreamId {
-    raw.parse()
-        .unwrap_or_else(|error| panic!("stored workstream id {raw:?} is not a uuid: {error:?}"))
-}
-
-fn parse_project_id(raw: String) -> ProjectId {
-    raw.parse()
-        .unwrap_or_else(|error| panic!("stored project id {raw:?} is not a uuid: {error:?}"))
-}
-
-fn parse_session_id(raw: String) -> SessionId {
-    raw.parse()
-        .unwrap_or_else(|error| panic!("stored session id {raw:?} is not a uuid: {error:?}"))
-}
-
-fn parse_time(raw: &str) -> Timestamp {
-    raw.parse()
-        .unwrap_or_else(|error| panic!("stored timestamp {raw:?} is not RFC 3339: {error:?}"))
-}
-
-/// Map a stored workstream status back to its variant.
-fn parse_status(raw: &str) -> WorkstreamStatus {
-    match raw {
-        "paused" => WorkstreamStatus::Paused,
-        "completed" => WorkstreamStatus::Completed,
-        _ => WorkstreamStatus::Active,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anamnesis_core::ids::WorkspaceId;
-    use anamnesis_core::scope::resolve_scope;
+    use crate::convert::fixture;
     use anamnesis_core::session::AgentKind;
-
-    fn fixture() -> (tempfile::TempDir, Store, ProjectId, WorkspaceId) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            dir.path().join(".anamnesis.toml"),
-            "[scope]\nworkspace = \"default\"\nproject = \"widget\"\n",
-        )
-        .expect("marker");
-        let scope = resolve_scope(dir.path()).expect("scope");
-
-        let store = Store::open_in_memory().expect("open");
-        store.migrate().expect("migrate");
-        store.upsert_project(&scope, now()).expect("project");
-
-        (dir, store, scope.project_id, scope.workspace_id)
-    }
 
     fn now() -> Timestamp {
         "2026-08-24T09:00:00Z".parse().expect("timestamp")

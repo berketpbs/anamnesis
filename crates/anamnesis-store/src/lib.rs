@@ -24,6 +24,7 @@ mod embedded {
     refinery::embed_migrations!("migrations");
 }
 
+mod convert;
 mod ops;
 mod query;
 mod workstream;

@@ -13,6 +13,7 @@ use anamnesis_core::session::{AgentKind, Session, SessionState};
 use jiff::Timestamp;
 use rusqlite::{OptionalExtension, Row, params};
 
+use crate::convert::{parse_id, parse_time};
 use crate::{Result, Store};
 
 /// One row of `anamnesis sessions`: what a session was, without its
@@ -53,7 +54,7 @@ impl Store {
                 session.project_id.to_string(),
                 session.agent.as_str(),
                 session.checkout_path.to_string_lossy(),
-                state_str(session.state),
+                session.state.as_str(),
                 session.started_at.to_string(),
                 session.ended_at.map(|t| t.to_string()),
                 session.workstream_id.map(|id| id.to_string()),
@@ -151,7 +152,7 @@ impl Store {
                 fm.title,
                 page.body,
                 fm.tier.as_str(),
-                status_str(fm.status),
+                fm.status.as_str(),
                 fm.pinned,
                 fm.canonical,
                 fm.salience,
@@ -322,7 +323,7 @@ fn read_session(row: &Row<'_>) -> rusqlite::Result<Session> {
             .parse()
             .expect("AgentKind parsing is infallible"),
         checkout_path: row.get::<_, String>(4)?.into(),
-        state: parse_state(&row.get::<_, String>(5)?),
+        state: SessionState::from_storage(&row.get::<_, String>(5)?),
         started_at: parse_time(&row.get::<_, String>(6)?),
         ended_at: row.get::<_, Option<String>>(7)?.map(|t| parse_time(&t)),
         workstream_id: row.get::<_, Option<String>>(8)?.map(parse_id),
@@ -335,7 +336,7 @@ fn read_observation(row: &Row<'_>) -> rusqlite::Result<Observation> {
     Ok(Observation {
         id: parse_id(row.get::<_, String>(0)?),
         session_id: parse_id(row.get::<_, String>(1)?),
-        kind: parse_kind(&row.get::<_, String>(2)?),
+        kind: EventKind::from_storage(&row.get::<_, String>(2)?),
         tool: tool_name.map(|name| ToolRef {
             name,
             ok: row.get(4).unwrap_or(None),
@@ -344,67 +345,6 @@ fn read_observation(row: &Row<'_>) -> rusqlite::Result<Observation> {
         body: BoundedBody::from_stored(row.get::<_, String>(6)?, row.get(7)?),
         sanitized: row.get(8)?,
     })
-}
-
-/// Parse an identifier written by this crate.
-///
-/// A value here that is not a UUID means the database was edited by hand or
-/// corrupted; there is no meaningful recovery, and continuing with a nil id
-/// would silently attach data to the wrong row.
-fn parse_id<T: std::str::FromStr>(raw: String) -> T
-where
-    T::Err: std::fmt::Debug,
-{
-    raw.parse()
-        .unwrap_or_else(|error| panic!("stored identifier {raw:?} is not a uuid: {error:?}"))
-}
-
-/// Parse a timestamp written by this crate.
-fn parse_time(raw: &str) -> Timestamp {
-    raw.parse()
-        .unwrap_or_else(|error| panic!("stored timestamp {raw:?} is not RFC 3339: {error:?}"))
-}
-
-/// Map a stored session state back to its variant.
-fn parse_state(raw: &str) -> SessionState {
-    match raw {
-        "ending" => SessionState::Ending,
-        "closed" => SessionState::Closed,
-        _ => SessionState::Open,
-    }
-}
-
-/// Map a stored event kind back to its variant.
-fn parse_kind(raw: &str) -> EventKind {
-    match raw {
-        "session-start" => EventKind::SessionStart,
-        "user-prompt" => EventKind::UserPrompt,
-        "tool-use" => EventKind::ToolUse,
-        "pre-compact" => EventKind::PreCompact,
-        "post-compact" => EventKind::PostCompact,
-        "session-end" => EventKind::SessionEnd,
-        _ => EventKind::Notification,
-    }
-}
-
-/// Storage form of a session state.
-fn state_str(state: SessionState) -> &'static str {
-    match state {
-        SessionState::Open => "open",
-        SessionState::Ending => "ending",
-        SessionState::Closed => "closed",
-    }
-}
-
-/// Storage form of a page status.
-fn status_str(status: anamnesis_core::page::PageStatus) -> &'static str {
-    use anamnesis_core::page::PageStatus;
-    match status {
-        PageStatus::Active => "active",
-        PageStatus::Historical => "historical",
-        PageStatus::DoNotAnswerFrom => "do-not-answer-from",
-        PageStatus::Superseded => "superseded",
-    }
 }
 
 /// Build a handoff ready to be recorded.
@@ -473,24 +413,8 @@ pub fn new_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::convert::fixture;
     use anamnesis_core::ids::WorkspaceId;
-    use anamnesis_core::scope::resolve_scope;
-
-    fn fixture() -> (tempfile::TempDir, Store, ProjectId, WorkspaceId) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            dir.path().join(".anamnesis.toml"),
-            "[scope]\nworkspace = \"default\"\nproject = \"widget\"\n",
-        )
-        .expect("marker");
-        let scope = resolve_scope(dir.path()).expect("scope");
-
-        let store = Store::open_in_memory().expect("open");
-        store.migrate().expect("migrate");
-        store.upsert_project(&scope, now()).expect("project");
-
-        (dir, store, scope.project_id, scope.workspace_id)
-    }
 
     fn now() -> Timestamp {
         "2026-08-19T09:00:00Z".parse().expect("timestamp")
