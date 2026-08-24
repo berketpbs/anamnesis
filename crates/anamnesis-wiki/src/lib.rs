@@ -139,6 +139,25 @@ impl Wiki {
         parse_document(path.as_str(), &text)
     }
 
+    /// Every page in a scope, in sorted path order.
+    ///
+    /// Walks the filesystem rather than asking git or the index: a rebuild
+    /// runs precisely when the index is gone, and a page someone dropped in
+    /// by hand — with Obsidian, or a text editor — is as real as one this
+    /// crate wrote. A file whose name is not a valid [`PagePath`] is skipped
+    /// rather than failing the walk, since the wiki directory belongs to the
+    /// user and may hold anything.
+    pub fn pages(&self, scope: &Scope) -> Result<Vec<PagePath>> {
+        let root = self
+            .root
+            .join(scope.workspace.as_str())
+            .join(scope.project.as_str());
+        let mut found = Vec::new();
+        collect_pages(&root, &root, &mut found)?;
+        found.sort();
+        Ok(found)
+    }
+
     /// Path of a page relative to the wiki root, in git's forward-slash form.
     fn relative(&self, scope: &Scope, path: &PagePath) -> PathBuf {
         PathBuf::from(scope.workspace.as_str())
@@ -193,6 +212,46 @@ pub fn page(
     body: impl Into<String>,
 ) -> Page {
     Page::new(project_id, path, frontmatter, body)
+}
+
+/// Walk `dir` collecting markdown files as paths relative to `root`.
+///
+/// A missing directory is an empty scope, not an error: a project that has
+/// never had a page written is the state every new project starts in.
+fn collect_pages(root: &Path, dir: &Path, found: &mut Vec<PagePath>) -> Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(WikiError::Io {
+                path: dir.to_path_buf(),
+                source,
+            });
+        }
+    };
+
+    for entry in entries {
+        let entry = entry.map_err(|source| WikiError::Io {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+
+        if path.is_dir() {
+            // `.git` holds the wiki's own history, not pages.
+            if path.file_name().is_some_and(|name| name == ".git") {
+                continue;
+            }
+            collect_pages(root, &path, found)?;
+        } else if path.extension().is_some_and(|ext| ext == "md")
+            && let Ok(relative) = path.strip_prefix(root)
+            && let Some(text) = relative.to_str()
+            && let Ok(page) = PagePath::parse(&text.replace('\\', "/"))
+        {
+            found.push(page);
+        }
+    }
+    Ok(())
 }
 
 /// Write bytes to `target` without ever leaving a partial file in place.
@@ -346,5 +405,72 @@ mod tests {
         }
         let wiki = Wiki::open(dir.path()).unwrap();
         assert_eq!(wiki.commit_count().unwrap(), 1, "history should survive");
+    }
+
+    #[test]
+    fn listing_finds_every_page_in_a_scope_sorted() {
+        let dir = tempfile::tempdir().unwrap();
+        let wiki = Wiki::open(dir.path()).unwrap();
+
+        for path in ["notes/b.md", "decisions/0001-storage.md", "top.md"] {
+            let mut page = sample("body");
+            page.path = PagePath::parse(path).unwrap();
+            wiki.write_page(&scope(), &page, "write").unwrap();
+        }
+
+        let listed: Vec<String> = wiki
+            .pages(&scope())
+            .unwrap()
+            .iter()
+            .map(|p| p.as_str().to_owned())
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                "decisions/0001-storage.md".to_owned(),
+                "notes/b.md".to_owned(),
+                "top.md".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn listing_a_scope_that_has_no_pages_is_empty_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let wiki = Wiki::open(dir.path()).unwrap();
+        assert!(wiki.pages(&scope()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn listing_ignores_git_internals_and_non_markdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let wiki = Wiki::open(dir.path()).unwrap();
+        wiki.write_page(&scope(), &sample("body"), "write").unwrap();
+
+        // A page written by hand, and two things that are not pages.
+        let project = dir.path().join("default").join("anamnesis");
+        std::fs::write(
+            project.join("by-hand.md"),
+            "---\ntitle: Hand\n---\n\nbody\n",
+        )
+        .unwrap();
+        std::fs::write(project.join("notes.txt"), "not a page").unwrap();
+        std::fs::create_dir_all(project.join(".git").join("refs")).unwrap();
+        std::fs::write(project.join(".git").join("refs").join("x.md"), "not a page").unwrap();
+
+        let listed: Vec<String> = wiki
+            .pages(&scope())
+            .unwrap()
+            .iter()
+            .map(|p| p.as_str().to_owned())
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                "by-hand.md".to_owned(),
+                "decisions/0001-storage.md".to_owned()
+            ],
+            "a hand-written page counts; .git and non-markdown do not"
+        );
     }
 }

@@ -1,5 +1,7 @@
 //! CLI entry point for anamnesis.
 
+mod reindex;
+
 use anamnesis_core::datadir::DataDir;
 use anamnesis_core::scope::{ScopeSource, resolve_scope};
 use anamnesis_store::Store;
@@ -128,6 +130,12 @@ enum Commands {
         server: String,
     },
 
+    /// Rebuild the index from the wiki and the raw transcripts
+    ///
+    /// Safe to run at any time: every identifier is derived, so a rebuild
+    /// reproduces the same rows rather than duplicating them.
+    Reindex,
+
     /// Bootstrap from git history
     Bootstrap {
         /// Repository path
@@ -213,6 +221,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::InstallHooks { agent, server } => {
             cmd_install_hooks(&agent, &server)?;
+        }
+        Commands::Reindex => {
+            cmd_reindex(cli.data_dir.clone())?;
         }
         Commands::Bootstrap { repo } => {
             cmd_bootstrap(&repo)?;
@@ -702,6 +713,47 @@ fn cmd_install_hooks(agent: &str, server: &str) -> anyhow::Result<()> {
     );
     println!();
     println!("Then start the server with `anamnesis serve`.");
+    Ok(())
+}
+
+fn cmd_reindex(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    let scope = resolve_scope(&cwd)?;
+    let data = DataDir::resolve(data_dir)?;
+    data.ensure_layout()?;
+
+    // Opening creates the database when it is missing, which is the case
+    // this command exists for.
+    let store = Store::open(data.db_file())?;
+    store.migrate()?;
+    let wiki = Wiki::open(data.wiki())?;
+    let raw = anamnesis_store::RawSpool::new(data.raw());
+
+    println!("♻️  Rebuilding the index for {}", scope.scope);
+    println!(
+        "   wiki:        {}",
+        data.wiki_scope(&scope.scope).display()
+    );
+    println!("   transcripts: {}", raw.root().display());
+    println!();
+
+    let report = reindex::rebuild(&store, &wiki, &raw, &scope, Timestamp::now())?;
+
+    println!("  {} page(s) indexed", report.pages);
+    println!(
+        "  {} session(s), {} observation(s) recovered",
+        report.sessions, report.observations
+    );
+    if report.orphaned_files > 0 {
+        println!(
+            "  {} transcript file(s) had no session header and were skipped",
+            report.orphaned_files
+        );
+    }
+    println!();
+    println!("  Pending handoffs are not restored: a handoff says what the *next*");
+    println!("  session should know, and reviving a stale one is worse than none.");
+
     Ok(())
 }
 
