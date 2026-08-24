@@ -19,6 +19,7 @@ use anamnesis_core::ids::SessionId;
 use anamnesis_core::page::{Entity, Frontmatter, Page, PagePath, PageStatus, Tier};
 use anamnesis_core::scope::ResolvedScope;
 use anamnesis_core::session::AgentKind;
+use anamnesis_core::workstream::{Workstream, WorkstreamSlug};
 use anamnesis_llm::Embedder;
 use anamnesis_store::{Store, new_session};
 use anamnesis_wiki::Wiki;
@@ -127,6 +128,10 @@ pub struct HandoffAcceptRequest {
     pub session_id: String,
     /// Which harness is asking. Defaults to `mcp` when unspecified.
     pub agent: Option<String>,
+    /// Slug of the workstream to join and claim a handoff from. Must already
+    /// exist (see `workstream_start`). Omitted claims the shared,
+    /// workstream-less slot, same as before workstreams existed.
+    pub workstream: Option<String>,
 }
 
 /// Response for [`AnamnesisMcp::memory_handoff_accept`].
@@ -134,6 +139,75 @@ pub struct HandoffAcceptRequest {
 pub struct HandoffAcceptResponse {
     /// The pending handoff's body, if there was one to claim.
     pub handoff: Option<String>,
+}
+
+/// Request for [`AnamnesisMcp::workstream_start`].
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WorkstreamStartRequest {
+    /// Stable short name, e.g. `auth-refactor`. Lowercase letters, digits,
+    /// `-`, and `_` only.
+    pub slug: String,
+    /// Human-facing title.
+    pub title: String,
+}
+
+/// Response for [`AnamnesisMcp::workstream_start`].
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct WorkstreamStartResponse {
+    /// The slug, normalized.
+    pub slug: String,
+    /// Current title.
+    pub title: String,
+    /// Current lifecycle status.
+    pub status: String,
+}
+
+/// Request for [`AnamnesisMcp::workstream_status`].
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WorkstreamStatusRequest {
+    /// Slug of the workstream to describe.
+    pub slug: String,
+}
+
+/// One session in a workstream's ledger.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct WorkstreamSessionEntry {
+    /// The session's identifier.
+    pub session_id: String,
+    /// Which harness ran it.
+    pub agent: String,
+    /// Its lifecycle state.
+    pub state: String,
+    /// When it started.
+    pub started_at: String,
+    /// When it ended, if it has.
+    pub ended_at: Option<String>,
+}
+
+/// One handoff in a workstream's ledger.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct WorkstreamHandoffEntry {
+    /// Delivery state: `pending`, `accepted`, or `expired`.
+    pub state: String,
+    /// When it was written.
+    pub created_at: String,
+    /// When it was accepted, if it has been.
+    pub accepted_at: Option<String>,
+}
+
+/// Response for [`AnamnesisMcp::workstream_status`].
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct WorkstreamStatusResponse {
+    /// The slug asked for.
+    pub slug: String,
+    /// Current title.
+    pub title: String,
+    /// Current lifecycle status.
+    pub status: String,
+    /// Sessions that have joined this workstream, oldest first.
+    pub sessions: Vec<WorkstreamSessionEntry>,
+    /// Handoffs written within this workstream, newest first.
+    pub handoffs: Vec<WorkstreamHandoffEntry>,
 }
 
 /// The MCP server: one resolved project scope, backed by its store and wiki.
@@ -233,6 +307,41 @@ impl AnamnesisMcp {
             .map(Json)
             .map_err(|error| error.to_string())
     }
+
+    /// Start, or resume, a named workstream.
+    ///
+    /// A workstream is a persistent thread of work that can span many
+    /// sessions and many harnesses — useful when a project has more than one
+    /// thread in flight at once (`auth-refactor` alongside `bug-123`), since
+    /// each gets its own pending-handoff slot and its own visible history.
+    /// Calling this with a slug that already exists updates its title rather
+    /// than starting a second one.
+    #[tool(
+        name = "workstream_start",
+        description = "Start or resume a named workstream: a persistent thread of work spanning many sessions and harnesses."
+    )]
+    pub async fn workstream_start(
+        &self,
+        params: Parameters<WorkstreamStartRequest>,
+    ) -> Result<Json<WorkstreamStartResponse>, String> {
+        self.start_workstream(params.0).map(Json).map_err(|error| error.to_string())
+    }
+
+    /// Show a workstream's status and its visible event ledger.
+    ///
+    /// The ledger is exactly the sessions that joined it and the handoffs
+    /// written within it — nothing is summarized or synthesized, so this is
+    /// a raw log of what actually happened, in order.
+    #[tool(
+        name = "workstream_status",
+        description = "Show a workstream's status and its event ledger (sessions and handoffs)."
+    )]
+    pub async fn workstream_status(
+        &self,
+        params: Parameters<WorkstreamStatusRequest>,
+    ) -> Result<Json<WorkstreamStatusResponse>, String> {
+        self.describe_workstream(params.0).map(Json).map_err(|error| error.to_string())
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -243,7 +352,11 @@ impl ServerHandler for AnamnesisMcp {
              might already have prior decisions, gotchas, or context recorded. Call \
              memory_write_page to record durable knowledge — decisions, gotchas, procedures — \
              worth keeping past this session; ordinary session summaries are written \
-             automatically and do not need this tool.",
+             automatically and do not need this tool. If this project has more than one \
+             thread of work going at once, call workstream_start with a short slug before \
+             memory_handoff_accept and name that slug there too — each workstream keeps its \
+             own resume point, so switching between them never loses or shadows the other's \
+             handoff. Use workstream_status to see what happened in one.",
         )
     }
 }
@@ -363,6 +476,11 @@ impl AnamnesisMcp {
         let now = Timestamp::now();
         self.store.upsert_project(&self.scope, now)?;
 
+        let workstream_id = match request.workstream.as_deref().map(str::trim) {
+            Some(slug) => Some(self.require_workstream(slug)?.id),
+            None => None,
+        };
+
         let claimant = SessionId::derive(self.scope.project_id, &request.session_id);
         self.store.ensure_session(&new_session(
             claimant,
@@ -371,10 +489,87 @@ impl AnamnesisMcp {
             agent,
             self.root.clone(),
             now,
+            workstream_id,
         ))?;
 
-        let handoff = self.store.claim_handoff(self.scope.project_id, claimant, now)?;
+        let handoff = self
+            .store
+            .claim_handoff(self.scope.project_id, claimant, workstream_id, now)?;
         Ok(HandoffAcceptResponse { handoff })
+    }
+
+    fn start_workstream(&self, request: WorkstreamStartRequest) -> Result<WorkstreamStartResponse, McpError> {
+        let slug = WorkstreamSlug::parse(&request.slug)?;
+        let now = Timestamp::now();
+        self.store.upsert_project(&self.scope, now)?;
+
+        let workstream = match self.store.find_workstream(self.scope.project_id, slug.as_str())? {
+            Some(mut existing) => {
+                existing.title = request.title;
+                existing.updated_at = now;
+                existing
+            }
+            None => Workstream::new(self.scope.project_id, slug, request.title, now),
+        };
+        self.store.upsert_workstream(&workstream)?;
+
+        Ok(WorkstreamStartResponse {
+            slug: workstream.slug.as_str().to_owned(),
+            title: workstream.title,
+            status: workstream.status.as_str().to_owned(),
+        })
+    }
+
+    fn describe_workstream(
+        &self,
+        request: WorkstreamStatusRequest,
+    ) -> Result<WorkstreamStatusResponse, McpError> {
+        let workstream = self.require_workstream(request.slug.trim())?;
+
+        let sessions = self
+            .store
+            .workstream_sessions(workstream.id)?
+            .into_iter()
+            .map(|session| WorkstreamSessionEntry {
+                session_id: session.session_id.to_string(),
+                agent: session.agent,
+                state: session.state,
+                started_at: session.started_at.to_string(),
+                ended_at: session.ended_at.map(|t| t.to_string()),
+            })
+            .collect();
+        let handoffs = self
+            .store
+            .workstream_handoffs(workstream.id)?
+            .into_iter()
+            .map(|handoff| WorkstreamHandoffEntry {
+                state: handoff.state,
+                created_at: handoff.created_at.to_string(),
+                accepted_at: handoff.accepted_at.map(|t| t.to_string()),
+            })
+            .collect();
+
+        Ok(WorkstreamStatusResponse {
+            slug: workstream.slug.as_str().to_owned(),
+            title: workstream.title,
+            status: workstream.status.as_str().to_owned(),
+            sessions,
+            handoffs,
+        })
+    }
+
+    /// Look up a workstream by slug, or report that it needs to be started
+    /// first — accepting a handoff into, or asking the status of, a
+    /// workstream nobody started is a caller mistake worth naming rather
+    /// than silently creating one.
+    fn require_workstream(&self, slug: &str) -> Result<Workstream, McpError> {
+        self.store
+            .find_workstream(self.scope.project_id, slug)?
+            .ok_or_else(|| {
+                McpError::Invalid(format!(
+                    "no workstream named {slug:?}; call workstream_start first"
+                ))
+            })
     }
 }
 
@@ -495,6 +690,7 @@ mod tests {
                 AgentKind::ClaudeCode,
                 server.root.clone(),
                 now,
+                None,
             ))
             .unwrap();
         server
@@ -502,6 +698,7 @@ mod tests {
             .record_handoff(&anamnesis_store::new_handoff(
                 server.scope.project_id,
                 from,
+                None,
                 "carry on",
                 now,
             ))
@@ -511,6 +708,7 @@ mod tests {
             .accept_handoff(HandoffAcceptRequest {
                 session_id: "reader".to_owned(),
                 agent: None,
+                workstream: None,
             })
             .unwrap();
         assert_eq!(first.handoff.as_deref(), Some("carry on"));
@@ -519,19 +717,139 @@ mod tests {
             .accept_handoff(HandoffAcceptRequest {
                 session_id: "reader-2".to_owned(),
                 agent: Some("codex".to_owned()),
+                workstream: None,
             })
             .unwrap();
         assert_eq!(second.handoff, None);
     }
 
     #[test]
-    fn tool_router_lists_all_three_tools() {
+    fn tool_router_lists_every_tool() {
         let (_repo, _data, server) = harness();
         let tools = server.tool_router.list_all();
         let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
         assert!(names.contains(&"memory_query"));
         assert!(names.contains(&"memory_write_page"));
         assert!(names.contains(&"memory_handoff_accept"));
+        assert!(names.contains(&"workstream_start"));
+        assert!(names.contains(&"workstream_status"));
+    }
+
+    #[test]
+    fn starting_a_workstream_twice_updates_rather_than_duplicates() {
+        let (_repo, _data, server) = harness();
+        server
+            .start_workstream(WorkstreamStartRequest {
+                slug: "Auth-Refactor".to_owned(),
+                title: "Auth refactor".to_owned(),
+            })
+            .unwrap();
+        let second = server
+            .start_workstream(WorkstreamStartRequest {
+                slug: "auth-refactor".to_owned(),
+                title: "Auth refactor v2".to_owned(),
+            })
+            .unwrap();
+
+        assert_eq!(second.slug, "auth-refactor");
+        assert_eq!(second.title, "Auth refactor v2");
+        assert_eq!(second.status, "active");
+    }
+
+    #[test]
+    fn asking_the_status_of_an_unstarted_workstream_is_reported() {
+        let (_repo, _data, server) = harness();
+        let error = server
+            .describe_workstream(WorkstreamStatusRequest {
+                slug: "never-started".to_owned(),
+            })
+            .unwrap_err();
+        assert!(matches!(error, McpError::Invalid(_)));
+    }
+
+    #[test]
+    fn a_workstream_accepted_handoff_shows_up_in_its_own_ledger() {
+        let (_repo, _data, server) = harness();
+        server
+            .start_workstream(WorkstreamStartRequest {
+                slug: "auth-refactor".to_owned(),
+                title: "Auth refactor".to_owned(),
+            })
+            .unwrap();
+
+        let now = Timestamp::now();
+        server.store.upsert_project(&server.scope, now).unwrap();
+        let writer = SessionId::derive(server.scope.project_id, "writer");
+        let workstream_id = server
+            .store
+            .find_workstream(server.scope.project_id, "auth-refactor")
+            .unwrap()
+            .unwrap()
+            .id;
+        server
+            .store
+            .ensure_session(&new_session(
+                writer,
+                server.scope.project_id,
+                server.scope.workspace_id,
+                AgentKind::ClaudeCode,
+                server.root.clone(),
+                now,
+                Some(workstream_id),
+            ))
+            .unwrap();
+        server
+            .store
+            .record_handoff(&anamnesis_store::new_handoff(
+                server.scope.project_id,
+                writer,
+                Some(workstream_id),
+                "postgres chosen for auth storage",
+                now,
+            ))
+            .unwrap();
+
+        // A plain accept (no workstream named) must not see this handoff —
+        // it lives in the auth-refactor slot, not the shared one.
+        let plain = server
+            .accept_handoff(HandoffAcceptRequest {
+                session_id: "codex-reader".to_owned(),
+                agent: Some("codex".to_owned()),
+                workstream: None,
+            })
+            .unwrap();
+        assert_eq!(plain.handoff, None);
+
+        let claimed = server
+            .accept_handoff(HandoffAcceptRequest {
+                session_id: "codex-reader-2".to_owned(),
+                agent: Some("codex".to_owned()),
+                workstream: Some("auth-refactor".to_owned()),
+            })
+            .unwrap();
+        assert_eq!(claimed.handoff.as_deref(), Some("postgres chosen for auth storage"));
+
+        let status = server
+            .describe_workstream(WorkstreamStatusRequest {
+                slug: "auth-refactor".to_owned(),
+            })
+            .unwrap();
+        assert_eq!(status.sessions.len(), 2, "the writer and the claimant both joined");
+        assert_eq!(status.handoffs.len(), 1);
+        assert_eq!(status.handoffs[0].state, "accepted");
+    }
+
+    #[test]
+    fn accepting_into_an_unstarted_workstream_is_reported() {
+        let (_repo, _data, server) = harness();
+        let error = server
+            .accept_handoff(HandoffAcceptRequest {
+                session_id: "reader".to_owned(),
+                agent: None,
+                workstream: Some("never-started".to_owned()),
+            })
+            .unwrap_err();
+        assert!(matches!(error, McpError::Invalid(_)));
     }
 
     /// Always embeds to the same vector, regardless of text. Real semantic

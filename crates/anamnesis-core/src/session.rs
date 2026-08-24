@@ -2,7 +2,7 @@
 
 use jiff::Timestamp;
 
-use crate::ids::{ProjectId, SessionId, WorkspaceId};
+use crate::ids::{ProjectId, SessionId, WorkspaceId, WorkstreamId};
 
 /// Which harness produced a session.
 ///
@@ -106,6 +106,10 @@ pub struct Session {
     pub workspace_id: WorkspaceId,
     /// Project it belongs to.
     pub project_id: ProjectId,
+    /// The workstream this session is part of, if any. `None` is the
+    /// ordinary case — a project with one thread of work needs no workstream
+    /// at all.
+    pub workstream_id: Option<WorkstreamId>,
     /// Working directory the agent ran in.
     pub checkout_path: std::path::PathBuf,
     /// When the session started.

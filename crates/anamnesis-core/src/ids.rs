@@ -99,6 +99,11 @@ id_newtype! {
     HandoffId
 }
 
+id_newtype! {
+    /// Identifies a workstream, derived from its project and slug.
+    WorkstreamId
+}
+
 impl WorkspaceId {
     /// Derive the identifier for a workspace name.
     pub fn derive(name: &WorkspaceName) -> Self {
@@ -129,6 +134,21 @@ impl PageId {
     /// different projects never collide.
     pub fn derive(project: ProjectId, path: &PagePath) -> Self {
         Self(Uuid::new_v5(project.as_uuid(), path.as_str().as_bytes()))
+    }
+}
+
+impl WorkstreamId {
+    /// Derive the identifier for a workstream slug within a project.
+    ///
+    /// Derived rather than minted so starting a workstream is idempotent: the
+    /// same slug asked for twice names the same row, the way a page path
+    /// does, rather than the caller needing to look one up before deciding
+    /// whether to create it.
+    pub fn derive(project: ProjectId, slug: &str) -> Self {
+        Self(Uuid::new_v5(
+            project.as_uuid(),
+            format!("workstream:{slug}").as_bytes(),
+        ))
     }
 }
 
@@ -231,6 +251,24 @@ mod tests {
         let two = ProjectId::derive(&ws("default"), &key("path:/b"));
         assert_ne!(PageId::derive(one, &path), PageId::derive(two, &path));
         assert_eq!(PageId::derive(one, &path), PageId::derive(one, &path));
+    }
+
+    #[test]
+    fn workstream_ids_are_namespaced_by_project_and_stable_by_slug() {
+        let one = ProjectId::derive(&ws("default"), &key("path:/a"));
+        let two = ProjectId::derive(&ws("default"), &key("path:/b"));
+        assert_ne!(
+            WorkstreamId::derive(one, "auth-refactor"),
+            WorkstreamId::derive(two, "auth-refactor")
+        );
+        assert_eq!(
+            WorkstreamId::derive(one, "auth-refactor"),
+            WorkstreamId::derive(one, "auth-refactor")
+        );
+        assert_ne!(
+            WorkstreamId::derive(one, "auth-refactor"),
+            WorkstreamId::derive(one, "bug-123")
+        );
     }
 
     #[test]

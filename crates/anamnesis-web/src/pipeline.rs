@@ -85,6 +85,10 @@ pub fn record(
         hook.agent.clone(),
         cwd.to_path_buf(),
         now,
+        // The hook capture path knows nothing about workstreams — that is an
+        // MCP-only concept for now. Every session it records shares the
+        // project-wide handoff slot, exactly as before workstreams existed.
+        None,
     ))?;
 
     store.insert_observation(&new_observation(
@@ -210,6 +214,7 @@ fn commit(
     store.record_handoff(&new_handoff(
         scope.project_id,
         session.id,
+        session.workstream_id,
         &digest.handoff,
         now,
     ))?;
@@ -250,9 +255,12 @@ pub fn claim_handoff(
         agent.clone(),
         cwd.to_path_buf(),
         now,
+        None,
     ))?;
 
-    Ok(store.claim_handoff(scope.project_id, session_id, now)?)
+    // Hooks have no concept of a workstream yet, so this always claims the
+    // shared, project-wide slot.
+    Ok(store.claim_handoff(scope.project_id, session_id, None, now)?)
 }
 
 /// Where a session's page lives: `sessions/<date>-<short id>.md`.
