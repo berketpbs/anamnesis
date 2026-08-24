@@ -68,7 +68,10 @@ impl std::fmt::Display for AgentKind {
 }
 
 impl serde::Serialize for AgentKind {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         serializer.serialize_str(self.as_str())
     }
 }
@@ -133,8 +136,14 @@ mod tests {
 
     #[test]
     fn known_agents_parse_to_variants() {
-        assert_eq!("claude-code".parse::<AgentKind>().unwrap(), AgentKind::ClaudeCode);
-        assert_eq!("Claude_Code".parse::<AgentKind>().unwrap(), AgentKind::ClaudeCode);
+        assert_eq!(
+            "claude-code".parse::<AgentKind>().unwrap(),
+            AgentKind::ClaudeCode
+        );
+        assert_eq!(
+            "Claude_Code".parse::<AgentKind>().unwrap(),
+            AgentKind::ClaudeCode
+        );
         assert_eq!("  CODEX ".parse::<AgentKind>().unwrap(), AgentKind::Codex);
     }
 

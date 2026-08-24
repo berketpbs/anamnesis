@@ -355,7 +355,11 @@ mod tests {
         };
 
         // `ç` is `c` plus a combining cedilla, so unicode61 folds it.
-        assert_eq!(hits("secimi"), 1, "an unaccented query should match 'seçimi'");
+        assert_eq!(
+            hits("secimi"),
+            1,
+            "an unaccented query should match 'seçimi'"
+        );
 
         // `ı` (U+0131) is not `i` with a mark removed — it is its own letter and
         // does not decompose, so diacritic folding cannot reach it. Turkish
@@ -378,8 +382,11 @@ mod tests {
             [],
         )
         .expect("link supersession");
-        conn.execute("UPDATE pages SET is_latest = 0, status = 'superseded' WHERE id = 'p1'", [])
-            .expect("mark old");
+        conn.execute(
+            "UPDATE pages SET is_latest = 0, status = 'superseded' WHERE id = 'p1'",
+            [],
+        )
+        .expect("mark old");
 
         conn.execute("DELETE FROM pages WHERE id = 'p1'", [])
             .expect("delete old page");
@@ -412,7 +419,10 @@ mod tests {
         };
 
         insert("h1").expect("first pending handoff");
-        assert!(insert("h2").is_err(), "second pending handoff must be rejected");
+        assert!(
+            insert("h2").is_err(),
+            "second pending handoff must be rejected"
+        );
 
         conn.execute("UPDATE handoffs SET state = 'expired' WHERE id = 'h1'", [])
             .expect("expire");

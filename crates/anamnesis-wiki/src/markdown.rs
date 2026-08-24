@@ -129,7 +129,10 @@ mod tests {
     fn frontmatter() -> Frontmatter {
         let mut fm = Frontmatter::new(
             "Storage engine",
-            vec![Entity::parse("sqlite").unwrap(), Entity::parse("fts5").unwrap()],
+            vec![
+                Entity::parse("sqlite").unwrap(),
+                Entity::parse("fts5").unwrap(),
+            ],
         )
         .unwrap();
         fm.tier = Tier::Semantic;
@@ -175,7 +178,10 @@ mod tests {
 
     #[test]
     fn an_unterminated_block_is_rejected() {
-        let err = parse_document("x.md", "---\ntitle: Broken\n\nbody without a closing fence\n");
+        let err = parse_document(
+            "x.md",
+            "---\ntitle: Broken\n\nbody without a closing fence\n",
+        );
         assert!(err.is_err());
     }
 

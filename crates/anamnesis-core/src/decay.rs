@@ -100,10 +100,7 @@ mod tests {
 
     #[test]
     fn age_halves_the_first_term_on_schedule() {
-        let aged = score(DecayInputs::unread(
-            1.0,
-            DecayParams::AGE_HALF_LIFE_DAYS,
-        ));
+        let aged = score(DecayInputs::unread(1.0, DecayParams::AGE_HALF_LIFE_DAYS));
         assert!((aged - 0.5).abs() < 1e-9);
     }
 

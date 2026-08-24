@@ -264,7 +264,12 @@ mod tests {
         });
 
         let parsed = parse(&claude(), &payload).unwrap();
-        assert!(!parsed.body.as_str().contains("wJalrXUtnFEMIK7MDENGbPxRfiCY"));
+        assert!(
+            !parsed
+                .body
+                .as_str()
+                .contains("wJalrXUtnFEMIK7MDENGbPxRfiCY")
+        );
         assert!(parsed.was_redacted());
     }
 
@@ -289,7 +294,10 @@ mod tests {
             "source": "startup",
             "a_field_added_next_release": {"nested": [1, 2, 3]}
         });
-        assert_eq!(parse(&claude(), &payload).unwrap().kind, EventKind::SessionStart);
+        assert_eq!(
+            parse(&claude(), &payload).unwrap().kind,
+            EventKind::SessionStart
+        );
     }
 
     #[test]

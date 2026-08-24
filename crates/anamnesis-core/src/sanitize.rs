@@ -189,7 +189,10 @@ mod tests {
     #[test]
     fn provider_keys_are_removed() {
         let cases = [
-            ("sk-ant-api03-abcdefghijklmnopqrstuvwxyz012345", "anthropic-key"),
+            (
+                "sk-ant-api03-abcdefghijklmnopqrstuvwxyz012345",
+                "anthropic-key",
+            ),
             ("sk-abcdefghijklmnopqrstuvwxyz0123", "openai-key"),
             ("ghp_abcdefghijklmnopqrstuvwxyz0123456789", "github-token"),
             ("xoxb-1234567890-abcdefghijkl", "slack-token"),
@@ -197,7 +200,11 @@ mod tests {
         ];
         for (secret, rule) in cases {
             let result = redact(&format!("the key is {secret} ok"));
-            assert!(!result.text().contains(secret), "{rule} leaked: {}", result.text());
+            assert!(
+                !result.text().contains(secret),
+                "{rule} leaked: {}",
+                result.text()
+            );
             assert!(result.hits().contains(&rule), "{rule} did not fire");
         }
     }
@@ -223,13 +230,20 @@ mod tests {
         // Every one of these is a name that occurs in real configuration, and
         // in none of them does the telling word sit at a word boundary.
         for (line, secret) in [
-            ("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCY", "wJalrXUtnFEMIK7MDENGbPxRfiCY"),
+            (
+                "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCY",
+                "wJalrXUtnFEMIK7MDENGbPxRfiCY",
+            ),
             ("db.password: hunter2000swordfish", "hunter2000swordfish"),
             ("githubToken = ghtoken1234567890", "ghtoken1234567890"),
             ("MY_APP_CREDENTIALS=abcdef123456", "abcdef123456"),
         ] {
             let result = redact(line);
-            assert!(!result.text().contains(secret), "leaked in: {}", result.text());
+            assert!(
+                !result.text().contains(secret),
+                "leaked in: {}",
+                result.text()
+            );
         }
     }
 
@@ -259,7 +273,11 @@ mod tests {
     fn jwts_are_removed() {
         let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk";
         let result = redact(&format!("cookie={jwt}"));
-        assert!(!result.text().contains("dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk"));
+        assert!(
+            !result
+                .text()
+                .contains("dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk")
+        );
     }
 
     #[test]

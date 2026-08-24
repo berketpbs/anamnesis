@@ -322,7 +322,12 @@ impl Store {
 
     /// Full-text stream: pages whose indexed content matches any query token,
     /// ranked by SQLite's bm25 (lower is a better match).
-    fn fts_stream(&self, project_id: ProjectId, tokens: &[String], limit: usize) -> Result<Vec<PageId>> {
+    fn fts_stream(
+        &self,
+        project_id: ProjectId,
+        tokens: &[String],
+        limit: usize,
+    ) -> Result<Vec<PageId>> {
         let match_expr = tokens
             .iter()
             .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
@@ -348,7 +353,12 @@ impl Store {
     /// Entity stream: pages declaring an entity the query names, ranked by
     /// inverse document frequency — an entity naming three pages carries more
     /// signal than one naming thirty.
-    fn entity_stream(&self, project_id: ProjectId, tokens: &[String], limit: usize) -> Result<Vec<PageId>> {
+    fn entity_stream(
+        &self,
+        project_id: ProjectId,
+        tokens: &[String],
+        limit: usize,
+    ) -> Result<Vec<PageId>> {
         let placeholders = placeholders(tokens.len());
         let sql = format!(
             "SELECT pe.page_id FROM page_entities pe
@@ -369,13 +379,20 @@ impl Store {
 
         let conn = self.connection();
         let mut statement = conn.prepare(&sql)?;
-        let rows = statement.query_map(params_from_iter(values.iter()), |row| row.get::<_, String>(0))?;
+        let rows = statement.query_map(params_from_iter(values.iter()), |row| {
+            row.get::<_, String>(0)
+        })?;
         collect_ids(rows)
     }
 
     /// Link-neighbour stream: pages one hop away, in either direction, from
     /// the pages the other two streams already found relevant.
-    fn link_stream(&self, project_id: ProjectId, seeds: &[PageId], limit: usize) -> Result<Vec<PageId>> {
+    fn link_stream(
+        &self,
+        project_id: ProjectId,
+        seeds: &[PageId],
+        limit: usize,
+    ) -> Result<Vec<PageId>> {
         if seeds.is_empty() {
             return Ok(Vec::new());
         }
@@ -402,7 +419,9 @@ impl Store {
 
         let conn = self.connection();
         let mut statement = conn.prepare(&sql)?;
-        let rows = statement.query_map(params_from_iter(values.iter()), |row| row.get::<_, String>(0))?;
+        let rows = statement.query_map(params_from_iter(values.iter()), |row| {
+            row.get::<_, String>(0)
+        })?;
         collect_ids(rows)
     }
 
@@ -455,9 +474,7 @@ impl Store {
 }
 
 /// Collect a query's rows into page ids, stopping at the first parse failure.
-fn collect_ids(
-    rows: impl Iterator<Item = rusqlite::Result<String>>,
-) -> Result<Vec<PageId>> {
+fn collect_ids(rows: impl Iterator<Item = rusqlite::Result<String>>) -> Result<Vec<PageId>> {
     rows.map(|row| row.map(parse_page_id))
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
@@ -625,7 +642,9 @@ mod tests {
             Vec::new(),
         );
 
-        let hits = store.query_pages(project, "sqlite rebuildable", 10, now(), None).unwrap();
+        let hits = store
+            .query_pages(project, "sqlite rebuildable", 10, now(), None)
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].title, "Storage engine");
     }
@@ -645,10 +664,17 @@ mod tests {
         let mut frontmatter = Frontmatter::new("Why SQLite", Vec::new()).unwrap();
         frontmatter.pinned = true;
         frontmatter.canonical = true;
-        let page = Page::new(project, decision, frontmatter, "SQLite is the storage engine.");
+        let page = Page::new(
+            project,
+            decision,
+            frontmatter,
+            "SQLite is the storage engine.",
+        );
         store.upsert_page(&page, now()).unwrap();
 
-        let hits = store.query_pages(project, "sqlite", 10, now(), None).unwrap();
+        let hits = store
+            .query_pages(project, "sqlite", 10, now(), None)
+            .unwrap();
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].title, "Why SQLite", "authority should win the tie");
     }
@@ -665,7 +691,9 @@ mod tests {
             vec![Entity::parse("React").unwrap()],
         );
 
-        let hits = store.query_pages(project, "React", 10, now(), None).unwrap();
+        let hits = store
+            .query_pages(project, "React", 10, now(), None)
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].title, "Frontend framework");
     }
@@ -693,7 +721,9 @@ mod tests {
             .set_page_links(project, neighbor, &["decisions/0001-storage.md".to_owned()])
             .unwrap();
 
-        let hits = store.query_pages(project, "sqlite", 10, now(), None).unwrap();
+        let hits = store
+            .query_pages(project, "sqlite", 10, now(), None)
+            .unwrap();
         assert!(hits.iter().any(|hit| hit.title == "Windows BOM"));
     }
 
@@ -742,15 +772,26 @@ mod tests {
 
         // And the edge is live: searching for the source's content now pulls
         // the target in through the link-neighbour stream.
-        let hits = store.query_pages(project, "sqlite", 10, now(), None).unwrap();
+        let hits = store
+            .query_pages(project, "sqlite", 10, now(), None)
+            .unwrap();
         assert!(hits.iter().any(|hit| hit.title == "Windows BOM"));
     }
 
     #[test]
     fn an_extensionless_link_resolves_to_the_markdown_page() {
         let (_dir, store, project, _workspace) = fixture();
-        let source = write_page(&store, project, "notes/a.md", "A", "See [[notes/b]].", Vec::new());
-        store.set_page_links(project, source, &["notes/b".to_owned()]).unwrap();
+        let source = write_page(
+            &store,
+            project,
+            "notes/a.md",
+            "A",
+            "See [[notes/b]].",
+            Vec::new(),
+        );
+        store
+            .set_page_links(project, source, &["notes/b".to_owned()])
+            .unwrap();
 
         let target = write_page(&store, project, "notes/b.md", "B", "body", Vec::new());
         store.set_page_links(project, target, &[]).unwrap();
@@ -775,7 +816,9 @@ mod tests {
         let page = Page::new(project, path, frontmatter, "SQLite, superseded now.");
         store.upsert_page(&page, now()).unwrap();
 
-        let hits = store.query_pages(project, "sqlite", 10, now(), None).unwrap();
+        let hits = store
+            .query_pages(project, "sqlite", 10, now(), None)
+            .unwrap();
         assert!(hits.is_empty());
     }
 
@@ -783,15 +826,29 @@ mod tests {
     fn an_empty_query_returns_nothing_rather_than_everything() {
         let (_dir, store, project, _workspace) = fixture();
         write_page(&store, project, "notes/a.md", "A", "body", Vec::new());
-        assert!(store.query_pages(project, "   ", 10, now(), None).unwrap().is_empty());
+        assert!(
+            store
+                .query_pages(project, "   ", 10, now(), None)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
     fn a_returned_hit_has_its_access_recorded() {
         let (_dir, store, project, _workspace) = fixture();
-        let id = write_page(&store, project, "notes/a.md", "A", "sqlite notes", Vec::new());
+        let id = write_page(
+            &store,
+            project,
+            "notes/a.md",
+            "A",
+            "sqlite notes",
+            Vec::new(),
+        );
 
-        store.query_pages(project, "sqlite", 10, now(), None).unwrap();
+        store
+            .query_pages(project, "sqlite", 10, now(), None)
+            .unwrap();
 
         let conn = store.connection();
         let access_count: i64 = conn
@@ -838,11 +895,26 @@ mod tests {
     #[test]
     fn a_vector_under_a_different_model_is_not_matched() {
         let (_dir, store, project, _workspace) = fixture();
-        let id = write_page(&store, project, "notes/car.md", "Automobile", "body", Vec::new());
-        store.set_page_embedding(id, "model-a", &[1.0, 0.0]).unwrap();
+        let id = write_page(
+            &store,
+            project,
+            "notes/car.md",
+            "Automobile",
+            "body",
+            Vec::new(),
+        );
+        store
+            .set_page_embedding(id, "model-a", &[1.0, 0.0])
+            .unwrap();
 
         let hits = store
-            .query_pages(project, "nomatch", 10, now(), Some(("model-b", &[1.0, 0.0])))
+            .query_pages(
+                project,
+                "nomatch",
+                10,
+                now(),
+                Some(("model-b", &[1.0, 0.0])),
+            )
             .unwrap();
         assert!(hits.is_empty());
     }

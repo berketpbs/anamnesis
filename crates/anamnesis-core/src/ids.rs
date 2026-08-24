@@ -225,7 +225,10 @@ mod tests {
     fn namespace_constant_is_pinned() {
         // Guards against an accidental edit to NAMESPACE, which would orphan
         // every project and page identifier ever written.
-        assert_eq!(NAMESPACE.to_string(), "744472a9-5db1-52bd-b20f-8e0be549f19f");
+        assert_eq!(
+            NAMESPACE.to_string(),
+            "744472a9-5db1-52bd-b20f-8e0be549f19f"
+        );
     }
 
     #[test]
