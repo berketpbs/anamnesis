@@ -58,9 +58,3 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on how to contribute to th
 ## License
 
 MIT - See [LICENSE](LICENSE) for details.
-
-## Authors
-
-- Berke Topbas ([berketopbas126@gmail.com](mailto:berketopbas126@gmail.com))
-
-Based on the original ai-memory project by Fabio Akita.
