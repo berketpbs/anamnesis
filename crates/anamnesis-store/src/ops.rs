@@ -260,7 +260,11 @@ impl Store {
     }
 
     /// A project's sessions, most recent first.
-    pub fn recent_sessions(&self, project_id: ProjectId, limit: usize) -> Result<Vec<SessionSummary>> {
+    pub fn recent_sessions(
+        &self,
+        project_id: ProjectId,
+        limit: usize,
+    ) -> Result<Vec<SessionSummary>> {
         let conn = self.connection();
         let mut statement = conn.prepare(
             "SELECT s.id, s.agent, s.state, s.started_at, s.ended_at, w.slug,
@@ -320,9 +324,7 @@ fn read_session(row: &Row<'_>) -> rusqlite::Result<Session> {
         checkout_path: row.get::<_, String>(4)?.into(),
         state: parse_state(&row.get::<_, String>(5)?),
         started_at: parse_time(&row.get::<_, String>(6)?),
-        ended_at: row
-            .get::<_, Option<String>>(7)?
-            .map(|t| parse_time(&t)),
+        ended_at: row.get::<_, Option<String>>(7)?.map(|t| parse_time(&t)),
         workstream_id: row.get::<_, Option<String>>(8)?.map(parse_id),
     })
 }
@@ -523,7 +525,10 @@ mod tests {
         let session = session_for(project, workspace);
         store.ensure_session(&session).expect("insert");
 
-        let loaded = store.load_session(session.id).expect("load").expect("found");
+        let loaded = store
+            .load_session(session.id)
+            .expect("load")
+            .expect("found");
         assert_eq!(loaded.id, session.id);
         assert_eq!(loaded.agent, AgentKind::ClaudeCode);
         // The workspace was never stored on the session; it came back through
@@ -629,10 +634,14 @@ mod tests {
             .expect("record");
 
         let claimant = next_session(&store, project, workspace);
-        let first = store.claim_handoff(project, claimant, None, now()).expect("claim");
+        let first = store
+            .claim_handoff(project, claimant, None, now())
+            .expect("claim");
         assert_eq!(first.as_deref(), Some("carry on"));
 
-        let second = store.claim_handoff(project, claimant, None, now()).expect("claim");
+        let second = store
+            .claim_handoff(project, claimant, None, now())
+            .expect("claim");
         assert_eq!(second, None, "a handoff is single use");
     }
 
@@ -648,7 +657,9 @@ mod tests {
             .expect("record");
 
         assert!(
-            store.claim_handoff(project, SessionId::new(), None, now()).is_err(),
+            store
+                .claim_handoff(project, SessionId::new(), None, now())
+                .is_err(),
             "an unknown claimant should be rejected"
         );
     }
@@ -667,7 +678,9 @@ mod tests {
             .expect("second");
 
         let claimant = next_session(&store, project, workspace);
-        let claimed = store.claim_handoff(project, claimant, None, now()).expect("claim");
+        let claimed = store
+            .claim_handoff(project, claimant, None, now())
+            .expect("claim");
         assert_eq!(claimed.as_deref(), Some("newer"));
     }
 
@@ -676,7 +689,9 @@ mod tests {
         let (_dir, store, project, workspace) = fixture();
         let claimant = next_session(&store, project, workspace);
         assert_eq!(
-            store.claim_handoff(project, claimant, None, now()).expect("claim"),
+            store
+                .claim_handoff(project, claimant, None, now())
+                .expect("claim"),
             None
         );
     }
@@ -764,7 +779,10 @@ mod tests {
         let ended: Timestamp = "2026-08-19T11:00:00Z".parse().expect("time");
         store.close_session(session.id, ended).expect("close");
 
-        let loaded = store.load_session(session.id).expect("load").expect("found");
+        let loaded = store
+            .load_session(session.id)
+            .expect("load")
+            .expect("found");
         assert!(!loaded.is_open());
         assert_eq!(loaded.ended_at, Some(ended));
     }

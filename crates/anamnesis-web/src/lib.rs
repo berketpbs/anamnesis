@@ -310,7 +310,11 @@ mod tests {
         }
     }
 
-    fn hook(harness: &Harness, event: &str, extra: serde_json::Value) -> anamnesis_hooks::ParsedHook {
+    fn hook(
+        harness: &Harness,
+        event: &str,
+        extra: serde_json::Value,
+    ) -> anamnesis_hooks::ParsedHook {
         let mut payload = json!({
             "session_id": "session-abc",
             "hook_event_name": event,
@@ -375,7 +379,11 @@ mod tests {
         assert!(read.body.contains("wire up the storage layer"));
         assert!(read.body.contains("crates/store/src/ops.rs"));
         assert_eq!(
-            harness.state.store.page_count(scope.project_id).expect("count"),
+            harness
+                .state
+                .store
+                .page_count(scope.project_id)
+                .expect("count"),
             1
         );
         assert!(harness.state.wiki.lock().commit_count().expect("commits") >= 1);
@@ -384,7 +392,11 @@ mod tests {
     #[test]
     fn the_next_session_receives_the_handoff_once() {
         let harness = harness();
-        run(&harness, "UserPromptSubmit", json!({"prompt": "do the thing"}));
+        run(
+            &harness,
+            "UserPromptSubmit",
+            json!({"prompt": "do the thing"}),
+        );
         run(&harness, "SessionEnd", json!({}));
 
         let claim = || {
@@ -414,7 +426,11 @@ mod tests {
 
         let scope = resolve_scope(&harness.cwd).expect("scope");
         assert_eq!(
-            harness.state.store.page_count(scope.project_id).expect("count"),
+            harness
+                .state
+                .store
+                .page_count(scope.project_id)
+                .expect("count"),
             0
         );
         assert_eq!(
@@ -459,8 +475,7 @@ mod tests {
         let end = run(&harness, "SessionEnd", json!({}));
 
         let scope = resolve_scope(&harness.cwd).expect("scope");
-        let path =
-            anamnesis_core::page::PagePath::parse(&end.page.expect("page")).expect("path");
+        let path = anamnesis_core::page::PagePath::parse(&end.page.expect("page")).expect("path");
         let read = harness
             .state
             .wiki
@@ -474,7 +489,11 @@ mod tests {
     fn a_second_session_supersedes_an_unread_handoff() {
         let harness = harness();
 
-        run(&harness, "UserPromptSubmit", json!({"prompt": "first task"}));
+        run(
+            &harness,
+            "UserPromptSubmit",
+            json!({"prompt": "first task"}),
+        );
         run(&harness, "SessionEnd", json!({}));
 
         // A different agent session, ending without anyone having read the
@@ -538,7 +557,12 @@ mod tests {
         let harness = harness();
         let payload = json!({"session_id": "s", "hook_event_name": "SessionStart"});
         let hook = anamnesis_hooks::parse(&AgentKind::ClaudeCode, &payload).expect("parse");
-        let result = ingest(&harness.state.store, &harness.state.wiki.lock(), &hook, now());
+        let result = ingest(
+            &harness.state.store,
+            &harness.state.wiki.lock(),
+            &hook,
+            now(),
+        );
         assert!(matches!(result, Err(WebError::BadRequest(_))));
     }
 
@@ -749,8 +773,9 @@ mod tests {
     async fn a_missing_preferences_page_is_not_an_error() {
         let harness = harness();
         let (scope, session_id) = recorded(&harness);
-        let provider =
-            Arc::new(Fake::answering(json!({"title": "t", "body": "b", "handoff": "h"})));
+        let provider = Arc::new(Fake::answering(
+            json!({"title": "t", "body": "b", "handoff": "h"}),
+        ));
 
         let page = finalize_with_llm(
             &harness.state.store,

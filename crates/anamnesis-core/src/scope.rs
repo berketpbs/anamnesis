@@ -464,7 +464,9 @@ fn validate_name(kind: &'static str, value: &str) -> Result<()> {
         return Err(invalid("must not be a relative path component"));
     }
     if trimmed.starts_with('_') {
-        return Err(invalid("leading underscore is reserved for internal scopes"));
+        return Err(invalid(
+            "leading underscore is reserved for internal scopes",
+        ));
     }
     if trimmed.ends_with('.') || trimmed.ends_with(' ') {
         return Err(invalid("must not end with a dot or space"));
@@ -588,7 +590,9 @@ mod tests {
     #[test]
     fn sanitized_names_are_usable() {
         assert_eq!(
-            ProjectName::sanitized("My Cool Repo!").expect("coerced").as_str(),
+            ProjectName::sanitized("My Cool Repo!")
+                .expect("coerced")
+                .as_str(),
             "my-cool-repo"
         );
         assert_eq!(

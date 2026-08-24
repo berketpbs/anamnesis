@@ -12,9 +12,11 @@ use std::path::PathBuf;
 #[command(name = "anamnesis")]
 #[command(about = "Long-term memory for AI coding agents")]
 #[command(version)]
-#[command(long_about = "Anamnesis preserves context across AI agent sessions through a persistent wiki.
+#[command(
+    long_about = "Anamnesis preserves context across AI agent sessions through a persistent wiki.
 Quit Claude Code mid-task, start Codex in the same directory, and the next agent
-receives a bounded handoff with previous decisions, attempted approaches, and open questions.")]
+receives a bounded handoff with previous decisions, attempted approaches, and open questions."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -107,7 +109,11 @@ enum Commands {
         agent: String,
 
         /// Server to deliver to
-        #[arg(long, env = "ANAMNESIS_SERVER", default_value = "http://127.0.0.1:8080")]
+        #[arg(
+            long,
+            env = "ANAMNESIS_SERVER",
+            default_value = "http://127.0.0.1:8080"
+        )]
         server: String,
     },
 
@@ -184,7 +190,14 @@ fn main() -> anyhow::Result<()> {
             pinned,
             expires_at,
         } => {
-            cmd_write_page(&path, &title, &body, pinned, expires_at, cli.data_dir.clone())?;
+            cmd_write_page(
+                &path,
+                &title,
+                &body,
+                pinned,
+                expires_at,
+                cli.data_dir.clone(),
+            )?;
         }
         Commands::Init => {
             cmd_init(cli.data_dir.clone())?;
@@ -235,7 +248,10 @@ fn cmd_status(verbose: bool, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
         println!("  Project id:   {}", scope.project_id);
         println!("  Workspace id: {}", scope.workspace_id);
         println!("  Data dir:     {}", data.root().display());
-        println!("  Wiki:         {}", data.wiki_scope(&scope.scope).display());
+        println!(
+            "  Wiki:         {}",
+            data.wiki_scope(&scope.scope).display()
+        );
         println!("  Index:        {}", data.db_file().display());
         match &scope.marker {
             Some(path) => println!("  Marker:       {}", path.display()),
@@ -268,11 +284,7 @@ fn cmd_status(verbose: bool, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
 fn describe_source(source: &ScopeSource) -> String {
     match source {
         ScopeSource::Marker { path, legacy } => {
-            let name = if *legacy {
-                "legacy marker"
-            } else {
-                "marker"
-            };
+            let name = if *legacy { "legacy marker" } else { "marker" };
             format!("pinned by {name} at {}", path.display())
         }
         ScopeSource::GitRemote { normalized } => format!("git remote {normalized}"),
@@ -289,7 +301,9 @@ fn describe_source(source: &ScopeSource) -> String {
 /// wrong (a data dir that does not exist, a scope resolved from the wrong
 /// directory) is the usual reason a command reports nothing rather than
 /// failing outright.
-fn open_project(data_dir: Option<PathBuf>) -> anyhow::Result<(anamnesis_core::scope::ResolvedScope, DataDir, Store)> {
+fn open_project(
+    data_dir: Option<PathBuf>,
+) -> anyhow::Result<(anamnesis_core::scope::ResolvedScope, DataDir, Store)> {
     let cwd = std::env::current_dir()?;
     let scope = resolve_scope(&cwd)?;
     let data = DataDir::resolve(data_dir)?;
@@ -315,13 +329,15 @@ fn cmd_search(
     // The same opt-in local embedder `anamnesis mcp` uses, so a search from
     // the terminal ranks identically to one an agent runs.
     let embedder = anamnesis_llm::EmbedConfig::from_env().build(&data.models())?;
-    let query_vector = embedder.as_ref().and_then(|embedder| match embedder.embed(query) {
-        Ok(vector) => Some((embedder.model().to_owned(), vector)),
-        Err(error) => {
-            eprintln!("anamnesis: query embedding failed ({error}); searching without it");
-            None
-        }
-    });
+    let query_vector = embedder
+        .as_ref()
+        .and_then(|embedder| match embedder.embed(query) {
+            Ok(vector) => Some((embedder.model().to_owned(), vector)),
+            Err(error) => {
+                eprintln!("anamnesis: query embedding failed ({error}); searching without it");
+                None
+            }
+        });
 
     let hits = store.query_pages(
         scope.project_id,
@@ -396,22 +412,25 @@ fn cmd_write_page(
         } else {
             expires.clone()
         };
-        frontmatter.expires_at = Some(
-            stamp
-                .parse()
-                .map_err(|_| anyhow::anyhow!("--expires-at {expires:?} is not a date or RFC 3339 timestamp"))?,
-        );
+        frontmatter.expires_at = Some(stamp.parse().map_err(|_| {
+            anyhow::anyhow!("--expires-at {expires:?} is not a date or RFC 3339 timestamp")
+        })?);
     }
 
     let now = Timestamp::now();
     store.upsert_project(&scope, now)?;
 
-    let mut page = anamnesis_core::page::Page::new(scope.project_id, page_path.clone(), frontmatter, body);
+    let mut page =
+        anamnesis_core::page::Page::new(scope.project_id, page_path.clone(), frontmatter, body);
     let commit = wiki.write_page(&scope.scope, &page, &format!("cli: write {page_path}"))?;
     page.git_commit = Some(commit.clone());
 
     store.upsert_page(&page, now)?;
-    store.set_page_links(scope.project_id, page.id, &anamnesis_wiki::extract_links(body))?;
+    store.set_page_links(
+        scope.project_id,
+        page.id,
+        &anamnesis_wiki::extract_links(body),
+    )?;
 
     println!("✍️  Wrote {page_path}");
     println!("   {}", wiki.locate(&scope.scope, &page_path).display());
@@ -447,9 +466,7 @@ fn cmd_init(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
 /// way `serve` binds one store and wiki rather than re-resolving per request.
 /// A harness that wants a different project starts a different process.
 fn cmd_mcp(repo: &std::path::Path, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
-    let repo = repo
-        .canonicalize()
-        .unwrap_or_else(|_| repo.to_path_buf());
+    let repo = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
     let scope = resolve_scope(&repo)?;
     let data = DataDir::resolve(data_dir)?;
     data.ensure_layout()?;
@@ -598,7 +615,10 @@ fn cmd_hook(agent: &str, server: &str) {
         Ok(response) if !response.status().is_success() => {
             let status = response.status();
             let detail = response.text().unwrap_or_default();
-            eprintln!("anamnesis: server rejected event ({status}): {}", detail.trim());
+            eprintln!(
+                "anamnesis: server rejected event ({status}): {}",
+                detail.trim()
+            );
             return;
         }
         Ok(_) => {}
@@ -610,11 +630,7 @@ fn cmd_hook(agent: &str, server: &str) {
         let (session_id, cwd) = session_and_cwd(&payload);
         let handoff = client
             .get(format!("{server}/handoff"))
-            .query(&[
-                ("agent", agent),
-                ("session_id", &session_id),
-                ("cwd", &cwd),
-            ])
+            .query(&[("agent", agent), ("session_id", &session_id), ("cwd", &cwd)])
             .send()
             .and_then(reqwest::blocking::Response::text);
 
@@ -719,7 +735,9 @@ fn cmd_handoff(workstream: Option<String>, data_dir: Option<PathBuf>) -> anyhow:
             println!();
             println!("{body}");
         }
-        None => println!("Nothing waiting — the last session left no handoff, or it was already claimed."),
+        None => println!(
+            "Nothing waiting — the last session left no handoff, or it was already claimed."
+        ),
     }
     Ok(())
 }

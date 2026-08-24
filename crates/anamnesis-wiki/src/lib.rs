@@ -261,7 +261,8 @@ mod tests {
         let wiki = Wiki::open(dir.path()).unwrap();
         let page = sample("We chose SQLite because the index is rebuildable.");
 
-        wiki.write_page(&scope(), &page, "add storage decision").unwrap();
+        wiki.write_page(&scope(), &page, "add storage decision")
+            .unwrap();
         let read = wiki.read_page(&scope(), &page.path).unwrap();
 
         assert_eq!(read.frontmatter.title, "Storage engine");
@@ -324,7 +325,10 @@ mod tests {
         wiki.write_page(&scope(), &page, "write").unwrap();
 
         let leftovers: Vec<_> = std::fs::read_dir(
-            dir.path().join("default").join("anamnesis").join("decisions"),
+            dir.path()
+                .join("default")
+                .join("anamnesis")
+                .join("decisions"),
         )
         .unwrap()
         .filter_map(|entry| entry.ok())

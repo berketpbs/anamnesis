@@ -157,7 +157,10 @@ fn fetch_cached(
     };
 
     let url = format!("https://huggingface.co/{model_id}/resolve/main/{file}");
-    let response = client.get(&url).send().map_err(|e| fetch_err(e.to_string()))?;
+    let response = client
+        .get(&url)
+        .send()
+        .map_err(|e| fetch_err(e.to_string()))?;
     if !response.status().is_success() {
         return Err(fetch_err(format!("http {}", response.status())));
     }
@@ -201,7 +204,10 @@ impl Embedder for LocalEmbedder {
             let sequence_output = self.model.forward(&input_ids, &token_type_ids, None)?;
 
             let seq_len = sequence_output.dims()[1] as f64;
-            let pooled = sequence_output.sum(1)?.affine(1.0 / seq_len, 0.0)?.squeeze(0)?;
+            let pooled = sequence_output
+                .sum(1)?
+                .affine(1.0 / seq_len, 0.0)?
+                .squeeze(0)?;
             let norm = pooled.sqr()?.sum_all()?.sqrt()?;
             pooled.broadcast_div(&norm)
         };
@@ -281,7 +287,12 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect();
-        move |key| owned.iter().find(|(k, _)| k == key).map(|(_, v)| v.to_owned())
+        move |key| {
+            owned
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.to_owned())
+        }
     }
 
     #[test]
@@ -336,11 +347,16 @@ mod tests {
 
         let cat = embedder.embed("a cat sitting on a mat").expect("embed");
         let dog = embedder.embed("a dog resting on a rug").expect("embed");
-        let invoice = embedder.embed("quarterly tax filing deadline").expect("embed");
+        let invoice = embedder
+            .embed("quarterly tax filing deadline")
+            .expect("embed");
 
         assert_eq!(cat.len(), 384);
         let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((norm(&cat) - 1.0).abs() < 1e-3, "vectors should be L2-normalized");
+        assert!(
+            (norm(&cat) - 1.0).abs() < 1e-3,
+            "vectors should be L2-normalized"
+        );
 
         let cosine = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
         let related = cosine(&cat, &dog);

@@ -110,7 +110,10 @@ impl Store {
 
     /// The sessions that have joined a workstream, oldest first: one half of
     /// its visible event ledger.
-    pub fn workstream_sessions(&self, workstream_id: WorkstreamId) -> Result<Vec<WorkstreamSession>> {
+    pub fn workstream_sessions(
+        &self,
+        workstream_id: WorkstreamId,
+    ) -> Result<Vec<WorkstreamSession>> {
         let conn = self.connection();
         let mut statement = conn.prepare(
             "SELECT id, agent, state, started_at, ended_at
@@ -131,7 +134,10 @@ impl Store {
 
     /// The handoffs written within a workstream, newest first: the other
     /// half of its ledger.
-    pub fn workstream_handoffs(&self, workstream_id: WorkstreamId) -> Result<Vec<WorkstreamHandoff>> {
+    pub fn workstream_handoffs(
+        &self,
+        workstream_id: WorkstreamId,
+    ) -> Result<Vec<WorkstreamHandoff>> {
         let conn = self.connection();
         let mut statement = conn.prepare(
             "SELECT state, created_at, accepted_at
@@ -234,8 +240,12 @@ mod tests {
     #[test]
     fn starting_a_workstream_twice_keeps_one_row() {
         let (_dir, store, project, _workspace) = fixture();
-        store.upsert_workstream(&workstream(project, "auth-refactor")).unwrap();
-        store.upsert_workstream(&workstream(project, "auth-refactor")).unwrap();
+        store
+            .upsert_workstream(&workstream(project, "auth-refactor"))
+            .unwrap();
+        store
+            .upsert_workstream(&workstream(project, "auth-refactor"))
+            .unwrap();
 
         assert_eq!(store.list_workstreams(project).unwrap().len(), 1);
     }
@@ -243,13 +253,23 @@ mod tests {
     #[test]
     fn a_workstream_is_findable_by_its_slug() {
         let (_dir, store, project, _workspace) = fixture();
-        store.upsert_workstream(&workstream(project, "auth-refactor")).unwrap();
+        store
+            .upsert_workstream(&workstream(project, "auth-refactor"))
+            .unwrap();
 
-        let found = store.find_workstream(project, "auth-refactor").unwrap().unwrap();
+        let found = store
+            .find_workstream(project, "auth-refactor")
+            .unwrap()
+            .unwrap();
         assert_eq!(found.slug.as_str(), "auth-refactor");
         assert_eq!(found.status, WorkstreamStatus::Active);
 
-        assert!(store.find_workstream(project, "no-such-slug").unwrap().is_none());
+        assert!(
+            store
+                .find_workstream(project, "no-such-slug")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -258,9 +278,14 @@ mod tests {
         let ws = workstream(project, "auth-refactor");
         store.upsert_workstream(&ws).unwrap();
 
-        store.set_workstream_status(ws.id, WorkstreamStatus::Completed, now()).unwrap();
+        store
+            .set_workstream_status(ws.id, WorkstreamStatus::Completed, now())
+            .unwrap();
 
-        let found = store.find_workstream(project, "auth-refactor").unwrap().unwrap();
+        let found = store
+            .find_workstream(project, "auth-refactor")
+            .unwrap()
+            .unwrap();
         assert_eq!(found.status, WorkstreamStatus::Completed);
     }
 
@@ -283,7 +308,13 @@ mod tests {
             ))
             .unwrap();
         store
-            .record_handoff(&crate::new_handoff(project, session_id, Some(ws.id), "carry on", now()))
+            .record_handoff(&crate::new_handoff(
+                project,
+                session_id,
+                Some(ws.id),
+                "carry on",
+                now(),
+            ))
             .unwrap();
 
         let sessions = store.workstream_sessions(ws.id).unwrap();
@@ -322,10 +353,22 @@ mod tests {
         let bug_writer = session("bug-writer");
 
         store
-            .record_handoff(&crate::new_handoff(project, auth_writer, Some(auth.id), "auth notes", now()))
+            .record_handoff(&crate::new_handoff(
+                project,
+                auth_writer,
+                Some(auth.id),
+                "auth notes",
+                now(),
+            ))
             .unwrap();
         store
-            .record_handoff(&crate::new_handoff(project, bug_writer, Some(bug.id), "bug notes", now()))
+            .record_handoff(&crate::new_handoff(
+                project,
+                bug_writer,
+                Some(bug.id),
+                "bug notes",
+                now(),
+            ))
             .unwrap();
 
         // Claiming the auth workstream's handoff must not touch bug-123's.
@@ -361,7 +404,13 @@ mod tests {
             ))
             .unwrap();
         store
-            .record_handoff(&crate::new_handoff(project, plain_session, None, "project-wide notes", now()))
+            .record_handoff(&crate::new_handoff(
+                project,
+                plain_session,
+                None,
+                "project-wide notes",
+                now(),
+            ))
             .unwrap();
 
         let ws_session = SessionId::derive(project, "ws-writer");
@@ -377,7 +426,13 @@ mod tests {
             ))
             .unwrap();
         store
-            .record_handoff(&crate::new_handoff(project, ws_session, Some(ws.id), "ws notes", now()))
+            .record_handoff(&crate::new_handoff(
+                project,
+                ws_session,
+                Some(ws.id),
+                "ws notes",
+                now(),
+            ))
             .unwrap();
 
         let claimant = SessionId::derive(project, "reader");

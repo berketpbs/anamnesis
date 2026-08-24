@@ -14,7 +14,8 @@ use regex::Regex;
 
 /// Extensions worth recognising. Restricting to a known list is what keeps
 /// version numbers (`1.95`) and domains (`example.com`) out of the results.
-const EXTENSIONS: &str = "rs|toml|md|json|ya?ml|sql|sh|ps1|ts|tsx|js|jsx|py|go|java|kt|rb|c|h|cpp|hpp|css|html";
+const EXTENSIONS: &str =
+    "rs|toml|md|json|ya?ml|sql|sh|ps1|ts|tsx|js|jsx|py|go|java|kt|rb|c|h|cpp|hpp|css|html";
 
 /// File paths mentioned across a session's observations, deduplicated and
 /// sorted for stable output.
@@ -103,10 +104,8 @@ mod tests {
 
     #[test]
     fn deduplicates_repeated_mentions() {
-        let files = mentioned_files(&[
-            observation("src/main.rs"),
-            observation("src/main.rs again"),
-        ]);
+        let files =
+            mentioned_files(&[observation("src/main.rs"), observation("src/main.rs again")]);
         assert_eq!(files.len(), 1);
     }
 

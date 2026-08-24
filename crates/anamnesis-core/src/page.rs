@@ -373,7 +373,11 @@ mod tests {
 
     #[test]
     fn authority_namespaces_are_recognised() {
-        assert!(PagePath::parse("decisions/x.md").unwrap().is_authoritative());
+        assert!(
+            PagePath::parse("decisions/x.md")
+                .unwrap()
+                .is_authoritative()
+        );
         assert!(PagePath::parse("_rules/x.md").unwrap().is_authoritative());
         assert!(!PagePath::parse("notes/x.md").unwrap().is_authoritative());
         assert!(!PagePath::parse("x.md").unwrap().is_authoritative());

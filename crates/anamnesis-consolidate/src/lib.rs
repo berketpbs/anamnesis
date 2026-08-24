@@ -67,7 +67,10 @@ pub fn consolidate(session: &Session, observations: &[Observation]) -> Option<Se
     let tools = count_tools(observations);
     let failures = count_failures(observations);
     let files = files::mentioned_files(observations);
-    let truncated = observations.iter().filter(|o| o.body.is_truncated()).count();
+    let truncated = observations
+        .iter()
+        .filter(|o| o.body.is_truncated())
+        .count();
 
     let title = title_for(session, prompts.first().map(String::as_str));
     let body = render_body(
@@ -245,8 +248,7 @@ fn render_handoff(
 
 /// Tool counts, most used first, ties broken by name for stable output.
 fn sorted_by_count(tools: &BTreeMap<String, usize>) -> Vec<(String, usize)> {
-    let mut entries: Vec<(String, usize)> =
-        tools.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    let mut entries: Vec<(String, usize)> = tools.iter().map(|(k, v)| (k.clone(), *v)).collect();
     entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     entries
 }
@@ -327,7 +329,11 @@ mod tests {
         let observations = vec![
             observation(EventKind::SessionStart, "", None),
             observation(EventKind::UserPrompt, "add the storage layer", None),
-            observation(EventKind::ToolUse, "edited crates/store/src/lib.rs", tool("Edit", Some(true))),
+            observation(
+                EventKind::ToolUse,
+                "edited crates/store/src/lib.rs",
+                tool("Edit", Some(true)),
+            ),
             observation(EventKind::ToolUse, "cargo test", tool("Bash", Some(false))),
             observation(EventKind::SessionEnd, "", None),
         ];
@@ -374,10 +380,18 @@ mod tests {
     fn tools_are_reported_most_used_first() {
         let mut observations = vec![observation(EventKind::UserPrompt, "go", None)];
         for _ in 0..3 {
-            observations.push(observation(EventKind::ToolUse, "x", tool("Read", Some(true))));
+            observations.push(observation(
+                EventKind::ToolUse,
+                "x",
+                tool("Read", Some(true)),
+            ));
         }
         for _ in 0..7 {
-            observations.push(observation(EventKind::ToolUse, "x", tool("Edit", Some(true))));
+            observations.push(observation(
+                EventKind::ToolUse,
+                "x",
+                tool("Edit", Some(true)),
+            ));
         }
 
         let digest = consolidate(&session(), &observations).expect("digest");
@@ -407,7 +421,11 @@ mod tests {
 
     #[test]
     fn a_session_without_prompts_still_gets_a_title() {
-        let observations = vec![observation(EventKind::ToolUse, "x", tool("Bash", Some(true)))];
+        let observations = vec![observation(
+            EventKind::ToolUse,
+            "x",
+            tool("Bash", Some(true)),
+        )];
         let digest = consolidate(&session(), &observations).expect("digest");
         assert!(digest.title.contains("2026-08-19"));
         assert!(digest.title.contains("claude-code"));

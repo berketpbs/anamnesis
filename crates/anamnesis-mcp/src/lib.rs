@@ -27,7 +27,9 @@ use jiff::Timestamp;
 use parking_lot::Mutex;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{ServerCapabilities, ServerInfo};
-use rmcp::{Json, ServerHandler, handler::server::router::tool::ToolRouter, tool, tool_handler, tool_router};
+use rmcp::{
+    Json, ServerHandler, handler::server::router::tool::ToolRouter, tool, tool_handler, tool_router,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -271,7 +273,9 @@ impl AnamnesisMcp {
         &self,
         params: Parameters<QueryRequest>,
     ) -> Result<Json<QueryResponse>, String> {
-        self.query(params.0).map(Json).map_err(|error| error.to_string())
+        self.query(params.0)
+            .map(Json)
+            .map_err(|error| error.to_string())
     }
 
     /// Write or update a wiki page.
@@ -287,7 +291,9 @@ impl AnamnesisMcp {
         &self,
         params: Parameters<WritePageRequest>,
     ) -> Result<Json<WritePageResponse>, String> {
-        self.write_page(params.0).map(Json).map_err(|error| error.to_string())
+        self.write_page(params.0)
+            .map(Json)
+            .map_err(|error| error.to_string())
     }
 
     /// Claim the pending handoff left by the previous session, if there is one.
@@ -324,7 +330,9 @@ impl AnamnesisMcp {
         &self,
         params: Parameters<WorkstreamStartRequest>,
     ) -> Result<Json<WorkstreamStartResponse>, String> {
-        self.start_workstream(params.0).map(Json).map_err(|error| error.to_string())
+        self.start_workstream(params.0)
+            .map(Json)
+            .map_err(|error| error.to_string())
     }
 
     /// Show a workstream's status and its visible event ledger.
@@ -340,7 +348,9 @@ impl AnamnesisMcp {
         &self,
         params: Parameters<WorkstreamStatusRequest>,
     ) -> Result<Json<WorkstreamStatusResponse>, String> {
-        self.describe_workstream(params.0).map(Json).map_err(|error| error.to_string())
+        self.describe_workstream(params.0)
+            .map(Json)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -383,7 +393,9 @@ impl AnamnesisMcp {
             &request.text,
             limit,
             Timestamp::now(),
-            query_vector.as_ref().map(|(model, vector)| (model.as_str(), vector.as_slice())),
+            query_vector
+                .as_ref()
+                .map(|(model, vector)| (model.as_str(), vector.as_slice())),
         )?;
         Ok(QueryResponse {
             hits: hits
@@ -423,14 +435,17 @@ impl AnamnesisMcp {
             frontmatter.supersedes = Some(PagePath::parse(supersedes)?);
         }
         if let Some(expires_at) = &request.expires_at {
-            frontmatter.expires_at = Some(
-                expires_at
-                    .parse()
-                    .map_err(|_| McpError::Invalid(format!("expires_at {expires_at:?} is not RFC 3339")))?,
-            );
+            frontmatter.expires_at = Some(expires_at.parse().map_err(|_| {
+                McpError::Invalid(format!("expires_at {expires_at:?} is not RFC 3339"))
+            })?);
         }
 
-        let mut page = Page::new(self.scope.project_id, path.clone(), frontmatter, request.body.clone());
+        let mut page = Page::new(
+            self.scope.project_id,
+            path.clone(),
+            frontmatter,
+            request.body.clone(),
+        );
         let commit = {
             let wiki = self.wiki.lock();
             wiki.write_page(&self.scope.scope, &page, &format!("mcp: write {path}"))?
@@ -440,9 +455,11 @@ impl AnamnesisMcp {
         let now = Timestamp::now();
         self.store.upsert_project(&self.scope, now)?;
         self.store.upsert_page(&page, now)?;
-        self.store.set_page_entities(self.scope.project_id, page.id, &entities)?;
+        self.store
+            .set_page_entities(self.scope.project_id, page.id, &entities)?;
         let links = anamnesis_wiki::extract_links(&request.body);
-        self.store.set_page_links(self.scope.project_id, page.id, &links)?;
+        self.store
+            .set_page_links(self.scope.project_id, page.id, &links)?;
 
         // Embedding failure costs this page its place in the vector stream,
         // not the write itself — the page is already committed to the wiki
@@ -451,7 +468,8 @@ impl AnamnesisMcp {
             let text = format!("{}\n\n{}", request.title, request.body);
             match embedder.embed(&text) {
                 Ok(vector) => {
-                    self.store.set_page_embedding(page.id, embedder.model(), &vector)?;
+                    self.store
+                        .set_page_embedding(page.id, embedder.model(), &vector)?;
                 }
                 Err(error) => {
                     tracing::warn!(%error, %path, "page embedding failed; page was still written");
@@ -465,7 +483,10 @@ impl AnamnesisMcp {
         })
     }
 
-    fn accept_handoff(&self, request: HandoffAcceptRequest) -> Result<HandoffAcceptResponse, McpError> {
+    fn accept_handoff(
+        &self,
+        request: HandoffAcceptRequest,
+    ) -> Result<HandoffAcceptResponse, McpError> {
         let agent: AgentKind = request
             .agent
             .as_deref()
@@ -492,18 +513,24 @@ impl AnamnesisMcp {
             workstream_id,
         ))?;
 
-        let handoff = self
-            .store
-            .claim_handoff(self.scope.project_id, claimant, workstream_id, now)?;
+        let handoff =
+            self.store
+                .claim_handoff(self.scope.project_id, claimant, workstream_id, now)?;
         Ok(HandoffAcceptResponse { handoff })
     }
 
-    fn start_workstream(&self, request: WorkstreamStartRequest) -> Result<WorkstreamStartResponse, McpError> {
+    fn start_workstream(
+        &self,
+        request: WorkstreamStartRequest,
+    ) -> Result<WorkstreamStartResponse, McpError> {
         let slug = WorkstreamSlug::parse(&request.slug)?;
         let now = Timestamp::now();
         self.store.upsert_project(&self.scope, now)?;
 
-        let workstream = match self.store.find_workstream(self.scope.project_id, slug.as_str())? {
+        let workstream = match self
+            .store
+            .find_workstream(self.scope.project_id, slug.as_str())?
+        {
             Some(mut existing) => {
                 existing.title = request.title;
                 existing.updated_at = now;
@@ -827,14 +854,21 @@ mod tests {
                 workstream: Some("auth-refactor".to_owned()),
             })
             .unwrap();
-        assert_eq!(claimed.handoff.as_deref(), Some("postgres chosen for auth storage"));
+        assert_eq!(
+            claimed.handoff.as_deref(),
+            Some("postgres chosen for auth storage")
+        );
 
         let status = server
             .describe_workstream(WorkstreamStatusRequest {
                 slug: "auth-refactor".to_owned(),
             })
             .unwrap();
-        assert_eq!(status.sessions.len(), 2, "the writer and the claimant both joined");
+        assert_eq!(
+            status.sessions.len(),
+            2,
+            "the writer and the claimant both joined"
+        );
         assert_eq!(status.handoffs.len(), 1);
         assert_eq!(status.handoffs[0].state, "accepted");
     }
@@ -908,7 +942,12 @@ mod tests {
         let (_repo, _data, server) = harness();
         let server = server.with_embedder(Some(Arc::new(FakeEmbedder) as Arc<dyn Embedder>));
 
-        write_page(&server, "notes/car.md", "Automobile", "A vehicle with four wheels.");
+        write_page(
+            &server,
+            "notes/car.md",
+            "Automobile",
+            "A vehicle with four wheels.",
+        );
 
         // Shares no token and no entity with the page above — only the
         // (fake, constant) vector stream can connect the two.

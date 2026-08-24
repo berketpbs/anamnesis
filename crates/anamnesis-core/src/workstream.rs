@@ -127,7 +127,12 @@ pub struct Workstream {
 impl Workstream {
     /// Start (or describe) a workstream, deriving its identifier from
     /// `project` and `slug`.
-    pub fn new(project_id: ProjectId, slug: WorkstreamSlug, title: impl Into<String>, now: Timestamp) -> Self {
+    pub fn new(
+        project_id: ProjectId,
+        slug: WorkstreamSlug,
+        title: impl Into<String>,
+        now: Timestamp,
+    ) -> Self {
         Self {
             id: WorkstreamId::derive(project_id, slug.as_str()),
             project_id,
@@ -146,13 +151,19 @@ mod tests {
 
     #[test]
     fn slugs_are_lowercased_and_trimmed() {
-        assert_eq!(WorkstreamSlug::parse("  Auth-Refactor  ").unwrap().as_str(), "auth-refactor");
+        assert_eq!(
+            WorkstreamSlug::parse("  Auth-Refactor  ").unwrap().as_str(),
+            "auth-refactor"
+        );
     }
 
     #[test]
     fn slugs_reject_slashes_and_spaces() {
         for bad in ["a/b", "a b", "", "   ", &"x".repeat(65)] {
-            assert!(WorkstreamSlug::parse(bad).is_err(), "{bad:?} should be rejected");
+            assert!(
+                WorkstreamSlug::parse(bad).is_err(),
+                "{bad:?} should be rejected"
+            );
         }
     }
 
