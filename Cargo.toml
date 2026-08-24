@@ -10,7 +10,6 @@ members = [
     "crates/anamnesis-consolidate",
     "crates/anamnesis-web",
     "crates/anamnesis-cli",
-    "crates/anamnesis-workstream",
     "evals",
 ]
 
@@ -32,7 +31,6 @@ anamnesis-hooks = { path = "crates/anamnesis-hooks", version = "0.1.0" }
 anamnesis-llm = { path = "crates/anamnesis-llm", version = "0.1.0" }
 anamnesis-consolidate = { path = "crates/anamnesis-consolidate", version = "0.1.0" }
 anamnesis-web = { path = "crates/anamnesis-web", version = "0.1.0" }
-anamnesis-workstream = { path = "crates/anamnesis-workstream", version = "0.1.0" }
 
 # Error handling.
 anyhow = "1"

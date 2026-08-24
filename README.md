@@ -19,7 +19,6 @@ Anamnesis is organized as a Rust workspace with modular crates:
 - **anamnesis-consolidate** - Session consolidation and summary generation
 - **anamnesis-web** - Web UI and HTTP server for wiki browsing
 - **anamnesis-cli** - Command-line interface
-- **anamnesis-workstream** - Cross-harness workstream management
 - **evals** - Evaluation suite and testing harness
 
 ## Features

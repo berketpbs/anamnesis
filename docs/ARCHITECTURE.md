@@ -119,6 +119,14 @@ Model Context Protocol server implementation.
 - `memory_write_page` - Create wiki pages
 - `memory_feedback` - Rate page usefulness
 - `memory_handoff_accept` - Accept session handoff
+- `workstream_start` - Start or resume a named thread of work
+- `workstream_status` - A workstream's status and event ledger
+
+Workstreams (cross-harness threads of work, session linking, per-thread
+resume, and the visible event ledger) are not a separate crate: their types
+live in `anamnesis-core::workstream`, their persistence in `anamnesis-store`,
+and their tool surface here — the same split `Page` and `Handoff` already
+follow.
 
 ### anamnesis-web
 Web UI and HTTP server.
@@ -128,15 +136,6 @@ Web UI and HTTP server.
 - Search UI
 - Git history visualization
 - REST API endpoints
-
-### anamnesis-workstream
-Cross-harness workstream management.
-
-**Provides:**
-- Workstream tracking
-- Session linking
-- Cross-harness resume logic
-- Visible event ledger
 
 ### anamnesis-cli
 Command-line interface.
