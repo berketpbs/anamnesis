@@ -129,37 +129,24 @@ enum Commands {
         repo: PathBuf,
     },
 
-    /// Show session handoff
+    /// Show the handoff waiting for the next session, without consuming it
     Handoff {
-        /// Session ID
-        session_id: String,
+        /// Workstream to look in. Omitted shows the project-wide handoff.
+        #[arg(long)]
+        workstream: Option<String>,
     },
 
-    /// List all sessions
+    /// List recent sessions, newest first
     Sessions {
         /// Limit number of results
         #[arg(short, long)]
         limit: Option<usize>,
-
-        /// Sort order
-        #[arg(long, default_value = "recent")]
-        sort: String,
     },
 
     /// View page details
     ShowPage {
         /// Page path
         path: String,
-    },
-
-    /// Create a new session
-    NewSession {
-        /// Agent name (claude-code, codex, etc.)
-        agent: String,
-
-        /// Checkout path
-        #[arg(long)]
-        path: Option<PathBuf>,
     },
 }
 
@@ -188,7 +175,7 @@ fn main() -> anyhow::Result<()> {
             cmd_status(verbose, cli.data_dir.clone())?;
         }
         Commands::Search { query, limit, path } => {
-            cmd_search(&query, limit, path)?;
+            cmd_search(&query, limit, path, cli.data_dir.clone())?;
         }
         Commands::WritePage {
             path,
@@ -197,7 +184,7 @@ fn main() -> anyhow::Result<()> {
             pinned,
             expires_at,
         } => {
-            cmd_write_page(&path, &title, &body, pinned, expires_at)?;
+            cmd_write_page(&path, &title, &body, pinned, expires_at, cli.data_dir.clone())?;
         }
         Commands::Init => {
             cmd_init(cli.data_dir.clone())?;
@@ -217,17 +204,14 @@ fn main() -> anyhow::Result<()> {
         Commands::Bootstrap { repo } => {
             cmd_bootstrap(&repo)?;
         }
-        Commands::Handoff { session_id } => {
-            cmd_handoff(&session_id)?;
+        Commands::Handoff { workstream } => {
+            cmd_handoff(workstream, cli.data_dir.clone())?;
         }
-        Commands::Sessions { limit, sort } => {
-            cmd_sessions(limit, &sort)?;
+        Commands::Sessions { limit } => {
+            cmd_sessions(limit, cli.data_dir.clone())?;
         }
         Commands::ShowPage { path } => {
-            cmd_show_page(&path)?;
-        }
-        Commands::NewSession { agent, path } => {
-            cmd_new_session(&agent, path)?;
+            cmd_show_page(&path, cli.data_dir.clone())?;
         }
     }
 
@@ -299,14 +283,93 @@ fn describe_source(source: &ScopeSource) -> String {
     }
 }
 
-fn cmd_search(query: &str, limit: usize, path: Option<String>) -> anyhow::Result<()> {
-    println!("🔍 Searching for: {}", query);
-    if let Some(p) = path {
-        println!("   in path: {}", p);
+/// Open the index and wiki for the project containing the current directory.
+///
+/// Every read-only command needs the same three things, and getting them
+/// wrong (a data dir that does not exist, a scope resolved from the wrong
+/// directory) is the usual reason a command reports nothing rather than
+/// failing outright.
+fn open_project(data_dir: Option<PathBuf>) -> anyhow::Result<(anamnesis_core::scope::ResolvedScope, DataDir, Store)> {
+    let cwd = std::env::current_dir()?;
+    let scope = resolve_scope(&cwd)?;
+    let data = DataDir::resolve(data_dir)?;
+    if !data.db_file().exists() {
+        anyhow::bail!(
+            "no memory at {} — run `anamnesis init` first",
+            data.root().display()
+        );
     }
-    println!("   limit: {}", limit);
-    println!();
-    println!("(Search not yet implemented)");
+    let store = Store::open(data.db_file())?;
+    store.migrate()?;
+    Ok((scope, data, store))
+}
+
+fn cmd_search(
+    query: &str,
+    limit: usize,
+    path: Option<String>,
+    data_dir: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    let (scope, data, store) = open_project(data_dir)?;
+
+    // The same opt-in local embedder `anamnesis mcp` uses, so a search from
+    // the terminal ranks identically to one an agent runs.
+    let embedder = anamnesis_llm::EmbedConfig::from_env().build(&data.models())?;
+    let query_vector = embedder.as_ref().and_then(|embedder| match embedder.embed(query) {
+        Ok(vector) => Some((embedder.model().to_owned(), vector)),
+        Err(error) => {
+            eprintln!("anamnesis: query embedding failed ({error}); searching without it");
+            None
+        }
+    });
+
+    let hits = store.query_pages(
+        scope.project_id,
+        query,
+        limit,
+        Timestamp::now(),
+        query_vector
+            .as_ref()
+            .map(|(model, vector)| (model.as_str(), vector.as_slice())),
+    )?;
+
+    let hits: Vec<_> = match &path {
+        Some(prefix) => hits
+            .into_iter()
+            .filter(|hit| hit.path.as_str().starts_with(prefix.as_str()))
+            .collect(),
+        None => hits,
+    };
+
+    if hits.is_empty() {
+        println!("No pages matched {query:?}.");
+        return Ok(());
+    }
+
+    for hit in &hits {
+        let mut marks = Vec::new();
+        if hit.pinned {
+            marks.push("pinned");
+        }
+        if hit.canonical {
+            marks.push("canonical");
+        }
+        if !hit.status.is_answerable() {
+            marks.push(hit.status.as_str());
+        }
+        let marks = if marks.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", marks.join(", "))
+        };
+
+        println!("{}  {}{}", hit.path, hit.title, marks);
+        println!("    {} · score {:.4}", hit.tier.as_str(), hit.score);
+        if !hit.snippet.is_empty() {
+            println!("    {}", hit.snippet.replace('\n', " "));
+        }
+        println!();
+    }
     Ok(())
 }
 
@@ -316,18 +379,43 @@ fn cmd_write_page(
     body: &str,
     pinned: bool,
     expires_at: Option<String>,
+    data_dir: Option<PathBuf>,
 ) -> anyhow::Result<()> {
-    println!("✍️  Writing page: {}", path);
-    println!("   Title: {}", title);
-    if pinned {
-        println!("   Pinned: yes");
+    let (scope, data, store) = open_project(data_dir)?;
+    let wiki = Wiki::open(data.wiki())?;
+
+    let page_path = anamnesis_core::page::PagePath::parse(path)?;
+    let mut frontmatter = anamnesis_core::page::Frontmatter::new(title, Vec::new())?;
+    frontmatter.pinned = pinned;
+    if let Some(expires) = &expires_at {
+        // Accepting a bare date is the whole reason this is parsed here rather
+        // than deserialized: `--expires-at 2026-12-31` is what someone types,
+        // and rejecting it for want of a time of day would be pedantry.
+        let stamp = if expires.len() == 10 {
+            format!("{expires}T00:00:00Z")
+        } else {
+            expires.clone()
+        };
+        frontmatter.expires_at = Some(
+            stamp
+                .parse()
+                .map_err(|_| anyhow::anyhow!("--expires-at {expires:?} is not a date or RFC 3339 timestamp"))?,
+        );
     }
-    if let Some(expires) = expires_at {
-        println!("   Expires: {}", expires);
-    }
-    println!("   Body length: {} bytes", body.len());
-    println!();
-    println!("(Write not yet implemented)");
+
+    let now = Timestamp::now();
+    store.upsert_project(&scope, now)?;
+
+    let mut page = anamnesis_core::page::Page::new(scope.project_id, page_path.clone(), frontmatter, body);
+    let commit = wiki.write_page(&scope.scope, &page, &format!("cli: write {page_path}"))?;
+    page.git_commit = Some(commit.clone());
+
+    store.upsert_page(&page, now)?;
+    store.set_page_links(scope.project_id, page.id, &anamnesis_wiki::extract_links(body))?;
+
+    println!("✍️  Wrote {page_path}");
+    println!("   {}", wiki.locate(&scope.scope, &page_path).display());
+    println!("   commit {}", &commit[..commit.len().min(8)]);
     Ok(())
 }
 
@@ -605,37 +693,94 @@ fn cmd_bootstrap(repo: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_handoff(session_id: &str) -> anyhow::Result<()> {
-    println!("📋 Session handoff: {}", session_id);
-    println!();
-    println!("(Handoff not yet implemented)");
+/// Show the handoff waiting for the next session, without consuming it.
+///
+/// Deliberately a peek, not a claim: running this to see what is waiting must
+/// not be the reason the next agent session starts with nothing.
+fn cmd_handoff(workstream: Option<String>, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
+    let (scope, _data, store) = open_project(data_dir)?;
+
+    let workstream_id = match workstream.as_deref().map(str::trim) {
+        Some(slug) => Some(
+            store
+                .find_workstream(scope.project_id, slug)?
+                .ok_or_else(|| anyhow::anyhow!("no workstream named {slug:?}"))?
+                .id,
+        ),
+        None => None,
+    };
+
+    match store.peek_handoff(scope.project_id, workstream_id)? {
+        Some(body) => {
+            match &workstream {
+                Some(slug) => println!("📋 Pending handoff for workstream {slug}:"),
+                None => println!("📋 Pending handoff:"),
+            }
+            println!();
+            println!("{body}");
+        }
+        None => println!("Nothing waiting — the last session left no handoff, or it was already claimed."),
+    }
     Ok(())
 }
 
-fn cmd_sessions(limit: Option<usize>, sort: &str) -> anyhow::Result<()> {
-    println!("📊 Sessions (sorted by {})", sort);
-    if let Some(l) = limit {
-        println!("   limit: {}", l);
+fn cmd_sessions(limit: Option<usize>, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
+    let (scope, _data, store) = open_project(data_dir)?;
+    let sessions = store.recent_sessions(scope.project_id, limit.unwrap_or(20))?;
+
+    if sessions.is_empty() {
+        println!("No sessions recorded for {}.", scope.scope);
+        return Ok(());
+    }
+
+    for session in &sessions {
+        let short: String = session.id.to_string().chars().take(8).collect();
+        let when = session.started_at.to_string();
+        let when = when.split('.').next().unwrap_or(&when);
+        let workstream = match &session.workstream {
+            Some(slug) => format!(" · {slug}"),
+            None => String::new(),
+        };
+        println!(
+            "{short}  {when}  {:<12} {:<7} {} obs{workstream}",
+            session.agent, session.state, session.observation_count
+        );
+    }
+    Ok(())
+}
+
+fn cmd_show_page(path: &str, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
+    let (scope, data, _store) = open_project(data_dir)?;
+    let wiki = Wiki::open(data.wiki())?;
+    let page_path = anamnesis_core::page::PagePath::parse(path)?;
+
+    if !wiki.exists(&scope.scope, &page_path) {
+        anyhow::bail!(
+            "no page at {page_path} — looked in {}",
+            wiki.locate(&scope.scope, &page_path).display()
+        );
+    }
+
+    let page = wiki.read_page(&scope.scope, &page_path)?;
+    let fm = &page.frontmatter;
+
+    println!("📄 {}", fm.title);
+    println!("   {page_path}");
+    println!("   {} · {}", fm.tier.as_str(), fm.status.as_str());
+    if fm.pinned {
+        println!("   pinned");
+    }
+    if fm.canonical {
+        println!("   canonical");
+    }
+    if let Some(expires) = fm.expires_at {
+        println!("   expires {expires}");
+    }
+    if !fm.entities.is_empty() {
+        let names: Vec<&str> = fm.entities.iter().map(|e| e.as_str()).collect();
+        println!("   entities: {}", names.join(", "));
     }
     println!();
-    println!("(Sessions listing not yet implemented)");
-    Ok(())
-}
-
-fn cmd_show_page(path: &str) -> anyhow::Result<()> {
-    println!("📄 Page: {}", path);
-    println!();
-    println!("(Page display not yet implemented)");
-    Ok(())
-}
-
-fn cmd_new_session(agent: &str, path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
-    println!("🔄 Creating new session");
-    println!("   agent: {}", agent);
-    if let Some(p) = path {
-        println!("   path: {}", p.display());
-    }
-    println!();
-    println!("(Session creation not yet implemented)");
+    println!("{}", page.body.trim_end());
     Ok(())
 }

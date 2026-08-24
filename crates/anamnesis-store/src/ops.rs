@@ -15,6 +15,26 @@ use rusqlite::{OptionalExtension, Row, params};
 
 use crate::{Result, Store};
 
+/// One row of `anamnesis sessions`: what a session was, without its
+/// observations.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionSummary {
+    /// The session.
+    pub id: SessionId,
+    /// Which harness ran it.
+    pub agent: String,
+    /// Its lifecycle state.
+    pub state: String,
+    /// When it started.
+    pub started_at: Timestamp,
+    /// When it ended, if it has.
+    pub ended_at: Option<Timestamp>,
+    /// Slug of the workstream it joined, if any.
+    pub workstream: Option<String>,
+    /// How many observations it captured.
+    pub observation_count: i64,
+}
+
 impl Store {
     /// Record a session, ignoring the call if it is already known.
     ///
@@ -212,6 +232,58 @@ impl Store {
             )
             .optional()?;
         Ok(body)
+    }
+
+    /// Read the pending handoff without consuming it.
+    ///
+    /// The counterpart to [`Store::claim_handoff`], for showing someone what
+    /// is waiting. Claiming is what a starting session does; looking is what
+    /// a person at a terminal does, and conflating the two would mean running
+    /// `anamnesis handoff` silently costs the next session its note.
+    pub fn peek_handoff(
+        &self,
+        project_id: ProjectId,
+        workstream_id: Option<WorkstreamId>,
+    ) -> Result<Option<String>> {
+        let conn = self.connection();
+        let workstream = workstream_id.map(|id| id.to_string());
+        conn.query_row(
+            "SELECT body FROM handoffs
+             WHERE project_id = ?1 AND state = 'pending'
+               AND COALESCE(workstream_id, '') = COALESCE(?2, '')
+             ORDER BY created_at DESC LIMIT 1",
+            params![project_id.to_string(), workstream],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// A project's sessions, most recent first.
+    pub fn recent_sessions(&self, project_id: ProjectId, limit: usize) -> Result<Vec<SessionSummary>> {
+        let conn = self.connection();
+        let mut statement = conn.prepare(
+            "SELECT s.id, s.agent, s.state, s.started_at, s.ended_at, w.slug,
+                    (SELECT COUNT(*) FROM observations o WHERE o.session_id = s.id)
+             FROM sessions s
+             LEFT JOIN workstreams w ON w.id = s.workstream_id
+             WHERE s.project_id = ?1
+             ORDER BY s.started_at DESC
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![project_id.to_string(), limit as i64], |row| {
+            Ok(SessionSummary {
+                id: parse_id(row.get::<_, String>(0)?),
+                agent: row.get(1)?,
+                state: row.get(2)?,
+                started_at: parse_time(&row.get::<_, String>(3)?),
+                ended_at: row.get::<_, Option<String>>(4)?.map(|t| parse_time(&t)),
+                workstream: row.get(5)?,
+                observation_count: row.get(6)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// How many sessions a project has recorded.
@@ -607,6 +679,80 @@ mod tests {
             store.claim_handoff(project, claimant, None, now()).expect("claim"),
             None
         );
+    }
+
+    #[test]
+    fn peeking_at_a_handoff_leaves_it_claimable() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+        store
+            .record_handoff(&new_handoff(project, session.id, None, "carry on", now()))
+            .expect("record");
+
+        assert_eq!(
+            store.peek_handoff(project, None).expect("peek").as_deref(),
+            Some("carry on")
+        );
+        // Twice, to be sure looking is not a one-shot read either.
+        assert_eq!(
+            store.peek_handoff(project, None).expect("peek").as_deref(),
+            Some("carry on")
+        );
+
+        let claimant = next_session(&store, project, workspace);
+        assert_eq!(
+            store
+                .claim_handoff(project, claimant, None, now())
+                .expect("claim")
+                .as_deref(),
+            Some("carry on"),
+            "peeking must not have consumed it"
+        );
+        assert_eq!(store.peek_handoff(project, None).expect("peek"), None);
+    }
+
+    #[test]
+    fn recent_sessions_come_back_newest_first_with_their_counts() {
+        let (_dir, store, project, workspace) = fixture();
+
+        for (index, agent) in ["claude-code", "codex"].into_iter().enumerate() {
+            let mut session = session_for(project, workspace);
+            session.id = SessionId::derive(project, &format!("agent-session-{index}"));
+            session.agent = agent.parse().expect("agent");
+            session.started_at = format!("2026-08-19T0{index}:00:00Z").parse().expect("time");
+            store.ensure_session(&session).expect("session");
+
+            for _ in 0..=index {
+                store
+                    .insert_observation(&new_observation(
+                        session.id,
+                        EventKind::UserPrompt,
+                        None,
+                        BoundedBody::truncating("hello", 1024),
+                        now(),
+                    ))
+                    .expect("observation");
+            }
+        }
+
+        let sessions = store.recent_sessions(project, 10).expect("list");
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].agent, "codex", "newest session should lead");
+        assert_eq!(sessions[0].observation_count, 2);
+        assert_eq!(sessions[1].observation_count, 1);
+        assert!(sessions[0].workstream.is_none());
+    }
+
+    #[test]
+    fn recent_sessions_honours_its_limit() {
+        let (_dir, store, project, workspace) = fixture();
+        for index in 0..3 {
+            let mut session = session_for(project, workspace);
+            session.id = SessionId::derive(project, &format!("agent-session-{index}"));
+            store.ensure_session(&session).expect("session");
+        }
+        assert_eq!(store.recent_sessions(project, 2).expect("list").len(), 2);
     }
 
     #[test]

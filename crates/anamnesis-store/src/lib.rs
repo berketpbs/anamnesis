@@ -28,7 +28,7 @@ mod ops;
 mod query;
 mod workstream;
 
-pub use ops::{new_handoff, new_observation, new_session};
+pub use ops::{SessionSummary, new_handoff, new_observation, new_session};
 pub use query::PageHit;
 pub use workstream::{WorkstreamHandoff, WorkstreamSession};
 
