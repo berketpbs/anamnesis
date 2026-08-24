@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # A backtrace costs nothing until something panics, and when something does
+  # panic in CI the run is usually not reproducible locally.
+  RUST_BACKTRACE: 1
+
+concurrency:
+  # A second push to the same branch makes the first run's answer worthless.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      # Every check runs even when an earlier one fails: knowing about the
+      # clippy lint *and* the failing test in one round beats finding them
+      # one push at a time.
+      fail-fast: false
+      matrix:
+        include:
+          - name: fmt
+            command: cargo fmt --all -- --check
+          - name: clippy
+            command: cargo clippy --workspace --all-targets -- -D warnings
+          - name: test
+            command: cargo test --workspace
+    steps:
+      - uses: actions/checkout@v5
+
+      # rust-toolchain.toml pins the version; installing the components here
+      # rather than a version keeps the two from disagreeing.
+      - name: Install toolchain components
+        run: rustup component add rustfmt clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Otherwise all three jobs share one cache key and race to write it.
+          key: ${{ matrix.name }}
+
+      - run: ${{ matrix.command }}
+
+  # The build every check above implies, run once on the platform the project
+  # is actually developed on. Windows is where the paths, the MSVC linker, and
+  # the PowerShell BOM handling differ, so a green Linux run is not evidence
+  # the thing works there.
+  windows:
+    name: build (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows
+      - run: cargo test --workspace

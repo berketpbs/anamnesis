@@ -1,5 +1,7 @@
 # Anamnesis
 
+[![CI](https://github.com/berketpbs/anamnesis/actions/workflows/ci.yml/badge.svg)](https://github.com/berketpbs/anamnesis/actions/workflows/ci.yml)
+
 Long-term memory for AI coding agents. Preserve context across sessions and enable seamless continuity between different AI agent tools.
 
 ## Vision
