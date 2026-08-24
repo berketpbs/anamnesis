@@ -517,6 +517,7 @@ fn cmd_serve(bind: &str, port: u16, data_dir: Option<PathBuf>) -> anyhow::Result
     let store = Store::open(data.db_file())?;
     store.migrate()?;
     let wiki = Wiki::open(data.wiki())?;
+    let raw = anamnesis_store::RawSpool::new(data.raw());
 
     // Built before the listener binds, so a misconfigured model is a startup
     // error someone sees rather than a warning that only surfaces hours later,
@@ -532,6 +533,7 @@ fn cmd_serve(bind: &str, port: u16, data_dir: Option<PathBuf>) -> anyhow::Result
     println!("🌐 anamnesis serving on http://{address}");
     println!("   data dir: {}", data.root().display());
     println!("   POST /hook   GET /handoff   GET /health");
+    println!("   transcripts: {}", raw.root().display());
     match &settings {
         Some(settings) => println!(
             "   consolidation: {} ({})",
@@ -544,7 +546,9 @@ fn cmd_serve(bind: &str, port: u16, data_dir: Option<PathBuf>) -> anyhow::Result
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(anamnesis_web::serve(
         address,
-        anamnesis_web::AppState::new(store, wiki).with_llm(settings),
+        anamnesis_web::AppState::new(store, wiki)
+            .with_raw(Some(raw))
+            .with_llm(settings),
     ))?;
     Ok(())
 }

@@ -14,7 +14,7 @@ use anamnesis_core::page::{Frontmatter, Page, PagePath, Tier};
 use anamnesis_core::scope::{ResolvedScope, resolve_scope};
 use anamnesis_core::session::{AgentKind, Session};
 use anamnesis_hooks::ParsedHook;
-use anamnesis_store::{Store, new_handoff, new_observation, new_session};
+use anamnesis_store::{RawSpool, Store, new_handoff, new_observation, new_session};
 use anamnesis_wiki::Wiki;
 use jiff::Timestamp;
 use parking_lot::Mutex;
@@ -36,10 +36,11 @@ pub struct Ingested {
 pub fn ingest(
     store: &Store,
     wiki: &Wiki,
+    raw: Option<&RawSpool>,
     hook: &ParsedHook,
     now: Timestamp,
 ) -> Result<Ingested, WebError> {
-    let (scope, session_id) = record(store, hook, now)?;
+    let (scope, session_id) = record(store, raw, hook, now)?;
 
     if hook.kind != EventKind::SessionEnd {
         return Ok(Ingested {
@@ -66,6 +67,7 @@ pub fn ingest(
 /// part that must not block.
 pub fn record(
     store: &Store,
+    raw: Option<&RawSpool>,
     hook: &ParsedHook,
     now: Timestamp,
 ) -> Result<(ResolvedScope, SessionId), WebError> {
@@ -78,7 +80,7 @@ pub fn record(
     store.upsert_project(&scope, now)?;
 
     let session_id = SessionId::derive(scope.project_id, &hook.agent_session_id);
-    store.ensure_session(&new_session(
+    let session = new_session(
         session_id,
         scope.project_id,
         scope.workspace_id,
@@ -89,15 +91,27 @@ pub fn record(
         // MCP-only concept for now. Every session it records shares the
         // project-wide handoff slot, exactly as before workstreams existed.
         None,
-    ))?;
+    );
+    store.ensure_session(&session)?;
 
-    store.insert_observation(&new_observation(
+    let observation = new_observation(
         session_id,
         hook.kind,
         hook.tool.clone(),
         hook.body.clone(),
         now,
-    ))?;
+    );
+    store.insert_observation(&observation)?;
+
+    // The index is the authority for this request; the spool is the durable
+    // copy behind it. A spool that cannot be written is logged and stepped
+    // over rather than failing the event: losing the durable copy is bad,
+    // losing the event itself because a disk filled up is worse.
+    if let Some(raw) = raw
+        && let Err(error) = raw.append(&scope.scope, &session, &observation)
+    {
+        tracing::error!(%error, %session_id, "could not spool observation");
+    }
 
     Ok((scope, session_id))
 }
