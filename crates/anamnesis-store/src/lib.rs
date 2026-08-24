@@ -26,9 +26,11 @@ mod embedded {
 
 mod ops;
 mod query;
+mod workstream;
 
 pub use ops::{new_handoff, new_observation, new_session};
 pub use query::PageHit;
+pub use workstream::{WorkstreamHandoff, WorkstreamSession};
 
 /// Errors produced by the storage layer.
 #[derive(Debug, thiserror::Error)]
@@ -198,14 +200,14 @@ mod tests {
         assert_eq!(store.schema_version().expect("version"), None);
 
         store.migrate().expect("migrate");
-        assert_eq!(store.schema_version().expect("version"), Some(5));
+        assert_eq!(store.schema_version().expect("version"), Some(6));
     }
 
     #[test]
     fn migrating_twice_is_a_no_op() {
         let store = migrated();
         store.migrate().expect("second migrate");
-        assert_eq!(store.schema_version().expect("version"), Some(5));
+        assert_eq!(store.schema_version().expect("version"), Some(6));
     }
 
     #[test]
@@ -224,6 +226,7 @@ mod tests {
             "handoffs",
             "page_feedback",
             "page_embeddings",
+            "workstreams",
         ] {
             let found: i64 = conn
                 .query_row(

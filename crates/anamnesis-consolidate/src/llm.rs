@@ -370,6 +370,7 @@ mod tests {
             agent: AgentKind::ClaudeCode,
             workspace_id: WorkspaceId::from_uuid(uuid::Uuid::nil()),
             project_id: ProjectId::from_uuid(uuid::Uuid::nil()),
+            workstream_id: None,
             checkout_path: "/repo".into(),
             started_at: "2026-08-20T09:00:00Z".parse().expect("timestamp"),
             ended_at: Some("2026-08-20T10:00:00Z".parse().expect("timestamp")),

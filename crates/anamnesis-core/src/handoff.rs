@@ -2,7 +2,7 @@
 
 use jiff::Timestamp;
 
-use crate::ids::{HandoffId, ProjectId, SessionId};
+use crate::ids::{HandoffId, ProjectId, SessionId, WorkstreamId};
 use crate::observation::BoundedBody;
 
 /// Delivery state of a handoff.
@@ -28,6 +28,12 @@ pub struct Handoff {
     pub id: HandoffId,
     /// Project the handoff belongs to.
     pub project_id: ProjectId,
+    /// The workstream this handoff's pending slot is keyed to, if any.
+    ///
+    /// `None` shares one slot with every other workstream-less handoff in
+    /// the project — today's behaviour. A workstream's handoffs are keyed to
+    /// its own slot, so claiming one never consumes another's.
+    pub workstream_id: Option<WorkstreamId>,
     /// Session that produced it.
     pub from_session: SessionId,
     /// Session that consumed it, once accepted.
@@ -71,6 +77,7 @@ mod tests {
         Handoff {
             id: HandoffId::new(),
             project_id: ProjectId::from_uuid(uuid::Uuid::nil()),
+            workstream_id: None,
             from_session: SessionId::new(),
             to_session: None,
             body: BoundedBody::truncating("carry on", BoundedBody::DEFAULT_LIMIT),

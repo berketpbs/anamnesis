@@ -6,7 +6,7 @@
 //! editing session.
 
 use anamnesis_core::handoff::{Handoff, HandoffState};
-use anamnesis_core::ids::{HandoffId, ObservationId, ProjectId, SessionId};
+use anamnesis_core::ids::{HandoffId, ObservationId, ProjectId, SessionId, WorkstreamId};
 use anamnesis_core::observation::{BoundedBody, EventKind, Observation, ToolRef};
 use anamnesis_core::page::Page;
 use anamnesis_core::session::{AgentKind, Session, SessionState};
@@ -24,8 +24,9 @@ impl Store {
     pub fn ensure_session(&self, session: &Session) -> Result<()> {
         let conn = self.connection();
         conn.execute(
-            "INSERT INTO sessions (id, project_id, agent, checkout_path, state, started_at, ended_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO sessions
+                 (id, project_id, agent, checkout_path, state, started_at, ended_at, workstream_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT (id) DO NOTHING",
             params![
                 session.id.to_string(),
@@ -35,6 +36,7 @@ impl Store {
                 state_str(session.state),
                 session.started_at.to_string(),
                 session.ended_at.map(|t| t.to_string()),
+                session.workstream_id.map(|id| id.to_string()),
             ],
         )?;
         Ok(())
@@ -56,7 +58,7 @@ impl Store {
         let session = conn
             .query_row(
                 "SELECT s.id, s.project_id, p.workspace_id, s.agent, s.checkout_path,
-                        s.state, s.started_at, s.ended_at
+                        s.state, s.started_at, s.ended_at, s.workstream_id
                  FROM sessions s
                  JOIN projects p ON p.id = s.project_id
                  WHERE s.id = ?1",
@@ -148,29 +150,36 @@ impl Store {
     /// handing a session two "where you left off" notes is worse than handing
     /// it the wrong one.
     pub fn record_handoff(&self, handoff: &Handoff) -> Result<()> {
+        let workstream = handoff.workstream_id.map(|id| id.to_string());
         let mut conn = self.connection();
         let transaction = conn.transaction()?;
+        // Only a pending handoff in the *same* slot is superseded — a
+        // workstream's handoff must not expire another workstream's, or the
+        // project-wide one.
         transaction.execute(
             "UPDATE handoffs SET state = 'expired'
-             WHERE project_id = ?1 AND state = 'pending'",
-            params![handoff.project_id.to_string()],
+             WHERE project_id = ?1 AND state = 'pending'
+               AND COALESCE(workstream_id, '') = COALESCE(?2, '')",
+            params![handoff.project_id.to_string(), workstream],
         )?;
         transaction.execute(
-            "INSERT INTO handoffs (id, project_id, from_session, body, state, created_at)
-             VALUES (?1, ?2, ?3, ?4, 'pending', ?5)",
+            "INSERT INTO handoffs (id, project_id, from_session, body, state, created_at, workstream_id)
+             VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6)",
             params![
                 handoff.id.to_string(),
                 handoff.project_id.to_string(),
                 handoff.from_session.to_string(),
                 handoff.body.as_str(),
                 handoff.created_at.to_string(),
+                workstream,
             ],
         )?;
         transaction.commit()?;
         Ok(())
     }
 
-    /// Claim the pending handoff for a project, if there is one.
+    /// Claim the pending handoff for a project's `workstream_id` slot
+    /// (`None` for the shared, workstream-less slot), if there is one.
     ///
     /// Claiming is a single statement so two sessions starting at the same
     /// moment cannot both receive it: the second finds nothing pending.
@@ -178,19 +187,27 @@ impl Store {
         &self,
         project_id: ProjectId,
         claimant: SessionId,
+        workstream_id: Option<WorkstreamId>,
         now: Timestamp,
     ) -> Result<Option<String>> {
         let conn = self.connection();
+        let workstream = workstream_id.map(|id| id.to_string());
         let body = conn
             .query_row(
                 "UPDATE handoffs SET state = 'accepted', to_session = ?2, accepted_at = ?3
                  WHERE id = (
                      SELECT id FROM handoffs
                      WHERE project_id = ?1 AND state = 'pending'
+                       AND COALESCE(workstream_id, '') = COALESCE(?4, '')
                      ORDER BY created_at DESC LIMIT 1
                  )
                  RETURNING body",
-                params![project_id.to_string(), claimant.to_string(), now.to_string()],
+                params![
+                    project_id.to_string(),
+                    claimant.to_string(),
+                    now.to_string(),
+                    workstream,
+                ],
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
@@ -234,6 +251,7 @@ fn read_session(row: &Row<'_>) -> rusqlite::Result<Session> {
         ended_at: row
             .get::<_, Option<String>>(7)?
             .map(|t| parse_time(&t)),
+        workstream_id: row.get::<_, Option<String>>(8)?.map(parse_id),
     })
 }
 
@@ -319,12 +337,14 @@ fn status_str(status: anamnesis_core::page::PageStatus) -> &'static str {
 pub fn new_handoff(
     project_id: ProjectId,
     from_session: SessionId,
+    workstream_id: Option<WorkstreamId>,
     body: &str,
     created_at: Timestamp,
 ) -> Handoff {
     Handoff {
         id: HandoffId::new(),
         project_id,
+        workstream_id,
         from_session,
         to_session: None,
         body: BoundedBody::truncating(body, BoundedBody::DEFAULT_LIMIT),
@@ -361,12 +381,14 @@ pub fn new_session(
     agent: AgentKind,
     checkout_path: std::path::PathBuf,
     started_at: Timestamp,
+    workstream_id: Option<WorkstreamId>,
 ) -> Session {
     Session {
         id,
         agent,
         workspace_id,
         project_id,
+        workstream_id,
         checkout_path,
         started_at,
         ended_at: None,
@@ -408,6 +430,7 @@ mod tests {
             AgentKind::ClaudeCode,
             "/repo".into(),
             now(),
+            None,
         )
     }
 
@@ -530,14 +553,14 @@ mod tests {
         let session = session_for(project, workspace);
         store.ensure_session(&session).expect("session");
         store
-            .record_handoff(&new_handoff(project, session.id, "carry on", now()))
+            .record_handoff(&new_handoff(project, session.id, None, "carry on", now()))
             .expect("record");
 
         let claimant = next_session(&store, project, workspace);
-        let first = store.claim_handoff(project, claimant, now()).expect("claim");
+        let first = store.claim_handoff(project, claimant, None, now()).expect("claim");
         assert_eq!(first.as_deref(), Some("carry on"));
 
-        let second = store.claim_handoff(project, claimant, now()).expect("claim");
+        let second = store.claim_handoff(project, claimant, None, now()).expect("claim");
         assert_eq!(second, None, "a handoff is single use");
     }
 
@@ -549,11 +572,11 @@ mod tests {
         let session = session_for(project, workspace);
         store.ensure_session(&session).expect("session");
         store
-            .record_handoff(&new_handoff(project, session.id, "carry on", now()))
+            .record_handoff(&new_handoff(project, session.id, None, "carry on", now()))
             .expect("record");
 
         assert!(
-            store.claim_handoff(project, SessionId::new(), now()).is_err(),
+            store.claim_handoff(project, SessionId::new(), None, now()).is_err(),
             "an unknown claimant should be rejected"
         );
     }
@@ -565,14 +588,14 @@ mod tests {
         store.ensure_session(&session).expect("session");
 
         store
-            .record_handoff(&new_handoff(project, session.id, "older", now()))
+            .record_handoff(&new_handoff(project, session.id, None, "older", now()))
             .expect("first");
         store
-            .record_handoff(&new_handoff(project, session.id, "newer", now()))
+            .record_handoff(&new_handoff(project, session.id, None, "newer", now()))
             .expect("second");
 
         let claimant = next_session(&store, project, workspace);
-        let claimed = store.claim_handoff(project, claimant, now()).expect("claim");
+        let claimed = store.claim_handoff(project, claimant, None, now()).expect("claim");
         assert_eq!(claimed.as_deref(), Some("newer"));
     }
 
@@ -581,7 +604,7 @@ mod tests {
         let (_dir, store, project, workspace) = fixture();
         let claimant = next_session(&store, project, workspace);
         assert_eq!(
-            store.claim_handoff(project, claimant, now()).expect("claim"),
+            store.claim_handoff(project, claimant, None, now()).expect("claim"),
             None
         );
     }
