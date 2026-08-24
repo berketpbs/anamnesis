@@ -39,6 +39,25 @@ impl EventKind {
         }
     }
 
+    /// Recover a kind from its stored form, the inverse of [`Self::as_str`].
+    ///
+    /// Anything unrecognised becomes [`Self::Notification`] rather than an
+    /// error: a row written by a newer version naming an event this build has
+    /// never heard of is still an observation worth keeping, and refusing to
+    /// read the database over it would be a far worse outcome than filing it
+    /// under the catch-all kind.
+    pub fn from_storage(raw: &str) -> Self {
+        match raw {
+            "session-start" => Self::SessionStart,
+            "user-prompt" => Self::UserPrompt,
+            "tool-use" => Self::ToolUse,
+            "pre-compact" => Self::PreCompact,
+            "post-compact" => Self::PostCompact,
+            "session-end" => Self::SessionEnd,
+            _ => Self::Notification,
+        }
+    }
+
     /// Whether this event only marks a boundary and carries no content worth
     /// consolidating. A session made only of these is closed without a page.
     pub fn is_boundary_only(&self) -> bool {
@@ -227,5 +246,26 @@ mod tests {
         assert_eq!(json, "\"pre-compact\"");
         let back: EventKind = serde_json::from_str(&json).unwrap();
         assert_eq!(back, EventKind::PreCompact);
+    }
+
+    #[test]
+    fn event_kind_round_trips_through_storage() {
+        for kind in [
+            EventKind::SessionStart,
+            EventKind::UserPrompt,
+            EventKind::ToolUse,
+            EventKind::PreCompact,
+            EventKind::PostCompact,
+            EventKind::SessionEnd,
+            EventKind::Notification,
+        ] {
+            assert_eq!(EventKind::from_storage(kind.as_str()), kind);
+        }
+        // An event a newer build wrote is filed under the catch-all rather
+        // than costing the reader the whole row.
+        assert_eq!(
+            EventKind::from_storage("some-future-event"),
+            EventKind::Notification
+        );
     }
 }

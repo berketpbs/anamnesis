@@ -103,6 +103,19 @@ impl WorkstreamStatus {
             Self::Completed => "completed",
         }
     }
+
+    /// Recover a status from its stored form, the inverse of [`Self::as_str`].
+    ///
+    /// Falls back to [`Self::Active`], the default, rather than erroring: the
+    /// schema's `CHECK` means an unrecognised value cannot come from a
+    /// database this code wrote.
+    pub fn from_storage(raw: &str) -> Self {
+        match raw {
+            "paused" => Self::Paused,
+            "completed" => Self::Completed,
+            _ => Self::Active,
+        }
+    }
 }
 
 /// A named, persistent thread of work.
@@ -175,6 +188,21 @@ mod tests {
         assert_eq!(
             workstream.id,
             crate::ids::WorkstreamId::derive(project, "auth-refactor")
+        );
+    }
+
+    #[test]
+    fn workstream_status_round_trips_through_storage() {
+        for status in [
+            WorkstreamStatus::Active,
+            WorkstreamStatus::Paused,
+            WorkstreamStatus::Completed,
+        ] {
+            assert_eq!(WorkstreamStatus::from_storage(status.as_str()), status);
+        }
+        assert_eq!(
+            WorkstreamStatus::from_storage("nonsense"),
+            WorkstreamStatus::default()
         );
     }
 }

@@ -98,6 +98,31 @@ pub enum SessionState {
     Closed,
 }
 
+impl SessionState {
+    /// Canonical lowercase identifier, as stored in the database.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Ending => "ending",
+            Self::Closed => "closed",
+        }
+    }
+
+    /// Recover a state from its stored form, the inverse of [`Self::as_str`].
+    ///
+    /// The schema constrains this column with a `CHECK`, so an unrecognised
+    /// value cannot come from a database this code wrote; treating it as
+    /// [`Self::Open`] keeps a hand-edited row readable rather than panicking
+    /// on it.
+    pub fn from_storage(raw: &str) -> Self {
+        match raw {
+            "ending" => Self::Ending,
+            "closed" => Self::Closed,
+            _ => Self::Open,
+        }
+    }
+}
+
 /// One bounded unit of agent work.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Session {
@@ -162,5 +187,17 @@ mod tests {
             let back: AgentKind = serde_json::from_str(&json).unwrap();
             assert_eq!(agent, back);
         }
+    }
+
+    #[test]
+    fn session_state_round_trips_through_storage() {
+        for state in [
+            SessionState::Open,
+            SessionState::Ending,
+            SessionState::Closed,
+        ] {
+            assert_eq!(SessionState::from_storage(state.as_str()), state);
+        }
+        assert_eq!(SessionState::from_storage("nonsense"), SessionState::Open);
     }
 }

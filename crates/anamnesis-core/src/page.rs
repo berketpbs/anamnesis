@@ -185,6 +185,20 @@ impl Tier {
         }
     }
 
+    /// Recover a tier from its stored form, the inverse of [`Self::as_str`].
+    ///
+    /// Falls back to [`Self::Episodic`], the default tier, rather than
+    /// erroring: the schema's `CHECK` means an unrecognised value cannot come
+    /// from a database this code wrote.
+    pub fn from_storage(raw: &str) -> Self {
+        match raw {
+            "working" => Self::Working,
+            "semantic" => Self::Semantic,
+            "procedural" => Self::Procedural,
+            _ => Self::Episodic,
+        }
+    }
+
     /// Whether pages in this tier are offered to ordinary recall.
     pub fn is_recallable(&self) -> bool {
         !matches!(self, Self::Working)
@@ -219,6 +233,19 @@ impl PageStatus {
             Self::Historical => "historical",
             Self::DoNotAnswerFrom => "do-not-answer-from",
             Self::Superseded => "superseded",
+        }
+    }
+
+    /// Recover a status from its stored form, the inverse of [`Self::as_str`].
+    ///
+    /// Falls back to [`Self::Active`] for the same reason [`Tier::from_storage`]
+    /// falls back to its default.
+    pub fn from_storage(raw: &str) -> Self {
+        match raw {
+            "historical" => Self::Historical,
+            "do-not-answer-from" => Self::DoNotAnswerFrom,
+            "superseded" => Self::Superseded,
+            _ => Self::Active,
         }
     }
 
@@ -432,6 +459,35 @@ mod tests {
             serde_json::from_str::<Tier>(&json).unwrap(),
             Tier::Procedural
         );
+    }
+
+    #[test]
+    fn tier_round_trips_through_storage() {
+        // The database column and the enum have to agree in both directions:
+        // a variant whose `as_str` no longer parses back would silently
+        // reindex every page under the wrong tier.
+        for tier in [
+            Tier::Working,
+            Tier::Episodic,
+            Tier::Semantic,
+            Tier::Procedural,
+        ] {
+            assert_eq!(Tier::from_storage(tier.as_str()), tier);
+        }
+        assert_eq!(Tier::from_storage("nonsense"), Tier::default());
+    }
+
+    #[test]
+    fn page_status_round_trips_through_storage() {
+        for status in [
+            PageStatus::Active,
+            PageStatus::Historical,
+            PageStatus::DoNotAnswerFrom,
+            PageStatus::Superseded,
+        ] {
+            assert_eq!(PageStatus::from_storage(status.as_str()), status);
+        }
+        assert_eq!(PageStatus::from_storage("nonsense"), PageStatus::default());
     }
 
     #[test]
