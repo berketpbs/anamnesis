@@ -25,6 +25,7 @@ pub mod handoff;
 pub mod ids;
 pub mod observation;
 pub mod page;
+pub mod retrieval;
 pub mod sanitize;
 pub mod scope;
 pub mod session;
@@ -41,6 +42,7 @@ pub mod prelude {
     pub use crate::ids::{HandoffId, ObservationId, PageId, ProjectId, SessionId, WorkspaceId};
     pub use crate::observation::{BoundedBody, EventKind, Observation, ToolRef};
     pub use crate::page::{Entity, Frontmatter, Page, PagePath, PageStatus, Tier};
+    pub use crate::retrieval::{RRF_K, authority_multiplier, fuse_and_rank, reciprocal_rank_fusion};
     pub use crate::sanitize::{Redacted, Redactor};
     pub use crate::scope::{
         ProjectKey, ProjectName, ResolvedScope, Scope, ScopeSource, WorkspaceName, resolve_scope,

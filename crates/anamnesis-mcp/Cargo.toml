@@ -19,6 +19,11 @@ rmcp = { workspace = true, features = ["server", "macros", "schemars"] }
 schemars.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+jiff.workspace = true
+parking_lot.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
