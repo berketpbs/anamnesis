@@ -685,3 +685,436 @@ fn truncated_cell(value: &str) -> String {
     let head: String = clean.chars().take(MAX_SUMMARY).collect();
     format!("{head}...")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anamnesis_core::scope::resolve_scope;
+    use std::path::PathBuf;
+
+    /// A repository built commit by commit, so a test states the history it
+    /// depends on instead of borrowing whatever this project's own history
+    /// happens to look like today.
+    struct Fixture {
+        dir: tempfile::TempDir,
+        repo: git2::Repository,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("repo dir");
+            let repo = git2::Repository::init(dir.path()).expect("git init");
+            Self { dir, repo }
+        }
+
+        fn path(&self) -> &Path {
+            self.dir.path()
+        }
+
+        /// Commit a set of files, authored by `who` at `when` (epoch seconds).
+        fn commit(&self, files: &[(&str, &str)], message: &str, who: &str, when: i64) -> git2::Oid {
+            for (name, body) in files {
+                let full: PathBuf = self.path().join(name);
+                if let Some(parent) = full.parent() {
+                    std::fs::create_dir_all(parent).expect("mkdir");
+                }
+                std::fs::write(&full, body).expect("write");
+            }
+            let tree = self.stage(files);
+
+            let when = git2::Time::new(when, 0);
+            let signature =
+                git2::Signature::new(who, "dev@example.invalid", &when).expect("signature");
+            let head = self
+                .repo
+                .head()
+                .ok()
+                .and_then(|head| head.peel_to_commit().ok());
+            let parents: Vec<&git2::Commit<'_>> = head.iter().collect();
+
+            self.repo
+                .commit(
+                    Some("HEAD"),
+                    &signature,
+                    &signature,
+                    message,
+                    &tree,
+                    &parents,
+                )
+                .expect("commit")
+        }
+
+        /// Record a two-parent commit, the shape churn has to ignore.
+        fn merge(&self, files: &[(&str, &str)], message: &str, when: i64) -> git2::Oid {
+            for (name, body) in files {
+                std::fs::write(self.path().join(name), body).expect("write");
+            }
+            let tree = self.stage(files);
+
+            let head = self
+                .repo
+                .head()
+                .expect("head")
+                .peel_to_commit()
+                .expect("commit");
+            let older = head.parent(0).expect("parent");
+            let when = git2::Time::new(when, 0);
+            let signature =
+                git2::Signature::new("Merger", "dev@example.invalid", &when).expect("signature");
+
+            self.repo
+                .commit(
+                    Some("HEAD"),
+                    &signature,
+                    &signature,
+                    message,
+                    &tree,
+                    &[&head, &older],
+                )
+                .expect("merge commit")
+        }
+
+        /// Stage the named files and return the tree they make.
+        fn stage(&self, files: &[(&str, &str)]) -> git2::Tree<'_> {
+            let mut index = self.repo.index().expect("index");
+            for (name, _) in files {
+                index.add_path(Path::new(name)).expect("add");
+            }
+            index.write().expect("index write");
+            let tree_id = index.write_tree().expect("write tree");
+            self.repo.find_tree(tree_id).expect("tree")
+        }
+    }
+
+    fn now() -> Timestamp {
+        "2026-08-25T09:00:00Z".parse().expect("timestamp")
+    }
+
+    /// 2026-01-01T00:00:00Z as epoch seconds, plus `days`.
+    fn at(days: i64) -> i64 {
+        1_767_225_600 + days * 86_400
+    }
+
+    fn body_of<'a>(pages: &'a [Draft], path: &str) -> &'a str {
+        pages
+            .iter()
+            .find(|page| page.path.as_str() == path)
+            .map_or("", |page| page.body.as_str())
+    }
+
+    #[test]
+    fn a_survey_counts_commits_authors_and_churn() {
+        let fixture = Fixture::new();
+        fixture.commit(&[("src/lib.rs", "one")], "feat: start", "Ada", at(0));
+        fixture.commit(&[("src/lib.rs", "two")], "fix: again", "Ada", at(1));
+        fixture.commit(&[("README.md", "docs")], "docs: readme", "Grace", at(2));
+
+        let survey = survey(fixture.path(), DEFAULT_MAX_COMMITS).expect("survey");
+
+        assert_eq!(survey.commits, 3);
+        assert_eq!(survey.merges, 0);
+        assert!(!survey.truncated);
+        assert_eq!(survey.authors.len(), 2);
+        // Ranked by commits, so the two-commit author leads.
+        assert_eq!(survey.authors[0].name, "Ada");
+        assert_eq!(survey.authors[0].commits, 2);
+        assert_eq!(survey.hotspots[0].path, "src/lib.rs");
+        assert_eq!(survey.hotspots[0].changes, 2);
+        // Newest first, and every commit is described.
+        assert_eq!(survey.recent.len(), 3);
+        assert_eq!(survey.recent[0].summary, "docs: readme");
+    }
+
+    #[test]
+    fn an_empty_repository_yields_nothing_to_seed() {
+        // `git init` and nothing else: an unborn HEAD must read as "no
+        // history", not as an error that stops someone bootstrapping a
+        // project they have only just created.
+        let fixture = Fixture::new();
+
+        let survey = survey(fixture.path(), DEFAULT_MAX_COMMITS).expect("survey");
+
+        assert!(survey.is_empty());
+        assert!(draft(&survey, now()).expect("draft").is_empty());
+    }
+
+    #[test]
+    fn merge_commits_are_counted_but_not_blamed_for_churn() {
+        // A merge's diff against its first parent contains every file the
+        // branch touched. Counting those would credit whoever merges most
+        // with having changed everything.
+        let fixture = Fixture::new();
+        fixture.commit(&[("a.txt", "one")], "feat: a", "Ada", at(0));
+        fixture.commit(&[("b.txt", "two")], "feat: b", "Ada", at(1));
+        fixture.merge(&[("merged.txt", "merged")], "merge branch", at(2));
+
+        let survey = survey(fixture.path(), DEFAULT_MAX_COMMITS).expect("survey");
+
+        assert_eq!(survey.commits, 3);
+        assert_eq!(survey.merges, 1);
+        assert!(
+            !survey
+                .hotspots
+                .iter()
+                .any(|hotspot| hotspot.path == "merged.txt"),
+            "a merge must not create churn: {:?}",
+            survey.hotspots
+        );
+    }
+
+    #[test]
+    fn the_walk_stops_at_its_bound_and_says_so() {
+        let fixture = Fixture::new();
+        for day in 0..4 {
+            fixture.commit(&[("a.txt", "x")], "chore: touch", "Ada", at(day));
+        }
+
+        let survey = survey(fixture.path(), 2).expect("survey");
+
+        assert_eq!(survey.commits, 2);
+        assert!(survey.truncated);
+        let pages = draft(&survey, now()).expect("draft");
+        assert!(
+            body_of(&pages, "bootstrap/repository.md").contains("stopped at its bound"),
+            "a partial count must not be presented as the whole history"
+        );
+    }
+
+    #[test]
+    fn a_pipe_in_a_commit_summary_cannot_break_a_table() {
+        let fixture = Fixture::new();
+        fixture.commit(
+            &[("a.txt", "x")],
+            "fix: handle a | b in the parser",
+            "A | B",
+            at(0),
+        );
+
+        let survey = survey(fixture.path(), DEFAULT_MAX_COMMITS).expect("survey");
+
+        assert_eq!(survey.authors[0].name, r"A \| B");
+        assert!(survey.recent[0].summary.contains(r"a \| b"));
+    }
+
+    #[test]
+    fn drafts_carry_provenance_and_link_to_each_other() {
+        let fixture = Fixture::new();
+        fixture.commit(&[("src/lib.rs", "one")], "feat: start", "Ada", at(0));
+
+        let survey = survey(fixture.path(), DEFAULT_MAX_COMMITS).expect("survey");
+        let pages = draft(&survey, now()).expect("draft");
+
+        let paths: Vec<&str> = pages.iter().map(|page| page.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "bootstrap/repository.md",
+                "bootstrap/contributors.md",
+                "bootstrap/hotspots.md",
+                "bootstrap/recent-work.md",
+            ]
+        );
+
+        for page in &pages {
+            assert!(
+                page.body.contains("Derived from git history"),
+                "{} lost its provenance footer",
+                page.path
+            );
+            // Nothing counted from commits may sit in a namespace that
+            // outranks pages someone reasoned their way to.
+            assert!(!page.path.is_authoritative());
+            assert!(page.frontmatter.salience <= 1.0);
+        }
+
+        let overview = pages.first().expect("overview");
+        let links = anamnesis_wiki::extract_links(&overview.body);
+        assert!(links.contains(&"bootstrap/contributors".to_owned()));
+        assert!(links.contains(&"bootstrap/hotspots".to_owned()));
+    }
+
+    /// A wiki, an index, and a scope, as `seed` expects them.
+    struct Memory {
+        _data: tempfile::TempDir,
+        store: Store,
+        wiki: Wiki,
+        scope: ResolvedScope,
+    }
+
+    fn memory(repo: &Path) -> Memory {
+        std::fs::write(
+            repo.join(".anamnesis.toml"),
+            "[scope]\nworkspace = \"default\"\nproject = \"widget\"\n",
+        )
+        .expect("marker");
+        let scope = resolve_scope(repo).expect("scope");
+
+        let data = tempfile::tempdir().expect("data");
+        let store = Store::open(data.path().join("index.db")).expect("store");
+        store.migrate().expect("migrate");
+        let wiki = Wiki::open(data.path().join("wiki")).expect("wiki");
+
+        Memory {
+            _data: data,
+            store,
+            wiki,
+            scope,
+        }
+    }
+
+    #[test]
+    fn seeding_writes_pages_and_indexes_them() {
+        let fixture = Fixture::new();
+        fixture.commit(
+            &[("src/parser.rs", "one")],
+            "feat: parse frontmatter",
+            "Ada",
+            at(0),
+        );
+        let memory = memory(fixture.path());
+        let survey = survey(fixture.path(), DEFAULT_MAX_COMMITS).expect("survey");
+        let drafts = draft(&survey, now()).expect("draft");
+
+        let report = seed(
+            &memory.store,
+            &memory.wiki,
+            &memory.scope,
+            &drafts,
+            false,
+            now(),
+        )
+        .expect("seed");
+
+        assert_eq!(report.written.len(), drafts.len());
+        assert!(report.skipped.is_empty());
+        // On disk...
+        for path in &report.written {
+            assert!(memory.wiki.exists(&memory.scope.scope, path));
+        }
+        // ...and answerable, which is the half a wiki write alone would miss.
+        let hits = memory
+            .store
+            .query_pages(memory.scope.project_id, "contributors", 10, now(), None)
+            .expect("query");
+        assert!(
+            hits.iter()
+                .any(|hit| hit.path.as_str() == "bootstrap/contributors.md"),
+            "seeded pages must be searchable immediately: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn seeding_twice_leaves_an_edited_page_alone() {
+        // The case this protects: someone rewrites bootstrap/repository.md by
+        // hand, then a later session runs bootstrap again. Losing that edit
+        // would make the command unsafe to re-run.
+        let fixture = Fixture::new();
+        fixture.commit(&[("a.txt", "x")], "feat: start", "Ada", at(0));
+        let memory = memory(fixture.path());
+        let survey = survey(fixture.path(), DEFAULT_MAX_COMMITS).expect("survey");
+        let drafts = draft(&survey, now()).expect("draft");
+
+        seed(
+            &memory.store,
+            &memory.wiki,
+            &memory.scope,
+            &drafts,
+            false,
+            now(),
+        )
+        .expect("first");
+
+        let path = drafts[0].path.clone();
+        let edited = memory.wiki.locate(&memory.scope.scope, &path);
+        let handwritten =
+            std::fs::read_to_string(&edited).expect("read") + "\nHand-written note.\n";
+        std::fs::write(&edited, &handwritten).expect("edit");
+
+        let second = seed(
+            &memory.store,
+            &memory.wiki,
+            &memory.scope,
+            &drafts,
+            false,
+            now(),
+        )
+        .expect("second");
+
+        assert!(second.written.is_empty());
+        assert_eq!(second.skipped.len(), drafts.len());
+        assert_eq!(
+            std::fs::read_to_string(&edited).expect("read"),
+            handwritten,
+            "an existing page must survive a re-run untouched"
+        );
+    }
+
+    #[test]
+    fn force_rewrites_what_bootstrap_wrote() {
+        let fixture = Fixture::new();
+        fixture.commit(&[("a.txt", "x")], "feat: start", "Ada", at(0));
+        let memory = memory(fixture.path());
+        let survey = survey(fixture.path(), DEFAULT_MAX_COMMITS).expect("survey");
+        let drafts = draft(&survey, now()).expect("draft");
+
+        seed(
+            &memory.store,
+            &memory.wiki,
+            &memory.scope,
+            &drafts,
+            false,
+            now(),
+        )
+        .expect("first");
+        let path = drafts[0].path.clone();
+        let page = memory.wiki.locate(&memory.scope.scope, &path);
+        std::fs::write(&page, "stale").expect("overwrite");
+
+        let second = seed(
+            &memory.store,
+            &memory.wiki,
+            &memory.scope,
+            &drafts,
+            true,
+            now(),
+        )
+        .expect("second");
+
+        assert_eq!(second.written.len(), drafts.len());
+        assert!(second.skipped.is_empty());
+        assert!(
+            std::fs::read_to_string(&page)
+                .expect("read")
+                .contains("Derived from git history")
+        );
+    }
+
+    #[test]
+    fn ranking_is_stable_across_runs() {
+        // Churn and author counts come out of a HashMap, whose iteration
+        // order changes between runs. Without a tiebreak, two equal entries
+        // would swap places and every re-run would produce a wiki commit that
+        // says nothing.
+        let fixture = Fixture::new();
+        fixture.commit(&[("a.txt", "x"), ("b.txt", "y")], "feat: two", "Ada", at(0));
+
+        let first = survey(fixture.path(), DEFAULT_MAX_COMMITS).expect("first");
+        let second = survey(fixture.path(), DEFAULT_MAX_COMMITS).expect("second");
+
+        assert_eq!(first.hotspots, second.hotspots);
+        assert_eq!(first.authors, second.authors);
+    }
+
+    #[test]
+    fn dotfiles_are_not_mistaken_for_a_language() {
+        let files = vec![
+            ".gitignore".to_owned(),
+            "src/main.rs".to_owned(),
+            "src/lib.rs".to_owned(),
+        ];
+
+        let counts = extension_counts(&files);
+
+        assert_eq!(counts, vec![("rs".to_owned(), 2)]);
+    }
+}
