@@ -55,6 +55,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repository it describes
 
 ### Fixed
+- Entity matching finds names that are not a single word. Names were stored
+  whole and compared against tokenized queries, so `Windows BOM` or
+  `anamnesis-llm` could never match anything, and the pages they named were
+  reachable through full text alone. Names are now split at write time, and an
+  entity matches when every one of its tokens is in the query; names stored
+  before this still match whole, and are split the next time their page is
+  written or reindexed
 - Supersession reaches the index. `supersedes` was accepted by the MCP tool,
   written into frontmatter, and then dropped: no column was written and
   `is_latest` never changed, so an agent recording that one page replaced
