@@ -68,6 +68,13 @@ pub type Result<T> = std::result::Result<T, WikiError>;
 const COMMIT_NAME: &str = "anamnesis";
 /// Address recorded on wiki commits.
 const COMMIT_EMAIL: &str = "anamnesis@localhost";
+/// Branch a newly created wiki starts on.
+///
+/// Named explicitly because `libgit2` still defaults to `master` and ignores
+/// `init.defaultBranch` entirely — so without this the branch a wiki lives on
+/// depends on which library created it, and someone pushing their memory to a
+/// remote gets a branch name they never chose.
+const INITIAL_BRANCH: &str = "main";
 
 /// A git-backed markdown wiki rooted at one directory.
 pub struct Wiki {
@@ -77,6 +84,10 @@ pub struct Wiki {
 
 impl Wiki {
     /// Open the wiki at `root`, creating the directory and repository if needed.
+    ///
+    /// A repository that already exists is opened as it is, whatever branch it
+    /// is on: renaming someone's branch out from under them — possibly one
+    /// they have already pushed — is not something opening a wiki should do.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
         std::fs::create_dir_all(&root).map_err(|source| WikiError::Io {
@@ -86,7 +97,11 @@ impl Wiki {
 
         let repo = match git2::Repository::open(&root) {
             Ok(repo) => repo,
-            Err(_) => git2::Repository::init(&root)?,
+            Err(_) => {
+                let mut options = git2::RepositoryInitOptions::new();
+                options.initial_head(INITIAL_BRANCH);
+                git2::Repository::init_opts(&root, &options)?
+            }
         };
 
         Ok(Self { root, repo })
@@ -312,6 +327,34 @@ mod tests {
             frontmatter,
             body,
         )
+    }
+
+    #[test]
+    fn a_new_wiki_starts_on_main() {
+        // libgit2 ignores `init.defaultBranch` and would pick `master`, so the
+        // branch a wiki lives on would otherwise depend on which library
+        // happened to create it.
+        let dir = tempfile::tempdir().unwrap();
+        let wiki = Wiki::open(dir.path()).unwrap();
+        wiki.write_page(&scope(), &sample("body"), "first").unwrap();
+
+        let head = wiki.repo.head().unwrap();
+        assert_eq!(head.shorthand().unwrap(), "main");
+    }
+
+    #[test]
+    fn an_existing_wiki_keeps_the_branch_it_is_on() {
+        // Reopening must not rename a branch someone may already have pushed.
+        let dir = tempfile::tempdir().unwrap();
+        let mut options = git2::RepositoryInitOptions::new();
+        options.initial_head("master");
+        git2::Repository::init_opts(dir.path(), &options).unwrap();
+
+        let wiki = Wiki::open(dir.path()).unwrap();
+        wiki.write_page(&scope(), &sample("body"), "first").unwrap();
+
+        let head = wiki.repo.head().unwrap();
+        assert_eq!(head.shorthand().unwrap(), "master");
     }
 
     #[test]

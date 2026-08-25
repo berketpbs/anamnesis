@@ -205,8 +205,10 @@ git -C <data_dir>/wiki remote add origin git@example.com:me/memory.git
 git -C <data_dir>/wiki push -u origin HEAD
 ```
 
-`HEAD`, not a branch name: the wiki repository is created by `git2`, which
-initializes on `master` regardless of your `init.defaultBranch`.
+`HEAD` rather than a branch name, because a wiki created before this was
+fixed is on `master`: `libgit2` ignores `init.defaultBranch`, and older
+versions left the branch it chose. New wikis start on `main`, and reopening
+an existing one never renames its branch.
 
 ## Configuration
 
