@@ -14,15 +14,15 @@ Anamnesis is a system for capturing, storing, and retrieving context from AI cod
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                        CLI / Web UI                         │
-│               (anamnesis-cli, anamnesis-web)               │
+│                      CLI / HTTP server                      │
+│               (anamnesis-cli, anamnesis-web)                │
 └────────────────────────────┬────────────────────────────────┘
                              │
             ┌────────────────┼────────────────┐
             │                │                │
 ┌───────────▼────────┐  ┌────▼──────────┐   │
-│  Consolidate       │  │  Workstream   │   │
-│  (LLM-powered)     │  │  Management   │   │
+│  Consolidate       │  │  Workstreams  │   │
+│  (model optional)  │  │  (core+store) │   │
 └────────┬───────────┘  └────┬──────────┘   │
          │                    │               │
          └────────────────────┼───────────────┘
@@ -77,24 +77,29 @@ Git-versioned markdown file management.
 Lifecycle event capture from agent sessions.
 
 **Provides:**
-- Hook payload parsing
+- Hook payload parsing (Claude Code today; one module per harness)
 - Observation creation
-- Event aggregation
-- Capture exclusion filters
+- Redaction, applied before an observation reaches storage
+
+> Path-based capture exclusion (`[capture] ignore_paths`) is **not
+> implemented**. The setting parses; nothing reads it.
 
 ### anamnesis-llm
-LLM provider abstraction.
+LLM provider abstraction, and the local embedder.
 
 **Provides:**
-- Provider trait and implementations
-- Prompt building
-- Token counting
-- Streaming response handling
+- Provider trait and one implementation
+- Prompt building, with a token budget that trims long sessions from the middle
+- Structured output enforced by a JSON schema
+- Local embeddings (candle, CPU, all-MiniLM-L6-v2), off unless
+  `ANAMNESIS_EMBED_ENABLED=1`
 
 **Supports:**
-- Anthropic (Claude API)
-- OpenAI
-- Local endpoints (Ollama, LM Studio)
+- Anthropic Messages API. `ANAMNESIS_LLM_BASE_URL` points it at a gateway
+  that speaks the same wire format; there is no OpenAI or Ollama provider.
+
+Requests are not streamed: consolidation is one POST per finished session,
+made after the hook's response has already been sent.
 
 ### anamnesis-consolidate
 Session consolidation and summary generation.
@@ -117,7 +122,6 @@ Model Context Protocol server implementation.
 **Tools:**
 - `memory_query` - Search wiki
 - `memory_write_page` - Create wiki pages
-- `memory_feedback` - Rate page usefulness
 - `memory_handoff_accept` - Accept session handoff
 - `workstream_start` - Start or resume a named thread of work
 - `workstream_status` - A workstream's status and event ledger
@@ -129,22 +133,25 @@ and their tool surface here — the same split `Page` and `Handoff` already
 follow.
 
 ### anamnesis-web
-Web UI and HTTP server.
+The HTTP server hooks deliver to.
 
 **Provides:**
-- Wiki browser interface
-- Search UI
-- Git history visualization
-- REST API endpoints
+- `POST /hook` — accept one lifecycle event, record it, return 202
+- `GET /handoff` — hand the next session what the last one left
+- `GET /health`
+- The consolidation pipeline, which runs *after* the response is sent
+
+> There is no web UI: no wiki browser, no search page, no git visualization.
+> There is also no authentication — bind to loopback, which is the default.
 
 ### anamnesis-cli
 Command-line interface.
 
 **Provides:**
-- CLI subcommands
-- Configuration management
-- Interactive pickers
-- Status reporting
+- `status`, `init`, `serve`, `mcp`, `hook`, `install-hooks`
+- `search`, `write-page`, `show-page`, `sessions`, `handoff`
+- `reindex` — rebuild the index from `wiki/` and `raw/`
+- `bootstrap` — seed a new project's memory from its git history
 
 ## Data Flow
 
@@ -153,14 +160,22 @@ Command-line interface.
 ```
 Agent Session
     │
-    ├─→ Hook Event (SessionStart, ToolCall, etc.)
+    ├─→ Hook Event (SessionStart, UserPromptSubmit, PostToolUse, …)
     │
-    ├─→ anamnesis-hooks (Sanitize & validate)
+    ├─→ anamnesis-hooks (Redact & validate)
     │
-    └─→ anamnesis-store (Persist observation)
+    └─→ anamnesis-store
          │
-         └─→ SQLite DB
+         ├─→ SQLite index   (authority for this request)
+         │
+         └─→ raw/ spool     (append-only JSONL, outlives the index)
 ```
+
+The order matters: the index is written first because the request depends on
+it, then the transcript. A spool failure is logged and stepped over — losing
+the durable copy is bad, losing the event because a disk filled up is worse.
+The spool refuses an observation that has not been redacted, since it is the
+longest-lived copy in the system.
 
 ### Consolidation
 
@@ -181,44 +196,58 @@ Session Ends
 ```
 Next Session Starts
     │
-    ├─→ anamnesis-mcp (memory_query tool)
+    ├─→ anamnesis-mcp (memory_query) or `anamnesis search`
     │
-    ├─→ anamnesis-store (FTS5 search)
+    ├─→ four independent streams
+    │     ├─ FTS5 over pages_fts
+    │     ├─ entity matching, weighted by inverse frequency
+    │     ├─ link neighbours, over page_links
+    │     └─ vector cosine (only when the local embedder is enabled)
     │
-    ├─→ anamnesis-wiki (Resolve entities)
+    ├─→ reciprocal-rank fusion (anamnesis_core::retrieval, a pure function)
     │
     └─→ Return results to agent
 ```
 
+Tier is a bounded signal applied *after* candidates are generated, never an
+independent retriever: otherwise a targeted search for something said once in
+one session would be buried under durable pages that merely outrank it.
+
 ## Storage Schema
 
-### Sessions Table
-- id: UUID
-- agent: String (claude-code, codex, etc.)
-- start_time: DateTime
-- end_time: DateTime (optional)
-- checkout_path: String
-- project_id: UUID
-- workspace_id: UUID
+Twelve tables across six migrations (`V01`–`V06`), the authoritative copy of
+which is `crates/anamnesis-store/migrations/`. Every timestamp is RFC 3339
+with an explicit `Z`, always written from Rust — no column carries a SQL
+default, because SQLite's `CURRENT_TIMESTAMP` has a different shape and
+mixing the two would break both parsing and lexicographic ordering.
 
-### Observations Table
-- id: UUID
-- session_id: UUID
-- event_type: String (prompt, tool_call, tool_result, etc.)
-- timestamp: DateTime
-- payload: JSON
-- sanitized: Boolean
+Identifiers are UUIDv5 derived from what they name — a page from
+`(project, path)`, a session from `(project, agent session id)` — which is
+what makes the whole index disposable and rebuildable.
 
-### Pages Table
-- id: UUID
-- project_id: UUID
-- path: String
-- title: String
-- body: Text (Markdown)
-- entities: JSON array
-- created_at: DateTime
-- updated_at: DateTime
-- git_commit: String
+### sessions
+`id`, `project_id`, `agent`, `checkout_path`, `state` (`open` / `ending` /
+`closed`), `started_at`, `ended_at`, `workstream_id`.
+
+Sessions reference the project only; the workspace is reachable through it,
+so there is no way to record a session whose workspace and project disagree.
+
+### observations
+`id`, `session_id`, `kind`, `tool_name`, `tool_ok`, `at`, `body`,
+`truncated`, `sanitized`.
+
+### pages
+`id`, `project_id`, `path`, `title`, `body`, `tier`, `status`, `pinned`,
+`canonical`, `supersedes`, `is_latest`, `salience`, `access_count`,
+`last_accessed_at`, `expires_at`, `git_commit`, `created_at`, `updated_at`.
+
+Entities are *not* a column: they live in `entities` and `page_entities`, so
+the entity retrieval stream can weight them by inverse frequency. Links live
+in `page_links`, which is what makes link-neighbour retrieval possible.
+
+### The rest
+`projects`, `pages_fts` (FTS5, unicode61), `entities`, `page_entities`,
+`page_links`, `handoffs`, `page_feedback`, `page_embeddings`, `workstreams`.
 
 ## Configuration
 
@@ -251,6 +280,11 @@ Unknown keys are an error, so a typo surfaces instead of quietly sending memory
 to the wrong project. `.ai-memory.toml` is still read as a fallback filename for
 projects migrating from upstream `ai-memory`.
 
+Of the tables above, only `[scope]` changes what the system does today.
+`[capture]`, `[slots]`, and `[auto_improve]` are parsed and validated, and
+then nothing reads them. They are accepted so that a file written for a later
+version does not fail to load, not because they take effect.
+
 ### Data directory
 
 Memory lives outside the repository it describes, so the wiki can carry its own
@@ -270,15 +304,34 @@ data directory.
 
 ## Security Considerations
 
-- **Sanitization**: Sensitive data removed from observations (API keys, passwords, PII)
-- **Capture Exclusions**: Patterns exclude files/paths from capture
-- **Bearer Token Auth**: Optional authentication for shared servers
-- **Per-User Slots**: Optional isolation of context per operator
+**Implemented:**
+
+- **Redaction** — observations are scrubbed of secret-shaped text before they
+  reach either the index or the spool, and the spool rejects anything that
+  arrives unredacted.
+- **Loopback by default** — `anamnesis serve` binds `127.0.0.1`.
+- **Path containment** — `PagePath` rejects absolute paths, `..`, drive
+  letters, and backslashes, so no page written through it can escape its
+  project directory.
+
+**Not implemented — do not rely on these:**
+
+- **`[capture] ignore_paths`** — parsed, never consulted. Excluding `.env`
+  here does nothing; redaction is the only thing standing between a secret in
+  a prompt and the wiki.
+- **Bearer-token auth** — there is no authentication on the HTTP server.
+- **`[slots] per_user`** — every session shares one scope.
 
 ## Future Enhancements
 
-1. **Vector Embeddings** - Optional semantic search via embedding providers
-2. **Graph Database** - Entity relationship tracking
-3. **Multi-Agent Coordination** - Shared context between agents
-4. **Policy Engine** - Fine-grained access control
-5. **Audit Trail** - Complete action logging
+Shipped since this list was written: vector embeddings (local candle
+embedder, opt-in), the raw spool, `reindex`, and `bootstrap`.
+
+Still ahead:
+
+1. **Graph Database** - Entity relationship tracking
+2. **Multi-Agent Coordination** - Shared context between agents
+3. **Policy Engine** - Fine-grained access control
+4. **Audit Trail** - Complete action logging
+5. **Auto-improve** - The scheduler the configuration already describes
+6. **Evals** - The empty crate at `evals/`
