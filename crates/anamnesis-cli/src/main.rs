@@ -1,6 +1,7 @@
 //! CLI entry point for anamnesis.
 
 mod bootstrap;
+mod hooks;
 mod reindex;
 mod sweep;
 
@@ -129,15 +130,30 @@ enum Commands {
         server: String,
     },
 
-    /// Print the hook configuration to add to the agent's settings
+    /// Wire the agent's lifecycle hooks to anamnesis
+    ///
+    /// Prints the configuration by default. `--write` merges it into the
+    /// settings file instead, which is the same thing with the paste-it-
+    /// yourself mistakes removed.
     InstallHooks {
-        /// Which harness to print configuration for
+        /// Which harness to configure
         #[arg(long, default_value = "claude-code")]
         agent: String,
 
         /// Server the hooks should deliver to
         #[arg(long, default_value = "http://127.0.0.1:8080")]
         server: String,
+
+        /// Merge the configuration into the settings file instead of printing
+        #[arg(long)]
+        write: bool,
+
+        /// Settings file to write to, when `--write` is given
+        ///
+        /// Defaults to this project's `.claude/settings.local.json`. Point it
+        /// at the user-level settings to capture every project.
+        #[arg(long)]
+        settings: Option<PathBuf>,
     },
 
     /// Rebuild the index from the wiki and the raw transcripts
@@ -287,8 +303,13 @@ fn main() -> anyhow::Result<()> {
         Commands::Hook { agent, server } => {
             cmd_hook(&agent, &server);
         }
-        Commands::InstallHooks { agent, server } => {
-            cmd_install_hooks(&agent, &server)?;
+        Commands::InstallHooks {
+            agent,
+            server,
+            write,
+            settings,
+        } => {
+            cmd_install_hooks(&agent, &server, write, settings)?;
         }
         Commands::Reindex => {
             cmd_reindex(cli.data_dir.clone())?;
@@ -878,7 +899,12 @@ fn session_and_cwd(payload: &str) -> (String, String) {
     (field("session_id"), cwd)
 }
 
-fn cmd_install_hooks(agent: &str, server: &str) -> anyhow::Result<()> {
+fn cmd_install_hooks(
+    agent: &str,
+    server: &str,
+    write: bool,
+    settings: Option<PathBuf>,
+) -> anyhow::Result<()> {
     if agent != "claude-code" {
         println!("No hook template for {agent} yet.");
         return Ok(());
@@ -887,34 +913,64 @@ fn cmd_install_hooks(agent: &str, server: &str) -> anyhow::Result<()> {
     let binary = std::env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "anamnesis".to_owned());
-    let command = format!("{binary} hook --agent claude-code --server {server}");
+    let config = hooks::hook_config(&hooks::hook_command(&binary, agent, server));
 
-    println!("Add this to your Claude Code settings.json:");
+    if !write {
+        println!("Add this to your Claude Code settings.json:");
+        println!();
+        println!("{}", serde_json::to_string_pretty(&config)?);
+        println!();
+        println!("Or run this again with `--write` to merge it in for you.");
+        println!("Then start the server with `anamnesis serve`.");
+        return Ok(());
+    }
+
+    let path = match settings {
+        Some(path) => path,
+        None => hooks::default_settings_path(&std::env::current_dir()?),
+    };
+
+    // Read failures stop here rather than starting a fresh file over the top of
+    // one we could not parse. Printing the configuration leaves the person a
+    // minute of pasting; the alternative costs them their editor settings.
+    let mut existing = match hooks::read_settings(&path) {
+        Ok(settings) => settings,
+        Err(error) => {
+            println!("Could not read {} — {error}", path.display());
+            println!();
+            println!("Nothing was changed. Add this by hand:");
+            println!();
+            println!("{}", serde_json::to_string_pretty(&config)?);
+            return Ok(());
+        }
+    };
+
+    let outcome = hooks::merge(&mut existing, &config);
+    if outcome.changed() {
+        hooks::write_settings(&path, &existing)?;
+    }
+
+    println!("🪝 {}", path.display());
     println!();
-    let events = [
-        "SessionStart",
-        "UserPromptSubmit",
-        "PostToolUse",
-        "PreCompact",
-        "SessionEnd",
-    ];
-    let hooks: serde_json::Map<String, serde_json::Value> = events
-        .iter()
-        .map(|event| {
-            (
-                (*event).to_owned(),
-                serde_json::json!([{
-                    "hooks": [{ "type": "command", "command": command }]
-                }]),
-            )
-        })
-        .collect();
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({ "hooks": hooks }))?
-    );
+    if !outcome.added.is_empty() {
+        println!("  Wired:        {}", outcome.added.join(", "));
+    }
+    if !outcome.present.is_empty() {
+        println!("  Already there: {}", outcome.present.join(", "));
+    }
+    if !outcome.changed() {
+        println!();
+        println!("  Nothing to do — every event was already delivering here.");
+        return Ok(());
+    }
+
     println!();
-    println!("Then start the server with `anamnesis serve`.");
+    println!("  Delivering to {server}.");
+    // Said rather than assumed: hooks are read when a session starts, so the
+    // session running this command is not the one that will be captured.
+    println!("  Takes effect in the next session, not this one.");
+    println!("  Start the server with `anamnesis serve`, then check with");
+    println!("  `anamnesis status`.");
     Ok(())
 }
 
