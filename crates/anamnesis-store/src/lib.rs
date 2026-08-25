@@ -31,12 +31,14 @@ mod embedded {
 }
 
 mod convert;
+mod improve;
 mod ops;
 mod query;
 mod raw;
 mod sweep;
 mod workstream;
 
+pub use improve::{Filed, ProjectRow, StoredProposal};
 pub use ops::{SessionSummary, new_handoff, new_observation, new_session};
 pub use query::PageHit;
 pub use raw::{RawError, RawRecord, RawSpool};
@@ -146,13 +148,19 @@ impl Store {
     pub fn upsert_project(&self, scope: &ResolvedScope, now: Timestamp) -> Result<()> {
         let conn = self.conn.lock();
         conn.execute(
+            // `root_path` is where this project's marker file was found, and
+            // it is refreshed on every registration rather than kept from the
+            // first: a repository someone moved is still the same project,
+            // and a scheduler looking for its settings has to look where it
+            // is now.
             "INSERT INTO projects
-                 (id, workspace_id, workspace, name, project_key, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+                 (id, workspace_id, workspace, name, project_key, root_path, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
              ON CONFLICT (id) DO UPDATE SET
                  workspace   = excluded.workspace,
                  name        = excluded.name,
                  project_key = excluded.project_key,
+                 root_path   = excluded.root_path,
                  updated_at  = excluded.updated_at",
             rusqlite::params![
                 scope.project_id.to_string(),
@@ -160,6 +168,7 @@ impl Store {
                 scope.scope.workspace.as_str(),
                 scope.scope.project.as_str(),
                 scope.key.as_str(),
+                scope.root.to_string_lossy(),
                 now.to_string(),
             ],
         )?;
@@ -211,14 +220,14 @@ mod tests {
         assert_eq!(store.schema_version().expect("version"), None);
 
         store.migrate().expect("migrate");
-        assert_eq!(store.schema_version().expect("version"), Some(6));
+        assert_eq!(store.schema_version().expect("version"), Some(7));
     }
 
     #[test]
     fn migrating_twice_is_a_no_op() {
         let store = migrated();
         store.migrate().expect("second migrate");
-        assert_eq!(store.schema_version().expect("version"), Some(6));
+        assert_eq!(store.schema_version().expect("version"), Some(7));
     }
 
     #[test]
