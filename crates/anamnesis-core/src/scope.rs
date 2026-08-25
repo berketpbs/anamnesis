@@ -13,7 +13,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use crate::config::MarkerConfig;
+use crate::config::{CaptureConfig, MarkerConfig};
 use crate::error::{CoreError, Result};
 use crate::ids::{ProjectId, WorkspaceId};
 
@@ -195,6 +195,11 @@ pub struct ResolvedScope {
     pub source: ScopeSource,
     /// Marker file that participated in resolution, if any.
     pub marker: Option<PathBuf>,
+    /// Directory the project's relative configuration resolves against: the
+    /// marker's directory, the repository root, or the working directory.
+    pub root: PathBuf,
+    /// Paths this project has asked never to be captured.
+    pub capture: CaptureConfig,
 }
 
 /// Location of a discovered marker file.
@@ -258,6 +263,16 @@ pub fn resolve_scope(cwd: &Path) -> Result<ResolvedScope> {
         _ => derive_project(&cwd)?,
     };
 
+    // Relative patterns belong to whoever wrote them: the marker's directory
+    // when there is a marker, the repository otherwise. Falling back to the
+    // working directory last means a pattern still resolves against something
+    // predictable in a directory that is neither.
+    let root = marker
+        .as_ref()
+        .and_then(|loc| loc.path.parent().map(Path::to_path_buf))
+        .or_else(|| discover_repository(&cwd).and_then(|repo| repo.workdir))
+        .unwrap_or_else(|| cwd.clone());
+
     Ok(ResolvedScope {
         workspace_id: WorkspaceId::derive(&workspace),
         project_id: ProjectId::derive(&workspace, &key),
@@ -265,6 +280,8 @@ pub fn resolve_scope(cwd: &Path) -> Result<ResolvedScope> {
         key,
         source,
         marker: marker.map(|m| m.path),
+        root,
+        capture: config.map(|c| c.capture).unwrap_or_default(),
     })
 }
 
