@@ -23,6 +23,31 @@ use crate::ids::PageId;
 /// fused ranking just by being confident.
 pub const RRF_K: f64 = 60.0;
 
+/// Split text into the tokens retrieval matches on.
+///
+/// One home for this on purpose. A query is tokenized before it is compared
+/// against anything, so whatever it is compared *to* has to be tokenized the
+/// same way — an entity named `Windows BOM`, stored whole, can never equal any
+/// token a query produces, and the page it names quietly becomes unreachable
+/// through that stream.
+///
+/// Deliberately blunt: split on everything that is not alphanumeric, lowercase
+/// what is left, keep the order, drop repeats. `crates/anamnesis-llm` and
+/// `crates anamnesis llm` come out the same, which is the point.
+pub fn tokenize(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for word in text.split(|c: char| !c.is_alphanumeric()) {
+        if word.is_empty() {
+            continue;
+        }
+        let lower = word.to_lowercase();
+        if !tokens.contains(&lower) {
+            tokens.push(lower);
+        }
+    }
+    tokens
+}
+
 /// Fuse ranked streams (each ordered best match first) into one score per id.
 ///
 /// A page absent from a stream contributes nothing to that stream's sum; it is
@@ -74,6 +99,25 @@ pub fn authority_multiplier(pinned: bool, canonical: bool, authoritative_namespa
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn tokens_are_lowercased_split_and_deduplicated() {
+        assert_eq!(
+            tokenize("crates/anamnesis-llm/src/lib.rs"),
+            vec!["crates", "anamnesis", "llm", "src", "lib", "rs"]
+        );
+        assert_eq!(tokenize("Windows BOM"), vec!["windows", "bom"]);
+        assert_eq!(tokenize("SQLite sqlite SQLITE"), vec!["sqlite"]);
+        assert!(tokenize("   ...   ").is_empty());
+    }
+
+    #[test]
+    fn a_name_and_the_query_someone_types_for_it_agree() {
+        // The property the entity stream depends on: however someone spells
+        // the separator, the tokens match.
+        assert_eq!(tokenize("anamnesis-llm"), tokenize("anamnesis llm"));
+        assert_eq!(tokenize("lib.rs"), tokenize("lib rs"));
+    }
 
     fn id(n: u128) -> PageId {
         PageId::from_uuid(Uuid::from_u128(n))

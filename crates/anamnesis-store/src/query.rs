@@ -17,7 +17,7 @@ use std::collections::HashMap;
 
 use anamnesis_core::ids::{PageId, ProjectId};
 use anamnesis_core::page::{Entity, PagePath, PageStatus, Tier};
-use anamnesis_core::retrieval::{RRF_K, authority_multiplier, fuse_and_rank};
+use anamnesis_core::retrieval::{RRF_K, authority_multiplier, fuse_and_rank, tokenize};
 use jiff::Timestamp;
 use rusqlite::types::Value;
 use rusqlite::{OptionalExtension, params, params_from_iter};
@@ -243,6 +243,18 @@ impl Store {
                 params![project_id.to_string(), entity.as_str()],
                 |row| row.get(0),
             )?;
+
+            // Split once, here, so the match can compare like with like. Done
+            // on every write rather than only on insert: it costs one
+            // statement per token and it is what backfills the names that
+            // were stored before this table existed.
+            for token in tokenize(entity.as_str()) {
+                tx.execute(
+                    "INSERT INTO entity_tokens (entity_id, token) VALUES (?1, ?2)
+                     ON CONFLICT (entity_id, token) DO NOTHING",
+                    params![entity_id, token],
+                )?;
+            }
             tx.execute(
                 "INSERT INTO page_entities (page_id, entity_id) VALUES (?1, ?2)
                  ON CONFLICT (page_id, entity_id) DO NOTHING",
@@ -367,11 +379,33 @@ impl Store {
         limit: usize,
     ) -> Result<Vec<PageId>> {
         let placeholders = placeholders(tokens.len());
+        // Two ways to match, and the first is the one that matters: an entity
+        // matches when *every* token of its name is in the query, so
+        // `Windows BOM` is found by "windows bom" and not by "windows" alone.
+        // Requiring all of them keeps a two-word name from answering half a
+        // question; the other three streams are what find a page from half a
+        // name.
+        //
+        // The second is for entities stored before their tokens were: those
+        // rows have no `entity_tokens` at all, and until something rewrites
+        // the page — or `anamnesis reindex` does — they can still be matched
+        // whole, exactly as they were.
         let sql = format!(
             "SELECT pe.page_id FROM page_entities pe
              JOIN entities e ON e.id = pe.entity_id
              JOIN pages p ON p.id = pe.page_id
-             WHERE e.project_id = ? AND lower(e.name) IN ({placeholders})
+             WHERE e.project_id = ?
+               AND (
+                 e.id IN (
+                   SELECT et.entity_id FROM entity_tokens et
+                   JOIN entities scoped ON scoped.id = et.entity_id
+                   WHERE scoped.project_id = ?
+                   GROUP BY et.entity_id
+                   HAVING COUNT(*) > 0
+                      AND COUNT(*) = SUM(CASE WHEN et.token IN ({placeholders}) THEN 1 ELSE 0 END)
+                 )
+                 OR lower(e.name) IN ({placeholders})
+               )
                AND p.is_latest = 1 AND p.status != 'superseded'
              GROUP BY pe.page_id
              ORDER BY SUM(
@@ -380,7 +414,11 @@ impl Store {
              LIMIT ?"
         );
 
-        let mut values: Vec<Value> = vec![Value::Text(project_id.to_string())];
+        let mut values: Vec<Value> = vec![
+            Value::Text(project_id.to_string()),
+            Value::Text(project_id.to_string()),
+        ];
+        values.extend(tokens.iter().map(|token| Value::Text(token.clone())));
         values.extend(tokens.iter().map(|token| Value::Text(token.clone())));
         values.push(Value::Integer(limit as i64));
 
@@ -485,25 +523,6 @@ fn collect_ids(rows: impl Iterator<Item = rusqlite::Result<String>>) -> Result<V
     rows.map(|row| row.map(parse_id))
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
-}
-
-/// Split a query into lowercase alphanumeric tokens, deduplicated in order.
-///
-/// Punctuation is discarded rather than escaped, which is what keeps the FTS5
-/// MATCH expression built from these tokens safe: nothing left in a token can
-/// be mistaken for query syntax.
-fn tokenize(text: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    for word in text.split(|c: char| !c.is_alphanumeric()) {
-        if word.is_empty() {
-            continue;
-        }
-        let lower = word.to_lowercase();
-        if !tokens.contains(&lower) {
-            tokens.push(lower);
-        }
-    }
-    tokens
 }
 
 /// A leading slice of a page body, for a hit that has not been opened yet.
@@ -635,6 +654,163 @@ mod tests {
             .unwrap();
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].title, "Why SQLite", "authority should win the tie");
+    }
+
+    #[test]
+    fn a_two_word_entity_is_found_by_the_query_someone_would_type() {
+        // Stored whole, this name could never equal a token, because a query
+        // is split before it is matched. The page was reachable through full
+        // text and through nothing else.
+        let (_dir, store, project, _workspace) = fixture();
+        write_page(
+            &store,
+            project,
+            "gotchas/encoding.md",
+            "Encoding trap",
+            "PowerShell prepends three bytes when piping to a native exe.",
+            vec![Entity::parse("Windows BOM").unwrap()],
+        );
+
+        let hits = store
+            .query_pages(project, "windows bom", 10, now(), None)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title, "Encoding trap");
+    }
+
+    #[test]
+    fn a_hyphenated_entity_is_found_however_the_separator_is_typed() {
+        let (_dir, store, project, _workspace) = fixture();
+        // Nothing in the path, title, or body carries either token, so a hit
+        // can only have come through the entity.
+        write_page(
+            &store,
+            project,
+            "notes/provider.md",
+            "The provider crate",
+            "Where the provider trait lives.",
+            vec![Entity::parse("anamnesis-llm").unwrap()],
+        );
+
+        for query in ["anamnesis-llm", "anamnesis llm", "ANAMNESIS-LLM"] {
+            let hits = store.query_pages(project, query, 10, now(), None).unwrap();
+            assert_eq!(hits.len(), 1, "no hit for {query:?}");
+        }
+    }
+
+    #[test]
+    fn half_a_name_is_not_a_match_for_the_whole_name() {
+        // All of a name's tokens have to be present. A two-word entity that
+        // answered to either word would drown the stream it shares with three
+        // others; half a name is what full text is for.
+        let (_dir, store, project, _workspace) = fixture();
+        write_page(
+            &store,
+            project,
+            "gotchas/encoding.md",
+            "Encoding trap",
+            "PowerShell prepends three bytes when piping to a native exe.",
+            vec![Entity::parse("Windows BOM").unwrap()],
+        );
+
+        assert!(
+            store
+                .query_pages(project, "windows", 10, now(), None)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_query_naming_more_than_the_entity_still_matches_it() {
+        let (_dir, store, project, _workspace) = fixture();
+        write_page(
+            &store,
+            project,
+            "gotchas/encoding.md",
+            "Encoding trap",
+            "PowerShell prepends three bytes when piping to a native exe.",
+            vec![Entity::parse("Windows BOM").unwrap()],
+        );
+
+        let hits = store
+            .query_pages(
+                project,
+                "why does the windows bom break docker",
+                10,
+                now(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn an_entity_stored_before_its_tokens_were_still_matches() {
+        // What every row in an existing database looks like until something
+        // rewrites its page. Matching them whole, as before, is what keeps
+        // this from being a retrieval regression that only a rebuild fixes.
+        let (_dir, store, project, _workspace) = fixture();
+        write_page(
+            &store,
+            project,
+            "concepts/react.md",
+            "Frontend framework",
+            "The team picked a component model for the dashboard.",
+            vec![Entity::parse("React").unwrap()],
+        );
+        store
+            .connection()
+            .execute("DELETE FROM entity_tokens", [])
+            .expect("drop the tokens");
+
+        let hits = store
+            .query_pages(project, "React", 10, now(), None)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn rewriting_a_page_backfills_the_tokens_of_an_older_entity() {
+        let (_dir, store, project, _workspace) = fixture();
+        let entities = vec![Entity::parse("Windows BOM").unwrap()];
+        write_page(
+            &store,
+            project,
+            "gotchas/encoding.md",
+            "Encoding trap",
+            "PowerShell prepends three bytes when piping to a native exe.",
+            entities.clone(),
+        );
+        store
+            .connection()
+            .execute("DELETE FROM entity_tokens", [])
+            .expect("drop the tokens");
+        assert!(
+            store
+                .query_pages(project, "windows bom", 10, now(), None)
+                .unwrap()
+                .is_empty(),
+            "an untokenized two-word name is unreachable, which is the bug"
+        );
+
+        write_page(
+            &store,
+            project,
+            "gotchas/encoding.md",
+            "Encoding trap",
+            "PowerShell prepends three bytes when piping to a native exe.",
+            entities,
+        );
+
+        assert_eq!(
+            store
+                .query_pages(project, "windows bom", 10, now(), None)
+                .unwrap()
+                .len(),
+            1,
+            "writing the page again splits the name it already had"
+        );
     }
 
     #[test]

@@ -201,7 +201,7 @@ Next Session Starts
     │
     ├─→ four independent streams
     │     ├─ FTS5 over pages_fts
-    │     ├─ entity matching, weighted by inverse frequency
+    │     ├─ entity matching, by token, weighted by inverse frequency
     │     ├─ link neighbours, over page_links
     │     └─ vector cosine (only when the local embedder is enabled)
     │
@@ -360,8 +360,16 @@ same row rather than filing a second copy of it.
 ### The rest
 `projects` — which also records each project's working copy and when it was
 last improved, so a scheduler can find its settings and honour its interval —
-plus `pages_fts` (FTS5, unicode61), `entities`, `page_entities`, `page_links`,
-`handoffs`, `page_feedback`, `page_embeddings`, `workstreams`.
+plus `pages_fts` (FTS5, unicode61), `entities`, `entity_tokens`,
+`page_entities`, `page_links`, `handoffs`, `page_feedback`, `page_embeddings`,
+`workstreams`.
+
+An entity is stored twice, like a supersession and like a link: `entities.name`
+is what someone wrote, and `entity_tokens` is that name split the same way a
+query is. A query is tokenized before it is matched, so a name kept whole could
+only be found by a query that tokenized to exactly it — never, for anything
+containing a space, a dash, or a dot. An entity matches when every one of its
+tokens is present in the query.
 
 ## Configuration
 
