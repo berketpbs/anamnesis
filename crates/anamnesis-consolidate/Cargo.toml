@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "anamnesis-consolidate"
 version.workspace = true
 edition.workspace = true

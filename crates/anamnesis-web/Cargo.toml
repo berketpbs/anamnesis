@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "anamnesis-web"
 version.workspace = true
 edition.workspace = true

@@ -48,6 +48,30 @@ jobs:
 
       - run: ${{ matrix.command }}
 
+  # Windows shells write UTF-8 with a byte order mark by default, and this
+  # project is developed on Windows. A BOM is invisible in an editor and
+  # breaks things that read the first bytes literally: a shebang stops being
+  # a shebang, `docker build` sees an unknown instruction, and the cache
+  # action gives up on parsing the manifest. Cheaper to catch here than to
+  # rediscover each time.
+  bom:
+    name: no byte order marks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check tracked files for a leading BOM
+        run: |
+          offenders=$(git ls-files -z | xargs -0 -I{} sh -c \
+            'head -c 3 "{}" 2>/dev/null | grep -q "$(printf "\357\273\277")" && echo "{}"' || true)
+          if [ -n "$offenders" ]; then
+            echo "These files start with a UTF-8 byte order mark:"
+            echo "$offenders"
+            echo
+            echo "Rewrite them without one. In PowerShell, Set-Content -Encoding utf8"
+            echo "still writes a BOM; use [System.IO.File]::WriteAllText instead."
+            exit 1
+          fi
+
   # The build every check above implies, run once on the platform the project
   # is actually developed on. Windows is where the paths, the MSVC linker, and
   # the PowerShell BOM handling differ, so a green Linux run is not evidence

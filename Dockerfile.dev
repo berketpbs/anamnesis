@@ -1,4 +1,4 @@
-﻿# Development Dockerfile with hot reload support
+# Development Dockerfile with hot reload support
 FROM rust:1.95-slim
 
 WORKDIR /app
