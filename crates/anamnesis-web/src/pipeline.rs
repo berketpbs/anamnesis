@@ -263,6 +263,20 @@ fn commit(
     page.git_commit = Some(commit);
 
     store.upsert_page(&page, now)?;
+
+    // The same three writes a rebuild performs, in the same order. Leaving
+    // these to `reindex` would mean the index the live path builds and the
+    // index a rebuild reproduces are not the same index: a page's wikilinks
+    // would reach `page_links` only if someone happened to rebuild, and until
+    // then the link-neighbour retrieval stream would be blind to every page
+    // this system wrote itself.
+    store.set_page_entities(scope.project_id, page.id, &page.frontmatter.entities)?;
+    store.set_page_links(
+        scope.project_id,
+        page.id,
+        &anamnesis_wiki::extract_links(&page.body),
+    )?;
+
     store.record_handoff(&new_handoff(
         scope.project_id,
         session.id,
