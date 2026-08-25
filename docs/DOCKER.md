@@ -66,10 +66,14 @@ docker-compose --profile prod up anamnesis
 docker-compose --profile prod exec anamnesis anamnesis status
 ```
 
-### postgres (Optional)
+### postgres (Optional, and unused)
 - Profile: `postgres`
-- Purpose: PostgreSQL support for future enhancements
+- Purpose: reserved for a future PostgreSQL backend
 - Version: 16 Alpine
+
+> **Anamnesis does not talk to PostgreSQL.** Storage is SQLite, bundled into
+> the binary, living in the data directory. Starting this profile gives you an
+> empty database that nothing writes to.
 
 **Usage:**
 ```bash

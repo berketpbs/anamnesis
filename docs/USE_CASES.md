@@ -67,10 +67,13 @@ New Dev: Queries memory for project decisions
   → Finds "architecture decisions"
   → Understands project structure
   
-Via Web UI: Browses wiki like Obsidian
+Opens <data_dir>/wiki in Obsidian or any editor
   → Reads design documents
-  → Follows decision tree
+  → Follows the wikilinks between them
 ```
+
+The wiki is plain markdown in a git repository, so any editor works. There is
+no built-in browser UI.
 
 **Value**: Faster onboarding. Centralized knowledge base.
 
@@ -81,15 +84,20 @@ Via Web UI: Browses wiki like Obsidian
 **Flow**:
 ```
 Session ends
-  → Consolidation step runs
-  → LLM reads all observations
-  → Generates summary page
-  → Updates relevant wiki entries
-  
+  → Consolidation runs                          [implemented]
+  → LLM reads the session's observations        [implemented]
+  → Generates a summary page and a handoff      [implemented]
+  → Sweeps and updates other wiki entries       [not implemented]
+
 Developer reviews changes
-  → Approves or rejects suggestions
-  → Wiki stays accurate and current
+  → Approves or rejects suggestions             [not implemented]
 ```
+
+Consolidation writes one page for the session that just ended, and commits it.
+It never rewrites another page, and there is no approval queue: the
+`require_approval` setting is parsed and unused. A model is optional
+throughout — without one the page is compiled by counting what happened, and
+says so in its footer.
 
 **Value**: Living documentation. Stays in sync with reality.
 
@@ -112,6 +120,11 @@ New Project: Queries memory
 ```
 
 **Value**: Cross-project consistency. Code style reuse.
+
+> **Not implemented.** The data directory reserves a `_global` scope and the
+> layout is designed around it, but retrieval does not read it: a query
+> answers from the current project only. Anything written to `_global/` today
+> is a file nobody reads.
 
 ## 7. Debugging Session Context
 
@@ -159,43 +172,56 @@ Based on these use cases, implement in order:
 
 ### Phase 1: Core Capture & Retrieval
 - [x] Workspace structure
-- [ ] **Database schema & migrations** (Step 1)
-- [ ] **Basic CLI commands** (Step 2)
-  - `anamnesis status`
-  - `anamnesis search`
-  - `anamnesis write-page`
-- [ ] Memory wiki file operations
-- [ ] Git integration for wiki versioning
+- [x] Database schema & migrations (`V01`–`V06`)
+- [x] Basic CLI commands — `status`, `search`, `write-page`, `show-page`,
+      `sessions`, `handoff`
+- [x] Memory wiki file operations
+- [x] Git integration for wiki versioning
+- [x] Durable transcripts under `raw/`, and `anamnesis reindex` to rebuild
+      the index from them
 
 ### Phase 2: Agent Integration
-- [ ] MCP server implementation
-- [ ] Lifecycle hook capture
-- [ ] Claude Code integration
-- [ ] Session handoff system
+- [x] MCP server implementation
+- [x] Lifecycle hook capture
+- [x] Claude Code integration
+- [x] Session handoff system
+- [ ] A second harness (Codex, Cursor, …) — the hook parser is per-harness
+      and only `claude-code` is written
 
 ### Phase 3: LLM & Consolidation
-- [ ] LLM provider abstraction
-- [ ] Session consolidation logic
-- [ ] Auto-improvement scheduler
-- [ ] Summary generation
+- [x] LLM provider abstraction (Anthropic Messages API)
+- [x] Session consolidation logic, deterministic when no model is configured
+- [x] Summary generation
+- [x] Retrieval over four fused signals, including an opt-in local embedder
+- [ ] Auto-improvement scheduler — configuration exists, nothing runs
 
 ### Phase 4: Web UI & Admin
-- [ ] Web server (Axum)
+- [x] Web server (Axum) — `/hook`, `/handoff`, `/health`
 - [ ] Wiki browser UI
 - [ ] Search interface
 - [ ] Admin endpoints
+- [ ] Authentication, without which none of the above should be exposed
 
 ### Phase 5: Multi-Agent & DevOps
 - [x] Cross-harness workstreams
+- [x] CI on every push and pull request
 - [ ] Managed session resume
-- [ ] Docker containerization
+- [ ] Docker containerization — `Dockerfile`, `Dockerfile.dev`, and compose
+      profiles exist; nothing in CI builds them, so treat them as untested
 - [ ] Remote server setup
 
 ## Success Metrics
 
+Reached:
+
 - ✅ Developer can capture decisions in memory
 - ✅ Developer can search and find relevant context
-- ✅ Switching agents preserves handoff context
-- ✅ Team shares knowledge without duplication
-- ✅ New developers onboard faster
+- ✅ Switching agents preserves handoff context — for one harness so far
 - ✅ Project architecture decisions are documented
+
+Not yet demonstrated:
+
+- ⬜ Team shares knowledge without duplication — needs a shared server, which
+  needs authentication
+- ⬜ New developers onboard faster — `anamnesis bootstrap` is the first step
+  toward this; nobody has measured it
