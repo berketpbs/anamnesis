@@ -28,6 +28,7 @@ use jiff::Timestamp;
 use parking_lot::Mutex;
 use serde::Deserialize;
 
+pub mod improve;
 mod pipeline;
 
 pub use pipeline::{Ingested, claim_handoff, finalize, finalize_with_llm, ingest, record};
@@ -143,6 +144,13 @@ pub fn router(state: AppState) -> Router {
 pub async fn serve(bind: SocketAddr, state: AppState) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(%bind, "anamnesis listening");
+
+    // The server is the only part of the system that runs for longer than one
+    // command, so it is where a schedule can live. It costs nothing until a
+    // project turns one on: every tick over a fleet that has not asked for
+    // auto-improve is one query and a list of reasons why not.
+    tokio::spawn(improve::run_scheduler(state.clone()));
+
     axum::serve(listener, router(state)).await
 }
 
