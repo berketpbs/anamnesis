@@ -215,14 +215,22 @@ impl Wiki {
     /// rather than failing the walk, since the wiki directory belongs to the
     /// user and may hold anything.
     pub fn pages(&self, scope: &Scope) -> Result<Vec<PagePath>> {
-        let root = self
-            .root
-            .join(scope.workspace.as_str())
-            .join(scope.project.as_str());
+        let root = self.scope_root(scope);
         let mut found = Vec::new();
         collect_pages(&root, &root, &mut found)?;
         found.sort();
         Ok(found)
+    }
+
+    /// Directory holding one scope's pages, whether or not it exists.
+    ///
+    /// Exposed because "the wiki has no pages" and "the wiki is not there" are
+    /// the same empty list to [`Wiki::pages`], and a caller deciding what to do
+    /// about pages it cannot find needs to tell those apart.
+    pub fn scope_root(&self, scope: &Scope) -> PathBuf {
+        self.root
+            .join(scope.workspace.as_str())
+            .join(scope.project.as_str())
     }
 
     /// Path of a page relative to the wiki root, in git's forward-slash form.

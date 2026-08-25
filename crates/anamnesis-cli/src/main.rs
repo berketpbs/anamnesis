@@ -1008,6 +1008,18 @@ fn cmd_reindex(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
             report.orphaned_files
         );
     }
+    if report.removed > 0 {
+        println!(
+            "  {} forgotten — no longer in the wiki",
+            plural(report.removed as i64, "page")
+        );
+    }
+    if report.skipped_removal {
+        println!();
+        println!("  ⚠ No wiki directory at that path, so nothing was forgotten.");
+        println!("    An index with rows and a scope with no directory usually");
+        println!("    means this ran against the wrong data dir or project.");
+    }
     println!();
     println!("  Pending handoffs are not restored: a handoff says what the *next*");
     println!("  session should know, and reviving a stale one is worse than none.");
