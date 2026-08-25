@@ -22,15 +22,29 @@ The binary will be available at `target/release/anamnesis`.
 
 ### 1. Initialize a Project
 
+Run this **inside** the repository you want remembered. `init` takes no
+arguments and creates no directory — it registers the project you are
+standing in:
+
 ```bash
-anamnesis init my-project
 cd my-project
+anamnesis init
 ```
 
 This creates:
-- `.anamnesis.toml` - Marker file pinning this project's memory scope
 - `<data_dir>/wiki/<workspace>/<project>/` - Wiki pages, in their own git repository
 - `<data_dir>/db/anamnesis.db` - SQLite index, rebuildable from the wiki
+- `<data_dir>/raw/` - Append-only transcripts the index can be rebuilt from
+
+Identity comes from the git remote, so two clones of the same repository share
+one memory. To pin it explicitly instead, write a `.anamnesis.toml` in the
+repository root:
+
+```toml
+[scope]
+workspace = "default"
+project = "my-project"
+```
 
 The data directory defaults to the platform data directory and can be overridden
 with `--data-dir` or `ANAMNESIS_DATA_DIR`. Run `anamnesis status --verbose` to
@@ -94,20 +108,33 @@ the reply shape is fixed by a schema regardless.
 anamnesis serve
 ```
 
-The server will:
-- Start MCP server on loopback (for local agents)
-- Start web UI on http://localhost:8080
-- Begin listening for lifecycle hooks
+This binds `127.0.0.1:8080` and serves three endpoints — `POST /hook`,
+`GET /handoff`, `GET /health`. There is no web UI to open, and no
+authentication, which is why the default bind is loopback.
+
+The MCP server is a separate process the agent launches itself; `serve` does
+not start one.
 
 ### 4. Connect Your Agent
 
-For Claude Code:
+Claude Code talks to anamnesis two ways, and they are independent.
+
+**Hooks** capture the session. Print the configuration and paste it into your
+`settings.json`:
 
 ```bash
-anamnesis install-mcp --client claude
+anamnesis install-hooks --agent claude-code
 ```
 
-For other agents, see [AGENTS.md](../AGENTS.md).
+**MCP** lets the agent search memory and write pages on purpose. Register the
+server as a stdio subprocess:
+
+```bash
+claude mcp add anamnesis -- anamnesis mcp --repo .
+```
+
+Hooks need `anamnesis serve` running. MCP does not — it opens the store
+directly.
 
 ## Common Commands
 
@@ -148,38 +175,75 @@ anamnesis write-page \
 anamnesis status
 ```
 
-### Export/Backup
+### Read What the Last Session Left
 
 ```bash
-anamnesis backup export --output backup.tar.gz
+anamnesis handoff        # peek, without consuming it
+anamnesis sessions       # recent sessions, newest first
+anamnesis show-page bootstrap/repository.md
 ```
+
+### Rebuild the Index
+
+The database is disposable. If it is lost or corrupted, rebuild it from the
+wiki and the transcripts:
+
+```bash
+anamnesis reindex
+```
+
+Safe to run against a live database: every identifier is derived, so a rebuild
+reproduces the same rows rather than duplicating them.
+
+### Back Up
+
+There is no `backup` command. The data directory is the backup — copy it, or
+push `<data_dir>/wiki` somewhere, since it is an ordinary git repository:
+
+```bash
+git -C <data_dir>/wiki remote add origin git@example.com:me/memory.git
+git -C <data_dir>/wiki push -u origin HEAD
+```
+
+`HEAD`, not a branch name: the wiki repository is created by `git2`, which
+initializes on `master` regardless of your `init.defaultBranch`.
 
 ## Configuration
 
-Edit `.anamnesis.toml` to customize behavior:
+`.anamnesis.toml` is optional. Only `[scope]` changes behaviour today:
 
 ```toml
 [scope]
 workspace = "default"
 project = "my-project"
+```
 
+Unknown keys are rejected rather than ignored, so a typo surfaces instead of
+quietly sending memory to the wrong project.
+
+The loader also accepts `[capture]`, `[slots]`, and `[auto_improve]`, but
+**nothing reads them yet**:
+
+```toml
 [capture]
-# Exclude patterns from capture
-ignore_paths = [
-    "target/",
-    "node_modules/",
-    ".env",
-    "*.log"
-]
+ignore_paths = ["target/**", "*.log"]   # parsed; never consulted
+
+[slots]
+per_user = false                        # parsed; never consulted
 
 [auto_improve]
-enabled = true
-require_approval = false  # Auto-approve consolidation
+enabled = true                          # parsed; nothing runs
+require_approval = true
 
-[[auto_improve.scheduler]]
+# A single table. `[[auto_improve.scheduler]]` — the double-bracket array
+# form — is rejected at load time.
+[auto_improve.scheduler]
+enabled = false
 interval_minutes = 60
-enabled = true
 ```
+
+In particular, do not put `.env` in `ignore_paths` and assume it is excluded.
+Redaction is what keeps secrets out of memory today.
 
 ## Troubleshooting
 
@@ -197,34 +261,49 @@ anamnesis serve --port 9000
 
 ### No Hook Events Captured
 
-Verify hook installation:
+Hooks fail quietly on purpose — a memory system that can break your editing
+session is worse than one that misses an event — so check in this order:
 
 ```bash
-# For Claude Code
-anamnesis install-mcp --client claude --status
+anamnesis status --verbose   # is the scope what you expect?
+anamnesis sessions           # did anything arrive at all?
+curl http://127.0.0.1:8080/health
 ```
+
+The `hook` command always exits 0, but it writes the reason to **stderr**: a
+rejected event, an unreachable server, a payload it could not parse. If
+Claude Code hides hook stderr, run the same command by hand with a payload on
+stdin to see it.
+
+On Windows, PowerShell prepends a UTF-8 BOM when piping text into a native
+executable. Both the CLI and the server strip it; a third-party wrapper that
+does not will produce a parse error on the first character.
 
 ### Database Locked
 
-If you see "database is locked":
+If you see "database is locked", more than one process is writing. Only one
+`anamnesis serve` should be running against a data directory:
 
 ```bash
-# Ensure only one server instance is running
 ps aux | grep anamnesis
+```
 
-# Restart the server
-anamnesis serve --fresh
+If the index is genuinely damaged, delete it and rebuild — nothing is lost
+that `wiki/` and `raw/` do not already hold:
+
+```bash
+rm <data_dir>/db/anamnesis.db
+anamnesis reindex
 ```
 
 ## Next Steps
 
 1. **Read** [ARCHITECTURE.md](./ARCHITECTURE.md) to understand the system
-2. **Explore** [AGENTS.md](../AGENTS.md) for agent-specific setup
-3. **Review** [API.md](./API.md) for MCP tool documentation
-4. **Join** discussions and contribute improvements
+2. **Read** [USE_CASES.md](./USE_CASES.md) for what this is for
+3. **Run** `anamnesis --help`, or `anamnesis <command> --help` — the CLI is
+   the current reference for the MCP tools and every flag
 
 ## Support
 
 - File issues on [GitHub](https://github.com/berketpbs/anamnesis/issues)
-- Read the [FAQ](./FAQ.md)
 - Check [CONTRIBUTING.md](../CONTRIBUTING.md) for contribution guidelines
