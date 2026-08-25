@@ -39,6 +39,16 @@ pub(crate) fn parse_time(raw: &str) -> Timestamp {
         .unwrap_or_else(|error| panic!("stored timestamp {raw:?} is not RFC 3339: {error:?}"))
 }
 
+/// Parse a page path written by this crate.
+///
+/// Panics for the same reason [`parse_id`] does: a page path is validated
+/// before it is ever stored, so a stored value that fails validation means
+/// the row was written by something other than this crate.
+pub(crate) fn parse_page_path(raw: &str) -> anamnesis_core::page::PagePath {
+    anamnesis_core::page::PagePath::parse(raw)
+        .unwrap_or_else(|error| panic!("stored page path {raw:?} is invalid: {error:?}"))
+}
+
 /// A migrated in-memory index with one project registered, for tests.
 ///
 /// Every test module in this crate needs the same four things back, and each

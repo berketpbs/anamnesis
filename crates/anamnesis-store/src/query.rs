@@ -22,7 +22,7 @@ use jiff::Timestamp;
 use rusqlite::types::Value;
 use rusqlite::{OptionalExtension, params, params_from_iter};
 
-use crate::convert::parse_id;
+use crate::convert::{parse_id, parse_page_path};
 use crate::{Result, Store};
 
 /// How many candidates each individual stream contributes before fusion.
@@ -551,12 +551,6 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         return 0.0;
     }
     dot / (norm_a * norm_b)
-}
-
-/// Parse a page path written by this crate.
-fn parse_page_path(raw: &str) -> PagePath {
-    PagePath::parse(raw)
-        .unwrap_or_else(|error| panic!("stored page path {raw:?} is invalid: {error:?}"))
 }
 
 #[cfg(test)]
