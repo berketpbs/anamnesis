@@ -30,6 +30,7 @@ use serde::Deserialize;
 
 pub mod improve;
 mod pipeline;
+pub mod watch;
 
 pub use pipeline::{Ingested, claim_handoff, finalize, finalize_with_llm, ingest, record};
 
@@ -141,7 +142,7 @@ pub fn router(state: AppState) -> Router {
 }
 
 /// Serve until the process ends.
-pub async fn serve(bind: SocketAddr, state: AppState) -> std::io::Result<()> {
+pub async fn serve(bind: SocketAddr, state: AppState, watch_wiki: bool) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(%bind, "anamnesis listening");
 
@@ -150,6 +151,16 @@ pub async fn serve(bind: SocketAddr, state: AppState) -> std::io::Result<()> {
     // project turns one on: every tick over a fleet that has not asked for
     // auto-improve is one query and a list of reasons why not.
     tokio::spawn(improve::run_scheduler(state.clone()));
+
+    // On by default, unlike the scheduler, and the difference is what each one
+    // does: auto-improve makes decisions about someone's memory, so it waits to
+    // be asked. The watcher only makes the index say what the wiki already
+    // says. A blocking task because everything it touches — SQLite, git, the
+    // wiki mutex — is synchronous.
+    if watch_wiki {
+        let watching = state.clone();
+        tokio::task::spawn_blocking(move || watch::run(watching));
+    }
 
     axum::serve(listener, router(state)).await
 }
