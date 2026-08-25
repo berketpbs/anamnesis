@@ -129,7 +129,16 @@ fn rebuild_pages(
             parsed.frontmatter,
             parsed.body.clone(),
         );
-        store.upsert_page(&page, now)?;
+        // A page the index already holds exactly is not written again.
+        // `upsert_page` moves `updated_at`, which a sweep reads as when the
+        // page was last written, so rebuilding an unchanged wiki would renew
+        // every page in it and push the whole memory's decay clock back to
+        // today. Entities and links are rebuilt either way: a page row can be
+        // current while the rows that point at it are missing, which is the
+        // state this command exists to repair.
+        if !store.page_is_current(&page)? {
+            store.upsert_page(&page, now)?;
+        }
         store.set_page_entities(scope.project_id, page.id, &entities)?;
         indexed.push((page.id, parsed.body));
     }
@@ -655,6 +664,52 @@ mod tests {
             .map(|(_, path)| path)
             .collect();
         assert_eq!(left, vec!["kept.md".to_owned()]);
+    }
+
+    /// Rebuilding an unchanged wiki must not move `updated_at`, which a sweep
+    /// reads as when the page was last written. Renewing every page on every
+    /// rebuild would push the whole memory's decay clock back to today.
+    #[test]
+    fn rebuilding_an_unchanged_page_does_not_renew_it() {
+        let harness = harness();
+        wiki_page(&harness, "note.md", "Note", "Body.");
+        rebuilt(&harness);
+
+        let written_at = |harness: &Harness| -> String {
+            harness
+                .store
+                .connection()
+                .query_row("SELECT updated_at FROM pages", [], |row| row.get(0))
+                .expect("updated_at")
+        };
+        let first = written_at(&harness);
+
+        // A later `now` that would be written if the page were touched at all.
+        rebuild(
+            &harness.store,
+            &harness.wiki,
+            &harness.raw,
+            &harness.scope,
+            "2026-09-01T09:00:00Z".parse().expect("timestamp"),
+        )
+        .expect("rebuild");
+        assert_eq!(
+            written_at(&harness),
+            first,
+            "an unchanged page is not renewed"
+        );
+
+        // But an edited one is: the content a reader would find is that recent.
+        wiki_page(&harness, "note.md", "Note", "Edited body.");
+        rebuild(
+            &harness.store,
+            &harness.wiki,
+            &harness.raw,
+            &harness.scope,
+            "2026-09-02T09:00:00Z".parse().expect("timestamp"),
+        )
+        .expect("rebuild");
+        assert_ne!(written_at(&harness), first, "an edited page is renewed");
     }
 
     /// A page that will not parse is skipped, not absent. Comparing against

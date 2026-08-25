@@ -109,6 +109,13 @@ enum Commands {
         /// Bind to address
         #[arg(long, default_value = "127.0.0.1")]
         bind: String,
+
+        /// Do not watch the wiki for edits made outside anamnesis
+        ///
+        /// Without the watcher, a page edited or deleted by hand reaches the
+        /// index only when `anamnesis reindex` is run.
+        #[arg(long)]
+        no_watch: bool,
     },
 
     /// Forward one lifecycle event, read as JSON on stdin
@@ -297,8 +304,12 @@ fn main() -> anyhow::Result<()> {
         Commands::Mcp { repo } => {
             cmd_mcp(&repo, cli.data_dir.clone())?;
         }
-        Commands::Serve { port, bind } => {
-            cmd_serve(&bind, port, cli.data_dir.clone())?;
+        Commands::Serve {
+            port,
+            bind,
+            no_watch,
+        } => {
+            cmd_serve(&bind, port, !no_watch, cli.data_dir.clone())?;
         }
         Commands::Hook { agent, server } => {
             cmd_hook(&agent, &server);
@@ -740,7 +751,12 @@ fn cmd_mcp(repo: &std::path::Path, data_dir: Option<PathBuf>) -> anyhow::Result<
     Ok(())
 }
 
-fn cmd_serve(bind: &str, port: u16, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
+fn cmd_serve(
+    bind: &str,
+    port: u16,
+    watch_wiki: bool,
+    data_dir: Option<PathBuf>,
+) -> anyhow::Result<()> {
     let data = DataDir::resolve(data_dir)?;
     data.ensure_layout()?;
 
@@ -768,6 +784,14 @@ fn cmd_serve(bind: &str, port: u16, data_dir: Option<PathBuf>) -> anyhow::Result
         anamnesis_web::improve::TICK.as_secs()
     );
     println!("   transcripts: {}", raw.root().display());
+    println!(
+        "   wiki edits:  {}",
+        if watch_wiki {
+            "watched — pages edited by hand are indexed as they are saved"
+        } else {
+            "not watched — hand edits need `anamnesis reindex`"
+        }
+    );
     match &settings {
         Some(settings) => println!(
             "   consolidation: {} ({})",
@@ -783,6 +807,7 @@ fn cmd_serve(bind: &str, port: u16, data_dir: Option<PathBuf>) -> anyhow::Result
         anamnesis_web::AppState::new(store, wiki)
             .with_raw(Some(raw))
             .with_llm(settings),
+        watch_wiki,
     ))?;
     Ok(())
 }

@@ -373,6 +373,61 @@ impl Store {
         )?)
     }
 
+    /// Whether the index already holds exactly this page.
+    ///
+    /// Written for the wiki watcher, which cannot tell its own writes from
+    /// someone else's: every page this system compiles arrives as a filesystem
+    /// event a moment later, as does every save an editor makes without
+    /// changing anything. Re-indexing those is harmless to the access counters,
+    /// which `upsert_page` leaves alone — but `updated_at` is what a sweep reads
+    /// as "when the page was last written", so writing it back would renew a
+    /// page nobody edited, and a wiki that watched itself would never decay.
+    ///
+    /// Compares every column an author can change from the markdown. `false`
+    /// for a page the index has never seen.
+    pub fn page_is_current(&self, page: &Page) -> Result<bool> {
+        let fm = &page.frontmatter;
+        let conn = self.connection();
+        let found = conn
+            .query_row(
+                "SELECT title, body, tier, status, pinned, canonical, salience,
+                        expires_at, supersedes_target
+                 FROM pages WHERE id = ?1",
+                params![page.id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, bool>(4)?,
+                        row.get::<_, bool>(5)?,
+                        row.get::<_, f64>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let Some(stored) = found else {
+            return Ok(false);
+        };
+
+        Ok(stored
+            == (
+                fm.title.clone(),
+                page.body.clone(),
+                fm.tier.as_str().to_owned(),
+                fm.status.as_str().to_owned(),
+                fm.pinned,
+                fm.canonical,
+                fm.salience,
+                fm.expires_at.map(|at| at.to_string()),
+                fm.supersedes.as_ref().map(|p| p.as_str().to_owned()),
+            ))
+    }
+
     /// Every page the index holds for a project, by id and authored path.
     ///
     /// The question this answers is the one a rebuild has to ask in reverse:
@@ -1169,6 +1224,56 @@ mod tests {
             .expect("found");
         assert!(!loaded.is_open());
         assert_eq!(loaded.ended_at, Some(ended));
+    }
+
+    #[test]
+    fn a_page_the_index_has_never_seen_is_not_current() {
+        let (_dir, store, project, _workspace) = fixture();
+        let page = write_page(&store, project, "a.md", None);
+        store.delete_page(page.id).expect("delete");
+        assert!(!store.page_is_current(&page).expect("check"));
+    }
+
+    #[test]
+    fn a_page_written_back_unchanged_is_current() {
+        let (_dir, store, project, _workspace) = fixture();
+        let page = write_page(&store, project, "a.md", None);
+        assert!(store.page_is_current(&page).expect("check"));
+    }
+
+    /// One thing an author could change in a page's markdown, by name.
+    type Edit = (&'static str, fn(&mut anamnesis_core::page::Page));
+
+    /// The watcher leans on this to tell a real edit from its own write, so
+    /// every field an author can change from the markdown has to count.
+    #[test]
+    fn any_field_an_author_can_edit_makes_a_page_stale() {
+        let (_dir, store, project, _workspace) = fixture();
+        let page = write_page(&store, project, "a.md", None);
+
+        use anamnesis_core::page::{PageStatus, Tier};
+
+        let edits: [Edit; 8] = [
+            ("body", |p| p.body = "Something else.".to_owned()),
+            ("title", |p| p.frontmatter.title = "Renamed".to_owned()),
+            ("tier", |p| p.frontmatter.tier = Tier::Semantic),
+            ("status", |p| {
+                p.frontmatter.status = PageStatus::DoNotAnswerFrom
+            }),
+            ("pinned", |p| p.frontmatter.pinned = true),
+            ("canonical", |p| p.frontmatter.canonical = true),
+            ("salience", |p| p.frontmatter.salience = 0.25),
+            ("expires_at", |p| p.frontmatter.expires_at = Some(now())),
+        ];
+
+        for (field, edit) in edits {
+            let mut edited = page.clone();
+            edit(&mut edited);
+            assert!(
+                !store.page_is_current(&edited).expect("check"),
+                "editing {field} should make the page stale"
+            );
+        }
     }
 
     #[test]

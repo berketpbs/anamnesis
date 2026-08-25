@@ -14,6 +14,8 @@ anamnesis-wiki.workspace = true
 anamnesis-hooks.workspace = true
 anamnesis-consolidate.workspace = true
 anamnesis-llm.workspace = true
+notify.workspace = true
+notify-debouncer-full.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde = { workspace = true, features = ["derive"] }
