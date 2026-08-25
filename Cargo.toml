@@ -99,6 +99,9 @@ flate2 = "1"
 # Text munging / hook payload sanitisation.
 regex = "1"
 
+# Capture exclusions: gitignore-style glob matching for `[capture] ignore_paths`.
+globset = "0.4"
+
 # Wiki git versioning.
 git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
 
