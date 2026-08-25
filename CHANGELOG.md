@@ -37,6 +37,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one commit that names each page and why it went
 - `[decay]` in `.anamnesis.toml` — retention tuning as half-lives, read by
   the sweep and refused at load time when a value would make it nonsense
+- `anamnesis improve` — file proposals from what the index already records: a
+  page several sessions kept coming back to should be durable, and a page
+  several pages link to should exist. Proposals are identified by what they
+  are about, so a dismissal sticks and a condition someone fixed themselves
+  resolves
+- `[auto_improve]` is enforced rather than merely parsed: `require_approval`
+  decides whether a pass may carry out its own applicable proposals, and
+  `[auto_improve.scheduler]` makes the server run that pass per project, on
+  that project's interval, measured from its last pass rather than from
+  server start
 
 ### Changed
 - Configuration marker is `.anamnesis.toml`; `.ai-memory.toml` is read as a

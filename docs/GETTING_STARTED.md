@@ -214,6 +214,64 @@ went:
 git -C <data_dir>/wiki show HEAD
 ```
 
+### Let the Memory Improve Itself
+
+A sweep forgets what nobody needs. The other half is noticing what the memory
+has earned, or is missing:
+
+```bash
+anamnesis improve                     # look, and report what is waiting
+anamnesis improve --apply a1b2c3d4    # carry one out
+anamnesis improve --dismiss a1b2c3d4  # never propose it again
+anamnesis improve --history           # including proposals already decided
+```
+
+Two things get proposed, both from signals the system already records:
+
+| Proposal | When | Applied by |
+| --- | --- | --- |
+| promote to the semantic tier | an episodic page three or more later searches came back to | the system |
+| write the page | two or more pages link to a page that does not exist | you |
+
+Promotion is worth understanding before you approve one. Retrieval records
+every hit, so a page later sessions kept returning to is knowledge filed as a
+session note — and the semantic tier is **exempt from the decay sweep**. It is
+how a page becomes durable by proving itself rather than by someone
+remembering to pin it, which is also why nothing is promoted without approval
+unless a project says otherwise.
+
+Proposals are identified by what they are about, not by when they were filed.
+Dismiss one and later passes leave it alone; write the missing page yourself
+and the next pass marks it resolved.
+
+### On a Schedule
+
+`anamnesis improve` is the same pass the server can run for you. It is off
+until a project asks:
+
+```toml
+[auto_improve]
+enabled = true
+require_approval = false   # let the pass carry out what it can
+
+[auto_improve.scheduler]
+enabled = true
+interval_minutes = 60
+```
+
+With `anamnesis serve` running, every project whose marker asks for a schedule
+is improved on its own interval — measured from its own last pass, so
+restarting the server does not restart the clock. Leave `require_approval` at
+`true` and the schedule still runs: it files proposals for you to review, and
+changes nothing.
+
+The server logs every pass it runs and every project it skipped, to stderr:
+
+```
+INFO anamnesis_web::improve: auto-improve pass project=default/my-project
+     filed=1 refreshed=0 resolved=0 carried=1 open=0
+```
+
 ### Rebuild the Index
 
 The database is disposable. If it is lost or corrupted, rebuild it from the
@@ -305,22 +363,26 @@ numbers rather than guessed. A half-life of zero or a negative threshold is
 refused at load time rather than clamped — a typo in a file that governs
 deletion should stop the command, not change what it deletes.
 
-The loader also accepts `[slots]` and `[auto_improve]`, which **nothing reads
-yet**:
+`[auto_improve]` governs what a pass may do, and when (see *Let the Memory
+Improve Itself* above):
 
 ```toml
-[slots]
-per_user = false                        # parsed; never consulted
-
 [auto_improve]
-enabled = true                          # parsed; nothing runs
-require_approval = true
+enabled = true                          # look at all
+require_approval = true                 # file proposals, change nothing
 
 # A single table. `[[auto_improve.scheduler]]` — the double-bracket array
 # form — is rejected at load time.
 [auto_improve.scheduler]
-enabled = false
+enabled = false                         # the server runs no pass for this project
 interval_minutes = 60
+```
+
+The loader also accepts `[slots]`, which **nothing reads yet**:
+
+```toml
+[slots]
+per_user = false                        # parsed; never consulted
 ```
 
 ## Troubleshooting

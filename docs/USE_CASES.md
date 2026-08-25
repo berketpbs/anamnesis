@@ -193,7 +193,8 @@ Based on these use cases, implement in order:
 - [x] Session consolidation logic, deterministic when no model is configured
 - [x] Summary generation
 - [x] Retrieval over four fused signals, including an opt-in local embedder
-- [ ] Auto-improvement scheduler — configuration exists, nothing runs
+- [x] Auto-improvement: proposals from recorded signals, applied on approval,
+      on a per-project schedule the server runs
 
 ### Phase 4: Web UI & Admin
 - [x] Web server (Axum) — `/hook`, `/handoff`, `/health`
