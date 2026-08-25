@@ -15,6 +15,7 @@
 use std::collections::BTreeMap;
 
 use anamnesis_core::observation::{EventKind, Observation};
+use anamnesis_core::page::Entity;
 use anamnesis_core::session::Session;
 
 mod files;
@@ -38,6 +39,13 @@ const MAX_NAMED_FILES: usize = 12;
 /// Longest single quoted prompt, in characters.
 const MAX_PROMPT_CHARS: usize = 400;
 
+/// How many entities a page may name.
+///
+/// The same ceiling `memory_write_page` puts on an agent writing a page by
+/// hand. Past a handful the inverse-frequency weighting is doing all the work
+/// anyway, and a page that claims to be about twenty things is about none.
+pub const MAX_ENTITIES: usize = 10;
+
 /// The result of consolidating one session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionDigest {
@@ -47,6 +55,13 @@ pub struct SessionDigest {
     pub body: String,
     /// Bounded summary for the next session.
     pub handoff: String,
+    /// Canonical names the page is about, for the entity retrieval stream.
+    ///
+    /// Empty is allowed and means exactly that: nothing nameable was found.
+    /// A session page with no entities is still reachable through full text,
+    /// links, and vectors — this stream is the one that finds a page whose
+    /// words a searcher never used.
+    pub entities: Vec<Entity>,
 }
 
 /// Consolidate a session into a page and a handoff.
@@ -72,6 +87,7 @@ pub fn consolidate(session: &Session, observations: &[Observation]) -> Option<Se
         .filter(|o| o.body.is_truncated())
         .count();
 
+    let entities = entities_from_files(&files);
     let title = title_for(session, prompts.first().map(String::as_str));
     let body = render_body(
         session,
@@ -88,7 +104,34 @@ pub fn consolidate(session: &Session, observations: &[Observation]) -> Option<Se
         title,
         body,
         handoff,
+        entities,
     })
+}
+
+/// Name the files a session worked on, as things the page is about.
+///
+/// Basenames, not paths. An entity matches when every token of its name is in
+/// the query, so `crates/anamnesis-llm/src/lib.rs` would demand that a
+/// searcher type all six of its tokens, while `lib.rs` asks for the two
+/// someone would actually write. A basename that names half the wiki costs
+/// nothing either: entity weighting is inverse to how many pages carry the
+/// name, so `lib.rs` fades on its own while `docker-compose.yml` stays sharp.
+///
+/// This is what counting can reach. A model, when one is configured, names
+/// the ideas instead — see `llm::consolidate_with_llm`.
+fn entities_from_files(files: &[String]) -> Vec<Entity> {
+    let mut names: Vec<String> = Vec::new();
+    for file in files {
+        let base = file.rsplit('/').next().unwrap_or(file);
+        if !base.is_empty() && !names.iter().any(|seen| seen == base) {
+            names.push(base.to_owned());
+        }
+    }
+    names.truncate(MAX_ENTITIES);
+    names
+        .iter()
+        .filter_map(|name| Entity::parse(name).ok())
+        .collect()
 }
 
 /// Prompts written by the operator, in order.
@@ -313,6 +356,89 @@ mod tests {
             name: name.to_owned(),
             ok,
         })
+    }
+
+    #[test]
+    fn the_files_a_session_touched_become_the_names_it_is_about() {
+        let digest = consolidate(
+            &session(),
+            &[
+                observation(EventKind::UserPrompt, "wire up the provider", None),
+                observation(
+                    EventKind::ToolUse,
+                    "edited crates/anamnesis-llm/src/lib.rs and docker-compose.yml",
+                    tool("Edit", Some(true)),
+                ),
+            ],
+        )
+        .expect("a digest");
+
+        let named: Vec<&str> = digest.entities.iter().map(Entity::as_str).collect();
+        assert!(named.contains(&"lib.rs"), "got {named:?}");
+        assert!(named.contains(&"docker-compose.yml"), "got {named:?}");
+        assert!(
+            !named.iter().any(|name| name.contains('/')),
+            "basenames, not paths: a path would demand every one of its tokens"
+        );
+    }
+
+    #[test]
+    fn one_file_named_twice_is_one_entity() {
+        let digest = consolidate(
+            &session(),
+            &[
+                observation(EventKind::UserPrompt, "fix the pipeline", None),
+                observation(
+                    EventKind::ToolUse,
+                    "read crates/web/src/pipeline.rs",
+                    tool("Read", Some(true)),
+                ),
+                observation(
+                    EventKind::ToolUse,
+                    "edited crates/web/src/pipeline.rs again",
+                    tool("Edit", Some(true)),
+                ),
+            ],
+        )
+        .expect("a digest");
+
+        assert_eq!(
+            digest
+                .entities
+                .iter()
+                .filter(|e| e.as_str() == "pipeline.rs")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_session_that_touched_no_files_names_nothing() {
+        let digest = consolidate(
+            &session(),
+            &[observation(
+                EventKind::UserPrompt,
+                "what did we decide?",
+                None,
+            )],
+        )
+        .expect("a digest");
+        assert!(digest.entities.is_empty());
+    }
+
+    #[test]
+    fn a_session_cannot_claim_to_be_about_everything() {
+        let mut observations = vec![observation(EventKind::UserPrompt, "big refactor", None)];
+        for n in 0..40 {
+            observations.push(observation(
+                EventKind::ToolUse,
+                &format!("edited crates/thing/src/module{n}.rs"),
+                tool("Edit", Some(true)),
+            ));
+        }
+
+        let digest = consolidate(&session(), &observations).expect("a digest");
+        assert_eq!(digest.entities.len(), MAX_ENTITIES);
     }
 
     #[test]

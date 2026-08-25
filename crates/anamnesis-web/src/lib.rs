@@ -523,6 +523,64 @@ mod tests {
     }
 
     #[test]
+    fn a_session_page_names_what_it_was_about() {
+        // Consolidation used to name nothing at all, so one of the four
+        // retrieval streams was blind to every page the system wrote itself.
+        let harness = harness();
+
+        run(&harness, "SessionStart", json!({"source": "startup"}));
+        run(
+            &harness,
+            "UserPromptSubmit",
+            json!({"prompt": "add the provider trait"}),
+        );
+        run(
+            &harness,
+            "PostToolUse",
+            json!({
+                "tool_name": "Edit",
+                "tool_input": {"file_path": "crates/anamnesis-llm/src/lib.rs"},
+                "tool_response": {"success": true}
+            }),
+        );
+        let end = run(&harness, "SessionEnd", json!({"reason": "clear"}));
+
+        let scope = resolve_scope(&harness.cwd).expect("scope");
+        let page = end.page.expect("a page was written");
+        let path = anamnesis_core::page::PagePath::parse(&page).expect("path");
+
+        // In the markdown, which is the source of truth …
+        let written = harness
+            .state
+            .wiki
+            .lock()
+            .read_page(&scope.scope, &path)
+            .expect("page readable");
+        let named: Vec<&str> = written
+            .frontmatter
+            .entities
+            .iter()
+            .map(|entity| entity.as_str())
+            .collect();
+        assert!(named.contains(&"lib.rs"), "got {named:?}");
+
+        // … and in the index, without anyone having to rebuild it.
+        let indexed: i64 = harness
+            .state
+            .store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM page_entities pe
+                 JOIN entities e ON e.id = pe.entity_id
+                 WHERE e.name = 'lib.rs'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(indexed, 1);
+    }
+
+    #[test]
     fn a_link_in_a_session_page_reaches_the_index_without_a_rebuild() {
         // The live path and a rebuild have to produce the same index. They
         // did not: `reindex` extracted a page's wikilinks and the server did

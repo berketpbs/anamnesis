@@ -250,7 +250,7 @@ fn commit(
     now: Timestamp,
 ) -> Result<String, WebError> {
     let path = session_page_path(&session.started_at, session.id)?;
-    let mut frontmatter = Frontmatter::new(&digest.title, Vec::new())?;
+    let mut frontmatter = Frontmatter::new(&digest.title, digest.entities.clone())?;
     frontmatter.tier = Tier::Episodic;
 
     let mut page = Page::new(

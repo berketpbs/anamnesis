@@ -16,11 +16,12 @@
 use std::collections::VecDeque;
 
 use anamnesis_core::observation::{EventKind, Observation};
+use anamnesis_core::page::Entity;
 use anamnesis_core::session::Session;
 use anamnesis_llm::{Completion, Provider, clip_to_tokens, estimate_tokens};
 use serde_json::{Value, json};
 
-use crate::{HANDOFF_LIMIT, SessionDigest, clip, clip_bytes, consolidate};
+use crate::{HANDOFF_LIMIT, MAX_ENTITIES, SessionDigest, clip, clip_bytes, consolidate};
 
 /// Wiki page holding project-specific consolidation preferences.
 ///
@@ -77,7 +78,12 @@ failed and, if it is visible, why.
 budget for it. It is prose, not headings, and it says what to know and what \
 to do next — not what happened, except where that changes what to do.
 - If the session genuinely did nothing of substance, say so plainly and \
-briefly rather than inflating it.";
+briefly rather than inflating it.
+- The entities are what a later search would type to find this page: the \
+files, crates, tools, systems, and error names this session was actually \
+about, spelled as they appear. At most ten, fewer when fewer are warranted, \
+and nothing generic — `code`, `bug`, and `session` find everything and \
+therefore nothing.";
 
 /// The reply shape.
 ///
@@ -100,8 +106,13 @@ pub fn schema() -> Value {
                 "type": "string",
                 "description": "Plain prose for the next session. Under 1500 characters.",
             },
+            "entities": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Up to 10 canonical names this session was about, spelled as they appear: files, crates, tools, systems, error names. Nothing generic.",
+            },
         },
-        "required": ["title", "body", "handoff"],
+        "required": ["title", "body", "handoff", "entities"],
         "additionalProperties": false,
     })
 }
@@ -348,11 +359,39 @@ fn digest_from_json(value: &Value, session: &Session) -> Result<SessionDigest, S
     // session's context, where every byte competes with the work itself.
     let handoff = clip_bytes(handoff.trim(), HANDOFF_LIMIT);
 
+    // Entities the model named, in its order, de-duplicated, with anything
+    // unusable dropped rather than failing the reply: a name too long or
+    // carrying a control character costs this page one search term, and
+    // refusing the whole digest over it would cost the page itself.
+    let entities = read_entities(value);
+
     Ok(SessionDigest {
         title,
         body,
         handoff,
+        entities,
     })
+}
+
+/// Entity names from a model reply, validated and bounded.
+fn read_entities(value: &Value) -> Vec<Entity> {
+    let mut entities: Vec<Entity> = Vec::new();
+    let Some(named) = value.get("entities").and_then(Value::as_array) else {
+        return entities;
+    };
+
+    for name in named.iter().filter_map(Value::as_str) {
+        let Ok(entity) = Entity::parse(name) else {
+            continue;
+        };
+        if !entities.contains(&entity) {
+            entities.push(entity);
+        }
+        if entities.len() == MAX_ENTITIES {
+            break;
+        }
+    }
+    entities
 }
 
 #[cfg(test)]
@@ -547,6 +586,78 @@ mod tests {
         });
         let digest = digest_from_json(&reply, &session()).expect("a digest");
         assert!(digest.handoff.len() <= HANDOFF_LIMIT);
+    }
+
+    #[test]
+    fn the_names_a_model_gives_become_the_entities() {
+        let reply = json!({
+            "title": "t",
+            "body": "b",
+            "handoff": "h",
+            "entities": ["Windows BOM", "anamnesis-llm", "tini"],
+        });
+        let digest = digest_from_json(&reply, &session()).expect("a digest");
+        let named: Vec<&str> = digest.entities.iter().map(Entity::as_str).collect();
+        assert_eq!(named, vec!["Windows BOM", "anamnesis-llm", "tini"]);
+    }
+
+    #[test]
+    fn an_unusable_name_costs_one_search_term_not_the_page() {
+        // A name too long, one that is only whitespace, one carrying a control
+        // character, and one that is not a string at all. Refusing the whole
+        // digest over any of them would throw away a page the model wrote
+        // correctly.
+        let reply = json!({
+            "title": "t",
+            "body": "b",
+            "handoff": "h",
+            "entities": ["x".repeat(200), "   ", "with\u{7}bell", "SQLite", 7],
+        });
+        let digest = digest_from_json(&reply, &session()).expect("a digest");
+        let named: Vec<&str> = digest.entities.iter().map(Entity::as_str).collect();
+        assert_eq!(named, vec!["SQLite"]);
+    }
+
+    #[test]
+    fn a_model_naming_the_same_thing_twice_names_it_once() {
+        let reply = json!({
+            "title": "t",
+            "body": "b",
+            "handoff": "h",
+            "entities": ["SQLite", "SQLite", "sqlite"],
+        });
+        let digest = digest_from_json(&reply, &session()).expect("a digest");
+        // Spelling is preserved as written, so these are two names, not three.
+        assert_eq!(digest.entities.len(), 2);
+    }
+
+    #[test]
+    fn a_model_cannot_name_more_than_the_ceiling() {
+        let many: Vec<String> = (0..40).map(|n| format!("thing{n}")).collect();
+        let reply = json!({"title": "t", "body": "b", "handoff": "h", "entities": many});
+        let digest = digest_from_json(&reply, &session()).expect("a digest");
+        assert_eq!(digest.entities.len(), MAX_ENTITIES);
+    }
+
+    #[test]
+    fn a_reply_with_no_entities_is_still_a_page() {
+        let reply = json!({"title": "t", "body": "b", "handoff": "h"});
+        let digest = digest_from_json(&reply, &session()).expect("a digest");
+        assert!(digest.entities.is_empty());
+    }
+
+    #[test]
+    fn the_schema_and_the_prompt_agree_about_entities() {
+        assert!(schema()["properties"]["entities"].is_object());
+        assert_eq!(
+            schema()["required"],
+            json!(["title", "body", "handoff", "entities"])
+        );
+        assert!(SYSTEM.contains("what a later search would type"));
+        assert!(
+            !SYSTEM.contains(char::from(92)),
+            "a stray escape in the prompt reaches the model verbatim"
+        );
     }
 
     #[test]
