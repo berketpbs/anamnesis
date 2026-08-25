@@ -57,6 +57,21 @@ pub enum CoreError {
     #[error("configuration error: {0}")]
     Config(Box<figment::Error>),
 
+    /// A numeric setting in the marker file is outside its permitted range.
+    ///
+    /// Separate from [`Self::Config`] because a value that parses as a number
+    /// and then means something absurd — a half-life of zero, a negative
+    /// threshold — never reaches the deserializer at all.
+    #[error("invalid setting {key} = {value}: {reason}")]
+    InvalidSetting {
+        /// Dotted key path, as it appears in the marker file.
+        key: &'static str,
+        /// The offending value.
+        value: f64,
+        /// Why it was rejected.
+        reason: &'static str,
+    },
+
     /// A git operation failed while inspecting the repository.
     #[error("git error: {0}")]
     Git(Box<git2::Error>),

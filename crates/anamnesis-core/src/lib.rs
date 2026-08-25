@@ -30,6 +30,7 @@ pub mod retrieval;
 pub mod sanitize;
 pub mod scope;
 pub mod session;
+pub mod sweep;
 pub mod workstream;
 
 pub use error::{CoreError, Result};
@@ -54,5 +55,6 @@ pub mod prelude {
         ProjectKey, ProjectName, ResolvedScope, Scope, ScopeSource, WorkspaceName, resolve_scope,
     };
     pub use crate::session::{AgentKind, Session, SessionState};
+    pub use crate::sweep::{Exemption, PageFacts, SweepPolicy, Verdict, judge};
     pub use crate::workstream::{Workstream, WorkstreamSlug, WorkstreamStatus};
 }
