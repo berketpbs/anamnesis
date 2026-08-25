@@ -357,6 +357,48 @@ mod tests {
     }
 
     #[test]
+    fn supersession_resolves_regardless_of_the_order_pages_are_visited() {
+        // `a.md` replaces `z.md`, which sorts last and is therefore indexed
+        // after it. The claim is recorded as authored and resolved when the
+        // page it names arrives, so a rebuild cannot lose it by walking the
+        // wiki in the order the filesystem happens to hand it over.
+        let harness = harness();
+        let mut frontmatter = Frontmatter::new("A", Vec::new()).expect("frontmatter");
+        frontmatter.supersedes = Some(PagePath::parse("z.md").expect("path"));
+        let replacement = Page::new(
+            harness.scope.project_id,
+            PagePath::parse("a.md").expect("path"),
+            frontmatter,
+            "The page that replaces z.",
+        );
+        harness
+            .wiki
+            .write_page(&harness.scope.scope, &replacement, "write")
+            .expect("write");
+        wiki_page(&harness, "z.md", "Z", "The page being replaced.");
+
+        rebuild(
+            &harness.store,
+            &harness.wiki,
+            &harness.raw,
+            &harness.scope,
+            now(),
+        )
+        .expect("rebuild");
+
+        let heads: Vec<String> = harness
+            .store
+            .connection()
+            .prepare("SELECT path FROM pages WHERE is_latest = 1 ORDER BY path")
+            .expect("prepare")
+            .query_map([], |row| row.get(0))
+            .expect("query")
+            .collect::<std::result::Result<Vec<String>, _>>()
+            .expect("rows");
+        assert_eq!(heads, vec!["a.md".to_owned()], "z.md was replaced");
+    }
+
+    #[test]
     fn links_resolve_regardless_of_the_order_pages_are_visited() {
         // `a.md` links to `z.md`, which sorts last and is therefore indexed
         // after it. A single-pass rebuild would leave that link dangling.

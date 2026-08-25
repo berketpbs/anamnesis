@@ -1396,7 +1396,7 @@ fn cmd_sessions(limit: Option<usize>, data_dir: Option<PathBuf>) -> anyhow::Resu
 }
 
 fn cmd_show_page(path: &str, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
-    let (scope, data, _store) = open_project(data_dir)?;
+    let (scope, data, store) = open_project(data_dir)?;
     let wiki = Wiki::open(data.wiki())?;
     let page_path = anamnesis_core::page::PagePath::parse(path)?;
 
@@ -1421,6 +1421,15 @@ fn cmd_show_page(path: &str, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
     }
     if let Some(expires) = fm.expires_at {
         println!("   expires {expires}");
+    }
+    if let Some(replaces) = &fm.supersedes {
+        println!("   replaces {replaces}");
+    }
+    // Worth saying loudly: retrieval stopped offering this page the moment
+    // something replaced it, so anyone reading it here found it by name and
+    // has no other way to learn that.
+    if let Some(replacement) = store.superseded_by(scope.project_id, &page_path)? {
+        println!("   ⚠ replaced by {replacement}");
     }
     if !fm.entities.is_empty() {
         let names: Vec<&str> = fm.entities.iter().map(|e| e.as_str()).collect();

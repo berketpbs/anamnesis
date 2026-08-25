@@ -55,6 +55,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repository it describes
 
 ### Fixed
+- Supersession reaches the index. `supersedes` was accepted by the MCP tool,
+  written into frontmatter, and then dropped: no column was written and
+  `is_latest` never changed, so an agent recording that one page replaced
+  another kept being answered with the page it replaced. The claim is now
+  stored as authored and resolved in both directions, so it survives the two
+  pages being written in either order, and `show-page` says when a page has
+  been replaced
+- Session pages written by the server have their wikilinks indexed, instead of
+  only after a rebuild
 - Backlinks now resolve when the target page is written after the page that
   links to it
 - Rebuilt sessions come back closed when the transcript records their end

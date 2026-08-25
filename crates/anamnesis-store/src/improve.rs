@@ -212,9 +212,7 @@ impl Store {
                 params![project_id.to_string(), now.to_string()],
             )?
         } else {
-            let placeholders = std::iter::repeat_n("?", current.len())
-                .collect::<Vec<_>>()
-                .join(", ");
+            let placeholders = crate::query::placeholders(current.len());
             let sql = format!(
                 "UPDATE proposals SET state = 'resolved', decided_at = ?1
                  WHERE project_id = ?2 AND state = 'open' AND id NOT IN ({placeholders})"
