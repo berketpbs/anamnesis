@@ -126,25 +126,50 @@ impl Store {
     }
 
     /// Insert or refresh the index row for a page.
+    ///
+    /// Also resolves the page's supersession, in both directions: what this
+    /// page replaces, and whether anything replaces it. Both are derived from
+    /// the authored `supersedes` path rather than passed in, so writing the
+    /// pages in either order produces the same index — a page can name its
+    /// predecessor before the index has seen it, and a rebuild visits paths in
+    /// an order nobody chose.
     pub fn upsert_page(&self, page: &Page, now: Timestamp) -> Result<()> {
-        let conn = self.connection();
         let fm = &page.frontmatter;
-        conn.execute(
+        let target = fm.supersedes.as_ref().map(|path| path.as_str().to_owned());
+
+        let mut conn = self.connection();
+        let tx = conn.transaction()?;
+
+        // Read before writing: a page that stops naming a predecessor has to
+        // give it back its place at the head of the chain, and after the write
+        // there is nothing left to say who that was.
+        let previous: Option<String> = tx
+            .query_row(
+                "SELECT supersedes_target FROM pages WHERE id = ?1",
+                params![page.id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap_or(None)
+            .flatten();
+
+        tx.execute(
             "INSERT INTO pages
                  (id, project_id, path, title, body, tier, status, pinned, canonical,
-                  salience, expires_at, git_commit, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)
+                  salience, expires_at, git_commit, supersedes_target, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)
              ON CONFLICT (id) DO UPDATE SET
-                 title      = excluded.title,
-                 body       = excluded.body,
-                 tier       = excluded.tier,
-                 status     = excluded.status,
-                 pinned     = excluded.pinned,
-                 canonical  = excluded.canonical,
-                 salience   = excluded.salience,
-                 expires_at = excluded.expires_at,
-                 git_commit = excluded.git_commit,
-                 updated_at = excluded.updated_at",
+                 title             = excluded.title,
+                 body              = excluded.body,
+                 tier              = excluded.tier,
+                 status            = excluded.status,
+                 pinned            = excluded.pinned,
+                 canonical         = excluded.canonical,
+                 salience          = excluded.salience,
+                 expires_at        = excluded.expires_at,
+                 git_commit        = excluded.git_commit,
+                 supersedes_target = excluded.supersedes_target,
+                 updated_at        = excluded.updated_at",
             params![
                 page.id.to_string(),
                 page.project_id.to_string(),
@@ -158,10 +183,47 @@ impl Store {
                 fm.salience,
                 fm.expires_at.map(|t| t.to_string()),
                 page.git_commit.clone(),
+                target.clone(),
                 now.to_string(),
             ],
         )?;
+
+        // Three paths can have changed standing: this page, the predecessor it
+        // names now, and the one it named before.
+        let mut affected = vec![page.path.as_str().to_owned()];
+        affected.extend(target);
+        affected.extend(previous);
+        affected.sort();
+        affected.dedup();
+        resolve_supersession(&tx, page.project_id, &affected)?;
+
+        tx.commit()?;
         Ok(())
+    }
+
+    /// The page that replaced this one, if any has.
+    ///
+    /// Read from the authored claim rather than from `supersedes`, so it
+    /// answers the same way whether or not the replacement has been indexed
+    /// yet — the question someone asks of a page they were handed is "is this
+    /// still current", and "a page I have not seen yet says no" is still no.
+    pub fn superseded_by(
+        &self,
+        project_id: ProjectId,
+        path: &anamnesis_core::page::PagePath,
+    ) -> Result<Option<anamnesis_core::page::PagePath>> {
+        let conn = self.connection();
+        let replacement: Option<String> = conn
+            .query_row(
+                "SELECT path FROM pages
+                 WHERE project_id = ?1 AND supersedes_target = ?2 AND path <> ?2
+                 ORDER BY updated_at DESC, path
+                 LIMIT 1",
+                params![project_id.to_string(), path.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(replacement.as_deref().map(crate::convert::parse_page_path))
     }
 
     /// Record a handoff, expiring any that was still waiting.
@@ -312,6 +374,87 @@ impl Store {
     }
 }
 
+/// Recompute supersession for a set of page paths.
+///
+/// Two facts, both derived from the authored `supersedes_target` rather than
+/// asserted by whoever happened to write last:
+///
+/// * `supersedes` — the row a page named, once that row exists.
+/// * `is_latest` — whether anything names *this* page. Retrieval filters on
+///   it, so this is what actually takes a replaced page out of circulation.
+///
+/// Resolution runs in both directions because either page can be written
+/// first. A page naming a predecessor the index has not seen keeps the name
+/// and resolves when it arrives, which is the same shape as an unresolved
+/// wikilink — and the same bug avoided.
+///
+/// A page naming itself resolves to nothing. Left alone it would set its own
+/// `is_latest` to zero and disappear from retrieval, which is a strange way to
+/// punish a typo.
+fn resolve_supersession(
+    tx: &rusqlite::Transaction<'_>,
+    project_id: ProjectId,
+    paths: &[String],
+) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+
+    let list = crate::query::placeholders(paths.len());
+    let mut values: Vec<rusqlite::types::Value> = Vec::with_capacity(paths.len() + 1);
+    values.push(rusqlite::types::Value::Text(project_id.to_string()));
+    values.extend(
+        paths
+            .iter()
+            .map(|path| rusqlite::types::Value::Text(path.clone())),
+    );
+
+    // What these pages replace.
+    tx.execute(
+        &format!(
+            "UPDATE pages SET supersedes = (
+                 SELECT t.id FROM pages t
+                 WHERE t.project_id = pages.project_id
+                   AND t.path = pages.supersedes_target
+                   AND t.id <> pages.id
+             )
+             WHERE project_id = ?1 AND path IN ({list})"
+        ),
+        rusqlite::params_from_iter(values.iter()),
+    )?;
+
+    // What replaces them — pages written earlier that named one of these and
+    // could not resolve it at the time.
+    tx.execute(
+        &format!(
+            "UPDATE pages SET supersedes = (
+                 SELECT t.id FROM pages t
+                 WHERE t.project_id = pages.project_id
+                   AND t.path = pages.supersedes_target
+                   AND t.id <> pages.id
+             )
+             WHERE project_id = ?1 AND supersedes_target IN ({list})"
+        ),
+        rusqlite::params_from_iter(values.iter()),
+    )?;
+
+    // And whether each is still the head of its chain.
+    tx.execute(
+        &format!(
+            "UPDATE pages SET is_latest = CASE WHEN EXISTS (
+                 SELECT 1 FROM pages o
+                 WHERE o.project_id = pages.project_id
+                   AND o.supersedes_target = pages.path
+                   AND o.id <> pages.id
+             ) THEN 0 ELSE 1 END
+             WHERE project_id = ?1 AND path IN ({list})"
+        ),
+        rusqlite::params_from_iter(values.iter()),
+    )?;
+
+    Ok(())
+}
+
 /// Build a [`Session`] from a joined row.
 fn read_session(row: &Row<'_>) -> rusqlite::Result<Session> {
     Ok(Session {
@@ -430,6 +573,286 @@ mod tests {
             now(),
             None,
         )
+    }
+
+    /// Write a page, optionally naming the page it replaces.
+    fn write_page(
+        store: &Store,
+        project: ProjectId,
+        path: &str,
+        supersedes: Option<&str>,
+    ) -> anamnesis_core::page::Page {
+        use anamnesis_core::page::{Frontmatter, Page, PagePath};
+
+        let mut frontmatter = Frontmatter::new("A page", Vec::new()).expect("frontmatter");
+        frontmatter.supersedes = supersedes.map(|raw| PagePath::parse(raw).expect("path"));
+        let page = Page::new(
+            project,
+            PagePath::parse(path).expect("path"),
+            frontmatter,
+            "Body about sqlite.",
+        );
+        store.upsert_page(&page, now()).expect("upsert");
+        page
+    }
+
+    /// `(supersedes, is_latest)` as the index holds them for one page.
+    fn chain(store: &Store, page: &anamnesis_core::page::Page) -> (Option<String>, bool) {
+        store
+            .connection()
+            .query_row(
+                "SELECT supersedes, is_latest FROM pages WHERE id = ?1",
+                params![page.id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("row")
+    }
+
+    #[test]
+    fn a_page_can_say_what_replaced_it() {
+        let (_dir, store, project, _workspace) = fixture();
+        let old = write_page(&store, project, "decisions/0001-storage.md", None);
+        let new = write_page(
+            &store,
+            project,
+            "decisions/0002-storage.md",
+            Some("decisions/0001-storage.md"),
+        );
+
+        assert_eq!(
+            store
+                .superseded_by(project, &old.path)
+                .expect("lookup")
+                .map(|path| path.as_str().to_owned()),
+            Some("decisions/0002-storage.md".to_owned())
+        );
+        assert_eq!(
+            store.superseded_by(project, &new.path).expect("lookup"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_page_that_replaces_another_says_so_in_the_index() {
+        let (_dir, store, project, _workspace) = fixture();
+        let old = write_page(&store, project, "decisions/0001-storage.md", None);
+        let new = write_page(
+            &store,
+            project,
+            "decisions/0002-storage.md",
+            Some("decisions/0001-storage.md"),
+        );
+
+        assert_eq!(chain(&store, &new), (Some(old.id.to_string()), true));
+        assert_eq!(
+            chain(&store, &old),
+            (None, false),
+            "the page it replaced is no longer the head of the chain"
+        );
+    }
+
+    #[test]
+    fn a_replaced_page_stops_being_retrievable() {
+        // The whole point of the flag: an agent that says "this replaces that"
+        // should stop being answered with what it replaced.
+        let (_dir, store, project, _workspace) = fixture();
+        write_page(&store, project, "decisions/0001-storage.md", None);
+        assert_eq!(
+            store
+                .query_pages(project, "sqlite", 10, now(), None)
+                .expect("query")
+                .len(),
+            1
+        );
+
+        write_page(
+            &store,
+            project,
+            "decisions/0002-storage.md",
+            Some("decisions/0001-storage.md"),
+        );
+
+        let hits = store
+            .query_pages(project, "sqlite", 10, now(), None)
+            .expect("query");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path.as_str(), "decisions/0002-storage.md");
+    }
+
+    #[test]
+    fn naming_a_predecessor_that_arrives_later_still_resolves() {
+        // The same shape as a wikilink written before its target: the authored
+        // path is kept, so the pointer resolves when the page shows up. A
+        // rebuild visits paths in an order nobody chose, which is exactly when
+        // this happens.
+        let (_dir, store, project, _workspace) = fixture();
+        let new = write_page(
+            &store,
+            project,
+            "decisions/0002-storage.md",
+            Some("decisions/0001-storage.md"),
+        );
+        assert_eq!(chain(&store, &new), (None, true), "nothing to point at yet");
+
+        let old = write_page(&store, project, "decisions/0001-storage.md", None);
+        assert_eq!(chain(&store, &new), (Some(old.id.to_string()), true));
+        assert_eq!(chain(&store, &old), (None, false));
+    }
+
+    #[test]
+    fn taking_the_supersession_back_returns_the_page_to_the_head() {
+        let (_dir, store, project, _workspace) = fixture();
+        let old = write_page(&store, project, "decisions/0001-storage.md", None);
+        write_page(
+            &store,
+            project,
+            "decisions/0002-storage.md",
+            Some("decisions/0001-storage.md"),
+        );
+        assert!(!chain(&store, &old).1);
+
+        // Someone edits the frontmatter and removes the claim.
+        let new = write_page(&store, project, "decisions/0002-storage.md", None);
+        assert_eq!(chain(&store, &new), (None, true));
+        assert_eq!(
+            chain(&store, &old),
+            (None, true),
+            "nothing replaces it any more"
+        );
+    }
+
+    #[test]
+    fn moving_the_claim_to_another_page_frees_the_first() {
+        let (_dir, store, project, _workspace) = fixture();
+        let first = write_page(&store, project, "decisions/0001-storage.md", None);
+        let second = write_page(&store, project, "decisions/0002-storage.md", None);
+        write_page(
+            &store,
+            project,
+            "decisions/0003-storage.md",
+            Some("decisions/0001-storage.md"),
+        );
+        assert!(!chain(&store, &first).1);
+
+        write_page(
+            &store,
+            project,
+            "decisions/0003-storage.md",
+            Some("decisions/0002-storage.md"),
+        );
+        assert!(chain(&store, &first).1, "no longer replaced");
+        assert!(!chain(&store, &second).1, "replaced instead");
+    }
+
+    #[test]
+    fn a_chain_leaves_exactly_one_head() {
+        let (_dir, store, project, _workspace) = fixture();
+        let first = write_page(&store, project, "decisions/0001-storage.md", None);
+        let second = write_page(
+            &store,
+            project,
+            "decisions/0002-storage.md",
+            Some("decisions/0001-storage.md"),
+        );
+        let third = write_page(
+            &store,
+            project,
+            "decisions/0003-storage.md",
+            Some("decisions/0002-storage.md"),
+        );
+
+        assert!(!chain(&store, &first).1);
+        assert!(!chain(&store, &second).1);
+        assert!(chain(&store, &third).1);
+        assert_eq!(chain(&store, &third).0, Some(second.id.to_string()));
+    }
+
+    #[test]
+    fn rewriting_a_page_leaves_the_chain_as_it_was() {
+        let (_dir, store, project, _workspace) = fixture();
+        let old = write_page(&store, project, "decisions/0001-storage.md", None);
+        let new = write_page(
+            &store,
+            project,
+            "decisions/0002-storage.md",
+            Some("decisions/0001-storage.md"),
+        );
+
+        for _ in 0..3 {
+            write_page(
+                &store,
+                project,
+                "decisions/0002-storage.md",
+                Some("decisions/0001-storage.md"),
+            );
+        }
+        assert_eq!(chain(&store, &new), (Some(old.id.to_string()), true));
+        assert_eq!(chain(&store, &old), (None, false));
+    }
+
+    #[test]
+    fn a_page_naming_itself_is_left_where_it_is() {
+        // A typo should not be able to delete a page from retrieval.
+        let (_dir, store, project, _workspace) = fixture();
+        let page = write_page(
+            &store,
+            project,
+            "decisions/0001-storage.md",
+            Some("decisions/0001-storage.md"),
+        );
+        assert_eq!(chain(&store, &page), (None, true));
+        assert_eq!(
+            store
+                .query_pages(project, "sqlite", 10, now(), None)
+                .expect("query")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn naming_a_page_in_another_project_resolves_to_nothing() {
+        let (_dir, store, project, _workspace) = fixture();
+        let page = write_page(
+            &store,
+            project,
+            "decisions/0002-storage.md",
+            Some("decisions/0001-storage.md"),
+        );
+        assert_eq!(chain(&store, &page), (None, true));
+    }
+
+    #[test]
+    fn a_link_to_a_replaced_page_still_finds_it() {
+        // It exists; being replaced changes how it ranks, not whether it is
+        // there. Left unresolved, the wiki would look like it is asking for a
+        // page it already holds.
+        let (_dir, store, project, _workspace) = fixture();
+        let old = write_page(&store, project, "decisions/0001-storage.md", None);
+        write_page(
+            &store,
+            project,
+            "decisions/0002-storage.md",
+            Some("decisions/0001-storage.md"),
+        );
+        let source = write_page(&store, project, "sessions/a.md", None);
+        store
+            .set_page_links(
+                project,
+                source.id,
+                &["decisions/0001-storage.md".to_owned()],
+            )
+            .expect("links");
+
+        let resolved: Option<String> = store
+            .connection()
+            .query_row(
+                "SELECT to_page_id FROM page_links WHERE from_page_id = ?1",
+                params![source.id.to_string()],
+                |row| row.get(0),
+            )
+            .expect("link");
+        assert_eq!(resolved, Some(old.id.to_string()));
     }
 
     #[test]

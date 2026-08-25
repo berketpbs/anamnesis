@@ -214,6 +214,11 @@ Tier is a bounded signal applied *after* candidates are generated, never an
 independent retriever: otherwise a targeted search for something said once in
 one session would be buried under durable pages that merely outrank it.
 
+Pages that something else has replaced are excluded outright (`is_latest`),
+because an agent that recorded "this decision replaces that one" should not be
+answered with the decision it replaced. Links to them still resolve, though:
+being replaced changes how a page ranks, not whether it exists.
+
 ### Forgetting
 
 ```
@@ -327,8 +332,18 @@ so there is no way to record a session whose workspace and project disagree.
 
 ### pages
 `id`, `project_id`, `path`, `title`, `body`, `tier`, `status`, `pinned`,
-`canonical`, `supersedes`, `is_latest`, `salience`, `access_count`,
-`last_accessed_at`, `expires_at`, `git_commit`, `created_at`, `updated_at`.
+`canonical`, `supersedes`, `supersedes_target`, `is_latest`, `salience`,
+`access_count`, `last_accessed_at`, `expires_at`, `git_commit`, `created_at`,
+`updated_at`.
+
+Supersession is stored twice on purpose, the same way a wikilink is:
+`supersedes_target` is the path a page *authored* and `supersedes` is the row
+it resolved to. Either page can be written first — a rebuild visits paths in
+an order nobody chose — so the claim has to survive naming a page the index
+has not seen yet and resolve when it arrives. `is_latest` is derived from
+those claims rather than asserted by whoever wrote last, which is what
+retrieval filters on: a replaced page stops being offered, without anything
+having to edit the markdown someone else wrote.
 
 Entities are *not* a column: they live in `entities` and `page_entities`, so
 the entity retrieval stream can weight them by inverse frequency. Links live

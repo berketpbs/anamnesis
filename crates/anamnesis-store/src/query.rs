@@ -282,8 +282,14 @@ impl Store {
         for target in targets {
             let resolved: Option<String> = tx
                 .query_row(
+                    // Not filtered by `is_latest`: a link naming a page that
+                    // has since been superseded still names a page that
+                    // exists. Whether it is the head of its chain decides how
+                    // it ranks, not whether it is there — and treating it as
+                    // missing would have the wiki asking for a page it
+                    // already holds.
                     "SELECT id FROM pages
-                     WHERE project_id = ?1 AND is_latest = 1
+                     WHERE project_id = ?1
                        AND (path = ?2 OR path = ?2 || '.md')",
                     params![project_id.to_string(), target],
                     |row| row.get(0),
@@ -512,7 +518,7 @@ fn snippet_of(body: &str) -> String {
 }
 
 /// `?,?,...` for a dynamic-length `IN` clause.
-fn placeholders(count: usize) -> String {
+pub(crate) fn placeholders(count: usize) -> String {
     vec!["?"; count].join(",")
 }
 
