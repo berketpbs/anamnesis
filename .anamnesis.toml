@@ -8,11 +8,13 @@ workspace = "default"
 project = "anamnesis"
 
 [capture]
-# Glob patterns whose file events are meant never to reach the spool.
+# Glob patterns whose file events are dropped before anything is recorded.
 #
-# NOT ENFORCED YET: this list is parsed and validated, and then nothing reads
-# it. Redaction is what currently keeps secrets out of memory, so do not add
-# a path here and treat it as excluded.
+# Gitignore-shaped: a pattern with no slash matches at any depth, and one
+# ending in a slash covers the directory. Matching is case-insensitive.
+# This is a second line of defence, not the first: redaction runs on every
+# observation regardless, because a secret pasted into a prompt has no path
+# to exclude.
 ignore_paths = ["target/**", "Cargo.lock"]
 
 [slots]

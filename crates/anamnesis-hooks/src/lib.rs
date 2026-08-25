@@ -48,6 +48,13 @@ pub struct ParsedHook {
     pub kind: EventKind,
     /// Tool involved, for tool events.
     pub tool: Option<ToolRef>,
+    /// Files the event refers to, as the harness reported them.
+    ///
+    /// Only what the tool input names outright. A shell command that happens
+    /// to mention a path is not parsed: guessing wrong here would either
+    /// capture something a project asked to exclude, or drop an event nobody
+    /// asked to lose.
+    pub paths: Vec<String>,
     /// Redacted, bounded payload.
     pub body: BoundedBody,
     /// Redaction rules that fired, safe to log.
@@ -71,6 +78,7 @@ pub fn parse(agent: &AgentKind, raw: &Value) -> Result<ParsedHook> {
 
     let kind = classify(string_field(object, "hook_event_name").as_deref());
     let tool = tool_from(object);
+    let paths = paths_from(object);
     let raw_body = body_for(kind, object);
 
     let redacted = Redactor::new().redact(&raw_body);
@@ -82,6 +90,7 @@ pub fn parse(agent: &AgentKind, raw: &Value) -> Result<ParsedHook> {
         cwd: string_field(object, "cwd").map(PathBuf::from),
         kind,
         tool,
+        paths,
         body,
         redactions: redacted.hits().to_vec(),
     })
@@ -135,6 +144,36 @@ fn tool_outcome(object: &serde_json::Map<String, Value>) -> Option<bool> {
         }
     }
     None
+}
+
+/// Keys a harness uses to name the file a tool acted on.
+const PATH_KEYS: [&str; 5] = [
+    "file_path",
+    "filePath",
+    "notebook_path",
+    "notebookPath",
+    "path",
+];
+
+/// Collect the files a tool event names, in the order they appear.
+fn paths_from(object: &serde_json::Map<String, Value>) -> Vec<String> {
+    let Some(input) = object
+        .get("tool_input")
+        .or_else(|| object.get("toolInput"))
+        .and_then(Value::as_object)
+    else {
+        return Vec::new();
+    };
+
+    let mut paths: Vec<String> = Vec::new();
+    for key in PATH_KEYS {
+        if let Some(path) = string_field(input, key)
+            && !paths.contains(&path)
+        {
+            paths.push(path);
+        }
+    }
+    paths
 }
 
 /// Choose what to record as the body for this kind of event.
@@ -205,6 +244,37 @@ mod tests {
         assert_eq!(parsed.body.as_str(), "add the storage layer");
         assert_eq!(parsed.cwd, Some(PathBuf::from("/repo")));
         assert!(parsed.tool.is_none());
+    }
+
+    #[test]
+    fn a_tool_hook_reports_the_file_it_touched() {
+        let payload = json!({
+            "session_id": "abc-123",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Write",
+            "tool_input": {"file_path": "/repo/.env", "content": "KEY=..."}
+        });
+
+        let parsed = parse(&claude(), &payload).unwrap();
+
+        assert_eq!(parsed.paths, vec!["/repo/.env".to_owned()]);
+    }
+
+    #[test]
+    fn an_event_that_names_no_file_reports_none() {
+        // A shell command may mention a path in its text; that is not a claim
+        // about which file was touched, and guessing would either over-exclude
+        // or lose events nobody asked to lose.
+        let payload = json!({
+            "session_id": "abc-123",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cat .env"}
+        });
+
+        let parsed = parse(&claude(), &payload).unwrap();
+
+        assert!(parsed.paths.is_empty());
     }
 
     #[test]

@@ -18,6 +18,7 @@ tracing.workspace = true
 figment = { workspace = true, features = ["toml", "env"] }
 git2.workspace = true
 regex.workspace = true
+globset.workspace = true
 dirs.workspace = true
 
 [dev-dependencies]

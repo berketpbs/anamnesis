@@ -302,10 +302,15 @@ mod tests {
     }
 
     fn harness() -> Harness {
+        harness_with("")
+    }
+
+    /// A harness whose marker file carries `extra` beyond the scope table.
+    fn harness_with(extra: &str) -> Harness {
         let repo = tempfile::tempdir().expect("repo dir");
         std::fs::write(
             repo.path().join(".anamnesis.toml"),
-            "[scope]\nworkspace = \"default\"\nproject = \"widget\"\n",
+            format!("[scope]\nworkspace = \"default\"\nproject = \"widget\"\n{extra}"),
         )
         .expect("marker");
 
@@ -354,6 +359,112 @@ mod tests {
             now(),
         )
         .expect("ingest")
+    }
+
+    #[test]
+    fn an_excluded_file_reaches_neither_the_index_nor_the_spool() {
+        // The point of the setting: a project says `.env` is not to be
+        // remembered, and no copy of it exists anywhere afterwards — not in
+        // the index, not in the transcript that outlives the index.
+        let harness = harness_with("\n[capture]\nignore_paths = [\".env\"]\n");
+
+        run(&harness, "SessionStart", json!({"source": "startup"}));
+        let secret = run(
+            &harness,
+            "PostToolUse",
+            json!({
+                "tool_name": "Read",
+                "tool_input": {"file_path": ".env", "content": "TOKEN=hunter2"}
+            }),
+        );
+        run(
+            &harness,
+            "PostToolUse",
+            json!({
+                "tool_name": "Edit",
+                "tool_input": {"file_path": "src/lib.rs"}
+            }),
+        );
+
+        let observations = harness
+            .state
+            .store
+            .observations(secret.session_id)
+            .expect("observations");
+        let bodies: Vec<&str> = observations.iter().map(|o| o.body.as_str()).collect();
+        assert!(
+            !bodies.iter().any(|body| body.contains(".env")),
+            "an excluded path was indexed anyway: {bodies:?}"
+        );
+        assert!(bodies.iter().any(|body| body.contains("src/lib.rs")));
+
+        let scope = resolve_scope(&harness.cwd).expect("scope");
+        let session = harness
+            .state
+            .store
+            .load_session(secret.session_id)
+            .expect("load")
+            .expect("session exists");
+        let spooled = harness
+            .state
+            .raw
+            .as_deref()
+            .expect("spool")
+            .read_session(&scope.scope, &session)
+            .expect("read spool");
+        assert!(
+            !spooled
+                .iter()
+                .any(|record| format!("{record:?}").contains(".env")),
+            "an excluded path was spooled anyway"
+        );
+    }
+
+    #[test]
+    fn exclusions_do_not_stop_a_session_from_starting_or_ending() {
+        // Only the events naming an excluded file are dropped. A session made
+        // entirely of them still has to open and close, or the next session
+        // inherits an open session that never ends.
+        let harness = harness_with("\n[capture]\nignore_paths = [\"secrets/**\"]\n");
+
+        run(&harness, "SessionStart", json!({"source": "startup"}));
+        run(
+            &harness,
+            "PostToolUse",
+            json!({"tool_name": "Read", "tool_input": {"file_path": "secrets/key.pem"}}),
+        );
+        let end = run(&harness, "SessionEnd", json!({"reason": "clear"}));
+
+        let session = harness
+            .state
+            .store
+            .load_session(end.session_id)
+            .expect("load")
+            .expect("session exists");
+        assert!(session.ended_at.is_some());
+    }
+
+    #[test]
+    fn a_project_without_exclusions_captures_everything() {
+        let harness = harness();
+
+        let ingested = run(
+            &harness,
+            "PostToolUse",
+            json!({"tool_name": "Read", "tool_input": {"file_path": ".env"}}),
+        );
+
+        let observations = harness
+            .state
+            .store
+            .observations(ingested.session_id)
+            .expect("observations");
+        assert!(
+            observations
+                .iter()
+                .any(|o| o.body.as_str().contains(".env")),
+            "nothing is excluded until a project asks for it"
+        );
     }
 
     #[test]

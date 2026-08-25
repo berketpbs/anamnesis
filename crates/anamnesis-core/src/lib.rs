@@ -17,6 +17,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod capture;
 pub mod config;
 pub mod datadir;
 pub mod decay;

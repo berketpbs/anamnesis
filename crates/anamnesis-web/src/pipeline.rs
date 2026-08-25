@@ -8,6 +8,7 @@
 use std::path::Path;
 
 use anamnesis_consolidate::{PREFERENCES_PAGE, SessionDigest, consolidate, consolidate_with_llm};
+use anamnesis_core::capture::CaptureFilter;
 use anamnesis_core::ids::SessionId;
 use anamnesis_core::observation::{EventKind, Observation};
 use anamnesis_core::page::{Frontmatter, Page, PagePath, Tier};
@@ -94,6 +95,19 @@ pub fn record(
     );
     store.ensure_session(&session)?;
 
+    // An excluded file is excluded from the moment it arrives: the observation
+    // is never built, so nothing about it reaches the index, the spool, or a
+    // later summary. The session row stays, because a session whose middle was
+    // filtered still started and still has to end.
+    if let Some(excluded) = excluded_path(&scope, hook) {
+        tracing::debug!(
+            %session_id,
+            path = %excluded,
+            "dropping event: path is excluded by [capture] ignore_paths"
+        );
+        return Ok((scope, session_id));
+    }
+
     let observation = new_observation(
         session_id,
         hook.kind,
@@ -114,6 +128,30 @@ pub fn record(
     }
 
     Ok((scope, session_id))
+}
+
+/// The first path in this event the project has asked never to capture.
+///
+/// A malformed pattern excludes nothing and says so once, rather than failing
+/// the event: a typo in a marker file must not stop a session being recorded,
+/// and the alternative — treating an uncompilable pattern as "exclude
+/// everything" — would silently empty someone's memory.
+fn excluded_path(scope: &ResolvedScope, hook: &ParsedHook) -> Option<String> {
+    if hook.paths.is_empty() || scope.capture.ignore_paths.is_empty() {
+        return None;
+    }
+
+    let filter = match CaptureFilter::compile(&scope.capture, &scope.root) {
+        Ok(filter) => filter,
+        Err(error) => {
+            tracing::warn!(%error, "ignoring unusable [capture] ignore_paths");
+            return None;
+        }
+    };
+
+    filter
+        .first_excluded(hook.paths.iter().map(String::as_str))
+        .map(str::to_owned)
 }
 
 /// Close a session: summarise it, write the page, leave a handoff.
