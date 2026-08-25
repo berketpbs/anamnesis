@@ -41,13 +41,17 @@ Anamnesis is organized as a Rust workspace with modular crates:
 - `anamnesis sweep` forgets pages that have decayed — reports by default,
   deletes only with `--apply`, and never touches pinned, durable, canonical,
   or known-wrong pages
+- `anamnesis improve` proposes what the memory could do better — promote a
+  page several sessions kept returning to, write a page several pages link to
+  — and carries out what it can, once a project says it may
+- `[auto_improve.scheduler]`: the server runs that pass per project, on the
+  interval that project asked for
 
 ## Not Built Yet
 
 These have configuration or a placeholder in the tree, and nothing behind it.
 They are listed so nobody plans around them:
 
-- **`[auto_improve]` and its scheduler** — configuration only; nothing runs.
 - **`[slots] per_user`** — configuration only; every session shares one scope.
 - **Bearer-token auth** — the HTTP server has no authentication. Bind it to
   loopback, which is the default.

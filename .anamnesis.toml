@@ -34,11 +34,23 @@ access_weight = 0.5
 # Per-operator memory slots, for shared servers. Parsed; not implemented.
 per_user = false
 
-# Parsed; nothing runs on a schedule yet.
+# What `anamnesis improve` — and, when scheduled, the server — may do to this
+# project's memory.
+#
+# `require_approval` is the important one: left true, a pass files proposals
+# and stops, and every change is made by someone running
+# `anamnesis improve --apply <id>`. Set it false and the pass carries out the
+# proposals it can carry out mechanically, which today means promoting a page
+# several sessions kept coming back to into the durable tier — where the decay
+# sweep can no longer reach it.
 [auto_improve]
 enabled = true
 require_approval = true
 
+# Off by default: nothing runs on a schedule unless a project asks. The server
+# checks every 60 seconds whether this interval has elapsed since this
+# project's last pass, so the interval is honoured across restarts.
+#
 # A single table, not a list. `[[auto_improve.scheduler]]` would declare an
 # array of tables and the schedule would be silently ignored.
 [auto_improve.scheduler]

@@ -104,6 +104,11 @@ id_newtype! {
     WorkstreamId
 }
 
+id_newtype! {
+    /// Identifies an improvement proposal, derived from what it is about.
+    ProposalId
+}
+
 impl WorkspaceId {
     /// Derive the identifier for a workspace name.
     pub fn derive(name: &WorkspaceName) -> Self {
@@ -134,6 +139,21 @@ impl PageId {
     /// different projects never collide.
     pub fn derive(project: ProjectId, path: &PagePath) -> Self {
         Self(Uuid::new_v5(project.as_uuid(), path.as_str().as_bytes()))
+    }
+}
+
+impl ProposalId {
+    /// Derive the identifier for a proposal from what it asks about.
+    ///
+    /// Derived rather than minted so that a pass which notices the same thing
+    /// again files the same row again, instead of a second copy. That is what
+    /// makes a decision stick: a proposal someone dismissed stays dismissed,
+    /// because the next pass cannot help but arrive at its identifier.
+    pub fn derive(project: ProjectId, kind: &str, subject: &str) -> Self {
+        Self(Uuid::new_v5(
+            project.as_uuid(),
+            format!("proposal:{kind}:{subject}").as_bytes(),
+        ))
     }
 }
 

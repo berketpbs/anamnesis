@@ -152,6 +152,7 @@ Command-line interface.
 - `reindex` — rebuild the index from `wiki/` and `raw/`
 - `bootstrap` — seed a new project's memory from its git history
 - `sweep` — forget pages that have decayed; reports unless `--apply`
+- `improve` — file and act on proposals about the memory itself
 
 ## Data Flow
 
@@ -256,6 +257,51 @@ not override an exemption: a page that is both pinned and expired is a
 contradiction between two things the same author wrote, and the sweep reports
 it rather than picking a winner in silence.
 
+### Improving
+
+```
+anamnesis improve            server tick, every 60s
+    │                            │
+    │                            ├─→ each project: is its interval elapsed?
+    │                            │     (read from its own marker file)
+    ▼                            ▼
+  anamnesis_core::improve::propose (pure)
+    ├─ promote-tier        an episodic page several sessions came back to
+    └─ write-missing-page  a link target no page answers to
+    │
+    ├─→ file, refresh, or resolve — identity is (project, kind, subject)
+    │
+    └─→ require_approval = false: carry out what can be carried out
+```
+
+The other half of forgetting. A sweep removes what nobody needs; a pass
+notices what the memory has earned or is missing, from signals it already
+records rather than from a model's opinion.
+
+**Promotion is the interesting one.** Retrieval records every hit, so an
+`episodic` page that later sessions kept coming back to is knowledge filed as
+a session note. Promoting it to `semantic` says so — and makes it exempt from
+the sweep, which is how a page becomes durable by proving itself instead of by
+someone remembering to pin it. That is also why approval is the default: it is
+a retention decision, not a tidy-up.
+
+**A proposal is an observation, not a task.** Its identifier is derived from
+`(project, kind, subject)`, so a later pass lands on the row it already filed.
+Dismiss one and it stays dismissed; do the thing yourself and the next pass
+resolves it, because the condition it described has stopped holding.
+
+**Not everything can be carried out.** Writing a missing page is not
+mechanical — nothing can invent what it should say — so that kind waits for a
+person however the project has set `require_approval`.
+
+**The schedule belongs to the project, not the server.** One server serves
+every project that talks to it, and each keeps its own `[auto_improve]` table.
+The loop ticks every 60 seconds and asks each project whether *its* interval
+has elapsed since *its* last pass, which is recorded in the index — so
+restarting the server does not restart everyone's clock, and a project whose
+marker file cannot be found or read is skipped with a reason rather than
+improved on defaults it never chose.
+
 ## Storage Schema
 
 Twelve tables across six migrations (`V01`–`V06`), the authoritative copy of
@@ -288,9 +334,19 @@ Entities are *not* a column: they live in `entities` and `page_entities`, so
 the entity retrieval stream can weight them by inverse frequency. Links live
 in `page_links`, which is what makes link-neighbour retrieval possible.
 
+### proposals
+`id`, `project_id`, `kind`, `subject`, `page_id`, `rationale`, `state`
+(`open` / `applied` / `dismissed` / `resolved`), `created_at`, `decided_at`.
+
+The identifier is derived from `(project, kind, subject)`, which is what makes
+a decision stick: a later pass that notices the same condition arrives at the
+same row rather than filing a second copy of it.
+
 ### The rest
-`projects`, `pages_fts` (FTS5, unicode61), `entities`, `page_entities`,
-`page_links`, `handoffs`, `page_feedback`, `page_embeddings`, `workstreams`.
+`projects` — which also records each project's working copy and when it was
+last improved, so a scheduler can find its settings and honour its interval —
+plus `pages_fts` (FTS5, unicode61), `entities`, `page_entities`, `page_links`,
+`handoffs`, `page_feedback`, `page_embeddings`, `workstreams`.
 
 ## Configuration
 
@@ -316,10 +372,14 @@ access_weight = 0.5
 [slots]
 per_user = false
 
+# Whether a pass may look at all, and whether it may act without being asked.
 [auto_improve]
 enabled = true
 require_approval = true
 
+# Off unless a project asks. The server checks every 60 seconds whether this
+# interval has elapsed since this project's last pass.
+#
 # A single table. `[[auto_improve.scheduler]]` declares an array of tables and
 # is rejected at load time rather than being silently ignored.
 [auto_improve.scheduler]
@@ -331,10 +391,10 @@ Unknown keys are an error, so a typo surfaces instead of quietly sending memory
 to the wrong project. `.ai-memory.toml` is still read as a fallback filename for
 projects migrating from upstream `ai-memory`.
 
-Of the tables above, `[scope]`, `[capture]`, and `[decay]` change what the
-system does. `[slots]` and `[auto_improve]` are parsed and validated, and then
-nothing reads them; they are accepted so that a file written for a later
-version does not fail to load, not because they take effect.
+Of the tables above, only `[slots]` is inert: it is parsed and validated and
+then nothing reads it, accepted so that a file written for a later version
+does not fail to load. `[scope]`, `[capture]`, `[decay]`, and `[auto_improve]`
+all change what the system does.
 
 ### Data directory
 
@@ -380,7 +440,8 @@ data directory.
 ## Future Enhancements
 
 Shipped since this list was written: vector embeddings (local candle
-embedder, opt-in), the raw spool, `reindex`, `bootstrap`, and the decay sweep.
+embedder, opt-in), the raw spool, `reindex`, `bootstrap`, the decay sweep, and
+auto-improve with its scheduler.
 
 Still ahead:
 
@@ -388,5 +449,4 @@ Still ahead:
 2. **Multi-Agent Coordination** - Shared context between agents
 3. **Policy Engine** - Fine-grained access control
 4. **Audit Trail** - Complete action logging
-5. **Auto-improve** - The scheduler the configuration already describes
-6. **Evals** - The empty crate at `evals/`
+5. **Evals** - The empty crate at `evals/`

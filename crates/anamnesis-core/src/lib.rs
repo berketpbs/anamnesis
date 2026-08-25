@@ -24,6 +24,7 @@ pub mod decay;
 pub mod error;
 pub mod handoff;
 pub mod ids;
+pub mod improve;
 pub mod observation;
 pub mod page;
 pub mod retrieval;
@@ -43,8 +44,10 @@ pub mod prelude {
     pub use crate::error::{CoreError, Result};
     pub use crate::handoff::{Handoff, HandoffState};
     pub use crate::ids::{
-        HandoffId, ObservationId, PageId, ProjectId, SessionId, WorkspaceId, WorkstreamId,
+        HandoffId, ObservationId, PageId, ProjectId, ProposalId, SessionId, WorkspaceId,
+        WorkstreamId,
     };
+    pub use crate::improve::{Proposal, ProposalKind, ProposalState};
     pub use crate::observation::{BoundedBody, EventKind, Observation, ToolRef};
     pub use crate::page::{Entity, Frontmatter, Page, PagePath, PageStatus, Tier};
     pub use crate::retrieval::{
