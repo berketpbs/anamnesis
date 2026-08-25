@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one commit that names each page and why it went
 - `[decay]` in `.anamnesis.toml` — retention tuning as half-lives, read by
   the sweep and refused at load time when a value would make it nonsense
+- Session pages name their entities. Consolidation produces them in both
+  modes — the names a model says a later search would type, or the basenames
+  of the files the session touched when no model is configured — so the entity
+  retrieval stream finally sees the pages the system writes for itself
 - `anamnesis improve` — file proposals from what the index already records: a
   page several sessions kept coming back to should be durable, and a page
   several pages link to should exist. Proposals are identified by what they

@@ -185,12 +185,25 @@ Session Ends
     │
     ├─→ anamnesis-consolidate (Collect observations)
     │
-    ├─→ anamnesis-llm (Generate summary)
+    ├─→ anamnesis-llm (Generate summary)      ← optional; counting otherwise
+    │
+    ├─→ a digest: title, body, handoff, entities
     │
     ├─→ anamnesis-wiki (Create/update pages)
     │
+    ├─→ the index: page row, entities, links
+    │
     └─→ Git repo (Commit changes)
 ```
+
+A page says what it is about, not only what it contains. With a model, the
+entities are the names it says a later search would type — files, crates,
+tools, systems, error names. Without one, they are the basenames of the files
+the session worked on, which is what counting can reach. Basenames rather than
+paths: an entity matches when every token of its name is in the query, so
+`lib.rs` asks for the two tokens someone would type where the full path would
+demand six. A name that ends up on half the wiki costs nothing, since entity
+weight is inverse to how many pages carry it.
 
 ### Retrieval
 
