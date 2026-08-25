@@ -151,8 +151,17 @@ docker run -d \
 |----------|---------|-------------|
 | `ANAMNESIS_DATA_DIR` | `/root/.anamnesis` | Data directory root (`wiki/`, `raw/`, `db/`, `models/`, `logs/`) |
 | `RUST_LOG` | `info` | Logging level (debug, info, warn, error) |
-| `PORT` | `8080` | Server port |
-| `BIND` | `0.0.0.0` | Bind address |
+| `ANTHROPIC_API_KEY` | — | Enables model-written consolidation. Without it, summaries are compiled by counting. |
+| `ANAMNESIS_LLM_*` | see below | `PROVIDER`, `MODEL`, `BASE_URL`, `EFFORT`, `MAX_INPUT_TOKENS`, `MAX_OUTPUT_TOKENS`, `TIMEOUT_SECS`, `MAX_RETRIES`, `FALLBACKS` |
+| `ANAMNESIS_EMBED_ENABLED` | unset | `1` turns on the local embedder, which downloads a model into `models/` on first use |
+
+> `PORT` and `BIND` are **not** read. The entrypoint hardcodes
+> `anamnesis serve --bind 0.0.0.0 --port 8080`; to change either, override the
+> container command instead:
+>
+> ```bash
+> docker run anamnesis:latest anamnesis serve --bind 0.0.0.0 --port 9000
+> ```
 
 **Usage:**
 ```bash
