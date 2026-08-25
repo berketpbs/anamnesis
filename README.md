@@ -44,8 +44,6 @@ Anamnesis is organized as a Rust workspace with modular crates:
 These have configuration or a placeholder in the tree, and nothing behind it.
 They are listed so nobody plans around them:
 
-- **`[capture] ignore_paths`** — parsed and validated, but never consulted.
-  Redaction, not path exclusion, is what currently keeps secrets out of memory.
 - **`[auto_improve]` and its scheduler** — configuration only; nothing runs.
 - **`[slots] per_user`** — configuration only; every session shares one scope.
 - **Bearer-token auth** — the HTTP server has no authentication. Bind it to

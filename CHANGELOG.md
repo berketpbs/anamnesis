@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `anamnesis reindex` — rebuild the index from `wiki/` and `raw/`
 - `anamnesis bootstrap` — seed a new project's memory from its git history
 - CI: fmt, clippy, and tests on Linux and Windows for every push and PR
+- `[capture] ignore_paths` is enforced: events naming an excluded path are
+  dropped before an observation exists, so nothing about them reaches the
+  index, the spool, or a summary
 
 ### Changed
 - Configuration marker is `.anamnesis.toml`; `.ai-memory.toml` is read as a

@@ -109,9 +109,7 @@ impl CaptureFilter {
     where
         I: IntoIterator<Item = &'a str>,
     {
-        if self.set.is_none() {
-            return None;
-        }
+        self.set.as_ref()?;
         paths.into_iter().find(|path| self.excludes(path))
     }
 

@@ -212,24 +212,48 @@ an existing one never renames its branch.
 
 ## Configuration
 
-`.anamnesis.toml` is optional. Only `[scope]` changes behaviour today:
+`.anamnesis.toml` is optional. Two tables change what happens:
 
 ```toml
 [scope]
 workspace = "default"
 project = "my-project"
+
+[capture]
+# Events naming these paths are dropped before anything is recorded.
+ignore_paths = ["target/**", "*.log", ".env"]
 ```
 
 Unknown keys are rejected rather than ignored, so a typo surfaces instead of
 quietly sending memory to the wrong project.
 
-The loader also accepts `[capture]`, `[slots]`, and `[auto_improve]`, but
-**nothing reads them yet**:
+### Excluding paths from capture
+
+Patterns are shaped like `.gitignore` entries:
+
+| Pattern | Matches |
+| --- | --- |
+| `target/**` | everything under this project's `target/` |
+| `target/` | the same — a trailing slash means the directory |
+| `*.log` | any `.log` file, at any depth |
+| `.env` | any file called `.env`, at any depth |
+| `config/*.yml` | `.yml` files directly in `config/`, not below it |
+
+Matching is case-insensitive, and works on both the absolute path an agent
+reports and the path relative to the project. An event naming several files is
+dropped if any one of them is excluded, because the record of it would carry
+the excluded file's contents too.
+
+What this does **not** cover: a shell command that merely mentions a path.
+Only the file a tool input names outright is matched, since guessing at
+command lines would either drop events nobody asked to lose or miss the ones
+that mattered. Redaction still runs on everything, and remains the first line
+of defence — a secret pasted into a prompt has no path to exclude.
+
+The loader also accepts `[slots]` and `[auto_improve]`, which **nothing reads
+yet**:
 
 ```toml
-[capture]
-ignore_paths = ["target/**", "*.log"]   # parsed; never consulted
-
 [slots]
 per_user = false                        # parsed; never consulted
 
@@ -243,9 +267,6 @@ require_approval = true
 enabled = false
 interval_minutes = 60
 ```
-
-In particular, do not put `.env` in `ignore_paths` and assume it is excluded.
-Redaction is what keeps secrets out of memory today.
 
 ## Troubleshooting
 

@@ -80,9 +80,8 @@ Lifecycle event capture from agent sessions.
 - Hook payload parsing (Claude Code today; one module per harness)
 - Observation creation
 - Redaction, applied before an observation reaches storage
-
-> Path-based capture exclusion (`[capture] ignore_paths`) is **not
-> implemented**. The setting parses; nothing reads it.
+- The file paths a tool event names, which is what `[capture] ignore_paths`
+  is matched against
 
 ### anamnesis-llm
 LLM provider abstraction, and the local embedder.
@@ -309,6 +308,13 @@ data directory.
 - **Redaction** — observations are scrubbed of secret-shaped text before they
   reach either the index or the spool, and the spool rejects anything that
   arrives unredacted.
+- **Capture exclusions** — `[capture] ignore_paths` drops events naming the
+  paths a project has excluded, before an observation is built. Nothing about
+  them reaches the index, the spool, or a later summary. Patterns are
+  gitignore-shaped and matched case-insensitively; an event naming several
+  files is dropped if any one of them is excluded. Only paths a tool input
+  names outright are matched — a shell command that mentions a path is not
+  parsed, so exclusion is not a substitute for redaction.
 - **Loopback by default** — `anamnesis serve` binds `127.0.0.1`.
 - **Path containment** — `PagePath` rejects absolute paths, `..`, drive
   letters, and backslashes, so no page written through it can escape its
@@ -316,9 +322,6 @@ data directory.
 
 **Not implemented — do not rely on these:**
 
-- **`[capture] ignore_paths`** — parsed, never consulted. Excluding `.env`
-  here does nothing; redaction is the only thing standing between a secret in
-  a prompt and the wiki.
 - **Bearer-token auth** — there is no authentication on the HTTP server.
 - **`[slots] per_user`** — every session shares one scope.
 
