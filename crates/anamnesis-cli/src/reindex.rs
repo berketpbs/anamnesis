@@ -41,6 +41,12 @@ pub struct Rebuilt {
     /// to a session. Their observations are counted here rather than
     /// silently dropped from the report.
     pub orphaned_files: usize,
+    /// Index rows dropped because the wiki no longer holds their page.
+    pub removed: usize,
+    /// Whether stale rows were left alone because the scope's wiki directory
+    /// is not there at all. Reported rather than acted on: see
+    /// [`rebuild_pages`].
+    pub skipped_removal: bool,
 }
 
 /// Rebuild the index for one project from its wiki and spool.
@@ -57,7 +63,10 @@ pub fn rebuild(
     let mut report = Rebuilt::default();
     store.upsert_project(scope, now)?;
 
-    report.pages = rebuild_pages(store, wiki, scope, now)?;
+    let pages = rebuild_pages(store, wiki, scope, now)?;
+    report.pages = pages.indexed;
+    report.removed = pages.removed;
+    report.skipped_removal = pages.skipped_removal;
     let (sessions, observations, orphaned) = rebuild_sessions(store, raw, scope)?;
     report.sessions = sessions;
     report.observations = observations;
@@ -66,20 +75,40 @@ pub fn rebuild(
     Ok(report)
 }
 
-/// Re-index every page in the wiki, including its entities and links.
+/// What one pass over the wiki did to the index.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Pages {
+    /// Pages read from the wiki and written to the index.
+    indexed: usize,
+    /// Rows dropped because no file answers to their path any more.
+    removed: usize,
+    /// Whether removal was declined because the scope directory is missing.
+    skipped_removal: bool,
+}
+
+/// Re-index every page in the wiki, and forget the ones it no longer holds.
 ///
 /// Links are resolved in a second pass over the same pages. One pass cannot
 /// do it: a page linking to one written later would resolve against a page
 /// that does not exist in the index yet, which is the exact bug the
 /// backlink fix in `set_page_links` exists to prevent — and a rebuild must
 /// not reintroduce it by visiting pages in an unlucky order.
+///
+/// Removal runs last, and only against paths the walk actually looked for.
+/// A page that failed to parse is skipped above but its file is still there,
+/// so it is compared by the path the walk found rather than by whether it
+/// made it into the index — otherwise one malformed page would be quietly
+/// forgotten instead of merely reported.
 fn rebuild_pages(
     store: &Store,
     wiki: &Wiki,
     scope: &ResolvedScope,
     now: Timestamp,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<Pages> {
     let paths = wiki.pages(&scope.scope)?;
+    let on_disk: std::collections::HashSet<String> =
+        paths.iter().map(|path| path.as_str().to_owned()).collect();
+    let mut report = Pages::default();
     let mut indexed = Vec::with_capacity(paths.len());
 
     for path in paths {
@@ -112,8 +141,36 @@ fn rebuild_pages(
             &anamnesis_wiki::extract_links(body),
         )?;
     }
+    report.indexed = indexed.len();
 
-    Ok(indexed.len())
+    // An absent directory and an emptied one are the same empty list to
+    // `Wiki::pages`, and they call for opposite actions: the second means
+    // someone deleted their pages, the first means this rebuild is looking in
+    // the wrong place — a mistyped `--data-dir`, a scope resolved from a
+    // directory nobody meant. Dropping every row on the strength of a path
+    // that does not exist would be obeying the typo.
+    if !wiki.scope_root(&scope.scope).exists() {
+        // Worth saying only when the index holds rows this absent directory
+        // would otherwise have condemned. A project that has simply never been
+        // written to has nothing to warn anybody about.
+        report.skipped_removal = !store.page_paths(scope.project_id)?.is_empty();
+        return Ok(report);
+    }
+
+    for (page_id, path) in store.page_paths(scope.project_id)? {
+        if on_disk.contains(&path) {
+            continue;
+        }
+        // Rows only. The page is already gone from the wiki — that is why we
+        // are here — and its history is in the wiki's git repository, which is
+        // what makes a deletion something you can look back at.
+        if store.delete_page(page_id)? {
+            tracing::info!(%path, "forgetting a page the wiki no longer holds");
+            report.removed += 1;
+        }
+    }
+
+    Ok(report)
 }
 
 /// Recover sessions and their observations from the spool.
@@ -555,6 +612,135 @@ mod tests {
             "a session that ended must come back closed"
         );
         assert_eq!(loaded.ended_at, Some(ended), "and at the time it ended");
+    }
+
+    /// Rebuild once, so the index holds whatever the wiki holds.
+    fn rebuilt(harness: &Harness) -> Rebuilt {
+        rebuild(
+            &harness.store,
+            &harness.wiki,
+            &harness.raw,
+            &harness.scope,
+            now(),
+        )
+        .expect("rebuild")
+    }
+
+    /// The file a page lives in, for tests that reach past the wiki API.
+    fn page_file(harness: &Harness, path: &str) -> std::path::PathBuf {
+        harness.wiki.scope_root(&harness.scope.scope).join(path)
+    }
+
+    /// The gap this closes: search kept offering a page that was not there any
+    /// more, because a rebuild only ever added.
+    #[test]
+    fn a_page_deleted_from_the_wiki_is_forgotten_by_the_index() {
+        let harness = harness();
+        wiki_page(&harness, "kept.md", "Kept", "Still here.");
+        wiki_page(&harness, "gone.md", "Gone", "Deleted by hand.");
+        assert_eq!(rebuilt(&harness).pages, 2);
+
+        std::fs::remove_file(page_file(&harness, "gone.md")).expect("delete");
+
+        let report = rebuilt(&harness);
+        assert_eq!(report.pages, 1);
+        assert_eq!(report.removed, 1);
+        assert!(!report.skipped_removal);
+
+        let left: Vec<String> = harness
+            .store
+            .page_paths(harness.scope.project_id)
+            .expect("paths")
+            .into_iter()
+            .map(|(_, path)| path)
+            .collect();
+        assert_eq!(left, vec!["kept.md".to_owned()]);
+    }
+
+    /// A page that will not parse is skipped, not absent. Comparing against
+    /// what made it into the index rather than what the walk found would
+    /// quietly forget it — and the one page anyone needs to fix is the one
+    /// that would disappear.
+    #[test]
+    fn a_page_that_will_not_parse_is_skipped_not_forgotten() {
+        let harness = harness();
+        wiki_page(&harness, "broken.md", "Broken", "Fine for now.");
+        assert_eq!(rebuilt(&harness).pages, 1);
+
+        std::fs::write(page_file(&harness, "broken.md"), "no frontmatter here").expect("corrupt");
+
+        let report = rebuilt(&harness);
+        assert_eq!(report.pages, 0, "it could not be read");
+        assert_eq!(report.removed, 0, "but it is still there");
+        assert_eq!(
+            harness
+                .store
+                .page_paths(harness.scope.project_id)
+                .expect("paths")
+                .len(),
+            1
+        );
+    }
+
+    /// An absent directory and an emptied one look identical to `Wiki::pages`,
+    /// and call for opposite actions. Dropping every row on the strength of a
+    /// path that does not exist would be obeying a mistyped `--data-dir`.
+    #[test]
+    fn a_missing_scope_directory_forgets_nothing_and_says_so() {
+        let harness = harness();
+        wiki_page(&harness, "page.md", "Page", "Body.");
+        assert_eq!(rebuilt(&harness).pages, 1);
+
+        std::fs::remove_dir_all(harness.wiki.scope_root(&harness.scope.scope))
+            .expect("remove scope directory");
+
+        let report = rebuilt(&harness);
+        assert_eq!(report.removed, 0);
+        assert!(report.skipped_removal);
+        assert_eq!(
+            harness
+                .store
+                .page_paths(harness.scope.project_id)
+                .expect("paths")
+                .len(),
+            1,
+            "the row survives a wiki that is merely not where we looked"
+        );
+    }
+
+    /// Forgetting a page must not take the links other pages wrote to it. The
+    /// target is gone; the fact that someone linked to it is not, and the link
+    /// has to resolve again if the page comes back.
+    #[test]
+    fn links_to_a_forgotten_page_survive_as_unresolved() {
+        let harness = harness();
+        wiki_page(&harness, "from.md", "From", "See [[to.md]].");
+        wiki_page(&harness, "to.md", "To", "The target.");
+        rebuilt(&harness);
+
+        let links = |predicate: &str| -> i64 {
+            harness
+                .store
+                .connection()
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM page_links WHERE {predicate}"),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count")
+        };
+        assert_eq!(links("1 = 1"), 1);
+        assert_eq!(links("to_page_id IS NULL"), 0);
+
+        std::fs::remove_file(page_file(&harness, "to.md")).expect("delete");
+        assert_eq!(rebuilt(&harness).removed, 1);
+
+        assert_eq!(links("1 = 1"), 1, "the link someone wrote is still a fact");
+        assert_eq!(links("to_page_id IS NULL"), 1, "it just points at nothing");
+
+        wiki_page(&harness, "to.md", "To", "The target.");
+        assert_eq!(rebuilt(&harness).removed, 0);
+        assert_eq!(links("to_page_id IS NULL"), 0, "and resolves again");
     }
 
     #[test]

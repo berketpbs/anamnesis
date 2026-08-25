@@ -6,7 +6,7 @@
 //! editing session.
 
 use anamnesis_core::handoff::{Handoff, HandoffState};
-use anamnesis_core::ids::{HandoffId, ObservationId, ProjectId, SessionId, WorkstreamId};
+use anamnesis_core::ids::{HandoffId, ObservationId, PageId, ProjectId, SessionId, WorkstreamId};
 use anamnesis_core::observation::{BoundedBody, EventKind, Observation, ToolRef};
 use anamnesis_core::page::Page;
 use anamnesis_core::session::{AgentKind, Session, SessionState};
@@ -371,6 +371,23 @@ impl Store {
             params![project_id.to_string()],
             |row| row.get(0),
         )?)
+    }
+
+    /// Every page the index holds for a project, by id and authored path.
+    ///
+    /// The question this answers is the one a rebuild has to ask in reverse:
+    /// not "what is in the wiki", but "what does the index still claim exists".
+    /// A page deleted from the wiki by hand leaves a row behind that no walk of
+    /// the filesystem will ever visit, so nothing else can find it.
+    pub fn page_paths(&self, project_id: ProjectId) -> Result<Vec<(PageId, String)>> {
+        let conn = self.connection();
+        let mut statement =
+            conn.prepare("SELECT id, path FROM pages WHERE project_id = ?1 ORDER BY path")?;
+        let rows = statement.query_map(params![project_id.to_string()], |row| {
+            Ok((parse_id(row.get::<_, String>(0)?), row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// When this project last captured anything, if it ever has.
