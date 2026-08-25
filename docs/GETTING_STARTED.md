@@ -183,6 +183,37 @@ anamnesis sessions       # recent sessions, newest first
 anamnesis show-page bootstrap/repository.md
 ```
 
+### Forget What Has Decayed
+
+A wiki that only grows gets worse at answering, so pages that nobody writes to
+and nobody reads eventually go:
+
+```bash
+anamnesis sweep                       # report what would go; change nothing
+anamnesis sweep --verbose             # every page judged, with its score
+anamnesis sweep --threshold 0.2       # try a stricter cutoff
+anamnesis sweep --apply               # actually forget them
+```
+
+Without `--apply` nothing is deleted. Read the report first: the threshold is
+a guess until you have seen it applied to a real wiki.
+
+Four kinds of page are never swept — pinned, `semantic` and `procedural`
+tiers, canonical pages, and pages marked `do-not-answer-from`. A page whose
+`expires_at` has passed goes whatever its score, unless it is exempt, in which
+case the sweep says so instead of choosing between two instructions you wrote.
+
+Being read is what keeps a page: retrieval records the access, and a page
+found last week does not decay out from under you however old it is.
+
+Nothing is truly lost. The wiki is a git repository, so every page a sweep
+deletes remains in its history, in a commit that names each page and why it
+went:
+
+```bash
+git -C <data_dir>/wiki show HEAD
+```
+
 ### Rebuild the Index
 
 The database is disposable. If it is lost or corrupted, rebuild it from the
@@ -212,7 +243,7 @@ an existing one never renames its branch.
 
 ## Configuration
 
-`.anamnesis.toml` is optional. Two tables change what happens:
+`.anamnesis.toml` is optional. Three tables change what happens:
 
 ```toml
 [scope]
@@ -222,6 +253,13 @@ project = "my-project"
 [capture]
 # Events naming these paths are dropped before anything is recorded.
 ignore_paths = ["target/**", "*.log", ".env"]
+
+[decay]
+# What `anamnesis sweep` forgets. Every value is optional.
+threshold = 0.05                        # forget below this retention score
+age_half_life_days = 30.0               # an unwritten page halves every 30 days
+access_half_life_days = 14.0            # an unread one halves every 14
+access_weight = 0.5                     # how much being read counts for
 ```
 
 Unknown keys are rejected rather than ignored, so a typo surfaces instead of
@@ -249,6 +287,23 @@ Only the file a tool input names outright is matched, since guessing at
 command lines would either drop events nobody asked to lose or miss the ones
 that mattered. Redaction still runs on everything, and remains the first line
 of defence — a secret pasted into a prompt has no path to exclude.
+
+### Tuning what gets forgotten
+
+The defaults forget an unread page after roughly four months, and never forget
+one that is pinned, durable, canonical, or marked `do-not-answer-from`. Two
+knobs move that:
+
+| Setting | Raise it to |
+| --- | --- |
+| `threshold` | forget sooner — more pages fall below the cutoff |
+| `age_half_life_days` | forget later — pages keep their weight longer |
+
+`anamnesis sweep --threshold 0.2` tries a value without committing to it;
+`--verbose` prints the score of every page so a cutoff can be picked from real
+numbers rather than guessed. A half-life of zero or a negative threshold is
+refused at load time rather than clamped — a typo in a file that governs
+deletion should stop the command, not change what it deletes.
 
 The loader also accepts `[slots]` and `[auto_improve]`, which **nothing reads
 yet**:

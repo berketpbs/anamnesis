@@ -17,6 +17,19 @@ project = "anamnesis"
 # to exclude.
 ignore_paths = ["target/**", "Cargo.lock"]
 
+# What `anamnesis sweep` forgets, and how quickly. Read by the sweep; nothing
+# runs on a schedule, so pages go only when the command is run.
+#
+# Half-lives, not rates: under the defaults an unread page keeps half its
+# weight after 30 days and crosses the threshold after roughly four months,
+# while being retrieved renews it. Pinned, `semantic`/`procedural`, canonical,
+# and `do-not-answer-from` pages are never swept at any setting.
+[decay]
+threshold = 0.05
+age_half_life_days = 30.0
+access_half_life_days = 14.0
+access_weight = 0.5
+
 [slots]
 # Per-operator memory slots, for shared servers. Parsed; not implemented.
 per_user = false

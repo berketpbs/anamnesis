@@ -38,6 +38,9 @@ Anamnesis is organized as a Rust workspace with modular crates:
   `workstream_start`, `workstream_status`
 - Workstreams: parallel threads of work, each keeping its own handoff slot
 - `anamnesis bootstrap` seeds a new project's memory from its git history
+- `anamnesis sweep` forgets pages that have decayed — reports by default,
+  deletes only with `--apply`, and never touches pinned, durable, canonical,
+  or known-wrong pages
 
 ## Not Built Yet
 
