@@ -372,6 +372,26 @@ impl Store {
             |row| row.get(0),
         )?)
     }
+
+    /// When this project last captured anything, if it ever has.
+    ///
+    /// The question `anamnesis status` asks on someone's behalf is "is my work
+    /// being recorded right now?", and neither half of the obvious answer
+    /// settles it alone: a reachable server records nothing if no harness is
+    /// calling it, and an unreachable one may have been recording until a
+    /// minute ago. When the last observation landed is the only evidence that
+    /// capture reached the index rather than merely being configured to.
+    pub fn last_observation_at(&self, project_id: ProjectId) -> Result<Option<Timestamp>> {
+        let conn = self.connection();
+        let found: Option<String> = conn.query_row(
+            "SELECT MAX(o.at) FROM observations o
+             JOIN sessions s ON s.id = o.session_id
+             WHERE s.project_id = ?1",
+            params![project_id.to_string()],
+            |row| row.get(0),
+        )?;
+        Ok(found.as_deref().map(parse_time))
+    }
 }
 
 /// Recompute supersession for a set of page paths.
@@ -1132,6 +1152,77 @@ mod tests {
             .expect("found");
         assert!(!loaded.is_open());
         assert_eq!(loaded.ended_at, Some(ended));
+    }
+
+    #[test]
+    fn a_project_that_has_captured_nothing_reports_no_last_event() {
+        let (_dir, store, project, _workspace) = fixture();
+        assert_eq!(store.last_observation_at(project).expect("query"), None);
+    }
+
+    #[test]
+    fn the_last_event_is_the_newest_one_the_project_captured() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+
+        // Written out of order on purpose: the answer is the newest timestamp,
+        // not the last row inserted.
+        let newest: Timestamp = "2026-08-19T12:00:00Z".parse().expect("time");
+        for at in [
+            "2026-08-19T10:00:00Z",
+            "2026-08-19T12:00:00Z",
+            "2026-08-19T11:00:00Z",
+        ] {
+            store
+                .insert_observation(&new_observation(
+                    session.id,
+                    EventKind::UserPrompt,
+                    None,
+                    BoundedBody::truncating("what happened", 1024),
+                    at.parse().expect("time"),
+                ))
+                .expect("observation");
+        }
+
+        assert_eq!(
+            store.last_observation_at(project).expect("query"),
+            Some(newest)
+        );
+    }
+
+    /// One server serves every project, so "when did capture last reach the
+    /// index" has to mean *this* project, not whichever one is busiest.
+    #[test]
+    fn the_last_event_ignores_other_projects() {
+        let (dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+        store
+            .insert_observation(&new_observation(
+                session.id,
+                EventKind::UserPrompt,
+                None,
+                BoundedBody::truncating("ours", 1024),
+                now(),
+            ))
+            .expect("observation");
+
+        std::fs::write(
+            dir.path().join(".anamnesis.toml"),
+            "[scope]
+workspace = \"default\"
+project = \"other\"
+",
+        )
+        .expect("marker");
+        let other = anamnesis_core::scope::resolve_scope(dir.path()).expect("scope");
+        store.upsert_project(&other, now()).expect("project");
+
+        assert_eq!(
+            store.last_observation_at(other.project_id).expect("query"),
+            None
+        );
     }
 
     #[test]

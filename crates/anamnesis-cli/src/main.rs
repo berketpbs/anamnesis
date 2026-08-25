@@ -37,10 +37,18 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Show memory system status
+    ///
+    /// Answers the question someone actually has: is my work being recorded
+    /// right now? That takes three facts, not one — whether the server is
+    /// reachable, when capture last reached the index, and what is in memory.
     Status {
         /// Show detailed information
         #[arg(short, long)]
         verbose: bool,
+
+        /// Server whose reachability to report
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        server: String,
     },
 
     /// Search the memory wiki
@@ -245,8 +253,8 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     match cli.command {
-        Commands::Status { verbose } => {
-            cmd_status(verbose, cli.data_dir.clone())?;
+        Commands::Status { verbose, server } => {
+            cmd_status(verbose, &server, cli.data_dir.clone())?;
         }
         Commands::Search { query, limit, path } => {
             cmd_search(&query, limit, path, cli.data_dir.clone())?;
@@ -321,7 +329,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_status(verbose: bool, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
+fn cmd_status(verbose: bool, server: &str, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let scope = resolve_scope(&cwd)?;
     let data = DataDir::resolve(data_dir)?;
@@ -359,12 +367,123 @@ fn cmd_status(verbose: bool, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
         }
     }
 
-    if !data.root().exists() {
+    if !data.db_file().exists() {
         println!();
         println!("  Not initialized yet — run `anamnesis init`.");
+        return Ok(());
     }
 
+    // Migrated like every other read-only command opens it. A status that read
+    // an older schema would be describing a different database from the one
+    // `search` and `sessions` use, which is worse than taking a moment here.
+    let store = Store::open(data.db_file())?;
+    store.migrate()?;
+
+    let now = Timestamp::now();
+    println!();
+    println!(
+        "  Server:    {}",
+        describe_server(server, &probe_server(server))
+    );
+    println!(
+        "  Capture:   {}",
+        describe_capture(store.last_observation_at(scope.project_id)?, now)
+    );
+    println!(
+        "  Memory:    {}",
+        describe_memory(
+            store.session_count(scope.project_id)?,
+            store.page_count(scope.project_id)?,
+            store.peek_handoff(scope.project_id, None)?.is_some(),
+        )
+    );
+
     Ok(())
+}
+
+/// Whether the process that records events is answering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ServerState {
+    /// Reachable, and answering as anamnesis does.
+    Running,
+    /// Something is listening, but it is not answering `/health`.
+    Foreign(u16),
+    /// Nothing answered.
+    Down,
+}
+
+/// Ask the server whether it is there.
+///
+/// The budget is deliberately more generous than the hook's one second. A hook
+/// that waits is a stutter in someone's editing session, so it gives up fast;
+/// here a person has asked and is watching the terminal, and calling a
+/// slow-but-running server dead is the more expensive mistake of the two.
+fn probe_server(server: &str) -> ServerState {
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_millis(500))
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+    else {
+        return ServerState::Down;
+    };
+
+    match client.get(format!("{server}/health")).send() {
+        Ok(response) if response.status().is_success() => ServerState::Running,
+        Ok(response) => ServerState::Foreign(response.status().as_u16()),
+        Err(_) => ServerState::Down,
+    }
+}
+
+/// One line for where events are being delivered, and whether anyone is there.
+///
+/// The address is always named. Someone running the server on another port has
+/// not lost their memory, and a line that said only "unreachable" would send
+/// them looking for the wrong problem.
+fn describe_server(server: &str, state: &ServerState) -> String {
+    match state {
+        ServerState::Running => format!("running at {server}"),
+        ServerState::Foreign(code) => {
+            format!("something else answered {code} at {server}")
+        }
+        ServerState::Down => {
+            format!("not running at {server} — nothing is being captured")
+        }
+    }
+}
+
+/// One line for when capture last reached the index.
+///
+/// A reachable server proves nothing on its own: it records only what a
+/// harness sends it, and hooks that were never installed look exactly like a
+/// quiet afternoon. This is the half of the answer that comes from evidence.
+fn describe_capture(last: Option<Timestamp>, now: Timestamp) -> String {
+    match last {
+        Some(at) => format!("last event {}", describe_age(at, now)),
+        None => "nothing captured yet — run `anamnesis install-hooks`".to_owned(),
+    }
+}
+
+/// One line for what this project's memory currently holds.
+fn describe_memory(sessions: i64, pages: i64, handoff: bool) -> String {
+    format!(
+        "{} · {} · {}",
+        plural(sessions, "session"),
+        plural(pages, "page"),
+        if handoff {
+            "handoff waiting"
+        } else {
+            "no handoff waiting"
+        }
+    )
+}
+
+/// `1 page` / `2 pages`, so a count never has to be read as `1 page(s)`.
+fn plural(count: i64, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
 }
 
 /// Explain, in one line, how the project was identified.
@@ -1438,4 +1557,72 @@ fn cmd_show_page(path: &str, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
     println!();
     println!("{}", page.body.trim_end());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(raw: &str) -> Timestamp {
+        raw.parse().expect("timestamp")
+    }
+
+    /// The whole point of the line: an unreachable server means events are
+    /// being dropped right now, and saying so is the only warning anyone gets.
+    #[test]
+    fn a_server_that_is_not_running_says_capture_has_stopped() {
+        let line = describe_server("http://127.0.0.1:8080", &ServerState::Down);
+        assert!(line.contains("nothing is being captured"), "{line}");
+        assert!(line.contains("http://127.0.0.1:8080"), "{line}");
+    }
+
+    /// Naming the address is what separates "your memory is gone" from "you
+    /// are looking at the wrong port".
+    #[test]
+    fn every_server_line_names_where_it_looked() {
+        for state in [
+            ServerState::Running,
+            ServerState::Foreign(404),
+            ServerState::Down,
+        ] {
+            let line = describe_server("http://example:9999", &state);
+            assert!(line.contains("http://example:9999"), "{state:?}: {line}");
+        }
+    }
+
+    /// A port answering something that is not anamnesis is a different problem
+    /// from a port answering nothing, and needs a different fix.
+    #[test]
+    fn a_foreign_listener_is_not_reported_as_a_running_server() {
+        let line = describe_server("http://127.0.0.1:8080", &ServerState::Foreign(404));
+        assert!(!line.contains("running at"), "{line}");
+        assert!(line.contains("404"), "{line}");
+    }
+
+    /// Hooks that were never installed look exactly like a quiet afternoon, so
+    /// the empty case has to point at the thing that fixes it.
+    #[test]
+    fn capturing_nothing_yet_points_at_install_hooks() {
+        let line = describe_capture(None, at("2026-08-25T12:00:00Z"));
+        assert!(line.contains("install-hooks"), "{line}");
+    }
+
+    #[test]
+    fn capture_reports_how_long_ago_the_last_event_landed() {
+        let line = describe_capture(Some(at("2026-08-25T11:57:00Z")), at("2026-08-25T12:00:00Z"));
+        assert_eq!(line, "last event 3m ago");
+    }
+
+    #[test]
+    fn a_waiting_handoff_is_reported_as_waiting() {
+        assert!(describe_memory(2, 1, true).contains("handoff waiting"));
+        assert!(describe_memory(2, 1, false).contains("no handoff waiting"));
+    }
+
+    #[test]
+    fn counts_are_pluralised_rather_than_parenthesised() {
+        assert_eq!(plural(0, "page"), "0 pages");
+        assert_eq!(plural(1, "page"), "1 page");
+        assert_eq!(plural(2, "page"), "2 pages");
+    }
 }
