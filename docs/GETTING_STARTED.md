@@ -111,6 +111,22 @@ For other agents, see [AGENTS.md](../AGENTS.md).
 
 ## Common Commands
 
+### Seed From Git History
+
+A new project starts with an empty wiki. `bootstrap` fills it with what the
+repository already records — who works here, where the churn is, what just
+landed — so the first session has something to read:
+
+```bash
+anamnesis bootstrap --repo .          # write bootstrap/ pages
+anamnesis bootstrap --dry-run         # show what it would write
+anamnesis bootstrap --force           # refresh a stale snapshot
+```
+
+Existing pages are never overwritten without `--force`: bootstrap seeds a
+memory, it does not maintain one. The pages it writes are derived from commits
+rather than decided by anyone, and rank below what a session actually learned.
+
 ### Search Memory
 
 ```bash

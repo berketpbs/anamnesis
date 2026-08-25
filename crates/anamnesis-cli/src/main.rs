@@ -796,7 +796,7 @@ fn cmd_bootstrap(
     let data = DataDir::resolve(data_dir)?;
 
     println!("📖 Bootstrapping {} from git history", scope.scope);
-    println!("   repo: {}", repo.display());
+    println!("   repo: {}", display_path(&repo));
     println!();
 
     let survey = bootstrap::survey(&repo, max_commits)?;
@@ -815,7 +815,7 @@ fn cmd_bootstrap(
         String::new()
     };
     println!(
-        "  {} commit(s) walked{bound}, {} contributor(s), {} file(s) with churn",
+        "  {} commit(s) walked{bound}, {} contributor(s), {} hotspot(s) listed",
         survey.commits,
         survey.authors.len(),
         survey.hotspots.len()
@@ -860,6 +860,19 @@ fn cmd_bootstrap(
     }
 
     Ok(())
+}
+
+/// A path as someone would type it, rather than as Windows canonicalizes it.
+///
+/// `canonicalize` returns the verbatim form — `\\?\C:\repo` — which is correct
+/// and unreadable. Only the printed form is trimmed; the path actually used
+/// keeps the prefix.
+fn display_path(path: &std::path::Path) -> String {
+    let shown = path.display().to_string();
+    match shown.strip_prefix(r"\\?\") {
+        Some(trimmed) => trimmed.to_owned(),
+        None => shown,
+    }
 }
 
 /// Whether a page already exists, for the dry run's benefit.

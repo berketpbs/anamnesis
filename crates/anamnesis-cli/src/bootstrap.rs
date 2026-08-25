@@ -123,6 +123,8 @@ pub struct Survey {
     pub extensions: Vec<(String, usize)>,
     /// Top-level directories in the `HEAD` tree, by file count.
     pub directories: Vec<(String, usize)>,
+    /// Files sitting directly in the repository root.
+    pub root_files: usize,
 }
 
 impl Survey {
@@ -185,7 +187,9 @@ pub fn survey(repo_path: &Path, max_commits: usize) -> anyhow::Result<Survey> {
     survey.head = Some(short_id(head_commit.id()));
     let files = tree_files(&head_commit)?;
     survey.extensions = extension_counts(&files);
-    survey.directories = directory_counts(&files);
+    let (directories, root_files) = directory_counts(&files);
+    survey.directories = directories;
+    survey.root_files = root_files;
 
     let mut walk = repo.revwalk()?;
     walk.push_head()?;
@@ -399,7 +403,11 @@ fn page(
 fn render_repository(survey: &Survey, now: Timestamp) -> String {
     let mut out = String::new();
     out.push_str("## Identity\n\n");
-    row(&mut out, "Remote", survey.remote.as_deref().unwrap_or("(none)"));
+    row(
+        &mut out,
+        "Remote",
+        survey.remote.as_deref().unwrap_or("(none)"),
+    );
     row(
         &mut out,
         "Branch",
@@ -423,15 +431,23 @@ fn render_repository(survey: &Survey, now: Timestamp) -> String {
     }
 
     if !survey.extensions.is_empty() {
-        out.push_str("\n## Languages by file count\n\n");
+        // "Extensions", not "languages": a real repository answers with
+        // `.lock`, `.example`, and `.dev`, none of which anyone writes in.
+        out.push_str("\n## Files by extension\n\n");
         for (ext, count) in &survey.extensions {
             out.push_str(&format!("- `.{ext}` — {count}\n"));
         }
     }
-    if !survey.directories.is_empty() {
+    if !survey.directories.is_empty() || survey.root_files > 0 {
         out.push_str("\n## Top-level layout\n\n");
         for (dir, count) in &survey.directories {
             out.push_str(&format!("- `{dir}` — {count} file(s)\n"));
+        }
+        if survey.root_files > 0 {
+            out.push_str(&format!(
+                "- {} file(s) directly in the repository root\n",
+                survey.root_files
+            ));
         }
     }
     if !survey.tags.is_empty() {
@@ -550,7 +566,10 @@ fn commit_time(commit: &git2::Commit<'_>) -> Timestamp {
 }
 
 /// Paths a non-merge commit touched.
-fn touched_paths(repo: &git2::Repository, commit: &git2::Commit<'_>) -> anyhow::Result<Vec<String>> {
+fn touched_paths(
+    repo: &git2::Repository,
+    commit: &git2::Commit<'_>,
+) -> anyhow::Result<Vec<String>> {
     let tree = commit.tree()?;
     // The root commit has no parent: everything in it is new.
     let parent = match commit.parent(0) {
@@ -583,7 +602,11 @@ fn extension_counts(files: &[String]) -> Vec<(String, usize)> {
         let Some((stem, ext)) = name.rsplit_once('.') else {
             continue;
         };
-        if !stem.is_empty() && !ext.is_empty() && ext.len() <= 12 && ext.chars().all(char::is_alphanumeric) {
+        if !stem.is_empty()
+            && !ext.is_empty()
+            && ext.len() <= 12
+            && ext.chars().all(char::is_alphanumeric)
+        {
             *counts.entry(ext.to_lowercase()).or_default() += 1;
         }
     }
@@ -592,19 +615,24 @@ fn extension_counts(files: &[String]) -> Vec<(String, usize)> {
     ranked
 }
 
-/// Top-level entries among a set of paths, by how many files sit under them.
-fn directory_counts(files: &[String]) -> Vec<(String, usize)> {
+/// Top-level directories among a set of paths, and how many files sit in the
+/// root itself.
+///
+/// Root files are counted rather than listed: mixing them into the same list
+/// buries the directories that describe the layout under a dozen one-file
+/// entries for `README.md`, `.gitignore`, and friends.
+fn directory_counts(files: &[String]) -> (Vec<(String, usize)>, usize) {
     let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut root = 0;
     for path in files {
-        let top = match path.split_once('/') {
-            Some((head, _)) => format!("{head}/"),
-            None => path.clone(),
-        };
-        *counts.entry(top).or_default() += 1;
+        match path.split_once('/') {
+            Some((head, _)) => *counts.entry(format!("{head}/")).or_default() += 1,
+            None => root += 1,
+        }
     }
     let mut ranked = rank(counts.into_iter(), |(_, count)| *count);
     ranked.truncate(TOP_DIRECTORIES);
-    ranked
+    (ranked, root)
 }
 
 /// Every blob path in a commit's tree.
@@ -1103,6 +1131,24 @@ mod tests {
 
         assert_eq!(first.hotspots, second.hotspots);
         assert_eq!(first.authors, second.authors);
+    }
+
+    #[test]
+    fn root_files_are_counted_not_listed_beside_directories() {
+        // A real run listed `.gitignore`, `CHANGELOG.md`, and ten more
+        // one-file entries as though they were part of the layout, pushing
+        // the directories that actually describe it off the end of the list.
+        let files = vec![
+            "README.md".to_owned(),
+            ".gitignore".to_owned(),
+            "src/main.rs".to_owned(),
+            "src/lib.rs".to_owned(),
+        ];
+
+        let (directories, root) = directory_counts(&files);
+
+        assert_eq!(directories, vec![("src/".to_owned(), 2)]);
+        assert_eq!(root, 2);
     }
 
     #[test]
