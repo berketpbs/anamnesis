@@ -152,7 +152,7 @@ pub struct SlotsConfig {
 }
 
 /// Automatic learning proposal settings.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AutoImproveConfig {
     /// Whether proposals are generated at all.
@@ -174,7 +174,7 @@ impl Default for AutoImproveConfig {
 }
 
 /// Background scheduler settings for auto-improvement.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SchedulerConfig {
     /// Whether the scheduler runs.
