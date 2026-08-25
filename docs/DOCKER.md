@@ -1,4 +1,4 @@
-﻿# Docker Deployment Guide
+# Docker Deployment Guide
 
 Anamnesis includes complete Docker support for local development and production deployment.
 

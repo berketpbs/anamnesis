@@ -1,4 +1,4 @@
-﻿# Multi-stage build for anamnesis
+# Multi-stage build for anamnesis
 # Stage 1: Build
 FROM rust:1.95-slim as builder
 
