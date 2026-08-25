@@ -515,6 +515,73 @@ mod tests {
     }
 
     #[test]
+    fn a_link_in_a_session_page_reaches_the_index_without_a_rebuild() {
+        // The live path and a rebuild have to produce the same index. They
+        // did not: `reindex` extracted a page's wikilinks and the server did
+        // not, so link-neighbour retrieval was blind to every page the system
+        // wrote itself until somebody happened to rebuild.
+        let harness = harness();
+        let scope = resolve_scope(&harness.cwd).expect("scope");
+
+        // A page worth linking to, written the ordinary way.
+        let target =
+            anamnesis_core::page::PagePath::parse("decisions/0001-storage.md").expect("path");
+        let page = anamnesis_core::page::Page::new(
+            scope.project_id,
+            target.clone(),
+            anamnesis_core::page::Frontmatter::new("Storage engine", Vec::new())
+                .expect("frontmatter"),
+            "SQLite, because the index is disposable.",
+        );
+        harness
+            .state
+            .wiki
+            .lock()
+            .write_page(&scope.scope, &page, "write")
+            .expect("write");
+        harness
+            .state
+            .store
+            .upsert_project(&scope, now())
+            .expect("project");
+        harness
+            .state
+            .store
+            .upsert_page(&page, now())
+            .expect("upsert");
+
+        run(&harness, "SessionStart", json!({"source": "startup"}));
+        run(
+            &harness,
+            "UserPromptSubmit",
+            json!({"prompt": "follow up on [[decisions/0001-storage.md]] and finish the index"}),
+        );
+        let end = run(&harness, "SessionEnd", json!({"reason": "clear"}));
+
+        let session_page = end.page.expect("a page was written");
+        let session_id = anamnesis_core::ids::PageId::derive(
+            scope.project_id,
+            &anamnesis_core::page::PagePath::parse(&session_page).expect("path"),
+        );
+
+        let resolved: Option<String> = harness
+            .state
+            .store
+            .connection()
+            .query_row(
+                "SELECT to_page_id FROM page_links WHERE from_page_id = ?1",
+                [session_id.to_string()],
+                |row| row.get(0),
+            )
+            .expect("a link row");
+        assert_eq!(
+            resolved,
+            Some(page.id.to_string()),
+            "the link is indexed and resolved to the page it names"
+        );
+    }
+
+    #[test]
     fn the_next_session_receives_the_handoff_once() {
         let harness = harness();
         run(
