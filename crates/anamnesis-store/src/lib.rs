@@ -34,11 +34,13 @@ mod convert;
 mod ops;
 mod query;
 mod raw;
+mod sweep;
 mod workstream;
 
 pub use ops::{SessionSummary, new_handoff, new_observation, new_session};
 pub use query::PageHit;
 pub use raw::{RawError, RawRecord, RawSpool};
+pub use sweep::SweepRow;
 pub use workstream::{WorkstreamHandoff, WorkstreamSession};
 
 /// Errors produced by the storage layer.

@@ -13,7 +13,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use crate::config::{CaptureConfig, MarkerConfig};
+use crate::config::{CaptureConfig, DecayConfig, MarkerConfig};
 use crate::error::{CoreError, Result};
 use crate::ids::{ProjectId, WorkspaceId};
 
@@ -200,6 +200,8 @@ pub struct ResolvedScope {
     pub root: PathBuf,
     /// Paths this project has asked never to be captured.
     pub capture: CaptureConfig,
+    /// How quickly this project forgets pages nobody reads.
+    pub decay: DecayConfig,
 }
 
 /// Location of a discovered marker file.
@@ -263,6 +265,14 @@ pub fn resolve_scope(cwd: &Path) -> Result<ResolvedScope> {
         _ => derive_project(&cwd)?,
     };
 
+    // Taken apart here rather than at each use: `config` is consumed by the
+    // scope fields above, and a later reader should not have to prove that
+    // two `map`s over the same `Option` see the same marker file.
+    let (capture, decay) = match config {
+        Some(config) => (Some(config.capture), Some(config.decay)),
+        None => (None, None),
+    };
+
     // Relative patterns belong to whoever wrote them: the marker's directory
     // when there is a marker, the repository otherwise. Falling back to the
     // working directory last means a pattern still resolves against something
@@ -281,7 +291,8 @@ pub fn resolve_scope(cwd: &Path) -> Result<ResolvedScope> {
         source,
         marker: marker.map(|m| m.path),
         root,
-        capture: config.map(|c| c.capture).unwrap_or_default(),
+        capture: capture.unwrap_or_default(),
+        decay: decay.unwrap_or_default(),
     })
 }
 

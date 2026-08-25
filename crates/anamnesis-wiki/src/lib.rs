@@ -144,6 +144,58 @@ impl Wiki {
         self.commit(&relative, message)
     }
 
+    /// Delete pages and record their removal in one commit.
+    ///
+    /// One commit, not one per page: a sweep is a single decision about a
+    /// project's memory, and reading its history as forty commits that each
+    /// drop one file hides the shape of what happened. The message is where
+    /// the individual pages belong.
+    ///
+    /// Nothing is lost by this in the sense that matters — the wiki is a git
+    /// repository, and every deleted page stays reachable in the history that
+    /// records its removal.
+    ///
+    /// Returns the commit id, or `None` when there was nothing for git to
+    /// record: an empty list, or pages that were only ever on disk and never
+    /// committed. A missing file is not an error — a sweep whose page someone
+    /// already deleted by hand has arrived at the state it wanted.
+    pub fn delete_pages(
+        &self,
+        scope: &Scope,
+        paths: &[PagePath],
+        message: &str,
+    ) -> Result<Option<String>> {
+        if paths.is_empty() {
+            return Ok(None);
+        }
+
+        let scope_root = self
+            .root
+            .join(scope.workspace.as_str())
+            .join(scope.project.as_str());
+
+        for path in paths {
+            let absolute = self.locate(scope, path);
+            match std::fs::remove_file(&absolute) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(WikiError::Io {
+                        path: absolute,
+                        source,
+                    });
+                }
+            }
+            prune_empty_parents(&absolute, &scope_root);
+        }
+
+        let relatives: Vec<PathBuf> = paths
+            .iter()
+            .map(|path| self.relative(scope, path))
+            .collect();
+        self.commit_removals(&relatives, message)
+    }
+
     /// Read a page back from disk.
     pub fn read_page(&self, scope: &Scope, path: &PagePath) -> Result<ParsedPage> {
         let absolute = self.locate(scope, path);
@@ -206,6 +258,45 @@ impl Wiki {
         Ok(id.to_string())
     }
 
+    /// Stage a set of removals and commit them together.
+    ///
+    /// A path git never tracked produces no error: the file is gone either
+    /// way, and the caller asked for a state, not for a transaction. When
+    /// that leaves the tree exactly as HEAD already had it, no commit is
+    /// made — an empty commit would claim a sweep changed something it did
+    /// not.
+    fn commit_removals(&self, relatives: &[PathBuf], message: &str) -> Result<Option<String>> {
+        let mut index = self.repo.index()?;
+        for relative in relatives {
+            let _ = index.remove_path(relative);
+        }
+        index.write()?;
+        let tree_id = index.write_tree()?;
+
+        let parents = match self.repo.head() {
+            Ok(head) => vec![head.peel_to_commit()?],
+            Err(_) => Vec::new(),
+        };
+        if let Some(parent) = parents.first()
+            && parent.tree_id() == tree_id
+        {
+            return Ok(None);
+        }
+
+        let tree = self.repo.find_tree(tree_id)?;
+        let signature = git2::Signature::now(COMMIT_NAME, COMMIT_EMAIL)?;
+        let parent_refs: Vec<&git2::Commit<'_>> = parents.iter().collect();
+        let id = self.repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            message,
+            &tree,
+            &parent_refs,
+        )?;
+        Ok(Some(id.to_string()))
+    }
+
     /// Number of commits reachable from HEAD.
     pub fn commit_count(&self) -> Result<usize> {
         let mut walk = self.repo.revwalk()?;
@@ -213,6 +304,24 @@ impl Wiki {
             return Ok(0);
         }
         Ok(walk.count())
+    }
+}
+
+/// Remove the directories a deleted page left empty, up to `stop`.
+///
+/// Git does not track directories, so this changes nothing in the history —
+/// it keeps the working copy honest, so that someone browsing the wiki in a
+/// file manager or in Obsidian does not find a tree of empty folders naming
+/// subjects the memory no longer holds. Failures are ignored on purpose: a
+/// directory that will not go (a stray file, a permission) is not a reason to
+/// fail a deletion that already succeeded.
+fn prune_empty_parents(deleted: &Path, stop: &Path) {
+    let mut current = deleted.parent();
+    while let Some(dir) = current {
+        if dir == stop || !dir.starts_with(stop) || std::fs::remove_dir(dir).is_err() {
+            return;
+        }
+        current = dir.parent();
     }
 }
 
@@ -514,6 +623,198 @@ mod tests {
                 "decisions/0001-storage.md".to_owned()
             ],
             "a hand-written page counts; .git and non-markdown do not"
+        );
+    }
+    /// A second page, so a sweep has something to leave behind.
+    fn other(path: &str) -> Page {
+        let mut frontmatter = Frontmatter::new("Session notes", Vec::new()).unwrap();
+        frontmatter.tier = Tier::Episodic;
+        Page::new(
+            ProjectId::from_uuid(uuid::Uuid::nil()),
+            PagePath::parse(path).unwrap(),
+            frontmatter,
+            "what happened",
+        )
+    }
+
+    #[test]
+    fn deleting_a_page_removes_the_file_and_records_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let wiki = Wiki::open(dir.path()).unwrap();
+        let page = sample("body");
+        wiki.write_page(&scope(), &page, "write").unwrap();
+        let before = wiki.commit_count().unwrap();
+
+        let commit = wiki
+            .delete_pages(
+                &scope(),
+                std::slice::from_ref(&page.path),
+                "sweep: forget 1 page",
+            )
+            .unwrap()
+            .expect("a commit");
+
+        assert!(!wiki.exists(&scope(), &page.path));
+        assert!(wiki.pages(&scope()).unwrap().is_empty());
+        assert_eq!(wiki.commit_count().unwrap(), before + 1);
+        assert!(!commit.is_empty());
+    }
+
+    #[test]
+    fn a_deleted_page_is_still_in_the_history() {
+        // The whole reason a sweep may delete at all: the wiki is a git
+        // repository, so forgetting is reversible by anyone who needs it.
+        let dir = tempfile::tempdir().unwrap();
+        let wiki = Wiki::open(dir.path()).unwrap();
+        let page = sample("the body that must survive deletion");
+        wiki.write_page(&scope(), &page, "write").unwrap();
+        wiki.delete_pages(&scope(), std::slice::from_ref(&page.path), "sweep")
+            .unwrap();
+
+        let repo = git2::Repository::open(dir.path()).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let previous = head.parent(0).unwrap();
+        let blob = previous
+            .tree()
+            .unwrap()
+            .get_path(Path::new("default/anamnesis/decisions/0001-storage.md"))
+            .unwrap()
+            .to_object(&repo)
+            .unwrap();
+        let text = std::str::from_utf8(blob.as_blob().unwrap().content()).unwrap();
+        assert!(text.contains("the body that must survive deletion"));
+    }
+
+    #[test]
+    fn many_pages_leave_in_one_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let wiki = Wiki::open(dir.path()).unwrap();
+        let pages = ["sessions/a.md", "sessions/b.md", "sessions/c.md"].map(other);
+        for page in &pages {
+            wiki.write_page(&scope(), page, "write").unwrap();
+        }
+        let before = wiki.commit_count().unwrap();
+
+        let paths: Vec<PagePath> = pages.iter().map(|page| page.path.clone()).collect();
+        wiki.delete_pages(&scope(), &paths, "sweep: forget 3 pages")
+            .unwrap()
+            .expect("a commit");
+
+        assert_eq!(wiki.commit_count().unwrap(), before + 1);
+        assert!(wiki.pages(&scope()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn deleting_leaves_the_pages_it_was_not_asked_about() {
+        let dir = tempfile::tempdir().unwrap();
+        let wiki = Wiki::open(dir.path()).unwrap();
+        let doomed = other("sessions/old.md");
+        let kept = other("sessions/new.md");
+        wiki.write_page(&scope(), &doomed, "write").unwrap();
+        wiki.write_page(&scope(), &kept, "write").unwrap();
+
+        wiki.delete_pages(&scope(), std::slice::from_ref(&doomed.path), "sweep")
+            .unwrap();
+
+        assert_eq!(
+            wiki.pages(&scope()).unwrap(),
+            vec![kept.path.clone()],
+            "only the page named was forgotten"
+        );
+    }
+
+    #[test]
+    fn a_file_someone_already_deleted_is_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let wiki = Wiki::open(dir.path()).unwrap();
+        let page = sample("body");
+        wiki.write_page(&scope(), &page, "write").unwrap();
+        std::fs::remove_file(wiki.locate(&scope(), &page.path)).unwrap();
+
+        // Still committed, because git still had the file staged: the sweep
+        // is what records the removal.
+        assert!(
+            wiki.delete_pages(&scope(), std::slice::from_ref(&page.path), "sweep")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn deleting_nothing_makes_no_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let wiki = Wiki::open(dir.path()).unwrap();
+        wiki.write_page(&scope(), &sample("body"), "write").unwrap();
+        let before = wiki.commit_count().unwrap();
+
+        assert!(wiki.delete_pages(&scope(), &[], "sweep").unwrap().is_none());
+        assert_eq!(wiki.commit_count().unwrap(), before);
+    }
+
+    #[test]
+    fn deleting_a_page_git_never_saw_makes_no_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let wiki = Wiki::open(dir.path()).unwrap();
+        wiki.write_page(&scope(), &sample("body"), "write").unwrap();
+        let before = wiki.commit_count().unwrap();
+
+        // Dropped in by hand and never committed: there is nothing for git to
+        // record, and an empty commit would say a sweep happened.
+        let project = dir.path().join("default").join("anamnesis");
+        std::fs::write(
+            project.join("by-hand.md"),
+            "---
+title: Hand
+---
+
+body
+",
+        )
+        .unwrap();
+        let by_hand = PagePath::parse("by-hand.md").unwrap();
+
+        assert!(
+            wiki.delete_pages(&scope(), std::slice::from_ref(&by_hand), "sweep")
+                .unwrap()
+                .is_none()
+        );
+        assert!(!wiki.exists(&scope(), &by_hand), "the file is still gone");
+        assert_eq!(wiki.commit_count().unwrap(), before);
+    }
+
+    #[test]
+    fn emptied_directories_do_not_linger() {
+        let dir = tempfile::tempdir().unwrap();
+        let wiki = Wiki::open(dir.path()).unwrap();
+        let page = other("sessions/2026/08/only.md");
+        wiki.write_page(&scope(), &page, "write").unwrap();
+
+        wiki.delete_pages(&scope(), std::slice::from_ref(&page.path), "sweep")
+            .unwrap();
+
+        let project = dir.path().join("default").join("anamnesis");
+        assert!(!project.join("sessions").exists());
+        assert!(project.exists(), "the project directory itself stays");
+    }
+
+    #[test]
+    fn a_directory_with_pages_left_in_it_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        let wiki = Wiki::open(dir.path()).unwrap();
+        let doomed = other("sessions/old.md");
+        let kept = other("sessions/new.md");
+        wiki.write_page(&scope(), &doomed, "write").unwrap();
+        wiki.write_page(&scope(), &kept, "write").unwrap();
+
+        wiki.delete_pages(&scope(), std::slice::from_ref(&doomed.path), "sweep")
+            .unwrap();
+
+        assert!(
+            dir.path()
+                .join("default")
+                .join("anamnesis")
+                .join("sessions")
+                .exists()
         );
     }
 }

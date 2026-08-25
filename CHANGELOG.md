@@ -30,6 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `[capture] ignore_paths` is enforced: events naming an excluded path are
   dropped before an observation exists, so nothing about them reaches the
   index, the spool, or a summary
+- `anamnesis sweep` — forget pages that have decayed below a retention
+  threshold, or whose `expires_at` has passed. Reports and changes nothing
+  without `--apply`; pinned, durable, canonical, and `do-not-answer-from`
+  pages are never swept; deleted pages remain in the wiki's git history, in
+  one commit that names each page and why it went
+- `[decay]` in `.anamnesis.toml` — retention tuning as half-lives, read by
+  the sweep and refused at load time when a value would make it nonsense
 
 ### Changed
 - Configuration marker is `.anamnesis.toml`; `.ai-memory.toml` is read as a

@@ -151,6 +151,7 @@ Command-line interface.
 - `search`, `write-page`, `show-page`, `sessions`, `handoff`
 - `reindex` — rebuild the index from `wiki/` and `raw/`
 - `bootstrap` — seed a new project's memory from its git history
+- `sweep` — forget pages that have decayed; reports unless `--apply`
 
 ## Data Flow
 
@@ -212,6 +213,49 @@ Tier is a bounded signal applied *after* candidates are generated, never an
 independent retriever: otherwise a targeted search for something said once in
 one session would be buried under durable pages that merely outrank it.
 
+### Forgetting
+
+```
+anamnesis sweep [--apply]
+    │
+    ├─→ every page of one project, with its retention facts
+    │
+    ├─→ anamnesis_core::sweep::judge (pure)
+    │     ├─ exempt: pinned, durable tier, canonical, do-not-answer-from
+    │     ├─ expired: past the author's own `expires_at`
+    │     └─ scored: salience·e^(-λ·age) + σ·ln(1+reads)·e^(-μ·disuse)
+    │
+    └─→ --apply: drop the index rows, then remove the pages in one commit
+```
+
+Forgetting is a feature: without it the wiki accumulates every session summary
+ever written, and retrieval quality falls as the corpus grows. Four properties
+make it safe to leave in a system that is supposed to remember things.
+
+**Reporting is the default.** Nothing is deleted without `--apply`. A
+retention threshold is a guess until it has been run against a real wiki.
+
+**Being read is what keeps a page.** Retrieval records an access, and the
+access term outweighs age — a page someone searched for last week does not
+decay out from under them, however old it is.
+
+**Four kinds of page are never swept.** Pinned pages, durable tiers
+(`semantic`, `procedural`), canonical pages, and `do-not-answer-from` pages.
+The last is the least obvious: a page recording a known-wrong belief is almost
+never *retrieved*, so scoring alone would sweep it first — precisely once it
+has been quiet long enough for someone to make the mistake again.
+
+**The index goes before the wiki.** Interrupted between the two steps, a sweep
+leaves pages that are briefly unfindable and that `anamnesis reindex` restores
+in full; the opposite order would leave the index pointing at markdown that no
+longer exists. And because the wiki is a git repository, every page a sweep
+deletes stays in its history — the commit names each page and why it went.
+
+An `expires_at` that has passed forgets a page whatever its score, but does
+not override an exemption: a page that is both pinned and expired is a
+contradiction between two things the same author wrote, and the sweep reports
+it rather than picking a winner in silence.
+
 ## Storage Schema
 
 Twelve tables across six migrations (`V01`–`V06`), the authoritative copy of
@@ -261,6 +305,14 @@ project = "anamnesis"
 [capture]
 ignore_paths = ["target/**", "node_modules/**"]
 
+# Retention. Half-lives rather than rates, because a half-life is something
+# someone can hold an opinion about.
+[decay]
+threshold = 0.05                        # forget below this retention score
+age_half_life_days = 30.0
+access_half_life_days = 14.0
+access_weight = 0.5
+
 [slots]
 per_user = false
 
@@ -279,9 +331,9 @@ Unknown keys are an error, so a typo surfaces instead of quietly sending memory
 to the wrong project. `.ai-memory.toml` is still read as a fallback filename for
 projects migrating from upstream `ai-memory`.
 
-Of the tables above, only `[scope]` changes what the system does today.
-`[capture]`, `[slots]`, and `[auto_improve]` are parsed and validated, and
-then nothing reads them. They are accepted so that a file written for a later
+Of the tables above, `[scope]`, `[capture]`, and `[decay]` change what the
+system does. `[slots]` and `[auto_improve]` are parsed and validated, and then
+nothing reads them; they are accepted so that a file written for a later
 version does not fail to load, not because they take effect.
 
 ### Data directory
@@ -328,7 +380,7 @@ data directory.
 ## Future Enhancements
 
 Shipped since this list was written: vector embeddings (local candle
-embedder, opt-in), the raw spool, `reindex`, and `bootstrap`.
+embedder, opt-in), the raw spool, `reindex`, `bootstrap`, and the decay sweep.
 
 Still ahead:
 
