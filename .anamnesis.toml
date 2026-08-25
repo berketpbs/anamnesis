@@ -8,13 +8,18 @@ workspace = "default"
 project = "anamnesis"
 
 [capture]
-# Glob patterns whose file events never reach the spool.
-ignore_paths = ["target/**", "Cargo.lock", ".memory/**"]
+# Glob patterns whose file events are meant never to reach the spool.
+#
+# NOT ENFORCED YET: this list is parsed and validated, and then nothing reads
+# it. Redaction is what currently keeps secrets out of memory, so do not add
+# a path here and treat it as excluded.
+ignore_paths = ["target/**", "Cargo.lock"]
 
 [slots]
-# Per-operator memory slots, for shared servers.
+# Per-operator memory slots, for shared servers. Parsed; not implemented.
 per_user = false
 
+# Parsed; nothing runs on a schedule yet.
 [auto_improve]
 enabled = true
 require_approval = true
