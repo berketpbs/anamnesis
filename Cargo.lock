@@ -47,6 +47,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "figment",
+ "git2",
  "jiff",
  "reqwest",
  "rmcp",

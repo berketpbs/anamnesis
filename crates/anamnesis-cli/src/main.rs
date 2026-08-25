@@ -1,5 +1,6 @@
 //! CLI entry point for anamnesis.
 
+mod bootstrap;
 mod reindex;
 
 use anamnesis_core::datadir::DataDir;
@@ -136,11 +137,27 @@ enum Commands {
     /// reproduces the same rows rather than duplicating them.
     Reindex,
 
-    /// Bootstrap from git history
+    /// Seed an empty memory from the repository's git history
+    ///
+    /// Writes what the commits already say - who works here, where the churn
+    /// is, what just landed - as `bootstrap/` pages. Existing pages are left
+    /// alone unless `--force` is given.
     Bootstrap {
         /// Repository path
         #[arg(long, default_value = ".")]
         repo: PathBuf,
+
+        /// Rewrite bootstrap pages that already exist
+        #[arg(long)]
+        force: bool,
+
+        /// Stop walking after this many commits
+        #[arg(long, default_value_t = bootstrap::DEFAULT_MAX_COMMITS)]
+        max_commits: usize,
+
+        /// Print what would be written without writing it
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Show the handoff waiting for the next session, without consuming it
@@ -225,8 +242,13 @@ fn main() -> anyhow::Result<()> {
         Commands::Reindex => {
             cmd_reindex(cli.data_dir.clone())?;
         }
-        Commands::Bootstrap { repo } => {
-            cmd_bootstrap(&repo)?;
+        Commands::Bootstrap {
+            repo,
+            force,
+            max_commits,
+            dry_run,
+        } => {
+            cmd_bootstrap(&repo, force, max_commits, dry_run, cli.data_dir.clone())?;
         }
         Commands::Handoff { workstream } => {
             cmd_handoff(workstream, cli.data_dir.clone())?;
@@ -757,12 +779,99 @@ fn cmd_reindex(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_bootstrap(repo: &std::path::Path) -> anyhow::Result<()> {
-    println!("📖 Bootstrapping from git history");
+/// Seed the wiki from the repository's git history.
+///
+/// The scope is resolved from the repository being surveyed rather than the
+/// current directory: `anamnesis bootstrap --repo ../other-project` must seed
+/// that project's memory, not this one's.
+fn cmd_bootstrap(
+    repo: &std::path::Path,
+    force: bool,
+    max_commits: usize,
+    dry_run: bool,
+    data_dir: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    let repo = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    let scope = resolve_scope(&repo)?;
+    let data = DataDir::resolve(data_dir)?;
+
+    println!("📖 Bootstrapping {} from git history", scope.scope);
     println!("   repo: {}", repo.display());
     println!();
-    println!("(Bootstrap not yet implemented)");
+
+    let survey = bootstrap::survey(&repo, max_commits)?;
+    if survey.is_empty() {
+        println!("  No commits yet - nothing to seed.");
+        println!("  Memory fills itself in from sessions as work happens.");
+        return Ok(());
+    }
+
+    let now = Timestamp::now();
+    let drafts = bootstrap::draft(&survey, now)?;
+
+    let bound = if survey.truncated {
+        format!(" (stopped at --max-commits {max_commits})")
+    } else {
+        String::new()
+    };
+    println!(
+        "  {} commit(s) walked{bound}, {} contributor(s), {} file(s) with churn",
+        survey.commits,
+        survey.authors.len(),
+        survey.hotspots.len()
+    );
+    println!();
+
+    if dry_run {
+        for item in &drafts {
+            let state = if wiki_has(&data, &scope, &item.path) {
+                if force { "overwrite" } else { "skip (exists)" }
+            } else {
+                "write"
+            };
+            println!("  {state:<14} {}", item.path);
+        }
+        println!();
+        println!("  Dry run - nothing written.");
+        return Ok(());
+    }
+
+    data.ensure_layout()?;
+    let store = Store::open(data.db_file())?;
+    store.migrate()?;
+    let wiki = Wiki::open(data.wiki())?;
+
+    let report = bootstrap::seed(&store, &wiki, &scope, &drafts, force, now)?;
+
+    for path in &report.written {
+        println!("  wrote   {path}");
+    }
+    for path in &report.skipped {
+        println!("  skipped {path} (already exists)");
+    }
+    println!();
+    if !report.skipped.is_empty() {
+        println!("  Skipped pages were left alone: bootstrap seeds a memory, it does not");
+        println!("  maintain one. Pass --force to rewrite them from git.");
+    }
+    if !report.written.is_empty() {
+        println!("  These pages are derived from commits, not decided by anyone - they rank");
+        println!("  below what a session actually learned.");
+    }
+
     Ok(())
+}
+
+/// Whether a page already exists, for the dry run's benefit.
+///
+/// Reads the filesystem rather than opening the wiki: a dry run must not
+/// create a git repository as a side effect of being asked what it would do.
+fn wiki_has(
+    data: &DataDir,
+    scope: &anamnesis_core::scope::ResolvedScope,
+    path: &anamnesis_core::page::PagePath,
+) -> bool {
+    data.wiki_scope(&scope.scope).join(path.as_str()).is_file()
 }
 
 /// Show the handoff waiting for the next session, without consuming it.
