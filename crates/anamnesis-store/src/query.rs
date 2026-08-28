@@ -60,6 +60,37 @@ pub struct PageHit {
     pub snippet: String,
 }
 
+/// What each retrieval stream found, before fusion picked winners.
+///
+/// The fused ranking is the answer; this is the working. It exists because
+/// every weight in [`Store::query_pages`] was chosen by argument — whether the
+/// entity stream earns its place, whether link neighbours help or just add
+/// noise — and none of those questions can be answered from a fused list,
+/// where a page found by three streams and a page found by one look the same.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StreamBreakdown {
+    /// Full-text matches, best first.
+    pub fts: Vec<PageId>,
+    /// Pages whose declared entities the query names.
+    pub entity: Vec<PageId>,
+    /// Neighbours of what the first two streams found.
+    pub links: Vec<PageId>,
+    /// Cosine neighbours of the query vector. Empty without an embedding.
+    pub vectors: Vec<PageId>,
+}
+
+impl StreamBreakdown {
+    /// Each stream with the name it goes by, in the order they are fused.
+    pub fn named(&self) -> [(&'static str, &[PageId]); 4] {
+        [
+            ("fts", &self.fts),
+            ("entity", &self.entity),
+            ("links", &self.links),
+            ("vectors", &self.vectors),
+        ]
+    }
+}
+
 /// Row shape shared by every stream before fusion picks winners.
 struct PageRow {
     project_id: ProjectId,
@@ -158,6 +189,59 @@ impl Store {
         }
 
         Ok(hits)
+    }
+
+    /// Run each stream and return them unfused.
+    ///
+    /// The diagnostic counterpart to [`Store::query_pages`], which this
+    /// deliberately does not call: fusing is what hides the thing being asked
+    /// about.
+    ///
+    /// **Nothing here records an access.** `query_pages` bumps the statistics
+    /// for everything it returns, because a page it returned was a page
+    /// somebody was given. Asking which stream *would have* found a page is
+    /// not that, and the decay sweep reads those counters to decide what to
+    /// keep — an explain that inflated them would make the pages it was run
+    /// over harder to forget.
+    pub fn query_streams(
+        &self,
+        project_id: ProjectId,
+        query: &str,
+        limit: usize,
+        embedding: Option<(&str, &[f32])>,
+    ) -> Result<StreamBreakdown> {
+        let tokens = tokenize(query);
+        if tokens.is_empty() || limit == 0 {
+            return Ok(StreamBreakdown::default());
+        }
+
+        let fts = self.fts_stream(project_id, &tokens, limit)?;
+        let entity = self.entity_stream(project_id, &tokens, limit)?;
+
+        // Seeded exactly as `query_pages` seeds it, or the link stream here
+        // would be answering a different question from the one that runs.
+        let mut seeds: Vec<PageId> = Vec::with_capacity(fts.len() + entity.len());
+        for id in fts.iter().chain(entity.iter()) {
+            if !seeds.contains(id) {
+                seeds.push(*id);
+            }
+        }
+        seeds.truncate(STREAM_CANDIDATES);
+        let links = self.link_stream(project_id, &seeds, limit)?;
+
+        let vectors = match embedding {
+            Some((model, vector)) if !vector.is_empty() => {
+                self.vector_stream(project_id, model, vector, limit)?
+            }
+            _ => Vec::new(),
+        };
+
+        Ok(StreamBreakdown {
+            fts,
+            entity,
+            links,
+            vectors,
+        })
     }
 
     /// Search one project and the scopes it inherits from, as one ranking.

@@ -284,6 +284,14 @@ edit a number in the diff rather than a number nobody looks at. The built-in
 suite is run as an ordinary unit test, so CI fails on a regression without a
 job of its own.
 
+`--streams` scores each stream separately, and reports the measure that
+actually decides whether one stays: how many questions **only** it answers. A
+stream with a respectable average and nothing unique behind it is one the
+others already cover. Over the shipped suite, full text alone reaches a higher
+MRR than the fused ranking while missing a fifth of the questions — fusion
+buys recall with rank — and the link stream contributes nothing the others
+miss. Both are findings to act on, not settings to tune blind.
+
 ### Forgetting
 
 ```

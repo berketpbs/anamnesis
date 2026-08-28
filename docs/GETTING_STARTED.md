@@ -373,6 +373,7 @@ the page that answers this":
 anamnesis eval             # the suite built into the binary
 anamnesis eval --verbose   # every case, with the rank its answer came back at
 anamnesis eval --check     # exit non-zero when a suite is below its thresholds
+anamnesis eval --streams   # what each stream contributes on its own
 ```
 
 ```
