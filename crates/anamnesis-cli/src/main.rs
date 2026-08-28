@@ -50,6 +50,10 @@ enum Commands {
         /// Server whose reachability to report
         #[arg(long, default_value = "http://127.0.0.1:8080")]
         server: String,
+
+        /// Token to present, when the server requires one
+        #[arg(long, env = anamnesis_web::auth::TOKEN_ENV, hide_env_values = true)]
+        token: Option<String>,
     },
 
     /// Search the memory wiki
@@ -116,6 +120,15 @@ enum Commands {
         /// index only when `anamnesis reindex` is run.
         #[arg(long)]
         no_watch: bool,
+
+        /// Serve an address other than localhost with no token configured
+        ///
+        /// Without a token, everything this server holds — every prompt, every
+        /// file path, every summary — is readable by anything that can reach
+        /// the port. On loopback that is the machine's own boundary; off it,
+        /// it is the network's. Say so deliberately, or set ANAMNESIS_TOKEN.
+        #[arg(long)]
+        allow_anonymous: bool,
     },
 
     /// Forward one lifecycle event, read as JSON on stdin
@@ -135,6 +148,13 @@ enum Commands {
             default_value = "http://127.0.0.1:8080"
         )]
         server: String,
+
+        /// Token to present, when the server requires one
+        ///
+        /// Read from the environment so the secret never has to be written
+        /// into a settings file that the harness reads aloud.
+        #[arg(long, env = anamnesis_web::auth::TOKEN_ENV, hide_env_values = true)]
+        token: Option<String>,
     },
 
     /// Wire the agent's lifecycle hooks to anamnesis
@@ -161,6 +181,17 @@ enum Commands {
         /// at the user-level settings to capture every project.
         #[arg(long)]
         settings: Option<PathBuf>,
+    },
+
+    /// Mint a token for a server that should not be open to everyone
+    ///
+    /// Prints a fresh secret and the two variables that use it. Nothing is
+    /// stored: the token exists only where it is pasted, which is the one
+    /// property a secret has to have.
+    Token {
+        /// Operator the token belongs to, for a server shared by several people
+        #[arg(long)]
+        operator: Option<String>,
     },
 
     /// Rebuild the index from the wiki and the raw transcripts
@@ -276,8 +307,12 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     match cli.command {
-        Commands::Status { verbose, server } => {
-            cmd_status(verbose, &server, cli.data_dir.clone())?;
+        Commands::Status {
+            verbose,
+            server,
+            token,
+        } => {
+            cmd_status(verbose, &server, token.as_deref(), cli.data_dir.clone())?;
         }
         Commands::Search { query, limit, path } => {
             cmd_search(&query, limit, path, cli.data_dir.clone())?;
@@ -308,11 +343,22 @@ fn main() -> anyhow::Result<()> {
             port,
             bind,
             no_watch,
+            allow_anonymous,
         } => {
-            cmd_serve(&bind, port, !no_watch, cli.data_dir.clone())?;
+            cmd_serve(
+                &bind,
+                port,
+                !no_watch,
+                allow_anonymous,
+                cli.data_dir.clone(),
+            )?;
         }
-        Commands::Hook { agent, server } => {
-            cmd_hook(&agent, &server);
+        Commands::Hook {
+            agent,
+            server,
+            token,
+        } => {
+            cmd_hook(&agent, &server, token.as_deref());
         }
         Commands::InstallHooks {
             agent,
@@ -321,6 +367,9 @@ fn main() -> anyhow::Result<()> {
             settings,
         } => {
             cmd_install_hooks(&agent, &server, write, settings)?;
+        }
+        Commands::Token { operator } => {
+            cmd_token(operator.as_deref())?;
         }
         Commands::Reindex => {
             cmd_reindex(cli.data_dir.clone())?;
@@ -361,7 +410,12 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_status(verbose: bool, server: &str, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
+fn cmd_status(
+    verbose: bool,
+    server: &str,
+    token: Option<&str>,
+    data_dir: Option<PathBuf>,
+) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let scope = resolve_scope(&cwd)?;
     let data = DataDir::resolve(data_dir)?;
@@ -412,10 +466,12 @@ fn cmd_status(verbose: bool, server: &str, data_dir: Option<PathBuf>) -> anyhow:
     store.migrate()?;
 
     let now = Timestamp::now();
+    let reachable = probe_server(server);
     println!();
+    println!("  Server:    {}", describe_server(server, &reachable));
     println!(
-        "  Server:    {}",
-        describe_server(server, &probe_server(server))
+        "  Auth:      {}",
+        describe_auth(&probe_auth(server, token, &reachable), token.is_some())
     );
     println!(
         "  Capture:   {}",
@@ -479,6 +535,91 @@ fn describe_server(server: &str, state: &ServerState) -> String {
         }
         ServerState::Down => {
             format!("not running at {server} — nothing is being captured")
+        }
+    }
+}
+
+/// What the server makes of this machine's token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AuthState {
+    /// The server did not answer the question, so nothing is claimed.
+    Unknown,
+    /// No token is required. Every caller is accepted.
+    Open,
+    /// A token was accepted, naming this operator when it named one.
+    Accepted(Option<String>),
+    /// A token is required and this machine's was not one of them.
+    Rejected,
+}
+
+/// Ask the server what it makes of this machine's token.
+///
+/// `/whoami` and not `/handoff`, because the question has to be asked without
+/// changing anything: collecting a handoff to find out whether a token works
+/// would spend the handoff.
+fn probe_auth(server: &str, token: Option<&str>, reachable: &ServerState) -> AuthState {
+    if *reachable != ServerState::Running {
+        return AuthState::Unknown;
+    }
+
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_millis(500))
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+    else {
+        return AuthState::Unknown;
+    };
+
+    let mut request = client.get(format!("{server}/whoami"));
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+
+    match request.send() {
+        Ok(response) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
+            AuthState::Rejected
+        }
+        Ok(response) if response.status().is_success() => {
+            let body = response.json::<serde_json::Value>().unwrap_or_default();
+            if body.get("auth").and_then(|v| v.as_str()) == Some("open") {
+                AuthState::Open
+            } else {
+                AuthState::Accepted(
+                    body.get("operator")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned),
+                )
+            }
+        }
+        // Anything else — including the 404 an older server returns — is a
+        // question this server did not answer, and guessing at it would be
+        // worse than saying so.
+        Ok(_) | Err(_) => AuthState::Unknown,
+    }
+}
+
+/// One line for whether this memory is protected, and whether this machine
+/// gets in.
+///
+/// Both halves are needed. A server that requires tokens is no comfort if the
+/// hooks on this machine are being turned away, and that failure is otherwise
+/// invisible: rejected events look exactly like a quiet afternoon.
+fn describe_auth(state: &AuthState, presented: bool) -> String {
+    let token_env = anamnesis_web::auth::TOKEN_ENV;
+    match state {
+        AuthState::Unknown => "unknown — the server did not answer".to_owned(),
+        AuthState::Open => {
+            "not required — anything that can reach this port can read this memory".to_owned()
+        }
+        AuthState::Accepted(None) => "required — this client's token was accepted".to_owned(),
+        AuthState::Accepted(Some(operator)) => {
+            format!("required — this client is {operator}")
+        }
+        AuthState::Rejected if presented => {
+            format!("required — this client's token was rejected; check {token_env}")
+        }
+        AuthState::Rejected => {
+            format!("required — this client has no token; set {token_env}")
         }
     }
 }
@@ -755,8 +896,19 @@ fn cmd_serve(
     bind: &str,
     port: u16,
     watch_wiki: bool,
+    allow_anonymous: bool,
     data_dir: Option<PathBuf>,
 ) -> anyhow::Result<()> {
+    let address: std::net::SocketAddr = format!("{bind}:{port}").parse()?;
+
+    // Read before anything is opened: a server whose tokens are misconfigured
+    // should not have got as far as touching the data directory, and one that
+    // would expose memory to a network should not start at all.
+    let auth = anamnesis_web::Auth::from_env()?;
+    if let Some(refusal) = refuse_anonymous_exposure(&address, auth.is_open(), allow_anonymous) {
+        anyhow::bail!(refusal);
+    }
+
     let data = DataDir::resolve(data_dir)?;
     data.ensure_layout()?;
 
@@ -775,10 +927,10 @@ fn cmd_serve(
         max_output_tokens: llm.max_output_tokens,
     });
 
-    let address: std::net::SocketAddr = format!("{bind}:{port}").parse()?;
     println!("🌐 anamnesis serving on http://{address}");
     println!("   data dir: {}", data.root().display());
-    println!("   POST /hook   GET /handoff   GET /health");
+    println!("   POST /hook   GET /handoff   GET /whoami   GET /health");
+    println!("   auth: {}", describe_serving_auth(&auth));
     println!(
         "   auto-improve: every {}s, for projects whose marker asks for it",
         anamnesis_web::improve::TICK.as_secs()
@@ -806,17 +958,65 @@ fn cmd_serve(
         address,
         anamnesis_web::AppState::new(store, wiki)
             .with_raw(Some(raw))
-            .with_llm(settings),
+            .with_llm(settings)
+            .with_auth(auth),
         watch_wiki,
     ))?;
     Ok(())
+}
+
+/// Refuse to serve a network address with nothing guarding it.
+///
+/// The default bind is loopback, where the machine's own boundary is the whole
+/// story and a token would only be ceremony — which is why an open server stays
+/// legal there, and why every install that predates tokens keeps working. An
+/// address reachable from elsewhere is a different proposition: what is behind
+/// this port is every prompt someone typed, every path they opened, and every
+/// summary written from them. Refusing is recoverable in one command; the
+/// alternative failure is silent and permanent.
+///
+/// `--allow-anonymous` exists because "in front of a proxy that authenticates"
+/// is a real deployment, and a check with no way past it gets worked around by
+/// worse means.
+fn refuse_anonymous_exposure(
+    address: &std::net::SocketAddr,
+    open: bool,
+    allow_anonymous: bool,
+) -> Option<String> {
+    if !open || allow_anonymous || address.ip().is_loopback() {
+        return None;
+    }
+
+    let token_env = anamnesis_web::auth::TOKEN_ENV;
+    Some(format!(
+        "refusing to serve {address} with no token configured.\n\n\
+         Everything this server holds — every prompt, every file path, every\n\
+         summary written from them — would be readable by anything that can\n\
+         reach that address.\n\n\
+         Mint one with `anamnesis token`, then set {token_env} for this server\n\
+         and for whatever runs the hooks. Or pass --allow-anonymous to serve\n\
+         it open anyway."
+    ))
+}
+
+/// The startup line for what the server accepts.
+fn describe_serving_auth(auth: &anamnesis_web::Auth) -> String {
+    if auth.is_open() {
+        return "open — no token required".to_owned();
+    }
+
+    let named: Vec<String> = auth.named().map(ToString::to_string).collect();
+    match named.len() {
+        0 => "token required".to_owned(),
+        _ => format!("token required ({})", named.join(", ")),
+    }
 }
 
 /// Forward one hook event, and deliver the handoff when a session starts.
 ///
 /// Never fails loudly. Hooks run inside someone's editing session, so a server
 /// that is not running should cost them nothing more than a line on stderr.
-fn cmd_hook(agent: &str, server: &str) {
+fn cmd_hook(agent: &str, server: &str, token: Option<&str>) {
     let mut payload = String::new();
     if std::io::Read::read_to_string(&mut std::io::stdin(), &mut payload).is_err() {
         eprintln!("anamnesis: could not read hook payload");
@@ -860,12 +1060,15 @@ fn cmd_hook(agent: &str, server: &str) {
         }
     };
 
-    let post = client
+    let mut post = client
         .post(format!("{server}/hook"))
         .query(&[("agent", agent)])
         .header("content-type", "application/json")
-        .body(payload.clone())
-        .send();
+        .body(payload.clone());
+    if let Some(token) = token {
+        post = post.bearer_auth(token);
+    }
+    let post = post.send();
 
     match post {
         Err(error) => {
@@ -891,15 +1094,29 @@ fn cmd_hook(agent: &str, server: &str) {
     // goes to stdout, where the harness injects it into the model's context.
     if event.as_deref() == Some("SessionStart") {
         let (session_id, cwd) = session_and_cwd(&payload);
-        let handoff = client
-            .get(format!("{server}/handoff"))
-            .query(&[("agent", agent), ("session_id", &session_id), ("cwd", &cwd)])
-            .send()
-            .and_then(reqwest::blocking::Response::text);
-
-        match handoff {
-            Ok(text) if !text.trim().is_empty() => print!("{text}"),
-            Ok(_) => {}
+        let mut request = client.get(format!("{server}/handoff")).query(&[
+            ("agent", agent),
+            ("session_id", &session_id),
+            ("cwd", &cwd),
+        ]);
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        // The status is checked before the body is read, because this body
+        // goes to stdout and the harness injects stdout into the model's
+        // context. An error page printed as a handoff would not fail — it
+        // would be believed.
+        match request.send() {
+            Ok(response) if response.status().is_success() => match response.text() {
+                Ok(text) if !text.trim().is_empty() => print!("{text}"),
+                Ok(_) => {}
+                Err(error) => eprintln!("anamnesis: handoff unavailable: {error}"),
+            },
+            Ok(response) => {
+                let status = response.status();
+                let detail = response.text().unwrap_or_default();
+                eprintln!("anamnesis: handoff refused ({status}): {}", detail.trim());
+            }
             Err(error) => eprintln!("anamnesis: handoff unavailable: {error}"),
         }
     }
@@ -922,6 +1139,46 @@ fn session_and_cwd(payload: &str) -> (String, String) {
         found => found,
     };
     (field("session_id"), cwd)
+}
+
+/// Mint a token, and say where it goes.
+///
+/// Two variables rather than one, because they answer different questions.
+/// `ANAMNESIS_TOKEN` is the secret this machine *presents*; `ANAMNESIS_TOKENS`
+/// is the set a server *accepts*. On a single-user machine they hold the same
+/// value and the distinction never comes up; on a shared server it is the
+/// difference between "a token" and "whose token".
+fn cmd_token(operator: Option<&str>) -> anyhow::Result<()> {
+    let secret = anamnesis_web::auth::generate_token()?;
+    let token_env = anamnesis_web::auth::TOKEN_ENV;
+    let tokens_env = anamnesis_web::auth::TOKENS_ENV;
+
+    match operator {
+        None => {
+            println!("{secret}");
+            println!();
+            println!("  Server:  {token_env}={secret}");
+            println!("  Client:  {token_env}={secret}");
+            println!();
+            println!("  Set it for the server and for whatever runs the hooks —");
+            println!("  the same variable on both sides. Nothing was stored: this");
+            println!("  is the only time it is printed.");
+        }
+        Some(name) => {
+            // Validated here rather than at the server, so a name that could
+            // never be accepted is refused while it is still a suggestion.
+            let operator = anamnesis_core::scope::OperatorName::parse(name)?;
+            println!("{secret}");
+            println!();
+            println!("  Server:  {tokens_env}={operator}={secret}");
+            println!("  Client:  {token_env}={secret}");
+            println!();
+            println!("  Add the pair to the server's {tokens_env}, comma-separated");
+            println!("  alongside any others. {operator}'s machine sets {token_env}.");
+        }
+    }
+
+    Ok(())
 }
 
 fn cmd_install_hooks(
@@ -947,6 +1204,13 @@ fn cmd_install_hooks(
         println!();
         println!("Or run this again with `--write` to merge it in for you.");
         println!("Then start the server with `anamnesis serve`.");
+        println!();
+        println!(
+            "If that server requires a token, set {} in the environment",
+            anamnesis_web::auth::TOKEN_ENV
+        );
+        println!("the harness starts from. Hooks inherit it, and the secret stays");
+        println!("out of the settings file.");
         return Ok(());
     }
 
@@ -996,6 +1260,16 @@ fn cmd_install_hooks(
     println!("  Takes effect in the next session, not this one.");
     println!("  Start the server with `anamnesis serve`, then check with");
     println!("  `anamnesis status`.");
+    // The command written into the file carries no secret, on purpose: a
+    // settings file is read aloud by the harness and copied between machines.
+    if std::env::var_os(anamnesis_web::auth::TOKEN_ENV).is_none() {
+        println!();
+        println!(
+            "  If that server requires a token, set {} in the environment",
+            anamnesis_web::auth::TOKEN_ENV
+        );
+        println!("  the harness starts from — not in this file.");
+    }
     Ok(())
 }
 
@@ -1717,5 +1991,95 @@ mod tests {
         assert_eq!(plural(0, "page"), "0 pages");
         assert_eq!(plural(1, "page"), "1 page");
         assert_eq!(plural(2, "page"), "2 pages");
+    }
+
+    /// The line exists to answer "is my work reaching memory", so the case
+    /// where it is not — a hook whose token the server refuses — has to read
+    /// as a problem and name what to check.
+    #[test]
+    fn a_rejected_token_says_which_variable_is_wrong() {
+        let line = describe_auth(&AuthState::Rejected, true);
+        assert!(line.contains("rejected"), "{line}");
+        assert!(line.contains(anamnesis_web::auth::TOKEN_ENV), "{line}");
+    }
+
+    /// Missing and wrong are different fixes: one is "set the variable", the
+    /// other is "you set it to the wrong thing".
+    #[test]
+    fn no_token_at_all_is_reported_differently_from_a_wrong_one() {
+        let missing = describe_auth(&AuthState::Rejected, false);
+        let wrong = describe_auth(&AuthState::Rejected, true);
+        assert_ne!(missing, wrong);
+        assert!(missing.contains("has no token"), "{missing}");
+    }
+
+    #[test]
+    fn an_open_server_is_reported_as_open_rather_than_as_working() {
+        let line = describe_auth(&AuthState::Open, false);
+        assert!(line.contains("not required"), "{line}");
+        assert!(line.contains("can read this memory"), "{line}");
+    }
+
+    #[test]
+    fn an_accepted_token_names_the_operator_when_it_has_one() {
+        assert!(
+            describe_auth(&AuthState::Accepted(Some("alice".to_owned())), true).contains("alice")
+        );
+        assert!(describe_auth(&AuthState::Accepted(None), true).contains("accepted"));
+    }
+
+    /// A server that did not answer is not a server that is open. Saying
+    /// "not required" here would be a false all-clear.
+    #[test]
+    fn a_silent_server_is_not_reported_as_unprotected() {
+        let line = describe_auth(&AuthState::Unknown, false);
+        assert!(line.contains("unknown"), "{line}");
+        assert!(!line.contains("not required"), "{line}");
+    }
+
+    fn address(raw: &str) -> std::net::SocketAddr {
+        raw.parse().expect("address")
+    }
+
+    /// Loopback is where every single-user install lives, and where the port
+    /// is the boundary. Refusing there would break them all for no gain.
+    #[test]
+    fn an_open_server_on_loopback_is_allowed_to_start() {
+        assert!(refuse_anonymous_exposure(&address("127.0.0.1:8080"), true, false).is_none());
+        assert!(refuse_anonymous_exposure(&address("[::1]:8080"), true, false).is_none());
+    }
+
+    #[test]
+    fn an_open_server_on_a_network_address_is_refused_and_told_how() {
+        let refusal = refuse_anonymous_exposure(&address("0.0.0.0:8080"), true, false)
+            .expect("should refuse");
+        assert!(refusal.contains("anamnesis token"), "{refusal}");
+        assert!(refusal.contains("--allow-anonymous"), "{refusal}");
+    }
+
+    /// The refusal is about being unguarded, not about the address: a server
+    /// with tokens configured may bind wherever it likes.
+    #[test]
+    fn a_guarded_server_may_serve_any_address() {
+        assert!(refuse_anonymous_exposure(&address("0.0.0.0:8080"), false, false).is_none());
+    }
+
+    /// "Behind a proxy that authenticates" is a real deployment, and a check
+    /// with no way past it gets worked around by worse means.
+    #[test]
+    fn the_refusal_can_be_overridden_deliberately() {
+        assert!(refuse_anonymous_exposure(&address("0.0.0.0:8080"), true, true).is_none());
+    }
+
+    #[test]
+    fn the_startup_line_names_the_operators_it_will_accept() {
+        let auth = anamnesis_web::Auth::parse(None, Some("alice=alpha,bob=beta")).expect("parse");
+        let line = describe_serving_auth(&auth);
+        assert!(line.contains("alice"), "{line}");
+        assert!(line.contains("bob"), "{line}");
+
+        let shared = anamnesis_web::Auth::parse(Some("alpha"), None).expect("parse");
+        assert_eq!(describe_serving_auth(&shared), "token required");
+        assert!(describe_serving_auth(&anamnesis_web::Auth::open()).contains("open"));
     }
 }

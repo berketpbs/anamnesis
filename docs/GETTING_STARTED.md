@@ -108,9 +108,12 @@ the reply shape is fixed by a schema regardless.
 anamnesis serve
 ```
 
-This binds `127.0.0.1:8080` and serves three endpoints — `POST /hook`,
-`GET /handoff`, `GET /health`. There is no web UI to open, and no
-authentication, which is why the default bind is loopback.
+This binds `127.0.0.1:8080` and serves four endpoints — `POST /hook`,
+`GET /handoff`, `GET /whoami`, `GET /health`. There is no web UI to open.
+
+By default no token is required, which is why the default bind is loopback:
+there, the port is the boundary. To serve any other address, protect it first —
+see [Requiring a token](#requiring-a-token).
 
 The MCP server is a separate process the agent launches itself; `serve` does
 not start one.
@@ -174,6 +177,54 @@ anamnesis write-page \
 ```bash
 anamnesis status
 ```
+
+### Requiring a token
+
+The server holds every prompt you typed, every path you opened, and every
+summary written from them. On `127.0.0.1` the port is the boundary and no token
+is required. Anywhere else, require one:
+
+```bash
+anamnesis token                 # prints a fresh secret, stores nothing
+```
+
+Set it for the server and for whatever runs the hooks — the same variable on
+both sides:
+
+```bash
+export ANAMNESIS_TOKEN=anam_...   # server: accept this; client: present this
+anamnesis serve --bind 0.0.0.0
+```
+
+`anamnesis serve` refuses to bind a non-loopback address with no token
+configured. Pass `--allow-anonymous` if something in front of it already
+authenticates.
+
+For a server several people use, give each of them their own secret:
+
+```bash
+anamnesis token --operator alice        # prints the pair to add
+export ANAMNESIS_TOKENS='alice=anam_...,bob=anam_...'   # server accepts
+export ANAMNESIS_TOKEN=anam_...                          # alice's machine presents
+```
+
+`ANAMNESIS_TOKEN` is the secret a machine **presents**; `ANAMNESIS_TOKENS` is
+the set a server **accepts**. On one machine they hold the same value.
+
+The token never goes into a settings file — `install-hooks` writes a command
+with no secret in it, and the hook reads `ANAMNESIS_TOKEN` from the environment
+the harness started in. Hooks are read at session start, so set the variable
+before launching the agent.
+
+`anamnesis status` says whether this machine gets in:
+
+```
+  Server:    running at http://127.0.0.1:8080
+  Auth:      required — this client is alice
+```
+
+`/health` stays answerable without a token, on purpose: it is what tells a
+server that is down apart from one that is refusing this machine.
 
 ### Read What the Last Session Left
 
@@ -414,6 +465,11 @@ The `hook` command always exits 0, but it writes the reason to **stderr**: a
 rejected event, an unreachable server, a payload it could not parse. If
 Claude Code hides hook stderr, run the same command by hand with a payload on
 stdin to see it.
+
+If the server requires a token, `anamnesis status` says so on its `Auth:` line
+— including when this machine'''s token is the thing being refused. Hooks
+inherit the environment the harness started in, so a variable exported after
+that is not one the hooks have.
 
 On Windows, PowerShell prepends a UTF-8 BOM when piping text into a native
 executable. Both the CLI and the server strip it; a third-party wrapper that

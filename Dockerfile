@@ -45,8 +45,14 @@ ENV ANAMNESIS_DATA_DIR=/root/.anamnesis
 # Use tini as init system
 ENTRYPOINT ["/usr/bin/tini", "--"]
 
-# Default command
-CMD ["anamnesis", "serve", "--bind", "0.0.0.0", "--port", "8080"]
+# Default command.
+#
+# `--allow-anonymous` because a container binds 0.0.0.0 in order to be reachable
+# through a published port at all, not because its memory is meant to be public
+# — and whether anyone outside can reach it is decided by `-p` on the host,
+# where this process cannot see it. Set ANAMNESIS_TOKEN (or ANAMNESIS_TOKENS)
+# and the server requires it regardless of this flag.
+CMD ["anamnesis", "serve", "--bind", "0.0.0.0", "--port", "8080", "--allow-anonymous"]
 
 # Expose ports
 EXPOSE 8080

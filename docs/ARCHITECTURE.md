@@ -137,11 +137,19 @@ The HTTP server hooks deliver to.
 **Provides:**
 - `POST /hook` — accept one lifecycle event, record it, return 202
 - `GET /handoff` — hand the next session what the last one left
+- `GET /whoami` — what the server makes of the caller's token
 - `GET /health`
 - The consolidation pipeline, which runs *after* the response is sent
 
 > There is no web UI: no wiki browser, no search page, no git visualization.
-> There is also no authentication — bind to loopback, which is the default.
+
+**Bearer tokens.** With `ANAMNESIS_TOKEN` or `ANAMNESIS_TOKENS` set, every
+route but `/health` requires `Authorization: Bearer <token>`. With neither set
+the server is open, which is what loopback deployments have always been;
+binding a non-loopback address that way is refused at startup unless
+`--allow-anonymous` says it was meant. `/health` stays open so `anamnesis
+status` can tell a server that is down from one that refuses this machine's
+token — two problems with different fixes that would otherwise look identical.
 
 ### anamnesis-cli
 Command-line interface.
@@ -470,8 +478,8 @@ data directory.
 
 **Not implemented — do not rely on these:**
 
-- **Bearer-token auth** — there is no authentication on the HTTP server.
-- **`[slots] per_user`** — every session shares one scope.
+- **`[slots] per_user`** — every session shares one scope. A token may name an
+  operator, but nothing yet gives that operator a slot of their own.
 
 ## Future Enhancements
 

@@ -90,6 +90,15 @@ name_newtype! {
     ProjectName, "project"
 }
 
+name_newtype! {
+    /// A validated operator name: who a bearer token belongs to.
+    ///
+    /// Held to the same rules as a project name because it is heading for the
+    /// same places — a column that is compared, and eventually a slot that has
+    /// to be nameable on disk.
+    OperatorName, "operator"
+}
+
 impl Default for WorkspaceName {
     fn default() -> Self {
         Self(DEFAULT_WORKSPACE.to_owned())

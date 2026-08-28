@@ -24,10 +24,26 @@ docker build -t anamnesis:latest .
 docker run -d \
   --name anamnesis \
   -p 8080:8080 \
+  -e ANAMNESIS_TOKEN="$(anamnesis token)" \
   -v anamnesis-data:/root/.anamnesis \
   -v /path/to/workspace:/workspace \
   anamnesis:latest
 ```
+
+### Requiring a token
+
+`-p 8080:8080` publishes the port on every interface of the host, and
+everything behind it — every prompt, every path, every summary written from
+them — is readable by whatever can reach it. `ANAMNESIS_TOKEN` closes that:
+with it set, every route but `/health` requires `Authorization: Bearer <token>`.
+Whatever runs the hooks sets the same value in its own environment.
+
+Without the variable the image starts open and says so on stderr. It does not
+refuse, the way `anamnesis serve` refuses a non-loopback bind on the host,
+because a container binds `0.0.0.0` in order to be reachable at all — the
+decision that matters is made outside it, when the port is published. The other
+way to close it is to publish to loopback only:
+`-p 127.0.0.1:8080:8080`.
 
 ## Docker Compose Services
 
