@@ -94,6 +94,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Backlinks now resolve when the target page is written after the page that
   links to it
 - Rebuilt sessions come back closed when the transcript records their end
+- The first run is readable again. Refinery logs the entire SQL text of every
+  migration at info, so `anamnesis init` saying where memory now lives scrolled
+  away under several screens of schema that is checked into this repository.
+  Quieted to `warn` unless `--debug` or an explicit `RUST_LOG` asks — a
+  migration that fails halfway is exactly when the statement is worth seeing
 - A handoff request that fails is no longer printed as a handoff. The hook read
   the body without looking at the status, so an error page — a 401 among them —
   went to stdout, where the harness injects it into the model's context as
