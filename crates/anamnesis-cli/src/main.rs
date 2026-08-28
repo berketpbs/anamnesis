@@ -1363,7 +1363,13 @@ fn cmd_hook(agent: &str, server: &str, token: Option<&str>) {
 
     // Only a starting session has anything to collect, and whatever comes back
     // goes to stdout, where the harness injects it into the model's context.
-    if event.as_deref() == Some("SessionStart") {
+    //
+    // Gemini CLI is the exception that shapes this: it requires stdout to be a
+    // single JSON object and nothing else, so every event it fires gets one,
+    // empty when there is nothing to say. Printing plain text there would not
+    // fail loudly — it would fail as a parse error inside the harness, which
+    // is the kind of failure this system is worst at explaining.
+    if is_starting(event.as_deref(), agent) {
         let (session_id, cwd) = session_and_cwd(&payload);
         let mut request = client.get(format!("{server}/handoff")).query(&[
             ("agent", agent),
@@ -1379,18 +1385,67 @@ fn cmd_hook(agent: &str, server: &str, token: Option<&str>) {
         // would be believed.
         match request.send() {
             Ok(response) if response.status().is_success() => match response.text() {
-                Ok(text) if !text.trim().is_empty() => print!("{text}"),
-                Ok(_) => {}
+                Ok(text) => print!("{}", handoff_reply(agent, &text)),
                 Err(error) => eprintln!("anamnesis: handoff unavailable: {error}"),
             },
             Ok(response) => {
                 let status = response.status();
                 let detail = response.text().unwrap_or_default();
                 eprintln!("anamnesis: handoff refused ({status}): {}", detail.trim());
+                print!("{}", handoff_reply(agent, ""));
             }
-            Err(error) => eprintln!("anamnesis: handoff unavailable: {error}"),
+            Err(error) => {
+                eprintln!("anamnesis: handoff unavailable: {error}");
+                print!("{}", handoff_reply(agent, ""));
+            }
         }
+    } else if agent == "gemini-cli" {
+        // Every other event, for the harness that wants one object per call.
+        print!("{}", handoff_reply(agent, ""));
     }
+}
+
+/// Whether this event is the one that collects a handoff.
+///
+/// Every harness anamnesis wires calls it `SessionStart`, which is the only
+/// reason this is a comparison and not a table. `agent` is taken so that a
+/// harness which renames it can be added here rather than discovered in the
+/// field.
+fn is_starting(event: Option<&str>, _agent: &str) -> bool {
+    event == Some("SessionStart")
+}
+
+/// The handoff, in the shape the harness reads back.
+///
+/// Claude Code and Codex inject whatever a hook prints, so the handoff is
+/// printed as it is and nothing is printed when there is none. Gemini CLI
+/// parses stdout as one JSON object and rejects anything else, so it gets one
+/// — carrying the handoff as `hookSpecificOutput.additionalContext`, or empty
+/// when there is nothing to hand over.
+///
+/// The trailing newline matters only for the plain form, where stdout is
+/// spliced into a prompt.
+fn handoff_reply(agent: &str, handoff: &str) -> String {
+    let handoff = handoff.trim();
+
+    if agent == "gemini-cli" {
+        let reply = if handoff.is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": handoff,
+                }
+            })
+        };
+        return format!("{reply}\n");
+    }
+
+    if handoff.is_empty() {
+        return String::new();
+    }
+    format!("{handoff}\n")
 }
 
 /// Pull the session id and working directory out of a hook payload.
@@ -2710,5 +2765,54 @@ mod tests {
         let frontmatter =
             anamnesis_core::page::Frontmatter::new("t", Vec::new()).expect("frontmatter");
         assert!(!describe_page(&frontmatter).contains("active"));
+    }
+
+    /// The harness that shapes this: Gemini CLI parses stdout as one JSON
+    /// object and rejects anything else, so plain text there is not a
+    /// degraded handoff — it is a parse error inside somebody's agent.
+    #[test]
+    fn gemini_gets_one_json_object_whether_or_not_there_is_a_handoff() {
+        let with = handoff_reply("gemini-cli", "Last request: wire it up\n");
+        let parsed: serde_json::Value = serde_json::from_str(&with).expect("valid JSON");
+        assert_eq!(
+            parsed["hookSpecificOutput"]["additionalContext"],
+            "Last request: wire it up"
+        );
+        assert_eq!(
+            parsed["hookSpecificOutput"]["hookEventName"],
+            "SessionStart"
+        );
+
+        let without: serde_json::Value =
+            serde_json::from_str(&handoff_reply("gemini-cli", "")).expect("valid JSON");
+        assert_eq!(without, serde_json::json!({}));
+    }
+
+    /// Everything else injects whatever the hook printed, so the handoff is
+    /// printed as it is — and nothing at all when there is none, because an
+    /// empty line is still a line in somebody's context.
+    #[test]
+    fn the_other_harnesses_get_the_handoff_as_it_is() {
+        assert_eq!(
+            handoff_reply("claude-code", "Last request: wire it up"),
+            "Last request: wire it up\n"
+        );
+        assert_eq!(handoff_reply("codex", "  "), "");
+        assert_eq!(handoff_reply("claude-code", ""), "");
+    }
+
+    /// A refused or unreachable handoff must not leave Gemini with an empty
+    /// stdout it was told never to expect.
+    #[test]
+    fn a_failed_handoff_still_leaves_gemini_a_valid_object() {
+        let reply = handoff_reply("gemini-cli", "");
+        serde_json::from_str::<serde_json::Value>(&reply).expect("valid JSON");
+    }
+
+    #[test]
+    fn only_a_starting_session_collects_a_handoff() {
+        assert!(is_starting(Some("SessionStart"), "claude-code"));
+        assert!(!is_starting(Some("SessionEnd"), "claude-code"));
+        assert!(!is_starting(None, "gemini-cli"));
     }
 }

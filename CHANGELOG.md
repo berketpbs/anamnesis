@@ -34,6 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   be durable, authoritative, or a replacement for another, and it says which it
   was written as. Its entities reach the index too — the command wrote none
   before, so a page written this way was reachable through its words alone
+- `install-hooks` wires Gemini CLI. The same five moments under four different
+  names — `BeforeAgent` when a prompt is submitted, `AfterTool` when one
+  finishes, `PreCompress` before the context goes — which the parser now reads
+  as the boundaries they are. The way back differs too: Gemini parses a hook's
+  stdout as one JSON object and rejects anything else, so the handoff travels
+  as `hookSpecificOutput.additionalContext`, and every other event prints an
+  empty object rather than nothing
 - `install-hooks` wires Codex CLI as well as Claude Code. Codex reads
   `.codex/hooks.json`, names the same five lifecycle events, and delivers a
   payload with the same field names, so nothing downstream had to learn a

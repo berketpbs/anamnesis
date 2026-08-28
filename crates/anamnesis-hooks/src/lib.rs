@@ -104,9 +104,15 @@ fn classify(name: Option<&str>) -> EventKind {
     let normalized = name.unwrap_or_default().to_ascii_lowercase();
     match normalized.as_str() {
         "sessionstart" | "session_start" => EventKind::SessionStart,
-        "userpromptsubmit" | "user_prompt_submit" => EventKind::UserPrompt,
-        "pretooluse" | "posttooluse" | "pre_tool_use" | "post_tool_use" => EventKind::ToolUse,
-        "precompact" | "pre_compact" => EventKind::PreCompact,
+        // `beforeagent` is Gemini CLI's: it fires once the user has submitted
+        // a prompt, before anything is planned, and carries the same `prompt`
+        // field the others send.
+        "userpromptsubmit" | "user_prompt_submit" | "beforeagent" => EventKind::UserPrompt,
+        // `aftertool` likewise. A harness naming the moment differently is not
+        // a different moment.
+        "pretooluse" | "posttooluse" | "pre_tool_use" | "post_tool_use" | "beforetool"
+        | "aftertool" => EventKind::ToolUse,
+        "precompact" | "pre_compact" | "precompress" => EventKind::PreCompact,
         "postcompact" | "post_compact" => EventKind::PostCompact,
         "sessionend" | "session_end" => EventKind::SessionEnd,
         _ => EventKind::Notification,
@@ -401,5 +407,28 @@ mod tests {
         });
         let parsed = parse(&claude(), &payload).unwrap();
         assert_eq!(parsed.tool.unwrap().name, "Read");
+    }
+
+    /// A harness naming the moment differently is not a different moment.
+    /// Gemini CLI calls them `BeforeAgent`, `AfterTool`, and `PreCompress`;
+    /// left unclassified they would all become notifications, and a session
+    /// would consolidate with nothing in it but its own start and end.
+    #[test]
+    fn geminis_names_reach_the_same_lifecycle_boundaries() {
+        assert_eq!(classify(Some("BeforeAgent")), EventKind::UserPrompt);
+        assert_eq!(classify(Some("AfterTool")), EventKind::ToolUse);
+        assert_eq!(classify(Some("PreCompress")), EventKind::PreCompact);
+        assert_eq!(classify(Some("SessionStart")), EventKind::SessionStart);
+        assert_eq!(classify(Some("SessionEnd")), EventKind::SessionEnd);
+    }
+
+    /// The names the other harnesses use still mean what they meant.
+    #[test]
+    fn the_names_that_already_worked_still_work() {
+        assert_eq!(classify(Some("UserPromptSubmit")), EventKind::UserPrompt);
+        assert_eq!(classify(Some("PostToolUse")), EventKind::ToolUse);
+        assert_eq!(classify(Some("PreCompact")), EventKind::PreCompact);
+        // And an invented one is still captured, just unclassified.
+        assert_eq!(classify(Some("SomethingNew")), EventKind::Notification);
     }
 }

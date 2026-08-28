@@ -66,8 +66,35 @@ pub const CODEX: Harness = Harness {
     note: "Hooks are on unless `[features] hooks = false` says otherwise.",
 };
 
+/// Gemini CLI: the same five moments under four different names.
+///
+/// `BeforeAgent` fires after the user submits a prompt, `AfterTool` after a
+/// tool runs, `PreCompress` before the context is compacted. Only
+/// `SessionStart` and `SessionEnd` are spelled the way the others spell them,
+/// which is exactly why the events belong in a table rather than in the code
+/// that writes the file.
+///
+/// The payload fields are the ones everything downstream already reads —
+/// `session_id`, `cwd`, `hook_event_name`, `prompt`, `tool_name`, `tool_input`
+/// — so only the event names had to be taught. What differs is the way back:
+/// Gemini requires stdout to be a single JSON object, so the handoff travels
+/// as `hookSpecificOutput.additionalContext` rather than as plain text. See
+/// `handoff_reply` in `main.rs`.
+pub const GEMINI_CLI: Harness = Harness {
+    agent: "gemini-cli",
+    settings: &[".gemini", "settings.json"],
+    events: &[
+        "SessionStart",
+        "BeforeAgent",
+        "AfterTool",
+        "PreCompress",
+        "SessionEnd",
+    ],
+    note: "Stdout must be one JSON object; the hook prints one.",
+};
+
 /// Every harness `install-hooks` can wire.
-pub const HARNESSES: [Harness; 2] = [CLAUDE_CODE, CODEX];
+pub const HARNESSES: [Harness; 3] = [CLAUDE_CODE, CODEX, GEMINI_CLI];
 
 /// The harness `agent` names, if it is one anamnesis can wire.
 pub fn harness(agent: &str) -> Option<Harness> {
