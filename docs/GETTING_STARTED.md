@@ -128,11 +128,17 @@ Claude Code talks to anamnesis two ways, and they are independent.
 ```bash
 anamnesis install-hooks --agent claude-code          # .claude/settings.local.json
 anamnesis install-hooks --agent codex --write        # .codex/hooks.json
+anamnesis install-hooks --agent gemini-cli --write   # .gemini/settings.json
 ```
 
-Both harnesses name the same five events and deliver the same payload fields,
-so one server captures both. Hooks are read when a session starts, so the
-session you run this from is not the one that gets captured.
+All three capture the same five moments and one server captures all of them,
+though each spells the events its own way and Gemini CLI wants its answers as
+JSON. Hooks are read when a session starts, so the session you run this from
+is not the one that gets captured.
+
+OpenCode is not wired: it extends through a TypeScript plugin API rather than
+a command hook, so there is nothing for `install-hooks` to register. Running
+it against `--agent opencode` says so.
 
 **MCP** lets the agent search memory and write pages on purpose. Register the
 server as a stdio subprocess:
