@@ -306,9 +306,8 @@ fn main() -> anyhow::Result<()> {
     // handoff to stdout, and the harness injects whatever appears there into
     // the model context. A log line on that stream would become part of the
     // agent memory it was describing.
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        tracing_subscriber::EnvFilter::new(if cli.debug { "debug" } else { "info" })
-    });
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter(cli.debug)));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
@@ -419,6 +418,27 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// The log filter used when `RUST_LOG` says nothing.
+///
+/// `info` for anamnesis, because consolidation happens after the response has
+/// been sent and a model that refuses or times out leaves no trace anywhere
+/// else. `warn` for refinery, because it logs the **entire SQL text of every
+/// migration** at info — ten migrations of schema, several screens of it, on
+/// the first run of every command that opens the index. What that buries is
+/// `anamnesis init` saying where the memory now lives, which is the one thing
+/// the person running it was reading for, and the SQL it buries it under is
+/// checked into this repository.
+///
+/// `--debug` restores it, and so does an explicit `RUST_LOG`: a migration that
+/// fails halfway is exactly when someone wants to see the statement.
+fn default_filter(debug: bool) -> &'static str {
+    if debug {
+        "debug"
+    } else {
+        "info,refinery_core=warn"
+    }
 }
 
 fn cmd_status(
@@ -2233,5 +2253,22 @@ mod tests {
         );
         assert_eq!(AuthState::Accepted(None).operator(), None);
         assert_eq!(AuthState::Open.operator(), None);
+    }
+
+    /// The finding this exists for: refinery logs every migration's whole SQL
+    /// text at info, and `anamnesis init` saying where memory now lives
+    /// scrolls away under it on the first run.
+    #[test]
+    fn the_default_filter_quiets_the_migration_sql() {
+        let filter = default_filter(false);
+        assert!(filter.starts_with("info"), "{filter}");
+        assert!(filter.contains("refinery_core=warn"), "{filter}");
+    }
+
+    /// A migration that fails halfway is exactly when the statement is worth
+    /// seeing, so debugging must not inherit the muzzle.
+    #[test]
+    fn debug_logging_still_shows_it() {
+        assert!(!default_filter(true).contains("refinery_core=warn"));
     }
 }
