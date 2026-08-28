@@ -107,18 +107,13 @@ name = "anamnesis-evals"
 version = "0.1.0"
 dependencies = [
  "anamnesis-core",
- "anamnesis-llm",
  "anamnesis-store",
  "anamnesis-wiki",
- "anyhow",
  "jiff",
  "serde",
- "serde_json",
  "tempfile",
  "thiserror 2.0.20",
- "tokio",
  "toml_edit",
- "tracing",
 ]
 
 [[package]]

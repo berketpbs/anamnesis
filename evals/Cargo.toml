@@ -7,20 +7,20 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+# Only what the suite actually needs. The stub this crate grew out of also
+# declared anamnesis-llm, tokio, anyhow, serde_json, and tracing — none of
+# which it uses. anamnesis-llm is the one worth naming: it pulls in candle, so
+# the eval crate was waiting on a machine-learning toolchain to score three
+# SQL-backed streams that never touch one.
 [dependencies]
 anamnesis-core.workspace = true
 anamnesis-store.workspace = true
 anamnesis-wiki.workspace = true
-anamnesis-llm.workspace = true
-anyhow.workspace = true
 jiff.workspace = true
 toml_edit = { workspace = true, features = ["serde"] }
 tempfile.workspace = true
 thiserror.workspace = true
 serde = { workspace = true, features = ["derive"] }
-serde_json.workspace = true
-tokio.workspace = true
-tracing.workspace = true
 
 [lints]
 workspace = true
