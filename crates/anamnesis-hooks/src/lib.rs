@@ -72,9 +72,7 @@ impl ParsedHook {
 pub fn parse(agent: &AgentKind, raw: &Value) -> Result<ParsedHook> {
     let object = raw.as_object().ok_or(HookError::NotAnObject)?;
 
-    let agent_session_id = string_field(object, "session_id")
-        .or_else(|| string_field(object, "sessionId"))
-        .ok_or(HookError::MissingSessionId)?;
+    let agent_session_id = correlation_id(object).ok_or(HookError::MissingSessionId)?;
 
     let kind = classify(string_field(object, "hook_event_name").as_deref());
     let tool = tool_from(object);
@@ -87,13 +85,49 @@ pub fn parse(agent: &AgentKind, raw: &Value) -> Result<ParsedHook> {
     Ok(ParsedHook {
         agent: agent.clone(),
         agent_session_id,
-        cwd: string_field(object, "cwd").map(PathBuf::from),
+        cwd: working_directory(object),
         kind,
         tool,
         paths,
         body,
         redactions: redacted.hits().to_vec(),
     })
+}
+
+/// The identifier that ties one harness's events into one session.
+///
+/// `conversation_id` comes first, and only Cursor sends it. It sends it on
+/// *every* event, while `session_id` rides along on only some — so preferring
+/// the one that is always there is what keeps a Cursor session from being
+/// recorded as two: the start and end under one identifier, the prompts and
+/// tool calls under another, neither knowing about the other.
+///
+/// No other harness sends `conversation_id`, so nothing else changes.
+fn correlation_id(object: &serde_json::Map<String, Value>) -> Option<String> {
+    string_field(object, "conversation_id")
+        .or_else(|| string_field(object, "conversationId"))
+        .or_else(|| string_field(object, "session_id"))
+        .or_else(|| string_field(object, "sessionId"))
+}
+
+/// Where the agent is working, however the harness says it.
+///
+/// Cursor reports `cwd` on tool events and a `workspace_roots` array
+/// everywhere else. The first root is the one taken: a session belongs to a
+/// project, and the alternative — no directory at all — is an event the
+/// capture path refuses outright, which would cost the whole session rather
+/// than one field.
+fn working_directory(object: &serde_json::Map<String, Value>) -> Option<PathBuf> {
+    if let Some(cwd) = string_field(object, "cwd") {
+        return Some(PathBuf::from(cwd));
+    }
+    object
+        .get("workspace_roots")
+        .or_else(|| object.get("workspaceRoots"))
+        .and_then(Value::as_array)
+        .and_then(|roots| roots.first())
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
 }
 
 /// Map a harness event name onto a lifecycle boundary.
@@ -107,7 +141,9 @@ fn classify(name: Option<&str>) -> EventKind {
         // `beforeagent` is Gemini CLI's: it fires once the user has submitted
         // a prompt, before anything is planned, and carries the same `prompt`
         // field the others send.
-        "userpromptsubmit" | "user_prompt_submit" | "beforeagent" => EventKind::UserPrompt,
+        "userpromptsubmit" | "user_prompt_submit" | "beforeagent" | "beforesubmitprompt" => {
+            EventKind::UserPrompt
+        }
         // `aftertool` likewise. A harness naming the moment differently is not
         // a different moment.
         "pretooluse" | "posttooluse" | "pre_tool_use" | "post_tool_use" | "beforetool"
@@ -134,9 +170,22 @@ fn tool_from(object: &serde_json::Map<String, Value>) -> Option<ToolRef> {
 /// `error` field when things went wrong, and some say nothing. `None` means
 /// "not reported", which is different from "succeeded".
 fn tool_outcome(object: &serde_json::Map<String, Value>) -> Option<bool> {
-    let response = object
+    // `tool_output` is Cursor's, and it is a JSON *string* rather than an
+    // object — the result serialised, not the result. Parsed back here because
+    // the alternative is reporting every Cursor tool call as an outcome nobody
+    // knows, which is what `None` means and would be a lie by omission.
+    let parsed;
+    let response = match object
         .get("tool_response")
-        .or_else(|| object.get("toolResponse"))?;
+        .or_else(|| object.get("toolResponse"))
+    {
+        Some(response) => response,
+        None => {
+            let raw = object.get("tool_output").and_then(Value::as_str)?;
+            parsed = serde_json::from_str::<Value>(raw).ok()?;
+            &parsed
+        }
+    };
 
     if let Some(response) = response.as_object() {
         if let Some(success) = response.get("success").and_then(Value::as_bool) {
@@ -430,5 +479,107 @@ mod tests {
         assert_eq!(classify(Some("PreCompact")), EventKind::PreCompact);
         // And an invented one is still captured, just unclassified.
         assert_eq!(classify(Some("SomethingNew")), EventKind::Notification);
+    }
+
+    /// The failure this ordering prevents: Cursor sends `session_id` on the
+    /// start and the end and `conversation_id` on everything, and the two do
+    /// not match. Keyed on the former, one session is recorded as two — the
+    /// boundaries in one, the work in another, neither knowing about the other.
+    #[test]
+    fn cursor_events_correlate_on_the_identifier_it_always_sends() {
+        let start = json!({
+            "hook_event_name": "sessionStart",
+            "conversation_id": "conversation-1",
+            "session_id": "session-aaa",
+            "workspace_roots": ["/repo"],
+        });
+        let prompt = json!({
+            "hook_event_name": "beforeSubmitPrompt",
+            "conversation_id": "conversation-1",
+            "workspace_roots": ["/repo"],
+            "prompt": "wire it up",
+        });
+
+        let start = parse(&AgentKind::Cursor, &start).expect("start");
+        let prompt = parse(&AgentKind::Cursor, &prompt).expect("prompt");
+        assert_eq!(start.agent_session_id, prompt.agent_session_id);
+        assert_eq!(start.agent_session_id, "conversation-1");
+    }
+
+    /// Nothing else sends a conversation id, so nothing else changes.
+    #[test]
+    fn a_harness_that_sends_only_a_session_id_still_correlates_on_it() {
+        let payload = json!({
+            "hook_event_name": "SessionStart",
+            "session_id": "session-abc",
+            "cwd": "/repo",
+        });
+        let parsed = parse(&AgentKind::ClaudeCode, &payload).expect("parse");
+        assert_eq!(parsed.agent_session_id, "session-abc");
+    }
+
+    /// A session belongs to a project, and an event with no directory is one
+    /// the capture path refuses outright — so the workspace root has to serve
+    /// where Cursor sends no `cwd`.
+    #[test]
+    fn the_first_workspace_root_stands_in_for_a_missing_cwd() {
+        let payload = json!({
+            "hook_event_name": "sessionStart",
+            "conversation_id": "conversation-1",
+            "workspace_roots": ["/repo", "/other"],
+        });
+        let parsed = parse(&AgentKind::Cursor, &payload).expect("parse");
+        assert_eq!(parsed.cwd, Some(std::path::PathBuf::from("/repo")));
+    }
+
+    /// And `cwd` still wins where a harness sends both, which Cursor does on
+    /// tool events.
+    #[test]
+    fn an_explicit_cwd_beats_the_workspace_roots() {
+        let payload = json!({
+            "hook_event_name": "postToolUse",
+            "conversation_id": "conversation-1",
+            "cwd": "/repo/sub",
+            "workspace_roots": ["/repo"],
+        });
+        let parsed = parse(&AgentKind::Cursor, &payload).expect("parse");
+        assert_eq!(parsed.cwd, Some(std::path::PathBuf::from("/repo/sub")));
+    }
+
+    /// Cursor serialises the tool result before sending it. Read as an opaque
+    /// string it would make every Cursor tool call an outcome nobody knows,
+    /// which is what `None` means and is not what the payload said.
+    #[test]
+    fn a_serialised_tool_result_is_still_a_tool_result() {
+        let failed = json!({
+            "hook_event_name": "postToolUse",
+            "conversation_id": "conversation-1",
+            "cwd": "/repo",
+            "tool_name": "edit_file",
+            "tool_output": "{\"success\": false}",
+        });
+        let parsed = parse(&AgentKind::Cursor, &failed).expect("parse");
+        assert_eq!(parsed.tool.expect("a tool").ok, Some(false));
+
+        // And a result that is not JSON at all says nothing, rather than
+        // guessing that silence means success.
+        let opaque = json!({
+            "hook_event_name": "postToolUse",
+            "conversation_id": "conversation-1",
+            "cwd": "/repo",
+            "tool_name": "edit_file",
+            "tool_output": "done",
+        });
+        let parsed = parse(&AgentKind::Cursor, &opaque).expect("parse");
+        assert_eq!(parsed.tool.expect("a tool").ok, None);
+    }
+
+    #[test]
+    fn cursors_prompt_event_is_a_prompt() {
+        assert_eq!(classify(Some("beforeSubmitPrompt")), EventKind::UserPrompt);
+        assert_eq!(classify(Some("sessionStart")), EventKind::SessionStart);
+        assert_eq!(classify(Some("sessionEnd")), EventKind::SessionEnd);
+        assert_eq!(classify(Some("postToolUse")), EventKind::ToolUse);
+        assert_eq!(classify(Some("preCompact")), EventKind::PreCompact);
     }
 }

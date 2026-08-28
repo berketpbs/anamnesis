@@ -1407,12 +1407,12 @@ fn cmd_hook(agent: &str, server: &str, token: Option<&str>) {
 
 /// Whether this event is the one that collects a handoff.
 ///
-/// Every harness anamnesis wires calls it `SessionStart`, which is the only
-/// reason this is a comparison and not a table. `agent` is taken so that a
-/// harness which renames it can be added here rather than discovered in the
-/// field.
+/// Three harnesses call it `SessionStart` and Cursor calls it `sessionStart`,
+/// which is the whole of the difference — so it is compared without regard to
+/// case rather than through a table. A harness that renames the moment
+/// outright would need one, and this is where it would go.
 fn is_starting(event: Option<&str>, _agent: &str) -> bool {
-    event == Some("SessionStart")
+    event.is_some_and(|event| event.eq_ignore_ascii_case("sessionstart"))
 }
 
 /// The handoff, in the shape the harness reads back.
@@ -1440,6 +1440,16 @@ fn handoff_reply(agent: &str, handoff: &str) -> String {
             })
         };
         return format!("{reply}\n");
+    }
+
+    // Cursor takes injected context as a top-level `additional_context`, and
+    // unlike Gemini it does not insist on being spoken to: nothing to hand
+    // over means nothing printed.
+    if agent == "cursor" {
+        if handoff.is_empty() {
+            return String::new();
+        }
+        return format!("{}\n", serde_json::json!({ "additional_context": handoff }));
     }
 
     if handoff.is_empty() {
@@ -2809,10 +2819,22 @@ mod tests {
         serde_json::from_str::<serde_json::Value>(&reply).expect("valid JSON");
     }
 
+    /// Cursor takes context back as a top-level `additional_context`, and
+    /// unlike Gemini it is content with silence when there is none.
+    #[test]
+    fn cursor_gets_its_own_field_and_nothing_when_there_is_nothing() {
+        let reply = handoff_reply("cursor", "Last request: wire it up");
+        let parsed: serde_json::Value = serde_json::from_str(&reply).expect("valid JSON");
+        assert_eq!(parsed["additional_context"], "Last request: wire it up");
+        assert_eq!(handoff_reply("cursor", ""), "");
+    }
+
     #[test]
     fn only_a_starting_session_collects_a_handoff() {
         assert!(is_starting(Some("SessionStart"), "claude-code"));
         assert!(!is_starting(Some("SessionEnd"), "claude-code"));
         assert!(!is_starting(None, "gemini-cli"));
+        // Cursor spells it differently, and it is still the same moment.
+        assert!(is_starting(Some("sessionStart"), "cursor"));
     }
 }
