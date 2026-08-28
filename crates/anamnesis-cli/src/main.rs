@@ -194,6 +194,26 @@ enum Commands {
         operator: Option<String>,
     },
 
+    /// Score retrieval against a checked-in corpus and its questions
+    ///
+    /// Answers the question the test suite cannot: not "is this correct" but
+    /// "does memory find the page that answers this". Runs against a
+    /// throwaway corpus, never your own memory — every query would otherwise
+    /// count as a read, and the decay sweep believes those.
+    Eval {
+        /// Suite file to run. Omitted runs the ones built into this binary.
+        #[arg(long)]
+        suite: Option<PathBuf>,
+
+        /// Print every case with the rank its answer came back at
+        #[arg(short, long)]
+        verbose: bool,
+
+        /// Exit non-zero when a suite scores below its own thresholds
+        #[arg(long)]
+        check: bool,
+    },
+
     /// Rebuild the index from the wiki and the raw transcripts
     ///
     /// Safe to run at any time: every identifier is derived, so a rebuild
@@ -377,6 +397,13 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Token { operator } => {
             cmd_token(operator.as_deref())?;
+        }
+        Commands::Eval {
+            suite,
+            verbose,
+            check,
+        } => {
+            cmd_eval(suite.as_deref(), verbose, check)?;
         }
         Commands::Reindex => {
             cmd_reindex(cli.data_dir.clone())?;
@@ -1340,6 +1367,127 @@ fn cmd_install_hooks(
         println!("  the harness starts from — not in this file.");
     }
     Ok(())
+}
+
+/// Score retrieval against a checked-in corpus.
+///
+/// Prints what each suite scored, and — with `--check` — refuses to exit zero
+/// when one has fallen below the bar it sets for itself. The bar lives in the
+/// suite file rather than here, so a change that costs recall shows up as a
+/// number someone had to edit.
+fn cmd_eval(suite: Option<&std::path::Path>, verbose: bool, check: bool) -> anyhow::Result<()> {
+    // Held still on purpose. Freshness is an input to nothing a suite scores,
+    // and it can only be that way if two runs are handed the same instant.
+    let now: Timestamp = "2026-01-01T00:00:00Z".parse()?;
+
+    let suites: Vec<(String, anamnesis_evals::Suite)> = match suite {
+        Some(path) => {
+            let loaded = anamnesis_evals::Suite::load(path)?;
+            vec![(path.display().to_string(), loaded)]
+        }
+        None => anamnesis_evals::builtin_suites()
+            .into_iter()
+            .map(|(name, source)| {
+                anamnesis_evals::Suite::from_toml(source).map(|suite| (name.to_owned(), suite))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    };
+
+    let mut failed = 0usize;
+    for (source, suite) in &suites {
+        let report = anamnesis_evals::run(suite, now)?;
+        print_report(&report, source, verbose);
+        if !report.passed() {
+            failed += 1;
+        }
+    }
+
+    if failed > 0 && check {
+        anyhow::bail!(
+            "{failed} of {} suites scored below their thresholds",
+            suites.len()
+        );
+    }
+    Ok(())
+}
+
+/// One suite's results.
+fn print_report(report: &anamnesis_evals::Report, source: &str, verbose: bool) {
+    println!("🎯 {} — {}", report.name, report.description);
+    println!(
+        "   {} · {} pages · {} cases · scored over the first {}",
+        source,
+        report.pages,
+        report.cases.len(),
+        report.limit
+    );
+    println!();
+    println!(
+        "   MRR     {:.3}  {}",
+        report.mrr,
+        describe_bar(report.mrr, report.thresholds.min_mrr)
+    );
+    println!(
+        "   Recall  {:.3}  {}",
+        report.recall,
+        describe_bar(report.recall, report.thresholds.min_recall)
+    );
+
+    // Printed whether or not anyone asked, and in two lists rather than one.
+    // A suite that passes on average while a question goes unanswered is the
+    // result most likely to be read as "fine" — and so is one whose answers
+    // are all technically there, at the bottom of a page nobody scrolls.
+    print_cases("Nothing relevant came back for:", report.misses());
+    print_cases("Answered, but not near the top:", report.ranked_low());
+
+    if verbose {
+        println!();
+        println!("   rank  query");
+        for case in &report.cases {
+            let rank = match case.score.rank {
+                Some(rank) => format!("{rank:>4}"),
+                None => "   —".to_owned(),
+            };
+            println!("   {rank}  {}", case.query);
+        }
+    }
+
+    println!();
+}
+
+/// One list of cases, with the reason each is in the suite.
+fn print_cases<'a>(heading: &str, cases: impl Iterator<Item = &'a anamnesis_evals::CaseOutcome>) {
+    let cases: Vec<&anamnesis_evals::CaseOutcome> = cases.collect();
+    if cases.is_empty() {
+        return;
+    }
+
+    println!();
+    println!("   {heading}");
+    for case in cases {
+        match case.score.rank {
+            Some(rank) => println!("     [{rank}] {:?}", case.query),
+            None => println!("     [—] {:?}", case.query),
+        }
+        if !case.note.is_empty() {
+            println!("         {}", case.note);
+        }
+    }
+}
+
+/// How a measurement sits against the bar the suite set for itself.
+///
+/// A suite that set no bar is reported without one rather than as a pass: it
+/// was never being gated, and a tick would say it was.
+fn describe_bar(value: f64, bar: f64) -> String {
+    if bar <= 0.0 {
+        return "(no threshold)".to_owned();
+    }
+    if value >= bar {
+        format!("(bar {bar:.3}) ok")
+    } else {
+        format!("(bar {bar:.3}) BELOW")
+    }
 }
 
 fn cmd_reindex(data_dir: Option<PathBuf>) -> anyhow::Result<()> {

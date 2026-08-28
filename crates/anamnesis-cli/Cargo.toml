@@ -21,6 +21,7 @@ anamnesis-hooks.workspace = true
 anamnesis-consolidate.workspace = true
 anamnesis-web.workspace = true
 anamnesis-llm.workspace = true
+anamnesis-evals.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde = { workspace = true, features = ["derive"] }

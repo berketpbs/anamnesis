@@ -13,6 +13,9 @@ anamnesis-store.workspace = true
 anamnesis-wiki.workspace = true
 anamnesis-llm.workspace = true
 anyhow.workspace = true
+jiff.workspace = true
+toml_edit = { workspace = true, features = ["serde"] }
+tempfile.workspace = true
 thiserror.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

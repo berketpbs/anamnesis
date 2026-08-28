@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Session consolidation, deterministic when no model is configured
 - HTTP server for hook delivery and handoff pickup (`/hook`, `/handoff`,
   `/whoami`, `/health`) — no UI
+- `anamnesis eval` — retrieval scored against a checked-in corpus and the
+  questions asked of it, through the same `query_pages` call `memory_query`
+  makes. Reports mean reciprocal rank and recall against thresholds the suite
+  file declares, so a change that costs recall has to edit a number in the
+  diff. The corpus is built in a throwaway directory, never real memory: every
+  query would otherwise count as a read, and the decay sweep believes those.
+  The shipped suite runs as an ordinary unit test, so CI fails on a regression
+  without a job of its own
 - `[slots] per_user` is enforced rather than merely parsed. A project that
   sets it keeps one pending handoff per operator, so two people sharing a
   server are each handed what their own last session left instead of whichever

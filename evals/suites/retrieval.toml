@@ -1,0 +1,215 @@
+# The retrieval suite: can memory find the page that answers the question?
+#
+# The corpus is written the way a real project's memory looks after a few
+# months — decisions, session summaries, a couple of notes, one page that
+# replaced another — because the failures worth catching are the ones that only
+# appear once a corpus has more than one plausible answer in it.
+#
+# Every case is here for a reason, and the reason is in its `note`. A case
+# whose note cannot be written is a case nobody will know how to fix.
+
+name = "retrieval"
+description = "Recall and ranking over a small project memory, through the real query path"
+
+# Scored over five, which is what `memory_query` returns when it is not told
+# otherwise. An answer at rank eleven is an answer nobody reads.
+limit = 5
+
+# Measured, then rounded down. These are a floor, not a target: a change that
+# pushes the numbers up should raise them, and a change that pushes them down
+# has to say so in the diff.
+#
+# As of the first run: MRR 0.708, recall 1.000. Everything is findable; not
+# everything is findable *first*. The lowest-placed answer is the paraphrase
+# case — "why is vector search off by default" against a page that says
+# "opt-in" — which comes back at rank four, because no word in the question
+# appears in the page and only the entity and link streams reach it at all.
+# That is the case the opt-in embedder exists for, and this is the number that
+# would show it earning its place.
+[thresholds]
+min_mrr = 0.70
+min_recall = 1.0
+
+# ---------------------------------------------------------------------------
+# Decisions: durable pages, the sort a project accumulates and keeps.
+# ---------------------------------------------------------------------------
+
+[[page]]
+path = "decisions/0001-storage.md"
+title = "Storage: one file, no server"
+tier = "semantic"
+canonical = true
+entities = ["SQLite", "rusqlite"]
+body = """
+The index is one file on disk. Nothing to install, nothing to keep running,
+and a backup is a copy.
+
+Rejected: a separate server process, because memory that needs a daemon
+running is memory that is silently absent the day the daemon is not.
+
+Migrations run at open. See [[notes/migrations.md]].
+"""
+
+[[page]]
+path = "decisions/0002-wiki-format.md"
+title = "Pages are markdown, in git"
+tier = "semantic"
+canonical = true
+entities = ["markdown", "git"]
+body = """
+Every page is a markdown file with YAML frontmatter, committed to a git
+repository outside the project it describes.
+
+The reason is legibility: someone can read their own memory in an editor, fix
+a page by hand, and see what changed and when. A binary store would have made
+all three impossible.
+"""
+
+[[page]]
+path = "decisions/0003-embeddings.md"
+title = "Embeddings are opt-in"
+tier = "semantic"
+entities = ["candle", "all-MiniLM-L6-v2"]
+body = """
+Vector search runs locally and only when asked. Without it the other three
+retrieval streams still work, which is what keeps a first run from depending
+on a model download.
+"""
+
+# ---------------------------------------------------------------------------
+# Notes: the pages nobody plans to write, which turn out to be the ones later
+# sessions actually need.
+# ---------------------------------------------------------------------------
+
+[[page]]
+path = "notes/migrations.md"
+title = "Schema migrations"
+entities = ["refinery"]
+body = """
+Numbered files under migrations/, applied in order at open. SQLite has no
+ALTER INDEX, so an index that changes shape is dropped and recreated.
+"""
+
+[[page]]
+path = "notes/windows.md"
+title = "Windows gotchas"
+tier = "procedural"
+entities = ["Windows BOM", "PowerShell"]
+body = """
+PowerShell prepends a byte order mark when it pipes text into a native
+process, and those three bytes are not valid JSON. Both the client and the
+server strip them.
+
+A running executable cannot be overwritten, so the binary is copied out of the
+build directory before the server is started from it.
+"""
+
+[[page]]
+path = "notes/handoff-slots.md"
+title = "One pending handoff per slot"
+tier = "semantic"
+entities = ["handoff"]
+body = """
+A handoff is single use. At most one can be pending per slot, so two sessions
+starting at once cannot both be handed the same note.
+"""
+
+# ---------------------------------------------------------------------------
+# Sessions: episodic, numerous, and the reason ranking matters — they are the
+# pages most likely to bury a durable one on a shared word.
+# ---------------------------------------------------------------------------
+
+[[page]]
+path = "sessions/2026-08-19-aa11bb22.md"
+title = "Session: wired the storage layer"
+entities = ["ops.rs"]
+body = """
+Opened the index, ran the migrations, and got the first page written. Spent
+most of the session on the path validation rather than on SQLite itself.
+
+Related: [[decisions/0001-storage.md]]
+"""
+
+[[page]]
+path = "sessions/2026-08-25-cc33dd44.md"
+title = "Session: the byte order mark afternoon"
+entities = ["hooks.rs"]
+body = """
+Every hook was returning a parse error on the first character. Tracked it to
+PowerShell, which writes a mark ahead of the text it pipes.
+
+Related: [[notes/windows.md]]
+"""
+
+[[page]]
+path = "sessions/2026-08-26-ee55ff66.md"
+title = "Session: chased a slow query"
+entities = ["query.rs"]
+body = """
+The fused ranking was recomputing the entity frequencies per stream. Cached
+them and moved on; nothing about storage changed.
+"""
+
+# A page that was replaced. It stays in the wiki — being superseded changes how
+# a page ranks, not whether it exists.
+[[page]]
+path = "notes/old-config-name.md"
+title = "The marker file used to be .ai-memory.toml"
+body = """
+Read as a fallback for projects migrating from upstream. The current name is
+.anamnesis.toml.
+"""
+
+# ---------------------------------------------------------------------------
+# The questions.
+# ---------------------------------------------------------------------------
+
+[[case]]
+query = "why one file instead of a server"
+relevant = ["decisions/0001-storage.md"]
+note = "Plain full text: the words are in the body, and the decision page should win over the session that merely mentions it."
+
+[[case]]
+query = "sqlite"
+relevant = ["decisions/0001-storage.md"]
+note = "The entity stream earning its place. The body never says SQLite except in passing; the page declares it."
+
+[[case]]
+query = "windows bom"
+relevant = ["notes/windows.md"]
+note = "A two-word entity. Stored whole it could never match a tokenized query, and the page it names became unreachable through that stream (the bug fixed in #33)."
+
+[[case]]
+query = "powershell byte order mark hook failure"
+relevant = ["notes/windows.md", "sessions/2026-08-25-cc33dd44.md"]
+note = "Either page answers this. The note is the better answer, but a session that hit the same wall is not wrong."
+
+[[case]]
+query = "alter index"
+relevant = ["notes/migrations.md"]
+note = "A phrase that appears in exactly one page and in no title. Full text is the only stream that can find it."
+
+[[case]]
+query = "refinery"
+relevant = ["notes/migrations.md"]
+note = "Named only as an entity, and by a page whose title says nothing about it."
+
+[[case]]
+query = "can two agents get the same handoff"
+relevant = ["notes/handoff-slots.md"]
+note = "Question shape rather than keyword shape: none of these words except handoff appear in the page."
+
+[[case]]
+query = "why is vector search off by default"
+relevant = ["decisions/0003-embeddings.md"]
+note = "The page says opt-in, not off by default. Different words, same question."
+
+[[case]]
+query = "markdown in git"
+relevant = ["decisions/0002-wiki-format.md"]
+note = "Two entities at once, against a corpus where several pages mention both words."
+
+[[case]]
+query = "ai-memory.toml"
+relevant = ["notes/old-config-name.md"]
+note = "A punctuated string that tokenizes into pieces. If tokenization drifts, this is the case that notices."

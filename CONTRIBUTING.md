@@ -56,6 +56,9 @@ cargo fmt
 # Run clippy linter
 cargo clippy -- -D warnings
 
+# Score retrieval against the checked-in corpus
+cargo run -p anamnesis-cli -- eval --verbose
+
 # Run with logging
 RUST_LOG=debug cargo run -p anamnesis-cli -- status
 ```
