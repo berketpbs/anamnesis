@@ -323,6 +323,34 @@ INFO anamnesis_web::improve: auto-improve pass project=default/my-project
      filed=1 refreshed=0 resolved=0 carried=1 open=0
 ```
 
+### Score Retrieval
+
+The question this answers is not "is the code correct" but "does memory find
+the page that answers this":
+
+```bash
+anamnesis eval             # the suite built into the binary
+anamnesis eval --verbose   # every case, with the rank its answer came back at
+anamnesis eval --check     # exit non-zero when a suite is below its thresholds
+```
+
+```
+🎯 retrieval — Recall and ranking over a small project memory, through the real query path
+   retrieval · 10 pages · 10 cases · scored over the first 5
+
+   MRR     0.708  (bar 0.700) ok
+   Recall  1.000  (bar 1.000) ok
+
+   Answered, but not near the top:
+     [4] "why is vector search off by default"
+         The page says opt-in, not off by default. Different words, same question.
+```
+
+The corpus is checked in at `evals/suites/`, and a run builds it in a
+throwaway directory — it never touches your own memory, because every query
+would otherwise count as a read and the decay sweep believes those. Write your
+own with `--suite path/to/suite.toml`; the format is the shipped file.
+
 ### Rebuild the Index
 
 The database is disposable. If it is lost or corrupted, rebuild it from the

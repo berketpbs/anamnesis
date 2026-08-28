@@ -21,7 +21,8 @@ Anamnesis is organized as a Rust workspace with modular crates:
 - **anamnesis-consolidate** - Session consolidation and summary generation
 - **anamnesis-web** - HTTP server that receives hooks and delivers handoffs
 - **anamnesis-cli** - Command-line interface
-- **evals** - Placeholder for an evaluation suite; empty today
+- **evals** - Retrieval evaluation: a checked-in corpus, the questions asked
+  of it, and the score they get through the real query path
 
 ## What Works Today
 
@@ -46,6 +47,9 @@ Anamnesis is organized as a Rust workspace with modular crates:
   — and carries out what it can, once a project says it may
 - `[auto_improve.scheduler]`: the server runs that pass per project, on the
   interval that project asked for
+- `anamnesis eval` scores retrieval against a checked-in corpus and its
+  questions, so a change to ranking can be judged by what it does to recall
+  rather than by argument. The suite runs in CI as an ordinary test
 
 ## Not Built Yet
 
@@ -54,7 +58,6 @@ They are listed so nobody plans around them:
 
 - **Web UI** — the server exposes `/health`, `/hook`, `/handoff`, and
   `/whoami`. There is no browser interface.
-- **`evals`** — an empty crate.
 
 ## Getting Started
 

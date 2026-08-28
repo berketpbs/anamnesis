@@ -240,6 +240,42 @@ because an agent that recorded "this decision replaces that one" should not be
 answered with the decision it replaced. Links to them still resolve, though:
 being replaced changes how a page ranks, not whether it exists.
 
+### Evaluation
+
+```
+anamnesis eval [--suite FILE] [--check]
+    │
+    ├─→ build a throwaway corpus from the suite's pages
+    │     (wiki write → index upsert → entities → links: the live path)
+    │
+    ├─→ ask each case through Store::query_pages, the call memory_query makes
+    │
+    └─→ mean reciprocal rank + recall, against the suite's own thresholds
+```
+
+Everything else in the workspace is tested for being *correct*. This is the
+only thing that asks whether memory is any *good*: whether the page that
+answers a question comes back, and comes back near the top. The fusion
+constant, the entity weighting, and the authority multiplier were each chosen
+by argument, and the suite is what makes the next such argument answerable.
+
+Three constraints, all of them deliberate:
+
+**The corpus is checked in, never real memory.** A score is only readable if
+the thing it scored is identical on every machine. There is a second reason:
+`query_pages` records an access for every page it returns, and the decay sweep
+reads exactly that number to decide what to keep — a hundred eval queries
+against a real index would look like a hundred afternoons of finding those
+pages useful.
+
+**No model is required.** The embedding stream is opt-in in production and
+absent here, so a score never depends on a download having succeeded.
+
+**The thresholds live in the suite file.** A change that costs recall has to
+edit a number in the diff rather than a number nobody looks at. The built-in
+suite is run as an ordinary unit test, so CI fails on a regression without a
+job of its own.
+
 ### Forgetting
 
 ```
@@ -494,4 +530,3 @@ Still ahead:
 2. **Multi-Agent Coordination** - Shared context between agents
 3. **Policy Engine** - Fine-grained access control
 4. **Audit Trail** - Complete action logging
-5. **Evals** - The empty crate at `evals/`
