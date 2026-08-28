@@ -91,6 +91,36 @@ enum Commands {
         /// Expiration date (YYYY-MM-DD)
         #[arg(long)]
         expires_at: Option<String>,
+
+        /// Temporal tier: working, episodic, semantic, or procedural
+        ///
+        /// `semantic` and `procedural` are durable — the decay sweep does not
+        /// reach them. Defaults to `episodic`, which does decay.
+        #[arg(long)]
+        tier: Option<String>,
+
+        /// Trust level: active, historical, do-not-answer-from, or superseded
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Declare this page authoritative on its subject
+        #[arg(long)]
+        canonical: bool,
+
+        /// Canonical names this page is about, repeated or comma-separated
+        ///
+        /// The entity retrieval stream matches on these, so a page that
+        /// declares none is reachable through its words alone.
+        #[arg(long, value_delimiter = ',')]
+        entity: Vec<String>,
+
+        /// Path of the page this one replaces
+        ///
+        /// Recorded rather than deleting the old page: retrieval stops
+        /// offering it, and a later reader can still see what was believed
+        /// before and why it changed.
+        #[arg(long)]
+        supersedes: Option<String>,
     },
 
     /// Create the data directory and register this project
@@ -350,13 +380,25 @@ fn main() -> anyhow::Result<()> {
             body,
             pinned,
             expires_at,
+            tier,
+            status,
+            canonical,
+            entity,
+            supersedes,
         } => {
             cmd_write_page(
                 &path,
                 &title,
                 &body,
-                pinned,
-                expires_at,
+                PageOptions {
+                    pinned,
+                    expires_at,
+                    tier,
+                    status,
+                    canonical,
+                    entities: entity,
+                    supersedes,
+                },
                 cli.data_dir.clone(),
             )?;
         }
@@ -867,21 +909,58 @@ fn cmd_search(
     Ok(())
 }
 
+/// Everything about a page except what it says.
+///
+/// A struct rather than eight positional arguments, four of which are `bool`
+/// or `Option<String>` and would swap silently.
+#[derive(Debug, Default)]
+struct PageOptions {
+    /// Exempt from the decay sweep.
+    pinned: bool,
+    /// When the page should be forgotten.
+    expires_at: Option<String>,
+    /// Temporal tier.
+    tier: Option<String>,
+    /// Trust level.
+    status: Option<String>,
+    /// Authoritative on its subject.
+    canonical: bool,
+    /// Canonical names the page is about.
+    entities: Vec<String>,
+    /// Page this one replaces.
+    supersedes: Option<String>,
+}
+
 fn cmd_write_page(
     path: &str,
     title: &str,
     body: &str,
-    pinned: bool,
-    expires_at: Option<String>,
+    options: PageOptions,
     data_dir: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let (scope, data, store) = open_project(data_dir)?;
     let wiki = Wiki::open(data.wiki())?;
 
     let page_path = anamnesis_core::page::PagePath::parse(path)?;
-    let mut frontmatter = anamnesis_core::page::Frontmatter::new(title, Vec::new())?;
-    frontmatter.pinned = pinned;
-    if let Some(expires) = &expires_at {
+    let entities = options
+        .entities
+        .iter()
+        .map(|name| anamnesis_core::page::Entity::parse(name))
+        .collect::<anamnesis_core::Result<Vec<_>>>()?;
+
+    let mut frontmatter = anamnesis_core::page::Frontmatter::new(title, entities.clone())?;
+    frontmatter.pinned = options.pinned;
+    frontmatter.canonical = options.canonical;
+    if let Some(tier) = &options.tier {
+        frontmatter.tier = anamnesis_core::page::Tier::parse(tier)?;
+    }
+    if let Some(status) = &options.status {
+        frontmatter.status = anamnesis_core::page::PageStatus::parse(status)?;
+    }
+    if let Some(supersedes) = &options.supersedes {
+        frontmatter.supersedes = Some(anamnesis_core::page::PagePath::parse(supersedes)?);
+    }
+    if let Some(expires) = &options.expires_at {
         // Accepting a bare date is the whole reason this is parsed here rather
         // than deserialized: `--expires-at 2026-12-31` is what someone types,
         // and rejecting it for want of a time of day would be pedantry.
@@ -904,6 +983,10 @@ fn cmd_write_page(
     page.git_commit = Some(commit.clone());
 
     store.upsert_page(&page, now)?;
+    // Entities as well as links, which this command used to skip because it
+    // could not set any. A page whose entities never reach the index is one
+    // the entity stream cannot find, however carefully they were declared.
+    store.set_page_entities(scope.project_id, page.id, &entities)?;
     store.set_page_links(
         scope.project_id,
         page.id,
@@ -913,7 +996,39 @@ fn cmd_write_page(
     println!("✍️  Wrote {page_path}");
     println!("   {}", wiki.locate(&scope.scope, &page_path).display());
     println!("   commit {}", &commit[..commit.len().min(8)]);
+    println!("   {}", describe_page(&page.frontmatter));
+    if let Some(replaced) = &page.frontmatter.supersedes {
+        // Said out loud because it is the one flag that changes another page:
+        // whatever it named stops being offered to recall.
+        println!("   replaces {replaced}, which recall will stop offering");
+    }
     Ok(())
+}
+
+/// The one-line summary of what a page was written as.
+fn describe_page(frontmatter: &anamnesis_core::page::Frontmatter) -> String {
+    let mut parts = vec![frontmatter.tier.as_str().to_owned()];
+    if frontmatter.status != anamnesis_core::page::PageStatus::default() {
+        parts.push(frontmatter.status.as_str().to_owned());
+    }
+    if frontmatter.canonical {
+        parts.push("canonical".to_owned());
+    }
+    if frontmatter.pinned {
+        parts.push("pinned".to_owned());
+    }
+    if !frontmatter.entities.is_empty() {
+        parts.push(format!(
+            "entities: {}",
+            frontmatter
+                .entities
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    parts.join(" · ")
 }
 
 fn cmd_init(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
@@ -2418,5 +2533,39 @@ mod tests {
     #[test]
     fn debug_logging_still_shows_it() {
         assert!(!default_filter(true).contains("refinery_core=warn"));
+    }
+
+    /// The summary line is the only feedback that a flag was understood, so
+    /// every flag that changes how a page is treated has to appear in it.
+    #[test]
+    fn the_summary_names_what_the_page_was_written_as() {
+        let mut frontmatter =
+            anamnesis_core::page::Frontmatter::new("t", Vec::new()).expect("frontmatter");
+        assert_eq!(describe_page(&frontmatter), "episodic");
+
+        frontmatter.tier = anamnesis_core::page::Tier::Semantic;
+        frontmatter.canonical = true;
+        frontmatter.pinned = true;
+        frontmatter.status = anamnesis_core::page::PageStatus::Historical;
+        frontmatter.entities = vec![
+            anamnesis_core::page::Entity::parse("SQLite").expect("entity"),
+            anamnesis_core::page::Entity::parse("recall").expect("entity"),
+        ];
+
+        let line = describe_page(&frontmatter);
+        assert!(line.contains("semantic"), "{line}");
+        assert!(line.contains("historical"), "{line}");
+        assert!(line.contains("canonical"), "{line}");
+        assert!(line.contains("pinned"), "{line}");
+        assert!(line.contains("SQLite, recall"), "{line}");
+    }
+
+    /// The default status is the ordinary case and saying it adds nothing;
+    /// every other status changes whether an agent answers from the page.
+    #[test]
+    fn an_ordinary_page_is_described_by_its_tier_alone() {
+        let frontmatter =
+            anamnesis_core::page::Frontmatter::new("t", Vec::new()).expect("frontmatter");
+        assert!(!describe_page(&frontmatter).contains("active"));
     }
 }

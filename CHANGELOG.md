@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Session consolidation, deterministic when no model is configured
 - HTTP server for hook delivery and handoff pickup (`/hook`, `/handoff`,
   `/whoami`, `/health`) — no UI
+- `anamnesis write-page` reaches the rest of a page: `--tier`, `--status`,
+  `--canonical`, `--entity`, and `--supersedes`, which the MCP tool has always
+  accepted and the CLI could not. A page written from the command line can now
+  be durable, authoritative, or a replacement for another, and it says which it
+  was written as. Its entities reach the index too — the command wrote none
+  before, so a page written this way was reachable through its words alone
 - `anamnesis eval` — retrieval scored against a checked-in corpus and the
   questions asked of it, through the same `query_pages` call `memory_query`
   makes. Reports mean reciprocal rank and recall against thresholds the suite

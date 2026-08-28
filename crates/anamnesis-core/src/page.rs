@@ -199,6 +199,28 @@ impl Tier {
         }
     }
 
+    /// Read a tier a person typed, refusing anything that is not one.
+    ///
+    /// The counterpart to [`Self::from_storage`], and deliberately stricter
+    /// than it. A value out of the database has already passed a `CHECK` and
+    /// can be defaulted safely; a value out of a command line or a tool call
+    /// has not, and `--tier sematic` means something by it. Filing that page
+    /// as episodic would put it where the decay sweep can reach it, which is
+    /// the opposite of what was asked.
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "working" => Ok(Self::Working),
+            "episodic" => Ok(Self::Episodic),
+            "semantic" => Ok(Self::Semantic),
+            "procedural" => Ok(Self::Procedural),
+            other => Err(CoreError::InvalidName {
+                kind: "tier",
+                value: other.to_owned(),
+                reason: "expected working, episodic, semantic, or procedural",
+            }),
+        }
+    }
+
     /// Whether pages in this tier are offered to ordinary recall.
     pub fn is_recallable(&self) -> bool {
         !matches!(self, Self::Working)
@@ -233,6 +255,25 @@ impl PageStatus {
             Self::Historical => "historical",
             Self::DoNotAnswerFrom => "do-not-answer-from",
             Self::Superseded => "superseded",
+        }
+    }
+
+    /// Read a status a person typed, refusing anything that is not one.
+    ///
+    /// Strict for the same reason [`Tier::parse`] is: `--status historic`
+    /// would otherwise leave a page active, and the difference between those
+    /// two is whether an agent answers from it.
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "active" => Ok(Self::Active),
+            "historical" => Ok(Self::Historical),
+            "do-not-answer-from" => Ok(Self::DoNotAnswerFrom),
+            "superseded" => Ok(Self::Superseded),
+            other => Err(CoreError::InvalidName {
+                kind: "status",
+                value: other.to_owned(),
+                reason: "expected active, historical, do-not-answer-from, or superseded",
+            }),
         }
     }
 
@@ -520,5 +561,40 @@ mod tests {
         let path = PagePath::parse("decisions/x.md").unwrap();
         let page = Page::new(project, path.clone(), Frontmatter::default(), "body");
         assert_eq!(page.id, PageId::derive(project, &path));
+    }
+
+    /// The distinction between the two readers: a value out of the database
+    /// has passed a CHECK and can be defaulted, a value a person typed has
+    /// not. Filing `sematic` as episodic would put a page the author meant to
+    /// keep where the decay sweep can reach it.
+    #[test]
+    fn a_typed_tier_is_refused_where_a_stored_one_is_defaulted() {
+        assert_eq!(Tier::from_storage("sematic"), Tier::Episodic);
+        assert!(Tier::parse("sematic").is_err());
+
+        assert_eq!(Tier::parse("semantic").expect("tier"), Tier::Semantic);
+        assert_eq!(Tier::parse("  SEMANTIC ").expect("tier"), Tier::Semantic);
+    }
+
+    #[test]
+    fn a_typed_status_is_refused_where_a_stored_one_is_defaulted() {
+        assert_eq!(PageStatus::from_storage("historic"), PageStatus::Active);
+        assert!(PageStatus::parse("historic").is_err());
+
+        assert_eq!(
+            PageStatus::parse("do-not-answer-from").expect("status"),
+            PageStatus::DoNotAnswerFrom
+        );
+    }
+
+    /// The refusal has to say what would have been accepted, because the
+    /// person reading it has just mistyped one of four words.
+    #[test]
+    fn the_refusal_lists_what_it_wanted() {
+        let error = Tier::parse("durable").expect_err("refused").to_string();
+        assert!(error.contains("procedural"), "{error}");
+
+        let error = PageStatus::parse("stale").expect_err("refused").to_string();
+        assert!(error.contains("do-not-answer-from"), "{error}");
     }
 }
