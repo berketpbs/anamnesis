@@ -84,7 +84,10 @@ pub fn interpret(root: &Path, path: &Path) -> Option<Located> {
     Some(Located {
         scope: Scope {
             workspace: WorkspaceName::parse(workspace).ok()?,
-            project: ProjectName::parse(project).ok()?,
+            // `from_wiki_dir`, not `parse`: the shared `_global` scope is a
+            // directory in the wiki like any other, and a page edited there by
+            // hand has to reach the index too.
+            project: ProjectName::from_wiki_dir(project).ok()?,
         },
         page: PagePath::parse(&page).ok()?,
     })
@@ -294,6 +297,25 @@ mod tests {
     fn only_markdown_is_a_page() {
         assert_eq!(located("default/widget/notes/diagram.png"), None);
         assert_eq!(located("default/widget/notes/README.txt"), None);
+    }
+
+    /// The shared scope is a directory in the wiki like any other. A page
+    /// edited there by hand has to reach the index, or `_global/` goes back to
+    /// being what it was before anything read it: files nobody sees.
+    #[test]
+    fn a_page_in_the_shared_scope_is_a_page() {
+        let found = located("default/_global/policy/databases.md").expect("a page");
+        assert_eq!(found.scope.project.as_str(), "_global");
+        assert!(found.scope.project.is_global());
+        assert_eq!(found.page.as_str(), "policy/databases.md");
+    }
+
+    /// `_global` is the only reserved name that names something. Every other
+    /// underscore directory is still not a project.
+    #[test]
+    fn other_reserved_directories_are_still_not_projects() {
+        assert_eq!(located("default/_rules/anything.md"), None);
+        assert_eq!(located("default/_slots/anything.md"), None);
     }
 
     /// The workspace and project directories themselves, and the wiki root, are

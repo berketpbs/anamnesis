@@ -231,6 +231,14 @@ Next Session Starts
     └─→ Return results to agent
 ```
 
+A query searches the project **and** the workspace's shared `_global` scope.
+Each is searched on its own and the two rankings are fused, rather than the
+streams being widened to select across projects: RRF combines by rank
+precisely because scores from different sources are not comparable, and two
+projects are two sources — and a canonical page in a five-page global scope
+should not outrank one in a five-hundred-page project merely for having less
+competition. Ties go to the project, which is the more specific answer.
+
 Tier is a bounded signal applied *after* candidates are generated, never an
 independent retriever: otherwise a targeted search for something said once in
 one session would be buried under durable pages that merely outrank it.

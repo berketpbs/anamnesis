@@ -47,6 +47,8 @@ Anamnesis is organized as a Rust workspace with modular crates:
   — and carries out what it can, once a project says it may
 - `[auto_improve.scheduler]`: the server runs that pass per project, on the
   interval that project asked for
+- A workspace-wide `_global` scope: `write-page --global` puts a policy there,
+  and every project in the workspace finds it without it being copied anywhere
 - `anamnesis eval` scores retrieval against a checked-in corpus and its
   questions, so a change to ranking can be judged by what it does to recall
   rather than by argument. The suite runs in CI as an ordinary test

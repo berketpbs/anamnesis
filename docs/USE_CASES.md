@@ -121,10 +121,16 @@ New Project: Queries memory
 
 **Value**: Cross-project consistency. Code style reuse.
 
-> **Not implemented.** The data directory reserves a `_global` scope and the
-> layout is designed around it, but retrieval does not read it: a query
-> answers from the current project only. Anything written to `_global/` today
-> is a file nobody reads.
+> **Implemented.** `anamnesis write-page --global` writes into the workspace's
+> `_global` scope, and every query from a project in that workspace searches
+> it alongside the project's own pages. A hit from the shared scope is marked
+> as one, because a policy that applies everywhere and a note about this
+> project are different kinds of answer. Ties go to the project: it is the
+> more specific of the two.
+>
+> It is one shared scope per workspace, not one overall — two workspaces are
+> two memories. Sharing is read-only inheritance, not merging: the pages stay
+> in `_global`, and nothing is copied into a project.
 
 ## 7. Debugging Session Context
 

@@ -36,6 +36,12 @@ const SNIPPET_LEN: usize = 240;
 pub struct PageHit {
     /// Identifies the page.
     pub page_id: PageId,
+    /// The project the page belongs to.
+    ///
+    /// Worth carrying because a ranking can now span scopes: a policy from the
+    /// workspace's shared scope and a note about this project are different
+    /// kinds of answer, and the path alone does not say which is which.
+    pub project_id: ProjectId,
     /// Project-relative path.
     pub path: PagePath,
     /// Title from frontmatter.
@@ -56,6 +62,7 @@ pub struct PageHit {
 
 /// Row shape shared by every stream before fusion picks winners.
 struct PageRow {
+    project_id: ProjectId,
     path: PagePath,
     title: String,
     body: String,
@@ -126,6 +133,7 @@ impl Store {
                     * authority_multiplier(row.pinned, row.canonical, row.path.is_authoritative());
                 Some(PageHit {
                     page_id: id,
+                    project_id: row.project_id,
                     path: row.path.clone(),
                     title: row.title.clone(),
                     tier: row.tier,
@@ -150,6 +158,78 @@ impl Store {
         }
 
         Ok(hits)
+    }
+
+    /// Search one project and the scopes it inherits from, as one ranking.
+    ///
+    /// `inherited` is the shared scopes — today that means the workspace's
+    /// `_global`, which holds what applies to every project in it. A page
+    /// there is a policy somebody wrote once and expects to see everywhere,
+    /// and until this existed it was a file nobody read.
+    ///
+    /// Each scope is searched on its own and the rankings are fused, rather
+    /// than the streams being widened to select across projects. Two reasons.
+    /// The rankings are what fusion is defined over — RRF combines by rank
+    /// precisely because scores from different sources are not comparable, and
+    /// two projects are two sources. And a page's authority multiplier is
+    /// relative to the corpus it sits in: a canonical page in a five-page
+    /// global scope should not outrank one in a five-hundred-page project
+    /// merely for having less competition.
+    ///
+    /// Ties go to the project. A global page and a local page that fuse to the
+    /// same score are not equally good answers — the one written about *this*
+    /// project is the more specific, and specificity is the whole reason the
+    /// two scopes are separate.
+    pub fn query_pages_across(
+        &self,
+        project_id: ProjectId,
+        inherited: &[ProjectId],
+        query: &str,
+        limit: usize,
+        now: Timestamp,
+        embedding: Option<(&str, &[f32])>,
+    ) -> Result<Vec<PageHit>> {
+        let own = self.query_pages(project_id, query, limit, now, embedding)?;
+        if inherited.is_empty() {
+            return Ok(own);
+        }
+
+        // Every scope contributes at most `limit`, so a shared scope cannot
+        // crowd out the project by being large.
+        let mut rankings: Vec<Vec<PageId>> = vec![own.iter().map(|hit| hit.page_id).collect()];
+        let mut hits: HashMap<PageId, PageHit> =
+            own.into_iter().map(|hit| (hit.page_id, hit)).collect();
+        let local: Vec<PageId> = rankings[0].clone();
+
+        for scope in inherited {
+            if *scope == project_id {
+                continue;
+            }
+            let found = self.query_pages(*scope, query, limit, now, embedding)?;
+            rankings.push(found.iter().map(|hit| hit.page_id).collect());
+            for hit in found {
+                hits.entry(hit.page_id).or_insert(hit);
+            }
+        }
+
+        let fused = fuse_and_rank(&rankings, RRF_K);
+        let mut merged: Vec<PageHit> = fused
+            .into_iter()
+            .filter_map(|(id, score)| {
+                let mut hit = hits.remove(&id)?;
+                hit.score = score;
+                Some(hit)
+            })
+            .collect();
+
+        merged.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| local.contains(&b.page_id).cmp(&local.contains(&a.page_id)))
+        });
+        merged.truncate(limit);
+        Ok(merged)
     }
 
     /// Bump a page's access statistics, as `memory_query` does for everything
@@ -478,7 +558,7 @@ impl Store {
         }
         let placeholders = placeholders(ids.len());
         let sql = format!(
-            "SELECT id, path, title, body, tier, status, pinned, canonical
+            "SELECT id, project_id, path, title, body, tier, status, pinned, canonical
              FROM pages WHERE id IN ({placeholders})"
         );
         let values: Vec<Value> = ids.iter().map(|id| Value::Text(id.to_string())).collect();
@@ -493,17 +573,19 @@ impl Store {
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
-                row.get::<_, bool>(6)?,
+                row.get::<_, String>(6)?,
                 row.get::<_, bool>(7)?,
+                row.get::<_, bool>(8)?,
             ))
         })?;
 
         let mut out = HashMap::new();
         for row in rows {
-            let (id, path, title, body, tier, status, pinned, canonical) = row?;
+            let (id, project_id, path, title, body, tier, status, pinned, canonical) = row?;
             out.insert(
                 parse_id(id),
                 PageRow {
+                    project_id: parse_id(project_id),
                     path: parse_page_path(&path),
                     title,
                     body,
@@ -1066,5 +1148,136 @@ mod tests {
     fn a_vector_round_trips_through_storage_bytes() {
         let original = vec![1.5_f32, -2.25, 0.0, 3.125];
         assert_eq!(bytes_to_vector(&vector_to_bytes(&original)), original);
+    }
+
+    /// The scope's whole purpose: a policy written once, found from a project
+    /// that has never mentioned it. Before this, `_global/` was a directory
+    /// nobody read.
+    #[test]
+    fn a_project_query_reaches_the_shared_scope() {
+        let (dir, store, project, _workspace) = fixture();
+        let global = global_scope(&dir);
+        store.upsert_project(&global, now()).expect("global");
+
+        write_page(
+            &store,
+            project,
+            "notes/local.md",
+            "Local note",
+            "Nothing about databases here.",
+            Vec::new(),
+        );
+        write_page(
+            &store,
+            global.project_id,
+            "policy/databases.md",
+            "We use PostgreSQL",
+            "Every project in this workspace stores its data in PostgreSQL.",
+            Vec::new(),
+        );
+
+        let own = store
+            .query_pages(project, "postgresql", 5, now(), None)
+            .expect("query");
+        assert!(own.is_empty(), "the project alone cannot know this");
+
+        let shared = store
+            .query_pages_across(project, &[global.project_id], "postgresql", 5, now(), None)
+            .expect("query");
+        assert_eq!(shared.len(), 1);
+        assert_eq!(shared[0].path.as_str(), "policy/databases.md");
+    }
+
+    /// Specificity is the reason the two scopes are separate at all, so when
+    /// they agree the project's own page is the one to read first.
+    #[test]
+    fn the_projects_own_page_wins_a_tie() {
+        let (dir, store, project, _workspace) = fixture();
+        let global = global_scope(&dir);
+        store.upsert_project(&global, now()).expect("global");
+
+        // The same words in both scopes: each ranks first where it lives, so
+        // the fused scores are equal and only the tie-break separates them.
+        write_page(
+            &store,
+            project,
+            "notes/style.md",
+            "Style",
+            "Migrations are numbered and never edited.",
+            Vec::new(),
+        );
+        write_page(
+            &store,
+            global.project_id,
+            "policy/style.md",
+            "Style",
+            "Migrations are numbered and never edited.",
+            Vec::new(),
+        );
+
+        let hits = store
+            .query_pages_across(project, &[global.project_id], "migrations", 5, now(), None)
+            .expect("query");
+        assert_eq!(hits.len(), 2);
+        assert_eq!(
+            hits[0].path.as_str(),
+            "notes/style.md",
+            "the global page displaced the project's own"
+        );
+    }
+
+    /// Inheriting nothing has to mean exactly what a plain query means, or
+    /// every existing caller changes behaviour by being ported.
+    #[test]
+    fn inheriting_nothing_answers_as_a_plain_query_does() {
+        let (_dir, store, project, _workspace) = fixture();
+        write_page(
+            &store,
+            project,
+            "notes/a.md",
+            "A",
+            "sqlite and rusqlite",
+            Vec::new(),
+        );
+
+        let plain = store
+            .query_pages(project, "sqlite", 5, now(), None)
+            .expect("query");
+        let across = store
+            .query_pages_across(project, &[], "sqlite", 5, now(), None)
+            .expect("query");
+
+        assert_eq!(
+            plain.iter().map(|hit| hit.page_id).collect::<Vec<_>>(),
+            across.iter().map(|hit| hit.page_id).collect::<Vec<_>>()
+        );
+    }
+
+    /// A shared scope is read, not merged: the pages stay in their own project
+    /// and are still reachable there on their own.
+    #[test]
+    fn a_shared_page_still_belongs_to_the_shared_scope() {
+        let (dir, store, project, _workspace) = fixture();
+        let global = global_scope(&dir);
+        store.upsert_project(&global, now()).expect("global");
+        write_page(
+            &store,
+            global.project_id,
+            "policy/databases.md",
+            "We use PostgreSQL",
+            "Every project stores its data in PostgreSQL.",
+            Vec::new(),
+        );
+
+        assert_eq!(store.page_count(project).expect("count"), 0);
+        assert_eq!(store.page_count(global.project_id).expect("count"), 1);
+    }
+
+    /// The workspace's shared scope, rooted where its pages would live.
+    fn global_scope(dir: &tempfile::TempDir) -> anamnesis_core::scope::ResolvedScope {
+        anamnesis_core::scope::ResolvedScope::global(
+            &anamnesis_core::scope::WorkspaceName::default(),
+            dir.path().join("_global"),
+        )
     }
 }

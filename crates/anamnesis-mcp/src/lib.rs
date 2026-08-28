@@ -79,6 +79,10 @@ pub struct QueryHit {
     pub score: f64,
     /// Leading slice of the page body.
     pub snippet: String,
+    /// True when the page comes from the workspace's shared `_global` scope
+    /// rather than this project: something held to be true of every project
+    /// here, not only of this one.
+    pub global: bool,
 }
 
 /// Response for [`AnamnesisMcp::memory_query`].
@@ -397,8 +401,12 @@ impl AnamnesisMcp {
             }
         });
 
-        let hits = self.store.query_pages(
+        // The workspace's shared scope is searched alongside this project's,
+        // so a policy written once is answerable from every project under it.
+        let global = self.global_scope();
+        let hits = self.store.query_pages_across(
             self.scope.project_id,
+            &[global.project_id],
             &request.text,
             limit,
             Timestamp::now(),
@@ -418,6 +426,7 @@ impl AnamnesisMcp {
                     canonical: hit.canonical,
                     score: hit.score,
                     snippet: hit.snippet,
+                    global: hit.project_id == global.project_id,
                 })
                 .collect(),
         })
@@ -611,6 +620,21 @@ impl AnamnesisMcp {
     /// first — accepting a handoff into, or asking the status of, a
     /// workstream nobody started is a caller mistake worth naming rather
     /// than silently creating one.
+    /// The workspace-wide scope this project inherits from.
+    ///
+    /// Derived rather than looked up, so it names the same rows here as it
+    /// does in the CLI. Its root is where its pages live: there is no
+    /// repository behind it.
+    fn global_scope(&self) -> ResolvedScope {
+        let root = {
+            let wiki = self.wiki.lock();
+            wiki.root()
+                .join(self.scope.scope.workspace.as_str())
+                .join(anamnesis_core::scope::GLOBAL_PROJECT)
+        };
+        ResolvedScope::global(&self.scope.scope.workspace, root)
+    }
+
     fn require_workstream(&self, slug: &str) -> Result<Workstream, McpError> {
         self.store
             .find_workstream(self.scope.project_id, slug)?
