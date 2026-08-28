@@ -121,6 +121,14 @@ enum Commands {
         /// before and why it changed.
         #[arg(long)]
         supersedes: Option<String>,
+
+        /// Write into the workspace's shared scope instead of this project
+        ///
+        /// Every project in the workspace searches it, so this is where a
+        /// policy goes — something true of all of them rather than of the one
+        /// you happen to be standing in.
+        #[arg(long)]
+        global: bool,
     },
 
     /// Create the data directory and register this project
@@ -385,6 +393,7 @@ fn main() -> anyhow::Result<()> {
             canonical,
             entity,
             supersedes,
+            global,
         } => {
             cmd_write_page(
                 &path,
@@ -398,6 +407,7 @@ fn main() -> anyhow::Result<()> {
                     canonical,
                     entities: entity,
                     supersedes,
+                    global,
                 },
                 cli.data_dir.clone(),
             )?;
@@ -821,6 +831,21 @@ fn describe_source(source: &ScopeSource) -> String {
 /// wrong (a data dir that does not exist, a scope resolved from the wrong
 /// directory) is the usual reason a command reports nothing rather than
 /// failing outright.
+/// The workspace-wide scope this project inherits from.
+///
+/// One per workspace, derived rather than looked up, so every process that
+/// asks for it lands on the same rows. Its root is where its pages live: there
+/// is no repository behind it for a relative path to resolve against.
+fn global_scope(
+    project: &anamnesis_core::scope::ResolvedScope,
+    data: &DataDir,
+) -> anamnesis_core::scope::ResolvedScope {
+    anamnesis_core::scope::ResolvedScope::global(
+        &project.scope.workspace,
+        data.wiki_global(&project.scope.workspace),
+    )
+}
+
 fn open_project(
     data_dir: Option<PathBuf>,
 ) -> anyhow::Result<(anamnesis_core::scope::ResolvedScope, DataDir, Store)> {
@@ -859,8 +884,12 @@ fn cmd_search(
             }
         });
 
-    let hits = store.query_pages(
+    // The workspace's shared scope is searched alongside this project's, so a
+    // policy written once is found from every project that inherits it.
+    let global = global_scope(&scope, &data);
+    let hits = store.query_pages_across(
         scope.project_id,
+        &[global.project_id],
         query,
         limit,
         Timestamp::now(),
@@ -899,7 +928,15 @@ fn cmd_search(
             format!(" [{}]", marks.join(", "))
         };
 
-        println!("{}  {}{}", hit.path, hit.title, marks);
+        // Which scope a hit came from is not cosmetic: a policy that applies
+        // everywhere and a note about this project are different kinds of
+        // answer, and the path alone does not say which is which.
+        let from = if hit.project_id == global.project_id {
+            format!(" ({})", anamnesis_core::scope::GLOBAL_PROJECT)
+        } else {
+            String::new()
+        };
+        println!("{}  {}{}{}", hit.path, hit.title, marks, from);
         println!("    {} · score {:.4}", hit.tier.as_str(), hit.score);
         if !hit.snippet.is_empty() {
             println!("    {}", hit.snippet.replace('\n', " "));
@@ -929,6 +966,8 @@ struct PageOptions {
     entities: Vec<String>,
     /// Page this one replaces.
     supersedes: Option<String>,
+    /// Write into the workspace's shared scope rather than this project.
+    global: bool,
 }
 
 fn cmd_write_page(
@@ -938,7 +977,15 @@ fn cmd_write_page(
     options: PageOptions,
     data_dir: Option<PathBuf>,
 ) -> anyhow::Result<()> {
-    let (scope, data, store) = open_project(data_dir)?;
+    let (project, data, store) = open_project(data_dir)?;
+    // Resolved from the project either way: the shared scope belongs to the
+    // workspace this project is in, so standing somewhere else writes to a
+    // different one.
+    let scope = if options.global {
+        global_scope(&project, &data)
+    } else {
+        project
+    };
     let wiki = Wiki::open(data.wiki())?;
 
     let page_path = anamnesis_core::page::PagePath::parse(path)?;
@@ -993,7 +1040,12 @@ fn cmd_write_page(
         &anamnesis_wiki::extract_links(body),
     )?;
 
-    println!("✍️  Wrote {page_path}");
+    if options.global {
+        println!("🌍 Wrote {page_path} to {}", scope.scope);
+        println!("   every project in {} searches it", scope.scope.workspace);
+    } else {
+        println!("✍️  Wrote {page_path}");
+    }
     println!("   {}", wiki.locate(&scope.scope, &page_path).display());
     println!("   commit {}", &commit[..commit.len().min(8)]);
     println!("   {}", describe_page(&page.frontmatter));
@@ -1626,9 +1678,26 @@ fn cmd_reindex(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
     println!("   transcripts: {}", raw.root().display());
     println!();
 
-    let report = reindex::rebuild(&store, &wiki, &raw, &scope, Timestamp::now())?;
+    let now = Timestamp::now();
+    let report = reindex::rebuild(&store, &wiki, &raw, &scope, now)?;
+
+    // The shared scope is rebuilt with the project, because a rebuild that
+    // left it out would drop the index rows for pages every project in the
+    // workspace can see — and nothing else would ever put them back.
+    let global = global_scope(&scope, &data);
+    let shared = if data.wiki_global(&scope.scope.workspace).exists() {
+        Some(reindex::rebuild(&store, &wiki, &raw, &global, now)?)
+    } else {
+        None
+    };
 
     println!("  {} page(s) indexed", report.pages);
+    if let Some(shared) = &shared {
+        println!(
+            "  {} page(s) indexed in {}",
+            shared.pages, global.scope.project
+        );
+    }
     println!(
         "  {} session(s), {} observation(s) recovered",
         report.sessions, report.observations

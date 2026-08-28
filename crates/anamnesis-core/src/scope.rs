@@ -26,6 +26,13 @@ pub const LEGACY_MARKER_FILE: &str = ".ai-memory.toml";
 /// Workspace used when nothing else is configured.
 pub const DEFAULT_WORKSPACE: &str = "default";
 
+/// Name of the cross-project scope every project in a workspace can read.
+///
+/// Deliberately unspellable through [`ProjectName::parse`], which refuses a
+/// leading underscore: no repository can be named `_global`, so no repository
+/// can collide with the scope that holds what applies to all of them.
+pub const GLOBAL_PROJECT: &str = "_global";
+
 /// Longest permitted workspace or project name, in bytes.
 pub const MAX_NAME_LEN: usize = 64;
 
@@ -102,6 +109,35 @@ name_newtype! {
 impl Default for WorkspaceName {
     fn default() -> Self {
         Self(DEFAULT_WORKSPACE.to_owned())
+    }
+}
+
+impl ProjectName {
+    /// The cross-project scope's name.
+    ///
+    /// Constructed here rather than parsed, because parsing refuses it. That
+    /// is the point: the one name no project can claim is the one the shared
+    /// scope uses.
+    pub fn global() -> Self {
+        Self(GLOBAL_PROJECT.to_owned())
+    }
+
+    /// Whether this is that scope.
+    pub fn is_global(&self) -> bool {
+        self.0 == GLOBAL_PROJECT
+    }
+
+    /// Read a project name from a directory under the wiki root.
+    ///
+    /// The one place [`Self::parse`] is too strict: `_global` is a real
+    /// directory in the wiki with real pages in it, and refusing to name it
+    /// means whatever walks the wiki — the watcher, a rebuild — skips those
+    /// pages and they go back to being files nobody reads.
+    pub fn from_wiki_dir(value: &str) -> Result<Self> {
+        if value == GLOBAL_PROJECT {
+            return Ok(Self::global());
+        }
+        Self::parse(value)
     }
 }
 
@@ -248,6 +284,39 @@ pub fn find_marker(start: &Path) -> Option<MarkerLocation> {
         }
     }
     None
+}
+
+impl ResolvedScope {
+    /// The cross-project scope of a workspace.
+    ///
+    /// A scope with no repository behind it: `root` is where its pages live,
+    /// because there is no working tree for a relative pattern to resolve
+    /// against. Every configuration section takes its default — the settings
+    /// in a marker file describe one project, and this is the scope that is
+    /// not one.
+    ///
+    /// The identifier is derived the same way every project's is, from
+    /// workspace and key, so it is the same in every process that asks.
+    pub fn global(workspace: &WorkspaceName, root: PathBuf) -> Self {
+        let project = ProjectName::global();
+        let key = ProjectKey::from_name(&project);
+        Self {
+            workspace_id: WorkspaceId::derive(workspace),
+            project_id: ProjectId::derive(workspace, &key),
+            scope: Scope {
+                workspace: workspace.clone(),
+                project,
+            },
+            key,
+            source: ScopeSource::CwdBasename { path: root.clone() },
+            marker: None,
+            root,
+            capture: CaptureConfig::default(),
+            decay: DecayConfig::default(),
+            auto_improve: AutoImproveConfig::default(),
+            slots: SlotsConfig::default(),
+        }
+    }
 }
 
 /// Resolve the memory scope for a working directory.
@@ -747,5 +816,48 @@ mod tests {
         let from_marker = ProjectId::derive(&workspace, &ProjectKey::from_name(&name));
         let from_basename = ProjectId::derive(&workspace, &ProjectKey::from_name(&name));
         assert_eq!(from_marker, from_basename);
+    }
+
+    /// The scope no project can collide with, because the name it uses is the
+    /// one `parse` refuses.
+    #[test]
+    fn the_global_scope_uses_a_name_no_project_can_claim() {
+        assert!(ProjectName::parse(GLOBAL_PROJECT).is_err());
+        assert!(ProjectName::global().is_global());
+        assert_eq!(ProjectName::global().as_str(), GLOBAL_PROJECT);
+        assert!(!ProjectName::sanitized("global").expect("name").is_global());
+    }
+
+    /// Derived like every other project identifier, so two processes that ask
+    /// for one workspace's global scope get the same rows.
+    #[test]
+    fn the_global_scope_is_the_same_wherever_it_is_asked_for() {
+        let workspace = WorkspaceName::default();
+        let here = ResolvedScope::global(&workspace, PathBuf::from("/one"));
+        let there = ResolvedScope::global(&workspace, PathBuf::from("/two"));
+        assert_eq!(here.project_id, there.project_id);
+        assert_eq!(here.workspace_id, there.workspace_id);
+    }
+
+    /// One per workspace, not one overall: two workspaces are two memories,
+    /// and sharing a global scope between them would leak one into the other.
+    #[test]
+    fn each_workspace_has_its_own_global_scope() {
+        let mine = ResolvedScope::global(&WorkspaceName::default(), PathBuf::from("/g"));
+        let theirs = ResolvedScope::global(
+            &WorkspaceName::parse("acme").expect("workspace"),
+            PathBuf::from("/g"),
+        );
+        assert_ne!(mine.project_id, theirs.project_id);
+    }
+
+    /// A marker file describes one project. The global scope is not one, so it
+    /// takes the defaults rather than inheriting anyone's.
+    #[test]
+    fn the_global_scope_carries_no_project_configuration() {
+        let global = ResolvedScope::global(&WorkspaceName::default(), PathBuf::from("/g"));
+        assert!(global.marker.is_none());
+        assert!(global.capture.ignore_paths.is_empty());
+        assert!(!global.slots.per_user);
     }
 }

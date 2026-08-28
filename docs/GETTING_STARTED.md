@@ -191,6 +191,28 @@ anamnesis write-page \
 or status is refused rather than defaulted, because filing a page as episodic
 when `semantic` was meant puts it where the sweep can reach it.
 
+### Share a Page Across Projects
+
+Some things are true of every project you work on, not one of them. Those go
+in the workspace's shared scope:
+
+```bash
+anamnesis write-page --global   --path policy/databases.md   --title "We use PostgreSQL"   --body "Every project in this workspace stores its data in PostgreSQL."   --tier semantic --canonical
+```
+
+Every project in the same workspace finds it, and search says where it came
+from:
+
+```
+policy/databases.md  We use PostgreSQL [canonical] (_global)
+    semantic · score 0.0164
+```
+
+It is inheritance, not merging: the page stays in `_global` and nothing is
+copied into a project. One shared scope per workspace — two workspaces are two
+memories. When a project's own page and a shared page score the same, the
+project's wins; it is the more specific answer.
+
 ### View Status
 
 ```bash

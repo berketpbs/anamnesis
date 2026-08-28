@@ -18,6 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Session consolidation, deterministic when no model is configured
 - HTTP server for hook delivery and handoff pickup (`/hook`, `/handoff`,
   `/whoami`, `/health`) — no UI
+- The workspace-wide `_global` scope is read. The data directory has reserved
+  it since the beginning and the layout was designed around it, but retrieval
+  answered from the current project only, so anything written there was a file
+  nobody read. A query now searches the project and the shared scope as two
+  rankings fused into one — ties going to the project, which is the more
+  specific answer — and a hit says which scope it came from. `write-page
+  --global` writes there, `reindex` rebuilds it alongside the project, and the
+  wiki watcher indexes a page edited there by hand. One shared scope per
+  workspace, and inheritance rather than merging: nothing is copied into a
+  project
 - `anamnesis write-page` reaches the rest of a page: `--tier`, `--status`,
   `--canonical`, `--entity`, and `--supersedes`, which the MCP tool has always
   accepted and the CLI could not. A page written from the command line can now
