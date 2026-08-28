@@ -172,6 +172,25 @@ anamnesis write-page \
   --body "# Database Choice\n\nWe chose PostgreSQL because..."
 ```
 
+A page written that way is episodic, and the decay sweep will eventually reach
+it. A decision usually should not be:
+
+```bash
+anamnesis write-page \
+  --path decisions/0002-storage.md \
+  --title "Storage: one file, no server" \
+  --body "..." \
+  --tier semantic \                        # durable; the sweep does not reach it
+  --canonical \                            # authoritative on its subject
+  --entity SQLite --entity rusqlite \      # what the entity stream matches on
+  --supersedes decisions/0001-database.md  # recall stops offering the old one
+```
+
+`--entity` also takes a comma-separated list. `--status` sets the trust level
+(`active`, `historical`, `do-not-answer-from`, `superseded`); a misspelled tier
+or status is refused rather than defaulted, because filing a page as episodic
+when `semantic` was meant puts it where the sweep can reach it.
+
 ### View Status
 
 ```bash

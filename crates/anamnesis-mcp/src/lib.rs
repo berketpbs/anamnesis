@@ -626,27 +626,19 @@ impl AnamnesisMcp {
 /// than silently falling back — a typo in a tool call should fail loudly, not
 /// file the page under the wrong tier.
 fn parse_tier(value: Option<&str>) -> Result<Tier, McpError> {
-    Ok(match value {
-        None => Tier::default(),
-        Some("working") => Tier::Working,
-        Some("episodic") => Tier::Episodic,
-        Some("semantic") => Tier::Semantic,
-        Some("procedural") => Tier::Procedural,
-        Some(other) => return Err(McpError::Invalid(format!("unknown tier {other:?}"))),
-    })
+    match value {
+        None => Ok(Tier::default()),
+        Some(value) => Tier::parse(value).map_err(Into::into),
+    }
 }
 
 /// Parse a status name from a request. See [`parse_tier`] for why unknown
 /// values are rejected rather than defaulted.
 fn parse_status(value: Option<&str>) -> Result<PageStatus, McpError> {
-    Ok(match value {
-        None => PageStatus::default(),
-        Some("active") => PageStatus::Active,
-        Some("historical") => PageStatus::Historical,
-        Some("do-not-answer-from") => PageStatus::DoNotAnswerFrom,
-        Some("superseded") => PageStatus::Superseded,
-        Some(other) => return Err(McpError::Invalid(format!("unknown status {other:?}"))),
-    })
+    match value {
+        None => Ok(PageStatus::default()),
+        Some(value) => PageStatus::parse(value).map_err(Into::into),
+    }
 }
 
 #[cfg(test)]
@@ -721,7 +713,15 @@ mod tests {
             supersedes: None,
             salience: None,
         });
-        assert!(matches!(result, Err(McpError::Invalid(_))));
+        // Asserted on the message rather than the variant: the tier names are
+        // core's to know, so the refusal now arrives as `Core`. What the caller
+        // gets either way is the string, and the string has to name the four
+        // words that would have worked.
+        let error = result
+            .expect_err("an unknown tier is not a tier")
+            .to_string();
+        assert!(error.contains("legendary"), "{error}");
+        assert!(error.contains("procedural"), "{error}");
     }
 
     #[test]
