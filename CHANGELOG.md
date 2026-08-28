@@ -34,6 +34,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   be durable, authoritative, or a replacement for another, and it says which it
   was written as. Its entities reach the index too — the command wrote none
   before, so a page written this way was reachable through its words alone
+- `install-hooks` wires Cursor, the first harness whose payload differs rather
+  than only its event names. It identifies a session by `conversation_id` and
+  sends `session_id` on only some events, with different values — keyed on the
+  latter, one Cursor session would have been recorded as two, its boundaries in
+  one and its work in another. It gives the working directory as
+  `workspace_roots` except on tool events, and serialises tool results as a
+  JSON string rather than an object. Its `hooks.json` declares a schema
+  version, which `install-hooks` writes when the file is silent and never
+  overwrites, and it takes injected context back as a top-level
+  `additional_context`
 - `install-hooks` wires Gemini CLI. The same five moments under four different
   names — `BeforeAgent` when a prompt is submitted, `AfterTool` when one
   finishes, `PreCompress` before the context goes — which the parser now reads

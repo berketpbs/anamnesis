@@ -129,11 +129,12 @@ Claude Code talks to anamnesis two ways, and they are independent.
 anamnesis install-hooks --agent claude-code          # .claude/settings.local.json
 anamnesis install-hooks --agent codex --write        # .codex/hooks.json
 anamnesis install-hooks --agent gemini-cli --write   # .gemini/settings.json
+anamnesis install-hooks --agent cursor --write       # .cursor/hooks.json
 ```
 
-All three capture the same five moments and one server captures all of them,
-though each spells the events its own way and Gemini CLI wants its answers as
-JSON. Hooks are read when a session starts, so the session you run this from
+All four capture the same five moments and one server captures all of them,
+though each spells the events its own way, Cursor names its fields its own way,
+and Gemini CLI and Cursor both want their answers as JSON. Hooks are read when a session starts, so the session you run this from
 is not the one that gets captured.
 
 OpenCode is not wired: it extends through a TypeScript plugin API rather than

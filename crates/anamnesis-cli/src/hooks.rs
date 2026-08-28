@@ -28,6 +28,13 @@ pub struct Harness {
     pub settings: &'static [&'static str],
     /// The five events, in this harness's spelling.
     pub events: &'static [&'static str],
+    /// Schema version the file must declare, when the harness requires one.
+    ///
+    /// Cursor refuses a `hooks.json` without it. Written only when the file
+    /// does not already say something — a version someone pinned themselves is
+    /// theirs, and overwriting it would be this command deciding which schema
+    /// their other hooks are written against.
+    pub schema_version: Option<u64>,
     /// What to tell someone about this file after writing it.
     pub note: &'static str,
 }
@@ -43,6 +50,7 @@ pub const CLAUDE_CODE: Harness = Harness {
         "PreCompact",
         "SessionEnd",
     ],
+    schema_version: None,
     note: "Hooks are read when a session starts.",
 };
 
@@ -63,6 +71,7 @@ pub const CODEX: Harness = Harness {
         "PreCompact",
         "SessionEnd",
     ],
+    schema_version: None,
     note: "Hooks are on unless `[features] hooks = false` says otherwise.",
 };
 
@@ -90,11 +99,34 @@ pub const GEMINI_CLI: Harness = Harness {
         "PreCompress",
         "SessionEnd",
     ],
+    schema_version: None,
     note: "Stdout must be one JSON object; the hook prints one.",
 };
 
+/// Cursor: camelCase events, its own file, and a schema version.
+///
+/// The first harness whose *payload* differs rather than only its names. It
+/// identifies a session by `conversation_id`, gives the working directory as
+/// `workspace_roots` on every event but `postToolUse`, and takes injected
+/// context back as a top-level `additional_context`. All three are handled
+/// where they belong — the first two in the parser, the third in
+/// `handoff_reply`.
+pub const CURSOR: Harness = Harness {
+    agent: "cursor",
+    settings: &[".cursor", "hooks.json"],
+    events: &[
+        "sessionStart",
+        "beforeSubmitPrompt",
+        "postToolUse",
+        "preCompact",
+        "sessionEnd",
+    ],
+    schema_version: Some(1),
+    note: "Cursor reads hooks.json at startup.",
+};
+
 /// Every harness `install-hooks` can wire.
-pub const HARNESSES: [Harness; 3] = [CLAUDE_CODE, CODEX, GEMINI_CLI];
+pub const HARNESSES: [Harness; 4] = [CLAUDE_CODE, CODEX, GEMINI_CLI, CURSOR];
 
 /// The harness `agent` names, if it is one anamnesis can wire.
 pub fn harness(agent: &str) -> Option<Harness> {
@@ -148,7 +180,12 @@ pub fn hook_config(harness: &Harness, command: &str) -> Value {
             )
         })
         .collect();
-    serde_json::json!({ "hooks": hooks })
+    let mut config = Map::new();
+    if let Some(version) = harness.schema_version {
+        config.insert("version".to_owned(), Value::from(version));
+    }
+    config.insert("hooks".to_owned(), Value::Object(hooks));
+    Value::Object(config)
 }
 
 /// The command a hook runs, for this binary and this server.
@@ -167,7 +204,10 @@ pub fn hook_command(binary: &str, agent: &str, server: &str) -> String {
 pub fn merge(settings: &mut Value, incoming: &Value) -> Outcome {
     let mut outcome = Outcome::default();
 
-    let Some(incoming) = incoming.get("hooks").and_then(Value::as_object) else {
+    let Some(incoming_root) = incoming.as_object() else {
+        return outcome;
+    };
+    let Some(incoming) = incoming_root.get("hooks").and_then(Value::as_object) else {
         return outcome;
     };
 
@@ -176,6 +216,16 @@ pub fn merge(settings: &mut Value, incoming: &Value) -> Outcome {
     let Some(root) = settings.as_object_mut() else {
         return outcome;
     };
+    // Anything the harness requires beside its hooks — Cursor's schema
+    // version — is written only when the file is silent about it. A value
+    // already there is someone's, and this command has no business deciding
+    // which schema their other hooks were written against.
+    for (key, value) in incoming_root {
+        if key != "hooks" && !root.contains_key(key) {
+            root.insert(key.clone(), value.clone());
+        }
+    }
+
     let hooks = root
         .entry("hooks")
         .or_insert_with(|| Value::Object(Map::new()));
@@ -508,5 +558,42 @@ mod tests {
             "codex is wired, not refused"
         );
         assert!(cannot_wire("claude-code").is_none());
+    }
+
+    /// Cursor refuses a `hooks.json` that does not declare its schema version,
+    /// so the file this command writes has to carry one.
+    #[test]
+    fn cursor_gets_the_schema_version_its_file_requires() {
+        let config = hook_config(&CURSOR, "anamnesis hook --agent cursor");
+        assert_eq!(config["version"], 1);
+
+        let mut settings = Value::Object(Map::new());
+        merge(&mut settings, &config);
+        assert_eq!(settings["version"], 1);
+    }
+
+    /// A version already in the file is somebody's, and this command has no
+    /// business deciding which schema their other hooks were written against.
+    #[test]
+    fn a_version_already_there_is_left_alone() {
+        let mut settings = serde_json::json!({ "version": 2, "hooks": {} });
+        merge(
+            &mut settings,
+            &hook_config(&CURSOR, "anamnesis hook --agent cursor"),
+        );
+        assert_eq!(settings["version"], 2);
+    }
+
+    /// The harnesses that ask for no version must not acquire one.
+    #[test]
+    fn nothing_else_gains_a_version_key() {
+        for harness in HARNESSES.iter().filter(|h| h.schema_version.is_none()) {
+            let config = hook_config(harness, "anamnesis hook");
+            assert!(
+                config.get("version").is_none(),
+                "{} grew a version key",
+                harness.agent
+            );
+        }
     }
 }
