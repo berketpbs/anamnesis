@@ -5,7 +5,7 @@
 //! agent never notices, and one that takes hundreds is a stutter in someone's
 //! editing session.
 
-use anamnesis_core::handoff::{Handoff, HandoffState};
+use anamnesis_core::handoff::{Handoff, HandoffState, Slot};
 use anamnesis_core::ids::{HandoffId, ObservationId, PageId, ProjectId, SessionId, WorkstreamId};
 use anamnesis_core::observation::{BoundedBody, EventKind, Observation, ToolRef};
 use anamnesis_core::page::Page;
@@ -13,7 +13,7 @@ use anamnesis_core::session::{AgentKind, Session, SessionState};
 use jiff::Timestamp;
 use rusqlite::{OptionalExtension, Row, params};
 
-use crate::convert::{parse_id, parse_time};
+use crate::convert::{parse_id, parse_operator, parse_time};
 use crate::{Result, Store};
 
 /// One row of `anamnesis sessions`: what a session was, without its
@@ -32,6 +32,8 @@ pub struct SessionSummary {
     pub ended_at: Option<Timestamp>,
     /// Slug of the workstream it joined, if any.
     pub workstream: Option<String>,
+    /// The operator whose token it arrived under, if the server named one.
+    pub operator: Option<String>,
     /// How many observations it captured.
     pub observation_count: i64,
 }
@@ -46,8 +48,9 @@ impl Store {
         let conn = self.connection();
         conn.execute(
             "INSERT INTO sessions
-                 (id, project_id, agent, checkout_path, state, started_at, ended_at, workstream_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 (id, project_id, agent, checkout_path, state, started_at, ended_at,
+                  workstream_id, operator)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT (id) DO NOTHING",
             params![
                 session.id.to_string(),
@@ -58,6 +61,7 @@ impl Store {
                 session.started_at.to_string(),
                 session.ended_at.map(|t| t.to_string()),
                 session.workstream_id.map(|id| id.to_string()),
+                session.operator.as_ref().map(ToString::to_string),
             ],
         )?;
         Ok(())
@@ -79,7 +83,7 @@ impl Store {
         let session = conn
             .query_row(
                 "SELECT s.id, s.project_id, p.workspace_id, s.agent, s.checkout_path,
-                        s.state, s.started_at, s.ended_at, s.workstream_id
+                        s.state, s.started_at, s.ended_at, s.workstream_id, s.operator
                  FROM sessions s
                  JOIN projects p ON p.id = s.project_id
                  WHERE s.id = ?1",
@@ -234,20 +238,23 @@ impl Store {
     /// it the wrong one.
     pub fn record_handoff(&self, handoff: &Handoff) -> Result<()> {
         let workstream = handoff.workstream_id.map(|id| id.to_string());
+        let operator = handoff.operator.as_ref().map(ToString::to_string);
         let mut conn = self.connection();
         let transaction = conn.transaction()?;
         // Only a pending handoff in the *same* slot is superseded — a
-        // workstream's handoff must not expire another workstream's, or the
-        // project-wide one.
+        // workstream's handoff must not expire another workstream's, the
+        // project-wide one, or one belonging to a different operator.
         transaction.execute(
             "UPDATE handoffs SET state = 'expired'
              WHERE project_id = ?1 AND state = 'pending'
-               AND COALESCE(workstream_id, '') = COALESCE(?2, '')",
-            params![handoff.project_id.to_string(), workstream],
+               AND COALESCE(workstream_id, '') = COALESCE(?2, '')
+               AND COALESCE(operator, '') = COALESCE(?3, '')",
+            params![handoff.project_id.to_string(), workstream, operator],
         )?;
         transaction.execute(
-            "INSERT INTO handoffs (id, project_id, from_session, body, state, created_at, workstream_id)
-             VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6)",
+            "INSERT INTO handoffs
+                 (id, project_id, from_session, body, state, created_at, workstream_id, operator)
+             VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6, ?7)",
             params![
                 handoff.id.to_string(),
                 handoff.project_id.to_string(),
@@ -255,14 +262,17 @@ impl Store {
                 handoff.body.as_str(),
                 handoff.created_at.to_string(),
                 workstream,
+                operator,
             ],
         )?;
         transaction.commit()?;
         Ok(())
     }
 
-    /// Claim the pending handoff for a project's `workstream_id` slot
-    /// (`None` for the shared, workstream-less slot), if there is one.
+    /// Claim the pending handoff in one of a project's slots, if there is one.
+    ///
+    /// [`Slot::shared`] is the whole story for a project that has asked for
+    /// neither workstreams nor per-operator slots.
     ///
     /// Claiming is a single statement so two sessions starting at the same
     /// moment cannot both receive it: the second finds nothing pending.
@@ -270,11 +280,10 @@ impl Store {
         &self,
         project_id: ProjectId,
         claimant: SessionId,
-        workstream_id: Option<WorkstreamId>,
+        slot: &Slot,
         now: Timestamp,
     ) -> Result<Option<String>> {
         let conn = self.connection();
-        let workstream = workstream_id.map(|id| id.to_string());
         let body = conn
             .query_row(
                 "UPDATE handoffs SET state = 'accepted', to_session = ?2, accepted_at = ?3
@@ -282,6 +291,7 @@ impl Store {
                      SELECT id FROM handoffs
                      WHERE project_id = ?1 AND state = 'pending'
                        AND COALESCE(workstream_id, '') = COALESCE(?4, '')
+                       AND COALESCE(operator, '') = COALESCE(?5, '')
                      ORDER BY created_at DESC LIMIT 1
                  )
                  RETURNING body",
@@ -289,7 +299,8 @@ impl Store {
                     project_id.to_string(),
                     claimant.to_string(),
                     now.to_string(),
-                    workstream,
+                    slot.workstream_key(),
+                    slot.operator_key(),
                 ],
                 |row| row.get::<_, String>(0),
             )
@@ -303,19 +314,19 @@ impl Store {
     /// is waiting. Claiming is what a starting session does; looking is what
     /// a person at a terminal does, and conflating the two would mean running
     /// `anamnesis handoff` silently costs the next session its note.
-    pub fn peek_handoff(
-        &self,
-        project_id: ProjectId,
-        workstream_id: Option<WorkstreamId>,
-    ) -> Result<Option<String>> {
+    pub fn peek_handoff(&self, project_id: ProjectId, slot: &Slot) -> Result<Option<String>> {
         let conn = self.connection();
-        let workstream = workstream_id.map(|id| id.to_string());
         conn.query_row(
             "SELECT body FROM handoffs
              WHERE project_id = ?1 AND state = 'pending'
                AND COALESCE(workstream_id, '') = COALESCE(?2, '')
+               AND COALESCE(operator, '') = COALESCE(?3, '')
              ORDER BY created_at DESC LIMIT 1",
-            params![project_id.to_string(), workstream],
+            params![
+                project_id.to_string(),
+                slot.workstream_key(),
+                slot.operator_key()
+            ],
             |row| row.get::<_, String>(0),
         )
         .optional()
@@ -330,7 +341,7 @@ impl Store {
     ) -> Result<Vec<SessionSummary>> {
         let conn = self.connection();
         let mut statement = conn.prepare(
-            "SELECT s.id, s.agent, s.state, s.started_at, s.ended_at, w.slug,
+            "SELECT s.id, s.agent, s.state, s.started_at, s.ended_at, w.slug, s.operator,
                     (SELECT COUNT(*) FROM observations o WHERE o.session_id = s.id)
              FROM sessions s
              LEFT JOIN workstreams w ON w.id = s.workstream_id
@@ -346,7 +357,8 @@ impl Store {
                 started_at: parse_time(&row.get::<_, String>(3)?),
                 ended_at: row.get::<_, Option<String>>(4)?.map(|t| parse_time(&t)),
                 workstream: row.get(5)?,
-                observation_count: row.get(6)?,
+                operator: row.get(6)?,
+                observation_count: row.get(7)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -562,6 +574,10 @@ fn read_session(row: &Row<'_>) -> rusqlite::Result<Session> {
         started_at: parse_time(&row.get::<_, String>(6)?),
         ended_at: row.get::<_, Option<String>>(7)?.map(|t| parse_time(&t)),
         workstream_id: row.get::<_, Option<String>>(8)?.map(parse_id),
+        operator: row
+            .get::<_, Option<String>>(9)?
+            .as_deref()
+            .map(parse_operator),
     })
 }
 
@@ -586,14 +602,15 @@ fn read_observation(row: &Row<'_>) -> rusqlite::Result<Observation> {
 pub fn new_handoff(
     project_id: ProjectId,
     from_session: SessionId,
-    workstream_id: Option<WorkstreamId>,
+    slot: Slot,
     body: &str,
     created_at: Timestamp,
 ) -> Handoff {
     Handoff {
         id: HandoffId::new(),
         project_id,
-        workstream_id,
+        workstream_id: slot.workstream_id,
+        operator: slot.operator,
         from_session,
         to_session: None,
         body: BoundedBody::truncating(body, BoundedBody::DEFAULT_LIMIT),
@@ -642,6 +659,7 @@ pub fn new_session(
         started_at,
         ended_at: None,
         state: SessionState::Open,
+        operator: None,
     }
 }
 
@@ -1069,17 +1087,23 @@ mod tests {
         let session = session_for(project, workspace);
         store.ensure_session(&session).expect("session");
         store
-            .record_handoff(&new_handoff(project, session.id, None, "carry on", now()))
+            .record_handoff(&new_handoff(
+                project,
+                session.id,
+                Slot::shared(),
+                "carry on",
+                now(),
+            ))
             .expect("record");
 
         let claimant = next_session(&store, project, workspace);
         let first = store
-            .claim_handoff(project, claimant, None, now())
+            .claim_handoff(project, claimant, &Slot::shared(), now())
             .expect("claim");
         assert_eq!(first.as_deref(), Some("carry on"));
 
         let second = store
-            .claim_handoff(project, claimant, None, now())
+            .claim_handoff(project, claimant, &Slot::shared(), now())
             .expect("claim");
         assert_eq!(second, None, "a handoff is single use");
     }
@@ -1092,12 +1116,18 @@ mod tests {
         let session = session_for(project, workspace);
         store.ensure_session(&session).expect("session");
         store
-            .record_handoff(&new_handoff(project, session.id, None, "carry on", now()))
+            .record_handoff(&new_handoff(
+                project,
+                session.id,
+                Slot::shared(),
+                "carry on",
+                now(),
+            ))
             .expect("record");
 
         assert!(
             store
-                .claim_handoff(project, SessionId::new(), None, now())
+                .claim_handoff(project, SessionId::new(), &Slot::shared(), now())
                 .is_err(),
             "an unknown claimant should be rejected"
         );
@@ -1110,15 +1140,27 @@ mod tests {
         store.ensure_session(&session).expect("session");
 
         store
-            .record_handoff(&new_handoff(project, session.id, None, "older", now()))
+            .record_handoff(&new_handoff(
+                project,
+                session.id,
+                Slot::shared(),
+                "older",
+                now(),
+            ))
             .expect("first");
         store
-            .record_handoff(&new_handoff(project, session.id, None, "newer", now()))
+            .record_handoff(&new_handoff(
+                project,
+                session.id,
+                Slot::shared(),
+                "newer",
+                now(),
+            ))
             .expect("second");
 
         let claimant = next_session(&store, project, workspace);
         let claimed = store
-            .claim_handoff(project, claimant, None, now())
+            .claim_handoff(project, claimant, &Slot::shared(), now())
             .expect("claim");
         assert_eq!(claimed.as_deref(), Some("newer"));
     }
@@ -1129,7 +1171,7 @@ mod tests {
         let claimant = next_session(&store, project, workspace);
         assert_eq!(
             store
-                .claim_handoff(project, claimant, None, now())
+                .claim_handoff(project, claimant, &Slot::shared(), now())
                 .expect("claim"),
             None
         );
@@ -1141,29 +1183,44 @@ mod tests {
         let session = session_for(project, workspace);
         store.ensure_session(&session).expect("session");
         store
-            .record_handoff(&new_handoff(project, session.id, None, "carry on", now()))
+            .record_handoff(&new_handoff(
+                project,
+                session.id,
+                Slot::shared(),
+                "carry on",
+                now(),
+            ))
             .expect("record");
 
         assert_eq!(
-            store.peek_handoff(project, None).expect("peek").as_deref(),
+            store
+                .peek_handoff(project, &Slot::shared())
+                .expect("peek")
+                .as_deref(),
             Some("carry on")
         );
         // Twice, to be sure looking is not a one-shot read either.
         assert_eq!(
-            store.peek_handoff(project, None).expect("peek").as_deref(),
+            store
+                .peek_handoff(project, &Slot::shared())
+                .expect("peek")
+                .as_deref(),
             Some("carry on")
         );
 
         let claimant = next_session(&store, project, workspace);
         assert_eq!(
             store
-                .claim_handoff(project, claimant, None, now())
+                .claim_handoff(project, claimant, &Slot::shared(), now())
                 .expect("claim")
                 .as_deref(),
             Some("carry on"),
             "peeking must not have consumed it"
         );
-        assert_eq!(store.peek_handoff(project, None).expect("peek"), None);
+        assert_eq!(
+            store.peek_handoff(project, &Slot::shared()).expect("peek"),
+            None
+        );
     }
 
     #[test]
@@ -1358,5 +1415,150 @@ project = \"other\"
             SessionId::derive(project, "abc-123"),
             SessionId::derive(project, "abc-124")
         );
+    }
+
+    /// Two operators on one server, one project. The whole point of the slot:
+    /// each is handed what their own last session left, and neither can
+    /// consume the other's by starting first.
+    #[test]
+    fn one_operators_handoff_is_not_anothers_to_claim() {
+        let (_dir, store, project, workspace) = fixture();
+        let alice = operator("alice");
+        let bob = operator("bob");
+
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+        store
+            .record_handoff(&new_handoff(
+                project,
+                session.id,
+                Slot::shared().for_operator(Some(alice.clone())),
+                "alice was here",
+                now(),
+            ))
+            .expect("record");
+        store
+            .record_handoff(&new_handoff(
+                project,
+                session.id,
+                Slot::shared().for_operator(Some(bob.clone())),
+                "bob was here",
+                now(),
+            ))
+            .expect("record");
+
+        let claimant = next_session(&store, project, workspace);
+        let bobs = store
+            .claim_handoff(
+                project,
+                claimant,
+                &Slot::shared().for_operator(Some(bob)),
+                now(),
+            )
+            .expect("claim");
+        assert_eq!(bobs.as_deref(), Some("bob was here"));
+
+        // Bob starting first took nothing from alice.
+        let alices = store
+            .peek_handoff(project, &Slot::shared().for_operator(Some(alice)))
+            .expect("peek");
+        assert_eq!(alices.as_deref(), Some("alice was here"));
+    }
+
+    /// A newer handoff expires the unread one it replaces — but only in its own
+    /// slot. Superseding across operators would be the same theft by another
+    /// route: alice finishing a session would silently discard bob's note.
+    #[test]
+    fn a_new_handoff_supersedes_only_its_own_operators() {
+        let (_dir, store, project, workspace) = fixture();
+        let alice = operator("alice");
+        let bob = operator("bob");
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+
+        for (who, body) in [
+            (Some(alice.clone()), "alice first"),
+            (Some(bob.clone()), "bob only"),
+            (Some(alice.clone()), "alice second"),
+            (None, "the shared slot"),
+        ] {
+            store
+                .record_handoff(&new_handoff(
+                    project,
+                    session.id,
+                    Slot::shared().for_operator(who),
+                    body,
+                    now(),
+                ))
+                .expect("record");
+        }
+
+        assert_eq!(
+            store
+                .peek_handoff(project, &Slot::shared().for_operator(Some(alice)))
+                .expect("peek")
+                .as_deref(),
+            Some("alice second"),
+        );
+        assert_eq!(
+            store
+                .peek_handoff(project, &Slot::shared().for_operator(Some(bob)))
+                .expect("peek")
+                .as_deref(),
+            Some("bob only"),
+        );
+        assert_eq!(
+            store
+                .peek_handoff(project, &Slot::shared())
+                .expect("peek")
+                .as_deref(),
+            Some("the shared slot"),
+        );
+    }
+
+    /// Every caller the server cannot name shares one slot, which is what an
+    /// unauthenticated install has always had.
+    #[test]
+    fn callers_without_a_name_share_the_slot_they_always_shared() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+        store
+            .record_handoff(&new_handoff(
+                project,
+                session.id,
+                Slot::shared(),
+                "carry on",
+                now(),
+            ))
+            .expect("record");
+
+        let claimant = next_session(&store, project, workspace);
+        assert_eq!(
+            store
+                .claim_handoff(project, claimant, &Slot::shared(), now())
+                .expect("claim")
+                .as_deref(),
+            Some("carry on"),
+        );
+    }
+
+    /// Provenance, not slot: who ran a session survives the round trip whether
+    /// or not the project separates slots by it.
+    #[test]
+    fn a_session_remembers_whose_it_was() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace).with_operator(Some(operator("alice")));
+        store.ensure_session(&session).expect("session");
+
+        let loaded = store
+            .load_session(session.id)
+            .expect("load")
+            .expect("session exists");
+        assert_eq!(loaded.operator, Some(operator("alice")));
+    }
+
+    fn operator(name: &str) -> anamnesis_core::scope::OperatorName {
+        anamnesis_core::scope::OperatorName::parse(name).expect("valid operator")
     }
 }

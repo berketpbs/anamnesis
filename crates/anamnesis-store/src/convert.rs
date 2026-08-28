@@ -39,6 +39,16 @@ pub(crate) fn parse_time(raw: &str) -> Timestamp {
         .unwrap_or_else(|error| panic!("stored timestamp {raw:?} is not RFC 3339: {error:?}"))
 }
 
+/// Parse an operator name written by this crate.
+///
+/// Panics for the same reason [`parse_id`] does: a name is validated before it
+/// is ever accepted as a token's owner, so a stored value that fails
+/// validation means the row was written by something other than this crate.
+pub(crate) fn parse_operator(raw: &str) -> anamnesis_core::scope::OperatorName {
+    anamnesis_core::scope::OperatorName::parse(raw)
+        .unwrap_or_else(|error| panic!("stored operator {raw:?} is invalid: {error:?}"))
+}
+
 /// Parse a page path written by this crate.
 ///
 /// Panics for the same reason [`parse_id`] does: a page path is validated

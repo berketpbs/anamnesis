@@ -3,6 +3,7 @@
 use jiff::Timestamp;
 
 use crate::ids::{ProjectId, SessionId, WorkspaceId, WorkstreamId};
+use crate::scope::OperatorName;
 
 /// Which harness produced a session.
 ///
@@ -146,6 +147,27 @@ pub struct Session {
     pub ended_at: Option<Timestamp>,
     /// Current lifecycle state.
     pub state: SessionState,
+    /// The operator whose token the events arrived under, when the server
+    /// could name one.
+    ///
+    /// Recorded whether or not the project keys handoff slots by operator:
+    /// whose session this was is a fact worth having on its own, and storing
+    /// it only while the setting is on would mean turning the setting on could
+    /// explain nothing about the sessions that came before.
+    ///
+    /// Defaulted rather than required, because every session already written
+    /// to the raw spool was written without it, and a rebuild has to be able
+    /// to read them.
+    #[serde(default)]
+    pub operator: Option<OperatorName>,
+}
+
+impl Session {
+    /// Attribute this session to an operator.
+    pub fn with_operator(mut self, operator: Option<OperatorName>) -> Self {
+        self.operator = operator;
+        self
+    }
 }
 
 impl Session {

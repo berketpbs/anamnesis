@@ -435,10 +435,11 @@ Unknown keys are an error, so a typo surfaces instead of quietly sending memory
 to the wrong project. `.ai-memory.toml` is still read as a fallback filename for
 projects migrating from upstream `ai-memory`.
 
-Of the tables above, only `[slots]` is inert: it is parsed and validated and
-then nothing reads it, accepted so that a file written for a later version
-does not fail to load. `[scope]`, `[capture]`, `[decay]`, and `[auto_improve]`
-all change what the system does.
+Every table above changes what the system does; none is inert. `[slots]
+per_user` keys the pending-handoff slot by the operator a request's bearer
+token names, so two people sharing a server stop being handed each other's
+"where I left off". A caller the server cannot name has no operator and uses
+the shared slot, which is what every unauthenticated install already had.
 
 ### Data directory
 
@@ -478,8 +479,8 @@ data directory.
 
 **Not implemented — do not rely on these:**
 
-- **`[slots] per_user`** — every session shares one scope. A token may name an
-  operator, but nothing yet gives that operator a slot of their own.
+- **Per-operator wiki scopes** — `[slots] per_user` separates handoff slots,
+  not pages. Two operators on one project read and write the same wiki.
 
 ## Future Enhancements
 

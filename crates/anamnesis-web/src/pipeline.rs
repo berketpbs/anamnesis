@@ -9,10 +9,11 @@ use std::path::Path;
 
 use anamnesis_consolidate::{PREFERENCES_PAGE, SessionDigest, consolidate, consolidate_with_llm};
 use anamnesis_core::capture::CaptureFilter;
+use anamnesis_core::handoff::Slot;
 use anamnesis_core::ids::SessionId;
 use anamnesis_core::observation::{EventKind, Observation};
 use anamnesis_core::page::{Frontmatter, Page, PagePath, Tier};
-use anamnesis_core::scope::{ResolvedScope, resolve_scope};
+use anamnesis_core::scope::{OperatorName, ResolvedScope, resolve_scope};
 use anamnesis_core::session::{AgentKind, Session};
 use anamnesis_hooks::ParsedHook;
 use anamnesis_store::{RawSpool, Store, new_handoff, new_observation, new_session};
@@ -40,8 +41,9 @@ pub fn ingest(
     raw: Option<&RawSpool>,
     hook: &ParsedHook,
     now: Timestamp,
+    operator: Option<&OperatorName>,
 ) -> Result<Ingested, WebError> {
-    let (scope, session_id) = record(store, raw, hook, now)?;
+    let (scope, session_id) = record(store, raw, hook, now, operator)?;
 
     if hook.kind != EventKind::SessionEnd {
         return Ok(Ingested {
@@ -71,6 +73,7 @@ pub fn record(
     raw: Option<&RawSpool>,
     hook: &ParsedHook,
     now: Timestamp,
+    operator: Option<&OperatorName>,
 ) -> Result<(ResolvedScope, SessionId), WebError> {
     let cwd = hook
         .cwd
@@ -92,7 +95,10 @@ pub fn record(
         // MCP-only concept for now. Every session it records shares the
         // project-wide handoff slot, exactly as before workstreams existed.
         None,
-    );
+    )
+    // Recorded whether or not this project keys slots by operator: who ran a
+    // session is worth knowing on its own, and only the *slot* is a setting.
+    .with_operator(operator.cloned());
     store.ensure_session(&session)?;
 
     // An excluded file is excluded from the moment it arrives: the observation
@@ -280,7 +286,7 @@ fn commit(
     store.record_handoff(&new_handoff(
         scope.project_id,
         session.id,
-        session.workstream_id,
+        slot_for(scope, session),
         &digest.handoff,
         now,
     ))?;
@@ -307,6 +313,7 @@ pub fn claim_handoff(
     agent: &AgentKind,
     agent_session_id: &str,
     now: Timestamp,
+    operator: Option<&OperatorName>,
 ) -> Result<Option<String>, WebError> {
     let scope = scope_for(cwd)?;
     store.upsert_project(&scope, now)?;
@@ -314,7 +321,7 @@ pub fn claim_handoff(
     // The claimant has to be a recorded session before it can be named as the
     // recipient; the schema enforces that, and this is where it is satisfied.
     let session_id = SessionId::derive(scope.project_id, agent_session_id);
-    store.ensure_session(&new_session(
+    let session = new_session(
         session_id,
         scope.project_id,
         scope.workspace_id,
@@ -322,11 +329,30 @@ pub fn claim_handoff(
         cwd.to_path_buf(),
         now,
         None,
-    ))?;
+    )
+    .with_operator(operator.cloned());
+    store.ensure_session(&session)?;
 
-    // Hooks have no concept of a workstream yet, so this always claims the
-    // shared, project-wide slot.
-    Ok(store.claim_handoff(scope.project_id, session_id, None, now)?)
+    // Hooks have no concept of a workstream yet, so the workstream half of the
+    // slot is always the shared one.
+    let slot = slot_for(&scope, &session);
+    Ok(store.claim_handoff(scope.project_id, session_id, &slot, now)?)
+}
+
+/// The slot a session writes its handoff into, and reads one from.
+///
+/// The workstream half is the session's own. The operator half is the
+/// session's too, but only where the project asked for per-operator slots.
+/// Keying by an operator a project never asked to separate would hide the
+/// waiting note the first time somebody presented a different token — and the
+/// symptom, an empty handoff, is the one this system is least able to explain.
+fn slot_for(scope: &ResolvedScope, session: &Session) -> Slot {
+    let operator = if scope.slots.per_user {
+        session.operator.clone()
+    } else {
+        None
+    };
+    Slot::for_workstream(session.workstream_id).for_operator(operator)
 }
 
 /// Where a session's page lives: `sessions/<date>-<short id>.md`.

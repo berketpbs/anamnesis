@@ -174,6 +174,7 @@ fn read_workstream(row: &Row<'_>) -> rusqlite::Result<Workstream> {
 mod tests {
     use super::*;
     use crate::convert::fixture;
+    use anamnesis_core::handoff::Slot;
     use anamnesis_core::session::AgentKind;
 
     fn now() -> Timestamp {
@@ -263,7 +264,7 @@ mod tests {
             .record_handoff(&crate::new_handoff(
                 project,
                 session_id,
-                Some(ws.id),
+                Slot::for_workstream(Some(ws.id)),
                 "carry on",
                 now(),
             ))
@@ -308,7 +309,7 @@ mod tests {
             .record_handoff(&crate::new_handoff(
                 project,
                 auth_writer,
-                Some(auth.id),
+                Slot::for_workstream(Some(auth.id)),
                 "auth notes",
                 now(),
             ))
@@ -317,7 +318,7 @@ mod tests {
             .record_handoff(&crate::new_handoff(
                 project,
                 bug_writer,
-                Some(bug.id),
+                Slot::for_workstream(Some(bug.id)),
                 "bug notes",
                 now(),
             ))
@@ -326,13 +327,23 @@ mod tests {
         // Claiming the auth workstream's handoff must not touch bug-123's.
         let auth_claimant = session("auth-reader");
         let claimed = store
-            .claim_handoff(project, auth_claimant, Some(auth.id), now())
+            .claim_handoff(
+                project,
+                auth_claimant,
+                &Slot::for_workstream(Some(auth.id)),
+                now(),
+            )
             .unwrap();
         assert_eq!(claimed.as_deref(), Some("auth notes"));
 
         let bug_claimant = session("bug-reader");
         let still_pending = store
-            .claim_handoff(project, bug_claimant, Some(bug.id), now())
+            .claim_handoff(
+                project,
+                bug_claimant,
+                &Slot::for_workstream(Some(bug.id)),
+                now(),
+            )
             .unwrap();
         assert_eq!(still_pending.as_deref(), Some("bug notes"));
     }
@@ -359,7 +370,7 @@ mod tests {
             .record_handoff(&crate::new_handoff(
                 project,
                 plain_session,
-                None,
+                Slot::shared(),
                 "project-wide notes",
                 now(),
             ))
@@ -381,7 +392,7 @@ mod tests {
             .record_handoff(&crate::new_handoff(
                 project,
                 ws_session,
-                Some(ws.id),
+                Slot::for_workstream(Some(ws.id)),
                 "ws notes",
                 now(),
             ))
@@ -400,7 +411,9 @@ mod tests {
             ))
             .unwrap();
 
-        let plain = store.claim_handoff(project, claimant, None, now()).unwrap();
+        let plain = store
+            .claim_handoff(project, claimant, &Slot::shared(), now())
+            .unwrap();
         assert_eq!(plain.as_deref(), Some("project-wide notes"));
     }
 }

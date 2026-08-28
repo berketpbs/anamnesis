@@ -270,6 +270,14 @@ enum Commands {
         /// Workstream to look in. Omitted shows the project-wide handoff.
         #[arg(long)]
         workstream: Option<String>,
+
+        /// Operator whose slot to look in, where `[slots] per_user` is on
+        ///
+        /// Names a slot; it proves nothing about who is asking. Over HTTP a
+        /// bearer token settles that — here the index is already open in front
+        /// of whoever ran the command.
+        #[arg(long)]
+        operator: Option<String>,
     },
 
     /// List recent sessions, newest first
@@ -396,8 +404,11 @@ fn main() -> anyhow::Result<()> {
         } => {
             cmd_improve(apply, dismiss, history, cli.data_dir.clone())?;
         }
-        Commands::Handoff { workstream } => {
-            cmd_handoff(workstream, cli.data_dir.clone())?;
+        Commands::Handoff {
+            workstream,
+            operator,
+        } => {
+            cmd_handoff(workstream, operator, cli.data_dir.clone())?;
         }
         Commands::Sessions { limit } => {
             cmd_sessions(limit, cli.data_dir.clone())?;
@@ -467,22 +478,33 @@ fn cmd_status(
 
     let now = Timestamp::now();
     let reachable = probe_server(server);
+    let authenticated = probe_auth(server, token, &reachable);
     println!();
     println!("  Server:    {}", describe_server(server, &reachable));
     println!(
         "  Auth:      {}",
-        describe_auth(&probe_auth(server, token, &reachable), token.is_some())
+        describe_auth(&authenticated, token.is_some())
     );
     println!(
         "  Capture:   {}",
         describe_capture(store.last_observation_at(scope.project_id)?, now)
     );
+    // Where a project keeps a slot per operator, the handoff reported has to
+    // be the one *this* machine would be handed. Reporting the shared slot
+    // would tell an operator with a note waiting that nothing is waiting.
+    let operator = if scope.slots.per_user {
+        authenticated.operator()
+    } else {
+        None
+    };
+    let slot = anamnesis_core::handoff::Slot::shared().for_operator(operator.clone());
     println!(
         "  Memory:    {}",
         describe_memory(
             store.session_count(scope.project_id)?,
             store.page_count(scope.project_id)?,
-            store.peek_handoff(scope.project_id, None)?.is_some(),
+            store.peek_handoff(scope.project_id, &slot)?.is_some(),
+            operator.as_ref(),
         )
     );
 
@@ -550,6 +572,20 @@ enum AuthState {
     Accepted(Option<String>),
     /// A token is required and this machine's was not one of them.
     Rejected,
+}
+
+impl AuthState {
+    /// The operator the server named, when it named one this crate can use.
+    ///
+    /// A name that will not parse is treated as no name: it can only come from
+    /// a server newer than this client, and guessing at it would key a slot to
+    /// something that is not an operator.
+    fn operator(&self) -> Option<anamnesis_core::scope::OperatorName> {
+        match self {
+            Self::Accepted(Some(name)) => anamnesis_core::scope::OperatorName::parse(name).ok(),
+            _ => None,
+        }
+    }
 }
 
 /// Ask the server what it makes of this machine's token.
@@ -637,9 +673,22 @@ fn describe_capture(last: Option<Timestamp>, now: Timestamp) -> String {
 }
 
 /// One line for what this project's memory currently holds.
-fn describe_memory(sessions: i64, pages: i64, handoff: bool) -> String {
+fn describe_memory(
+    sessions: i64,
+    pages: i64,
+    handoff: bool,
+    operator: Option<&anamnesis_core::scope::OperatorName>,
+) -> String {
+    // Named only where a project keeps more than one slot: "no handoff
+    // waiting" and "no handoff waiting for alice" are different facts, and on
+    // a shared server the second is the one that stops someone concluding
+    // their memory is empty.
+    let whose = match operator {
+        Some(operator) => format!(" for {operator}"),
+        None => String::new(),
+    };
     format!(
-        "{} · {} · {}",
+        "{} · {} · {}{whose}",
         plural(sessions, "session"),
         plural(pages, "page"),
         if handoff {
@@ -1827,7 +1876,11 @@ fn describe_exemptions(plan: &sweep::Plan) -> String {
 ///
 /// Deliberately a peek, not a claim: running this to see what is waiting must
 /// not be the reason the next agent session starts with nothing.
-fn cmd_handoff(workstream: Option<String>, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
+fn cmd_handoff(
+    workstream: Option<String>,
+    operator: Option<String>,
+    data_dir: Option<PathBuf>,
+) -> anyhow::Result<()> {
     let (scope, _data, store) = open_project(data_dir)?;
 
     let workstream_id = match workstream.as_deref().map(str::trim) {
@@ -1840,20 +1893,61 @@ fn cmd_handoff(workstream: Option<String>, data_dir: Option<PathBuf>) -> anyhow:
         None => None,
     };
 
-    match store.peek_handoff(scope.project_id, workstream_id)? {
+    // Refused rather than ignored: someone who passes `--operator` on a
+    // project that keys one slot is asking a question about a separation that
+    // does not exist, and answering with the shared slot would look like an
+    // answer about theirs.
+    if operator.is_some() && !scope.slots.per_user {
+        anyhow::bail!(
+            "this project keeps one handoff slot; --operator needs `[slots] per_user = true` in {}",
+            scope
+                .marker
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| anamnesis_core::scope::MARKER_FILE.to_owned())
+        );
+    }
+
+    let operator = match operator.as_deref().map(str::trim) {
+        Some(name) => Some(anamnesis_core::scope::OperatorName::parse(name)?),
+        None => None,
+    };
+
+    let slot =
+        anamnesis_core::handoff::Slot::for_workstream(workstream_id).for_operator(operator.clone());
+
+    match store.peek_handoff(scope.project_id, &slot)? {
         Some(body) => {
-            match &workstream {
-                Some(slug) => println!("📋 Pending handoff for workstream {slug}:"),
-                None => println!("📋 Pending handoff:"),
-            }
+            println!(
+                "📋 Pending handoff{}:",
+                describe_slot(&workstream, &operator)
+            );
             println!();
             println!("{body}");
         }
         None => println!(
-            "Nothing waiting — the last session left no handoff, or it was already claimed."
+            "Nothing waiting{} — the last session left no handoff, or it was already claimed.",
+            describe_slot(&workstream, &operator)
         ),
     }
     Ok(())
+}
+
+/// Name the slot that was looked in, when it was not the only one.
+///
+/// Said every time it is not the shared slot, because "nothing waiting" and
+/// "nothing waiting in this one slot of several" are different answers, and
+/// the second one is the one that sends someone looking in the right place.
+fn describe_slot(
+    workstream: &Option<String>,
+    operator: &Option<anamnesis_core::scope::OperatorName>,
+) -> String {
+    match (workstream, operator) {
+        (None, None) => String::new(),
+        (Some(slug), None) => format!(" for workstream {slug}"),
+        (None, Some(operator)) => format!(" for {operator}"),
+        (Some(slug), Some(operator)) => format!(" for {operator} in workstream {slug}"),
+    }
 }
 
 fn cmd_sessions(limit: Option<usize>, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
@@ -1869,12 +1963,19 @@ fn cmd_sessions(limit: Option<usize>, data_dir: Option<PathBuf>) -> anyhow::Resu
         let short: String = session.id.to_string().chars().take(8).collect();
         let when = session.started_at.to_string();
         let when = when.split('.').next().unwrap_or(&when);
+        // Both are absent for the ordinary session, and both change what the
+        // line means when they are not: which thread of work it belongs to,
+        // and whose it was.
         let workstream = match &session.workstream {
             Some(slug) => format!(" · {slug}"),
             None => String::new(),
         };
+        let operator = match &session.operator {
+            Some(operator) => format!(" · {operator}"),
+            None => String::new(),
+        };
         println!(
-            "{short}  {when}  {:<12} {:<7} {} obs{workstream}",
+            "{short}  {when}  {:<12} {:<7} {} obs{workstream}{operator}",
             session.agent, session.state, session.observation_count
         );
     }
@@ -1982,8 +2083,8 @@ mod tests {
 
     #[test]
     fn a_waiting_handoff_is_reported_as_waiting() {
-        assert!(describe_memory(2, 1, true).contains("handoff waiting"));
-        assert!(describe_memory(2, 1, false).contains("no handoff waiting"));
+        assert!(describe_memory(2, 1, true, None).contains("handoff waiting"));
+        assert!(describe_memory(2, 1, false, None).contains("no handoff waiting"));
     }
 
     #[test]
@@ -2081,5 +2182,56 @@ mod tests {
         let shared = anamnesis_web::Auth::parse(Some("alpha"), None).expect("parse");
         assert_eq!(describe_serving_auth(&shared), "token required");
         assert!(describe_serving_auth(&anamnesis_web::Auth::open()).contains("open"));
+    }
+
+    fn an_operator(name: &str) -> anamnesis_core::scope::OperatorName {
+        anamnesis_core::scope::OperatorName::parse(name).expect("valid operator")
+    }
+
+    /// On a shared server, "no handoff waiting" without a name is the sentence
+    /// that makes someone believe their memory is empty when it is somebody
+    /// else's slot they are looking at.
+    #[test]
+    fn the_memory_line_names_the_slot_it_looked_in() {
+        let alice = an_operator("alice");
+        let line = describe_memory(2, 1, false, Some(&alice));
+        assert!(line.contains("no handoff waiting for alice"), "{line}");
+
+        // And says nothing extra where there is only one slot to look in.
+        let shared = describe_memory(2, 1, false, None);
+        assert!(shared.ends_with("no handoff waiting"), "{shared}");
+    }
+
+    #[test]
+    fn a_peeked_slot_is_named_only_when_it_is_not_the_only_one() {
+        assert_eq!(describe_slot(&None, &None), "");
+        assert_eq!(
+            describe_slot(&Some("auth".to_owned()), &None),
+            " for workstream auth"
+        );
+        assert_eq!(
+            describe_slot(&None, &Some(an_operator("alice"))),
+            " for alice"
+        );
+        assert_eq!(
+            describe_slot(&Some("auth".to_owned()), &Some(an_operator("alice"))),
+            " for alice in workstream auth"
+        );
+    }
+
+    /// The name the server gave is the one the slot is keyed by, so a name
+    /// this build could not use as a key must not be treated as one.
+    #[test]
+    fn an_unusable_operator_name_is_no_operator_at_all() {
+        assert_eq!(
+            AuthState::Accepted(Some("alice".to_owned())).operator(),
+            Some(an_operator("alice"))
+        );
+        assert_eq!(
+            AuthState::Accepted(Some("Not A Name".to_owned())).operator(),
+            None
+        );
+        assert_eq!(AuthState::Accepted(None).operator(), None);
+        assert_eq!(AuthState::Open.operator(), None);
     }
 }
