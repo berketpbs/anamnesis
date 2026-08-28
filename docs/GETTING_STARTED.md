@@ -123,11 +123,16 @@ not start one.
 Claude Code talks to anamnesis two ways, and they are independent.
 
 **Hooks** capture the session. Print the configuration and paste it into your
-`settings.json`:
+`settings.json`, or `--write` to merge it in:
 
 ```bash
-anamnesis install-hooks --agent claude-code
+anamnesis install-hooks --agent claude-code          # .claude/settings.local.json
+anamnesis install-hooks --agent codex --write        # .codex/hooks.json
 ```
+
+Both harnesses name the same five events and deliver the same payload fields,
+so one server captures both. Hooks are read when a session starts, so the
+session you run this from is not the one that gets captured.
 
 **MCP** lets the agent search memory and write pages on purpose. Register the
 server as a stdio subprocess:
