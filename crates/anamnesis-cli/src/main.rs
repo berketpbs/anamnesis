@@ -247,6 +247,13 @@ enum Commands {
         #[arg(short, long)]
         verbose: bool,
 
+        /// Score each retrieval stream on its own, and say what only it finds
+        ///
+        /// The fused ranking says how good retrieval is; this says which
+        /// signal is doing the work, and what deleting one would cost.
+        #[arg(long)]
+        streams: bool,
+
         /// Exit non-zero when a suite scores below its own thresholds
         #[arg(long)]
         check: bool,
@@ -454,8 +461,9 @@ fn main() -> anyhow::Result<()> {
             suite,
             verbose,
             check,
+            streams,
         } => {
-            cmd_eval(suite.as_deref(), verbose, check)?;
+            cmd_eval(suite.as_deref(), verbose, check, streams)?;
         }
         Commands::Reindex => {
             cmd_reindex(cli.data_dir.clone())?;
@@ -1542,7 +1550,12 @@ fn cmd_install_hooks(
 /// when one has fallen below the bar it sets for itself. The bar lives in the
 /// suite file rather than here, so a change that costs recall shows up as a
 /// number someone had to edit.
-fn cmd_eval(suite: Option<&std::path::Path>, verbose: bool, check: bool) -> anyhow::Result<()> {
+fn cmd_eval(
+    suite: Option<&std::path::Path>,
+    verbose: bool,
+    check: bool,
+    streams: bool,
+) -> anyhow::Result<()> {
     // Held still on purpose. Freshness is an input to nothing a suite scores,
     // and it can only be that way if two runs are handed the same instant.
     let now: Timestamp = "2026-01-01T00:00:00Z".parse()?;
@@ -1564,6 +1577,9 @@ fn cmd_eval(suite: Option<&std::path::Path>, verbose: bool, check: bool) -> anyh
     for (source, suite) in &suites {
         let report = anamnesis_evals::run(suite, now)?;
         print_report(&report, source, verbose);
+        if streams {
+            print_ablation(&anamnesis_evals::ablate(suite, now)?);
+        }
         if !report.passed() {
             failed += 1;
         }
@@ -1619,6 +1635,39 @@ fn print_report(report: &anamnesis_evals::Report, source: &str, verbose: bool) {
         }
     }
 
+    println!();
+}
+
+/// What each stream contributes on its own.
+fn print_ablation(ablation: &anamnesis_evals::Ablation) {
+    println!("   stream     MRR    recall   only this stream finds");
+    for stream in &ablation.streams {
+        // The last column is the one that decides whether a stream stays: a
+        // respectable average with nothing unique behind it means the other
+        // streams already cover it.
+        let unique = match stream.only_stream_to_find.len() {
+            0 => "—".to_owned(),
+            count => format!("{count}"),
+        };
+        println!(
+            "   {:<9}  {:.3}  {:.3}    {}",
+            stream.name, stream.mrr, stream.recall, unique
+        );
+    }
+
+    for stream in &ablation.streams {
+        for query in &stream.only_stream_to_find {
+            println!("     only {} finds {query:?}", stream.name);
+        }
+    }
+
+    if !ablation.found_by_none.is_empty() {
+        println!();
+        println!("   No single stream answered these — fusion is doing the work:");
+        for query in &ablation.found_by_none {
+            println!("     {query:?}");
+        }
+    }
     println!();
 }
 

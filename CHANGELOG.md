@@ -34,6 +34,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   be durable, authoritative, or a replacement for another, and it says which it
   was written as. Its entities reach the index too — the command wrote none
   before, so a page written this way was reachable through its words alone
+- `anamnesis eval --streams` scores each retrieval stream on its own and names
+  the cases only it can answer — the measure that decides whether a stream
+  earns its place, which a fused ranking cannot show. `Store::query_streams`
+  is the diagnostic behind it, and deliberately records no access: asking
+  which stream *would have* found a page is not somebody reading it, and the
+  decay sweep reads those counters. First run over the shipped suite: full
+  text alone scores a higher MRR than the fused ranking (0.800 against 0.708)
+  while missing a fifth of the questions — fusion is buying recall with rank,
+  and the link stream answers nothing on its own that the others miss
 - `anamnesis eval` — retrieval scored against a checked-in corpus and the
   questions asked of it, through the same `query_pages` call `memory_query`
   makes. Reports mean reciprocal rank and recall against thresholds the suite
