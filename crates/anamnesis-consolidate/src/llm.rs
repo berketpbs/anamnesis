@@ -414,6 +414,7 @@ mod tests {
             started_at: "2026-08-20T09:00:00Z".parse().expect("timestamp"),
             ended_at: Some("2026-08-20T10:00:00Z".parse().expect("timestamp")),
             state: SessionState::Closed,
+            operator: None,
         }
     }
 

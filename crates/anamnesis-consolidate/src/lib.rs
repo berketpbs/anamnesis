@@ -336,6 +336,7 @@ mod tests {
             started_at: "2026-08-19T09:00:00Z".parse().unwrap(),
             ended_at: Some("2026-08-19T10:30:00Z".parse().unwrap()),
             state: SessionState::Closed,
+            operator: None,
         }
     }
 

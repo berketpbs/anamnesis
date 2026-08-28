@@ -15,9 +15,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anamnesis_core::handoff::Slot;
 use anamnesis_core::ids::SessionId;
 use anamnesis_core::page::{Entity, Frontmatter, Page, PagePath, PageStatus, Tier};
-use anamnesis_core::scope::ResolvedScope;
+use anamnesis_core::scope::{OperatorName, ResolvedScope};
 use anamnesis_core::session::AgentKind;
 use anamnesis_core::workstream::{Workstream, WorkstreamSlug};
 use anamnesis_llm::Embedder;
@@ -134,6 +135,14 @@ pub struct HandoffAcceptRequest {
     /// exist (see `workstream_start`). Omitted claims the shared,
     /// workstream-less slot, same as before workstreams existed.
     pub workstream: Option<String>,
+    /// Operator whose slot to claim from, where the project keys slots by
+    /// operator (`[slots] per_user`). Ignored where it does not.
+    ///
+    /// This names a slot; it does not prove anything about who is asking.
+    /// Over HTTP the bearer token settles that, but MCP is a subprocess the
+    /// agent launched with the store open in front of it, and there is nobody
+    /// left to authenticate to.
+    pub operator: Option<String>,
 }
 
 /// Response for [`AnamnesisMcp::memory_handoff_accept`].
@@ -502,20 +511,33 @@ impl AnamnesisMcp {
             None => None,
         };
 
-        let claimant = SessionId::derive(self.scope.project_id, &request.session_id);
-        self.store.ensure_session(&new_session(
-            claimant,
-            self.scope.project_id,
-            self.scope.workspace_id,
-            agent,
-            self.root.clone(),
-            now,
-            workstream_id,
-        ))?;
+        let operator = match request.operator.as_deref().map(str::trim) {
+            Some(name) if !name.is_empty() => Some(OperatorName::parse(name)?),
+            _ => None,
+        };
 
-        let handoff =
-            self.store
-                .claim_handoff(self.scope.project_id, claimant, workstream_id, now)?;
+        let claimant = SessionId::derive(self.scope.project_id, &request.session_id);
+        self.store.ensure_session(
+            &new_session(
+                claimant,
+                self.scope.project_id,
+                self.scope.workspace_id,
+                agent,
+                self.root.clone(),
+                now,
+                workstream_id,
+            )
+            .with_operator(operator.clone()),
+        )?;
+
+        // Gated on the project asking for per-operator slots, the same way the
+        // HTTP path is: an operator named for a project that keys one slot
+        // would otherwise claim from a slot nothing ever writes to.
+        let slot = Slot::for_workstream(workstream_id)
+            .for_operator(self.scope.slots.per_user.then_some(operator).flatten());
+        let handoff = self
+            .store
+            .claim_handoff(self.scope.project_id, claimant, &slot, now)?;
         Ok(HandoffAcceptResponse { handoff })
     }
 
@@ -725,7 +747,7 @@ mod tests {
             .record_handoff(&anamnesis_store::new_handoff(
                 server.scope.project_id,
                 from,
-                None,
+                Slot::shared(),
                 "carry on",
                 now,
             ))
@@ -736,6 +758,7 @@ mod tests {
                 session_id: "reader".to_owned(),
                 agent: None,
                 workstream: None,
+                operator: None,
             })
             .unwrap();
         assert_eq!(first.handoff.as_deref(), Some("carry on"));
@@ -745,6 +768,7 @@ mod tests {
                 session_id: "reader-2".to_owned(),
                 agent: Some("codex".to_owned()),
                 workstream: None,
+                operator: None,
             })
             .unwrap();
         assert_eq!(second.handoff, None);
@@ -830,7 +854,7 @@ mod tests {
             .record_handoff(&anamnesis_store::new_handoff(
                 server.scope.project_id,
                 writer,
-                Some(workstream_id),
+                Slot::for_workstream(Some(workstream_id)),
                 "postgres chosen for auth storage",
                 now,
             ))
@@ -843,6 +867,7 @@ mod tests {
                 session_id: "codex-reader".to_owned(),
                 agent: Some("codex".to_owned()),
                 workstream: None,
+                operator: None,
             })
             .unwrap();
         assert_eq!(plain.handoff, None);
@@ -852,6 +877,7 @@ mod tests {
                 session_id: "codex-reader-2".to_owned(),
                 agent: Some("codex".to_owned()),
                 workstream: Some("auth-refactor".to_owned()),
+                operator: None,
             })
             .unwrap();
         assert_eq!(
@@ -881,6 +907,7 @@ mod tests {
                 session_id: "reader".to_owned(),
                 agent: None,
                 workstream: Some("never-started".to_owned()),
+                operator: None,
             })
             .unwrap_err();
         assert!(matches!(error, McpError::Invalid(_)));

@@ -4,6 +4,64 @@ use jiff::Timestamp;
 
 use crate::ids::{HandoffId, ProjectId, SessionId, WorkstreamId};
 use crate::observation::BoundedBody;
+use crate::scope::OperatorName;
+
+/// Which pending-handoff slot a note belongs in.
+///
+/// A project holds at most one pending handoff per slot, and the slot is what
+/// decides whether two sessions are continuing the same thread of work or two
+/// different ones. Both keys default to absent, which is one slot for the whole
+/// project — the behaviour a single person on a single machine has always had,
+/// and the one every setting here is a departure from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Slot {
+    /// The workstream this slot belongs to, if any.
+    ///
+    /// `None` is the shared, workstream-less slot. Named threads of work get
+    /// one each, so finishing a session on one does not hand its note to a
+    /// session resuming the other.
+    pub workstream_id: Option<WorkstreamId>,
+
+    /// The operator this slot belongs to, when the project keys slots by
+    /// operator and the caller was one the server could name.
+    ///
+    /// `None` is the shared slot again, and is what every anonymous caller
+    /// gets. Set only where `[slots] per_user` is on: keying by an operator
+    /// the project never asked to separate would split one person's memory in
+    /// half the first time they used a second token.
+    pub operator: Option<OperatorName>,
+}
+
+impl Slot {
+    /// The one slot a project has when it has asked for nothing else.
+    pub fn shared() -> Self {
+        Self::default()
+    }
+
+    /// The slot belonging to a workstream.
+    pub fn for_workstream(workstream_id: Option<WorkstreamId>) -> Self {
+        Self {
+            workstream_id,
+            operator: None,
+        }
+    }
+
+    /// The same slot, narrowed to one operator.
+    pub fn for_operator(mut self, operator: Option<OperatorName>) -> Self {
+        self.operator = operator;
+        self
+    }
+
+    /// The workstream key as SQL sees it.
+    pub fn workstream_key(&self) -> Option<String> {
+        self.workstream_id.map(|id| id.to_string())
+    }
+
+    /// The operator key as SQL sees it.
+    pub fn operator_key(&self) -> Option<String> {
+        self.operator.as_ref().map(ToString::to_string)
+    }
+}
 
 /// Delivery state of a handoff.
 ///
@@ -34,6 +92,14 @@ pub struct Handoff {
     /// the project — today's behaviour. A workstream's handoffs are keyed to
     /// its own slot, so claiming one never consumes another's.
     pub workstream_id: Option<WorkstreamId>,
+    /// The operator this handoff's slot is keyed to, when the project keys
+    /// slots by operator.
+    ///
+    /// Unlike the operator recorded on a session, this is not provenance: it
+    /// is half the slot key, and it is `None` for a project that has not
+    /// asked for per-operator slots however the session was authenticated.
+    #[serde(default)]
+    pub operator: Option<OperatorName>,
     /// Session that produced it.
     pub from_session: SessionId,
     /// Session that consumed it, once accepted.
@@ -78,6 +144,7 @@ mod tests {
             id: HandoffId::new(),
             project_id: ProjectId::from_uuid(uuid::Uuid::nil()),
             workstream_id: None,
+            operator: None,
             from_session: SessionId::new(),
             to_session: None,
             body: BoundedBody::truncating("carry on", BoundedBody::DEFAULT_LIMIT),

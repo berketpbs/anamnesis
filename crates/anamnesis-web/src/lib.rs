@@ -310,6 +310,7 @@ impl AgentQuery {
 /// waits to find out.
 async fn receive_hook(
     State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
     Query(query): Query<AgentQuery>,
     body: String,
 ) -> Result<Response, WebError> {
@@ -329,7 +330,14 @@ async fn receive_hook(
         // while the hook waits.
         let outcome = {
             let wiki = state.wiki.lock();
-            ingest(&state.store, &wiki, state.raw.as_deref(), &hook, now)?
+            ingest(
+                &state.store,
+                &wiki,
+                state.raw.as_deref(),
+                &hook,
+                now,
+                identity.operator(),
+            )?
         };
         if let Some(page) = &outcome.page {
             tracing::info!(%page, "session consolidated");
@@ -345,7 +353,13 @@ async fn receive_hook(
     // it. The cost of that choice is honest: a server killed in the next few
     // seconds loses the page, and the session stays open rather than closing
     // with nothing in it.
-    let (scope, session_id) = record(&state.store, state.raw.as_deref(), &hook, now)?;
+    let (scope, session_id) = record(
+        &state.store,
+        state.raw.as_deref(),
+        &hook,
+        now,
+        identity.operator(),
+    )?;
 
     if hook.kind == EventKind::SessionEnd {
         let background = state.clone();
@@ -381,6 +395,7 @@ async fn receive_hook(
 /// nothing to say.
 async fn deliver_handoff(
     State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
     Query(query): Query<AgentQuery>,
 ) -> Result<String, WebError> {
     let cwd = query
@@ -398,6 +413,7 @@ async fn deliver_handoff(
         &query.agent(),
         &session_id,
         Timestamp::now(),
+        identity.operator(),
     )?;
 
     Ok(handoff.unwrap_or_default())
@@ -466,12 +482,23 @@ mod tests {
     }
 
     fn run(harness: &Harness, event: &str, extra: serde_json::Value) -> Ingested {
+        run_as(harness, event, extra, None)
+    }
+
+    /// The same, attributed to an operator, as an authenticated hook is.
+    fn run_as(
+        harness: &Harness,
+        event: &str,
+        extra: serde_json::Value,
+        operator: Option<&anamnesis_core::scope::OperatorName>,
+    ) -> Ingested {
         ingest(
             &harness.state.store,
             &harness.state.wiki.lock(),
             harness.state.raw.as_deref(),
             &hook(harness, event, extra),
             now(),
+            operator,
         )
         .expect("ingest")
     }
@@ -771,6 +798,7 @@ mod tests {
                 &AgentKind::ClaudeCode,
                 "session-next",
                 now(),
+                None,
             )
             .expect("claim")
         };
@@ -805,6 +833,7 @@ mod tests {
                 &AgentKind::ClaudeCode,
                 "session-next",
                 now(),
+                None,
             )
             .expect("claim"),
             None
@@ -968,6 +997,7 @@ mod tests {
             harness.state.raw.as_deref(),
             &parse(&payload),
             now(),
+            None,
         )
         .expect("ingest");
         payload["hook_event_name"] = json!("SessionEnd");
@@ -977,6 +1007,7 @@ mod tests {
             harness.state.raw.as_deref(),
             &parse(&payload),
             now(),
+            None,
         )
         .expect("ingest");
 
@@ -986,6 +1017,7 @@ mod tests {
             &AgentKind::ClaudeCode,
             "session-three",
             now(),
+            None,
         )
         .expect("claim")
         .expect("something pending");
@@ -1020,6 +1052,7 @@ mod tests {
             harness.state.raw.as_deref(),
             &hook,
             now(),
+            None,
         );
         assert!(matches!(result, Err(WebError::BadRequest(_))));
     }
@@ -1099,6 +1132,7 @@ mod tests {
             harness.state.raw.as_deref(),
             &hook(harness, "SessionStart", json!({"source": "startup"})),
             now(),
+            None,
         )
         .expect("start");
         record(
@@ -1110,6 +1144,7 @@ mod tests {
                 json!({"prompt": "wire up the llm provider"}),
             ),
             now(),
+            None,
         )
         .expect("prompt")
     }
@@ -1158,6 +1193,7 @@ mod tests {
             &AgentKind::ClaudeCode,
             "session-next",
             now(),
+            None,
         )
         .expect("claim")
         .expect("a handoff");
@@ -1463,7 +1499,7 @@ mod tests {
         assert!(
             state
                 .store
-                .peek_handoff(project, None)
+                .peek_handoff(project, &anamnesis_core::handoff::Slot::shared())
                 .expect("peek")
                 .is_some(),
             "the session should have left a handoff to lose"
@@ -1479,7 +1515,7 @@ mod tests {
         assert!(
             state
                 .store
-                .peek_handoff(project, None)
+                .peek_handoff(project, &anamnesis_core::handoff::Slot::shared())
                 .expect("peek")
                 .is_some(),
             "a refused request spent the handoff it was refused"
@@ -1513,5 +1549,113 @@ mod tests {
                 other => format!("%{other:02X}"),
             })
             .collect()
+    }
+
+    // ---------------------------------------------------------------
+    // Per-operator slots. The gate is the interesting part: the same
+    // session, recorded the same way, leaves its note in a different slot
+    // depending on one line in the project's marker.
+    // ---------------------------------------------------------------
+
+    fn operator(name: &str) -> anamnesis_core::scope::OperatorName {
+        anamnesis_core::scope::OperatorName::parse(name).expect("valid operator")
+    }
+
+    /// Work a session through to the handoff it leaves, attributed to `who`.
+    fn session_by(harness: &Harness, who: &anamnesis_core::scope::OperatorName) {
+        run_as(
+            harness,
+            "UserPromptSubmit",
+            json!({"prompt": "do the thing"}),
+            Some(who),
+        );
+        run_as(harness, "SessionEnd", json!({}), Some(who));
+    }
+
+    fn claim_as(
+        harness: &Harness,
+        session: &str,
+        who: Option<&anamnesis_core::scope::OperatorName>,
+    ) -> Option<String> {
+        claim_handoff(
+            &harness.state.store,
+            &harness.cwd,
+            &AgentKind::ClaudeCode,
+            session,
+            now(),
+            who,
+        )
+        .expect("claim")
+    }
+
+    /// The failure this exists to stop: on a shared server, whoever starts
+    /// next is handed someone else's context, and the person it was written
+    /// for finds nothing waiting.
+    #[test]
+    fn with_per_user_slots_a_handoff_waits_for_the_operator_it_was_written_by() {
+        let harness = harness_with("\n[slots]\nper_user = true\n");
+        let alice = operator("alice");
+        let bob = operator("bob");
+
+        session_by(&harness, &alice);
+
+        assert_eq!(
+            claim_as(&harness, "bobs-session", Some(&bob)),
+            None,
+            "bob was handed alice's handoff"
+        );
+
+        let alices = claim_as(&harness, "alices-session", Some(&alice))
+            .expect("alice's own handoff was waiting");
+        assert!(alices.contains("do the thing"));
+    }
+
+    /// The gate. Without the setting a project keeps one slot, whatever the
+    /// server can tell about who is calling — otherwise turning on
+    /// authentication would quietly split one person's memory in two.
+    #[test]
+    fn without_the_setting_an_operator_does_not_split_the_slot() {
+        let harness = harness();
+        session_by(&harness, &operator("alice"));
+
+        let claimed = claim_as(&harness, "bobs-session", Some(&operator("bob")))
+            .expect("one slot, so the note is there to be claimed");
+        assert!(claimed.contains("do the thing"));
+    }
+
+    /// A caller the server could not name is every anonymous caller, and they
+    /// go on sharing the slot they have always shared.
+    #[test]
+    fn an_anonymous_caller_uses_the_shared_slot_even_where_slots_are_split() {
+        let harness = harness_with("\n[slots]\nper_user = true\n");
+        session_by(&harness, &operator("alice"));
+
+        assert_eq!(
+            claim_as(&harness, "anonymous-session", None),
+            None,
+            "an unnamed caller took a named operator's handoff"
+        );
+    }
+
+    /// Provenance is not the setting: who ran a session is recorded whether or
+    /// not the project separates slots, so turning the setting on can explain
+    /// something about the sessions that came before it.
+    #[test]
+    fn a_session_records_its_operator_even_where_slots_are_shared() {
+        let harness = harness();
+        let ingested = run_as(
+            &harness,
+            "UserPromptSubmit",
+            json!({"prompt": "do the thing"}),
+            Some(&operator("alice")),
+        );
+
+        let session = harness
+            .state
+            .store
+            .load_session(ingested.session_id)
+            .expect("load")
+            .expect("session exists");
+        assert_eq!(session.operator, Some(operator("alice")));
     }
 }

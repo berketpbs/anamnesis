@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Initial project structure as Rust workspace
 - Core data types and abstractions
-- SQLite storage layer with migrations `V01`–`V09`
+- SQLite storage layer with migrations `V01`–`V10`
 - Git-versioned wiki system
 - MCP server: `memory_query`, `memory_write_page`, `memory_handoff_accept`
 - Lifecycle hooks capture system, with redaction before storage
@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Session consolidation, deterministic when no model is configured
 - HTTP server for hook delivery and handoff pickup (`/hook`, `/handoff`,
   `/whoami`, `/health`) — no UI
+- `[slots] per_user` is enforced rather than merely parsed. A project that
+  sets it keeps one pending handoff per operator, so two people sharing a
+  server are each handed what their own last session left instead of whichever
+  note was written last. The operator comes from the bearer token a request
+  presents; callers the server cannot name share the one slot they always
+  shared, and a project that has not set it is unchanged. Sessions record whose
+  they were either way, `anamnesis sessions` shows it, `anamnesis handoff
+  --operator` peeks one slot, and `memory_handoff_accept` takes an `operator`
 - Bearer-token authentication. `ANAMNESIS_TOKEN` is the secret a machine
   presents; `ANAMNESIS_TOKENS` is the `name=secret` set a server accepts, so a
   shared server can tell whose session it is recording. With neither set the

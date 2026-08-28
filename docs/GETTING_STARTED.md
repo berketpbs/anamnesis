@@ -429,11 +429,33 @@ enabled = false                         # the server runs no pass for this proje
 interval_minutes = 60
 ```
 
-The loader also accepts `[slots]`, which **nothing reads yet**:
+And `[slots]`, for a server more than one person uses:
 
 ```toml
 [slots]
-per_user = false                        # parsed; never consulted
+per_user = false                        # true: a handoff slot per operator
+```
+
+Left false, a project keeps one pending handoff and whoever starts next is
+handed it. Set it true and the note a session leaves waits for the operator
+whose token that session arrived under — see
+[Requiring a token](#requiring-a-token) for where operators come from. It
+separates handoff slots, not pages: everyone on the project still reads and
+writes the same wiki.
+
+Everyone the server cannot name shares the one slot they always shared, so
+turning this on without named tokens changes nothing.
+
+```bash
+anamnesis handoff --operator alice   # peek one operator's slot
+anamnesis sessions                   # each session names whose it was
+```
+
+`anamnesis status` peeks the slot belonging to whoever the server says this
+machine is, and says so:
+
+```
+  Memory:    12 sessions · 8 pages · no handoff waiting for alice
 ```
 
 ## Troubleshooting

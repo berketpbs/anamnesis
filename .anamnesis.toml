@@ -30,8 +30,14 @@ age_half_life_days = 30.0
 access_half_life_days = 14.0
 access_weight = 0.5
 
+# Per-operator handoff slots, for a server more than one person uses.
+#
+# Left false, a project keeps one pending handoff and whoever starts next is
+# handed it — right on one person's machine, and a silent theft on a shared
+# one. Set it true and the note a session leaves waits for the operator whose
+# token that session arrived under; everyone the server cannot name goes on
+# sharing the one slot they always shared.
 [slots]
-# Per-operator memory slots, for shared servers. Parsed; not implemented.
 per_user = false
 
 # What `anamnesis improve` — and, when scheduled, the server — may do to this
