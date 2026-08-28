@@ -10,14 +10,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Initial project structure as Rust workspace
 - Core data types and abstractions
-- SQLite storage layer with migrations `V01`–`V06`
+- SQLite storage layer with migrations `V01`–`V09`
 - Git-versioned wiki system
 - MCP server: `memory_query`, `memory_write_page`, `memory_handoff_accept`
 - Lifecycle hooks capture system, with redaction before storage
 - LLM provider abstraction (Anthropic Messages API), optional throughout
 - Session consolidation, deterministic when no model is configured
 - HTTP server for hook delivery and handoff pickup (`/hook`, `/handoff`,
-  `/health`) — no UI and no authentication
+  `/whoami`, `/health`) — no UI
+- Bearer-token authentication. `ANAMNESIS_TOKEN` is the secret a machine
+  presents; `ANAMNESIS_TOKENS` is the `name=secret` set a server accepts, so a
+  shared server can tell whose session it is recording. With neither set the
+  server is open, as it always was — except on a non-loopback bind, which is
+  refused unless `--allow-anonymous` says it was meant. `/health` stays open so
+  `anamnesis status` can tell a server that is down from one that is refusing
+  this machine, and says which on its `Auth:` line. `anamnesis token` mints a
+  secret and stores nothing
 - CLI entry point
 - Cross-harness workstreams: named threads of work with per-thread handoff
   slots, plus the `workstream_start` and `workstream_status` MCP tools
@@ -78,6 +86,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Backlinks now resolve when the target page is written after the page that
   links to it
 - Rebuilt sessions come back closed when the transcript records their end
+- A handoff request that fails is no longer printed as a handoff. The hook read
+  the body without looking at the status, so an error page — a 401 among them —
+  went to stdout, where the harness injects it into the model's context as
+  though the last session had written it
 
 ### Removed
 - The empty `anamnesis-workstream` crate; workstreams live in core, store,

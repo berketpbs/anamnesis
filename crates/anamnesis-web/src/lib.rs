@@ -19,19 +19,22 @@ use anamnesis_core::session::AgentKind;
 use anamnesis_llm::Provider;
 use anamnesis_store::{RawSpool, Store};
 use anamnesis_wiki::Wiki;
-use axum::Router;
-use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::extract::{Query, Request, State};
+use axum::http::{StatusCode, header};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use axum::{Extension, Json, Router};
 use jiff::Timestamp;
 use parking_lot::Mutex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
+pub mod auth;
 pub mod improve;
 mod pipeline;
 pub mod watch;
 
+pub use auth::{Auth, Identity};
 pub use pipeline::{Ingested, claim_handoff, finalize, finalize_with_llm, ingest, record};
 
 /// Errors surfaced over HTTP.
@@ -106,6 +109,9 @@ pub struct AppState {
     /// The model, when one is configured. `None` means every session is
     /// summarised by counting.
     pub llm: Option<LlmSettings>,
+    /// The tokens this server accepts. Open by default, which is what every
+    /// install did before tokens existed.
+    pub auth: Auth,
 }
 
 impl AppState {
@@ -116,6 +122,7 @@ impl AppState {
             wiki: Arc::new(Mutex::new(wiki)),
             raw: None,
             llm: None,
+            auth: Auth::open(),
         }
     }
 
@@ -130,15 +137,104 @@ impl AppState {
         self.llm = settings;
         self
     }
+
+    /// Require one of these tokens on every request that touches memory.
+    pub fn with_auth(mut self, auth: Auth) -> Self {
+        self.auth = auth;
+        self
+    }
 }
 
 /// Build the router.
+///
+/// `/health` is outside the guard on purpose. It says only that an anamnesis
+/// server is listening — which the open port already says — and keeping it
+/// answerable is what lets `anamnesis status` tell "the server is down" apart
+/// from "the server is up and does not accept your token". Collapsing those two
+/// into one silence is how a person spends an afternoon restarting a server
+/// that was running the whole time.
 pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/health", get(health))
+    let guarded = Router::new()
         .route("/hook", post(receive_hook))
         .route("/handoff", get(deliver_handoff))
+        .route("/whoami", get(whoami))
+        // `route_layer`, not `layer`: a request for a path this server does not
+        // serve should be a 404, not a 401 that implies the path exists.
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_token,
+        ));
+
+    Router::new()
+        .route("/health", get(health))
+        .merge(guarded)
         .with_state(state)
+}
+
+/// Turn away requests that do not carry an accepted token.
+///
+/// On an open server this resolves to [`Identity::Anonymous`] and costs a
+/// header lookup. The identity is put into the request's extensions either way,
+/// so a handler downstream never has to ask again — or care which of the two
+/// ways it got there.
+async fn require_token(
+    State(state): State<AppState>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let header = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+
+    match state.auth.authenticate(header) {
+        Ok(identity) => {
+            request.extensions_mut().insert(identity);
+            next.run(request).await
+        }
+        Err(rejection) => {
+            // Logged at warn: on a server that requires tokens, a rejected
+            // request is either a misconfigured hook that has stopped
+            // recording anything or somebody else knocking. Both are worth a
+            // line, and neither is worth the token that was presented.
+            tracing::warn!(
+                path = %request.uri().path(),
+                reason = ?rejection,
+                "rejected an unauthenticated request"
+            );
+            (
+                StatusCode::UNAUTHORIZED,
+                [(header::WWW_AUTHENTICATE, "Bearer")],
+                format!("{}\n", rejection.message()),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// What the server makes of the caller's token.
+#[derive(Debug, Serialize)]
+struct WhoAmI {
+    /// `open` when no token is required, `token` when one was accepted.
+    auth: &'static str,
+    /// The operator the token belongs to, when it names one.
+    operator: Option<String>,
+}
+
+/// Report the caller's identity back to them.
+///
+/// The endpoint exists for the question `status` has to answer — "does this
+/// machine's token work?" — which no other route can answer without side
+/// effects: `/handoff` consumes a handoff, and `/hook` records an event.
+async fn whoami(Extension(identity): Extension<Identity>) -> Json<WhoAmI> {
+    Json(WhoAmI {
+        auth: if identity.is_anonymous() {
+            "open"
+        } else {
+            "token"
+        },
+        operator: identity.operator().map(ToString::to_string),
+    })
 }
 
 /// Serve until the process ends.
@@ -1154,5 +1250,268 @@ mod tests {
 
         assert!(page.is_some());
         assert!(!provider.prompt().contains("Project preferences"));
+    }
+
+    // ---------------------------------------------------------------
+    // The guard. Exercised through the real router, because what is
+    // interesting here is the wiring — which routes the layer covers, and
+    // what a request that never reaches a handler leaves behind.
+    // ---------------------------------------------------------------
+
+    use axum::body::Body;
+    use axum::http::Request as HttpRequest;
+    use tower::ServiceExt;
+
+    /// A server that accepts exactly these named secrets.
+    fn guarded(harness: &Harness, tokens: &str) -> AppState {
+        harness
+            .state
+            .clone()
+            .with_auth(Auth::parse(None, Some(tokens)).expect("tokens"))
+    }
+
+    async fn send(state: &AppState, request: HttpRequest<Body>) -> Response {
+        router(state.clone())
+            .oneshot(request)
+            .await
+            .expect("routed")
+    }
+
+    async fn body_of(response: Response) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    fn with_token(builder: axum::http::request::Builder, token: Option<&str>) -> HttpRequest<Body> {
+        let builder = match token {
+            Some(token) => builder.header("authorization", format!("Bearer {token}")),
+            None => builder,
+        };
+        builder.body(Body::empty()).expect("request")
+    }
+
+    fn hook_request(harness: &Harness, event: &str, token: Option<&str>) -> HttpRequest<Body> {
+        let payload = json!({
+            "session_id": "session-guard",
+            "hook_event_name": event,
+            "cwd": harness.cwd.to_string_lossy(),
+        });
+        let builder = HttpRequest::builder()
+            .method("POST")
+            .uri("/hook?agent=claude-code")
+            .header("content-type", "application/json");
+        let builder = match token {
+            Some(token) => builder.header("authorization", format!("Bearer {token}")),
+            None => builder,
+        };
+        builder
+            .body(Body::from(payload.to_string()))
+            .expect("request")
+    }
+
+    fn project(harness: &Harness) -> anamnesis_core::ids::ProjectId {
+        resolve_scope(&harness.cwd).expect("scope").project_id
+    }
+
+    /// The default, and the reason absence is not an error: an install that
+    /// predates tokens keeps delivering events exactly as it did.
+    #[tokio::test]
+    async fn a_server_with_no_tokens_accepts_a_hook_that_carries_none() {
+        let harness = harness();
+        let response = send(&harness.state, hook_request(&harness, "SessionStart", None)).await;
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            harness
+                .state
+                .store
+                .session_count(project(&harness))
+                .expect("count"),
+            1
+        );
+    }
+
+    /// The point of the whole module: an unauthenticated event is not recorded,
+    /// not spooled, and not half-recorded either — the session row a hook would
+    /// have created is not there, because the request never reached a handler.
+    #[tokio::test]
+    async fn a_hook_without_a_token_records_nothing() {
+        let harness = harness();
+        let state = guarded(&harness, "alice=alpha");
+
+        let response = send(&state, hook_request(&harness, "SessionStart", None)).await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer"),
+            "a 401 has to say what it wants"
+        );
+        assert_eq!(
+            state.store.session_count(project(&harness)).expect("count"),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hook_with_the_right_token_is_recorded_as_before() {
+        let harness = harness();
+        let state = guarded(&harness, "alice=alpha");
+
+        let response = send(
+            &state,
+            hook_request(&harness, "SessionStart", Some("alpha")),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            state.store.session_count(project(&harness)).expect("count"),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wrong_token_is_refused_and_told_which_variable_to_check() {
+        let harness = harness();
+        let state = guarded(&harness, "alice=alpha");
+
+        let response = send(&state, hook_request(&harness, "SessionStart", Some("beta"))).await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = body_of(response).await;
+        assert!(body.contains(auth::TOKEN_ENV), "{body}");
+        // Never the token that was presented: this text lands on someone's
+        // stderr, and stderr ends up in issues.
+        assert!(!body.contains("beta"), "{body}");
+    }
+
+    /// `status` distinguishes "the server is down" from "the server refuses
+    /// this machine", and it can only do that if liveness stays answerable
+    /// without a token.
+    #[tokio::test]
+    async fn health_answers_without_a_token() {
+        let harness = harness();
+        let state = guarded(&harness, "alice=alpha");
+
+        let request = HttpRequest::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .expect("request");
+        let response = send(&state, request).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_of(response).await, "ok\n");
+    }
+
+    #[tokio::test]
+    async fn whoami_says_who_the_token_belongs_to() {
+        let harness = harness();
+        let state = guarded(&harness, "alice=alpha,bob=beta");
+
+        let response = send(
+            &state,
+            with_token(HttpRequest::builder().uri("/whoami"), Some("beta")),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_str(&body_of(response).await).expect("json");
+        assert_eq!(body["auth"], "token");
+        assert_eq!(body["operator"], "bob");
+    }
+
+    #[tokio::test]
+    async fn whoami_admits_when_the_server_is_open() {
+        let harness = harness();
+        let response = send(
+            &harness.state,
+            with_token(HttpRequest::builder().uri("/whoami"), None),
+        )
+        .await;
+
+        let body: serde_json::Value = serde_json::from_str(&body_of(response).await).expect("json");
+        assert_eq!(body["auth"], "open");
+        assert_eq!(body["operator"], serde_json::Value::Null);
+    }
+
+    /// A handoff is single-use, so a refused request must not be a use. The
+    /// layer running before the handler is what guarantees it; this is the
+    /// test that would notice if the guard were ever moved inside.
+    #[tokio::test]
+    async fn a_refused_request_does_not_spend_the_handoff() {
+        let harness = harness();
+        run(&harness, "SessionStart", json!({"source": "startup"}));
+        run(
+            &harness,
+            "UserPromptSubmit",
+            json!({"prompt": "make it work"}),
+        );
+        run(
+            &harness,
+            "PostToolUse",
+            json!({"tool_name": "Edit", "tool_input": {"file_path": "src/lib.rs"}}),
+        );
+        run(&harness, "SessionEnd", json!({"reason": "clear"}));
+
+        let state = guarded(&harness, "alice=alpha");
+        let project = project(&harness);
+        assert!(
+            state
+                .store
+                .peek_handoff(project, None)
+                .expect("peek")
+                .is_some(),
+            "the session should have left a handoff to lose"
+        );
+
+        let uri = format!(
+            "/handoff?agent=claude-code&session_id=next&cwd={}",
+            percent_encode(&harness.cwd.to_string_lossy())
+        );
+        let response = send(&state, with_token(HttpRequest::builder().uri(uri), None)).await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            state
+                .store
+                .peek_handoff(project, None)
+                .expect("peek")
+                .is_some(),
+            "a refused request spent the handoff it was refused"
+        );
+    }
+
+    /// `route_layer`, not `layer`: a path this server does not serve is a 404.
+    /// A 401 there would tell a stranger which paths exist.
+    #[tokio::test]
+    async fn an_unknown_path_is_not_challenged_for_a_token() {
+        let harness = harness();
+        let state = guarded(&harness, "alice=alpha");
+
+        let request = HttpRequest::builder()
+            .uri("/admin")
+            .body(Body::empty())
+            .expect("request");
+
+        assert_eq!(send(&state, request).await.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Percent-encode a path so it survives being a query parameter, which on
+    /// Windows means encoding the drive colon and the backslashes.
+    fn percent_encode(value: &str) -> String {
+        value
+            .bytes()
+            .map(|byte| match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    (byte as char).to_string()
+                }
+                other => format!("%{other:02X}"),
+            })
+            .collect()
     }
 }

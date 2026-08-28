@@ -28,6 +28,11 @@ services:
     environment:
       RUST_LOG: info
       ANAMNESIS_DATA_DIR: /root/.anamnesis
+      # Uncomment to require a bearer token on every request but /health.
+      # Mint one with `anamnesis token`; whatever runs the hooks sets the same
+      # value as ANAMNESIS_TOKEN. Without it, anything that can reach the
+      # published port can read every session this memory holds.
+      # ANAMNESIS_TOKEN: ${ANAMNESIS_TOKEN:-}
     volumes:
       - anamnesis-data:/root/.anamnesis
       - /workspace:/workspace
