@@ -1458,18 +1458,42 @@ fn cmd_install_hooks(
     write: bool,
     settings: Option<PathBuf>,
 ) -> anyhow::Result<()> {
-    if agent != "claude-code" {
-        println!("No hook template for {agent} yet.");
+    let Some(harness) = hooks::harness(agent) else {
+        // A harness that cannot be wired this way gets a reason rather than a
+        // "not yet": one of them is a permanent difference in how it extends,
+        // and someone deserves to stop waiting for it.
+        match hooks::cannot_wire(agent) {
+            Some(reason) => {
+                println!("{agent} cannot be wired by install-hooks.");
+                println!();
+                println!("  {reason}");
+            }
+            None => {
+                println!("No hook template for {agent} yet.");
+                println!();
+                println!(
+                    "  Wired today: {}",
+                    hooks::HARNESSES
+                        .iter()
+                        .map(|harness| harness.agent)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+        }
         return Ok(());
-    }
+    };
 
     let binary = std::env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "anamnesis".to_owned());
-    let config = hooks::hook_config(&hooks::hook_command(&binary, agent, server));
+    let config = hooks::hook_config(&harness, &hooks::hook_command(&binary, agent, server));
 
     if !write {
-        println!("Add this to your Claude Code settings.json:");
+        println!(
+            "Add this to {}:",
+            hooks::default_settings_path(&harness, std::path::Path::new(".")).display()
+        );
         println!();
         println!("{}", serde_json::to_string_pretty(&config)?);
         println!();
@@ -1487,7 +1511,7 @@ fn cmd_install_hooks(
 
     let path = match settings {
         Some(path) => path,
-        None => hooks::default_settings_path(&std::env::current_dir()?),
+        None => hooks::default_settings_path(&harness, &std::env::current_dir()?),
     };
 
     // Read failures stop here rather than starting a fresh file over the top of
@@ -1529,6 +1553,7 @@ fn cmd_install_hooks(
     // Said rather than assumed: hooks are read when a session starts, so the
     // session running this command is not the one that will be captured.
     println!("  Takes effect in the next session, not this one.");
+    println!("  {}", harness.note);
     println!("  Start the server with `anamnesis serve`, then check with");
     println!("  `anamnesis status`.");
     // The command written into the file carries no secret, on purpose: a

@@ -34,6 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   be durable, authoritative, or a replacement for another, and it says which it
   was written as. Its entities reach the index too — the command wrote none
   before, so a page written this way was reachable through its words alone
+- `install-hooks` wires Codex CLI as well as Claude Code. Codex reads
+  `.codex/hooks.json`, names the same five lifecycle events, and delivers a
+  payload with the same field names, so nothing downstream had to learn a
+  second shape — and what a `SessionStart` hook prints on stdout becomes
+  developer context there too, which is how the handoff arrives. An agent that
+  cannot be wired this way is now told why rather than "not yet": OpenCode
+  extends through a TypeScript plugin API, not a command hook
 - `anamnesis eval --streams` scores each retrieval stream on its own and names
   the cases only it can answer — the measure that decides whether a stream
   earns its place, which a fused ranking cannot show. `Store::query_streams`

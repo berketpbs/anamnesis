@@ -11,18 +11,85 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
-/// Lifecycle events anamnesis wants from Claude Code.
+/// Lifecycle events anamnesis wants, in one harness's own spelling.
 ///
-/// `PreCompact` is among them because a compaction is the harness admitting the
-/// session no longer fits in its own context — precisely the moment a durable
-/// memory is worth having.
-const CLAUDE_CODE_EVENTS: [&str; 5] = [
-    "SessionStart",
-    "UserPromptSubmit",
-    "PostToolUse",
-    "PreCompact",
-    "SessionEnd",
-];
+/// The five are the same five everywhere: the session opening, what the person
+/// asked for, what the agent did about it, the moment the context is about to
+/// be thrown away, and the session closing. Only the names differ.
+///
+/// `PreCompact` is among them because a compaction is the harness admitting
+/// the session no longer fits in its own context — precisely the moment a
+/// durable memory is worth having.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Harness {
+    /// The name `--agent` takes, and the one the hook command passes back.
+    pub agent: &'static str,
+    /// Configuration file, as path components under the project root.
+    pub settings: &'static [&'static str],
+    /// The five events, in this harness's spelling.
+    pub events: &'static [&'static str],
+    /// What to tell someone about this file after writing it.
+    pub note: &'static str,
+}
+
+/// Claude Code: hooks live beside the rest of its settings.
+pub const CLAUDE_CODE: Harness = Harness {
+    agent: "claude-code",
+    settings: &[".claude", "settings.local.json"],
+    events: &[
+        "SessionStart",
+        "UserPromptSubmit",
+        "PostToolUse",
+        "PreCompact",
+        "SessionEnd",
+    ],
+    note: "Hooks are read when a session starts.",
+};
+
+/// Codex CLI: a file of its own, and the same five names.
+///
+/// The payloads match Claude Code's field for field — `session_id`, `cwd`,
+/// `hook_event_name`, `tool_name`, `tool_input` — so nothing downstream had to
+/// learn a second shape. What a `SessionStart` hook prints on stdout becomes
+/// developer context, which is how the handoff arrives, exactly as it does in
+/// Claude Code.
+pub const CODEX: Harness = Harness {
+    agent: "codex",
+    settings: &[".codex", "hooks.json"],
+    events: &[
+        "SessionStart",
+        "UserPromptSubmit",
+        "PostToolUse",
+        "PreCompact",
+        "SessionEnd",
+    ],
+    note: "Hooks are on unless `[features] hooks = false` says otherwise.",
+};
+
+/// Every harness `install-hooks` can wire.
+pub const HARNESSES: [Harness; 2] = [CLAUDE_CODE, CODEX];
+
+/// The harness `agent` names, if it is one anamnesis can wire.
+pub fn harness(agent: &str) -> Option<Harness> {
+    HARNESSES.into_iter().find(|h| h.agent == agent)
+}
+
+/// Why a harness anamnesis knows about still cannot be wired this way.
+///
+/// Said rather than left as "not yet", because for one of them it is not a
+/// gap that will close: an answer someone can act on beats a promise.
+pub fn cannot_wire(agent: &str) -> Option<&'static str> {
+    match agent {
+        "opencode" => Some(
+            "OpenCode extends through a TypeScript plugin API, not a command hook:\n  \
+             a plugin is a module under .opencode/plugins/ that subscribes to events\n  \
+             like `session.created` and returns context through the SDK client.\n  \
+             There is no command for `install-hooks` to register, and writing the\n  \
+             plugin here would mean guessing at how it hands a handoff back.",
+        ),
+        _ => None,
+    }
+}
 
 /// What a merge did, per event.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -40,9 +107,10 @@ impl Outcome {
     }
 }
 
-/// The hook configuration for one harness, as a settings file holds it.
-pub fn hook_config(command: &str) -> Value {
-    let hooks: Map<String, Value> = CLAUDE_CODE_EVENTS
+/// The hook configuration for one harness, as its settings file holds it.
+pub fn hook_config(harness: &Harness, command: &str) -> Value {
+    let hooks: Map<String, Value> = harness
+        .events
         .iter()
         .map(|event| {
             (
@@ -127,15 +195,18 @@ fn commands_in(matchers: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Where Claude Code's project-local settings live, under `root`.
+/// Where a harness's project-local configuration lives, under `root`.
 ///
-/// The local file rather than the shared one, and the project's rather than the
-/// user's: `install-hooks` is run from inside a project and points at that
-/// project's server, so writing hooks that fire in every repository someone
-/// opens would be doing something they did not ask for. `--settings` is there
-/// for anyone who wants exactly that.
-pub fn default_settings_path(root: &Path) -> PathBuf {
-    root.join(".claude").join("settings.local.json")
+/// The project's rather than the user's, and for Claude Code the local file
+/// rather than the shared one: `install-hooks` is run from inside a project and
+/// points at that project's server, so writing hooks that fire in every
+/// repository someone opens would be doing something they did not ask for.
+/// `--settings` is there for anyone who wants exactly that.
+pub fn default_settings_path(harness: &Harness, root: &Path) -> PathBuf {
+    harness
+        .settings
+        .iter()
+        .fold(root.to_path_buf(), |path, component| path.join(component))
 }
 
 /// Read a settings file, or start an empty one.
@@ -187,14 +258,17 @@ mod tests {
     use super::*;
 
     fn config() -> Value {
-        hook_config("anamnesis hook --agent claude-code --server http://localhost:8080")
+        hook_config(
+            &CLAUDE_CODE,
+            "anamnesis hook --agent claude-code --server http://localhost:8080",
+        )
     }
 
     #[test]
     fn merging_into_an_empty_file_wires_every_event() {
         let mut settings = Value::Object(Map::new());
         let outcome = merge(&mut settings, &config());
-        assert_eq!(outcome.added.len(), CLAUDE_CODE_EVENTS.len());
+        assert_eq!(outcome.added.len(), CLAUDE_CODE.events.len());
         assert!(outcome.present.is_empty());
     }
 
@@ -208,7 +282,7 @@ mod tests {
         let second = merge(&mut settings, &config());
 
         assert!(second.added.is_empty());
-        assert_eq!(second.present.len(), CLAUDE_CODE_EVENTS.len());
+        assert_eq!(second.present.len(), CLAUDE_CODE.events.len());
         assert!(!second.changed());
 
         let matchers = settings["hooks"]["PostToolUse"].as_array().expect("array");
@@ -246,10 +320,12 @@ mod tests {
         let mut settings = Value::Object(Map::new());
         merge(&mut settings, &config());
 
-        let elsewhere =
-            hook_config("anamnesis hook --agent claude-code --server http://other:9000");
+        let elsewhere = hook_config(
+            &CLAUDE_CODE,
+            "anamnesis hook --agent claude-code --server http://other:9000",
+        );
         let outcome = merge(&mut settings, &elsewhere);
-        assert_eq!(outcome.added.len(), CLAUDE_CODE_EVENTS.len());
+        assert_eq!(outcome.added.len(), CLAUDE_CODE.events.len());
     }
 
     #[test]
@@ -264,7 +340,7 @@ mod tests {
     #[test]
     fn a_missing_settings_file_reads_as_an_empty_one() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = default_settings_path(dir.path());
+        let path = default_settings_path(&CLAUDE_CODE, dir.path());
         assert_eq!(
             read_settings(&path).expect("read"),
             Value::Object(Map::new())
@@ -297,7 +373,7 @@ mod tests {
     #[test]
     fn writing_creates_the_directory_and_round_trips() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = default_settings_path(dir.path());
+        let path = default_settings_path(&CLAUDE_CODE, dir.path());
 
         let mut settings = Value::Object(Map::new());
         merge(&mut settings, &config());
@@ -324,5 +400,86 @@ mod tests {
             .filter(|name| name.contains("anamnesis-tmp"))
             .collect();
         assert!(strays.is_empty(), "{strays:?}");
+    }
+
+    /// The five events are the same five for every harness, whatever each one
+    /// calls them. A harness wired for four of them captures a session with a
+    /// hole in it, and nothing would say which.
+    #[test]
+    fn every_harness_wires_the_same_five_moments() {
+        for harness in HARNESSES {
+            assert_eq!(
+                harness.events.len(),
+                5,
+                "{} wires {} events",
+                harness.agent,
+                harness.events.len()
+            );
+        }
+    }
+
+    /// Two harnesses writing to one path would have each overwrite the other's
+    /// hooks, and the second `install-hooks` would look like it had worked.
+    #[test]
+    fn no_two_harnesses_write_to_the_same_file() {
+        let root = Path::new("/project");
+        let mut seen: Vec<PathBuf> = Vec::new();
+        for harness in HARNESSES {
+            let path = default_settings_path(&harness, root);
+            assert!(
+                !seen.contains(&path),
+                "{} collides on {path:?}",
+                harness.agent
+            );
+            seen.push(path);
+        }
+    }
+
+    #[test]
+    fn a_harness_is_found_by_the_name_the_flag_takes() {
+        assert_eq!(harness("codex").expect("codex").agent, "codex");
+        assert_eq!(
+            harness("claude-code").expect("claude-code").agent,
+            "claude-code"
+        );
+        assert!(harness("nonesuch").is_none());
+    }
+
+    /// Codex reads its own file rather than a settings file it shares with
+    /// anything else, so the path is where the difference shows.
+    #[test]
+    fn codex_hooks_go_to_its_own_file() {
+        let path = default_settings_path(&CODEX, Path::new("/project"));
+        assert!(path.ends_with("hooks.json"), "{path:?}");
+        assert!(path.to_string_lossy().contains(".codex"), "{path:?}");
+    }
+
+    /// The merge is shared, so a second harness has to inherit the property
+    /// that matters most: running it twice wires nothing twice.
+    #[test]
+    fn wiring_codex_twice_changes_nothing_the_second_time() {
+        let config = hook_config(&CODEX, "anamnesis hook --agent codex");
+        let mut settings = Value::Object(Map::new());
+
+        let first = merge(&mut settings, &config);
+        assert_eq!(first.added.len(), CODEX.events.len());
+
+        let second = merge(&mut settings, &config);
+        assert!(!second.changed());
+        assert_eq!(second.present.len(), CODEX.events.len());
+    }
+
+    /// A harness that extends through something other than a command hook has
+    /// to say so. Left as "not yet", someone waits for a release that is never
+    /// coming.
+    #[test]
+    fn opencode_is_told_why_rather_than_when() {
+        let reason = cannot_wire("opencode").expect("a reason");
+        assert!(reason.contains("plugin"), "{reason}");
+        assert!(
+            cannot_wire("codex").is_none(),
+            "codex is wired, not refused"
+        );
+        assert!(cannot_wire("claude-code").is_none());
     }
 }
