@@ -101,23 +101,16 @@ impl FixturePage {
 
     /// The tier this page belongs to.
     ///
-    /// An unrecognised name is refused rather than defaulted. A suite that
-    /// says `semantik` means something by it, and quietly filing the page as
-    /// episodic would change what the case is measuring without saying so.
+    /// An unrecognised name is refused rather than defaulted, by the same
+    /// reader the CLI and the MCP server use: a suite that says `semantik`
+    /// means something by it, and quietly filing the page as episodic would
+    /// change what the case is measuring without saying so.
     pub fn parsed_tier(&self) -> Result<Tier, EvalError> {
         if self.tier.trim().is_empty() {
             return Ok(Tier::Episodic);
         }
-        match self.tier.trim().to_ascii_lowercase().as_str() {
-            "working" => Ok(Tier::Working),
-            "episodic" => Ok(Tier::Episodic),
-            "semantic" => Ok(Tier::Semantic),
-            "procedural" => Ok(Tier::Procedural),
-            other => Err(EvalError::Suite(format!(
-                "unknown tier {other:?} on {}; expected working, episodic, semantic, or procedural",
-                self.path
-            ))),
-        }
+        Tier::parse(&self.tier)
+            .map_err(|error| EvalError::Suite(format!("{error} (on {})", self.path)))
     }
 }
 
@@ -258,7 +251,10 @@ relevant = ["decisions/0001-sqlite.md"]
             "title = \"Why SQLite\"\ntier = \"semantik\"",
         );
         let error = Suite::from_toml(&source).expect_err("should refuse");
-        assert!(error.to_string().contains("unknown tier"), "{error}");
+        // The reader is core's, so the wording is core's. What the suite owes
+        // the reader is which page it was on.
+        assert!(error.to_string().contains("semantik"), "{error}");
+        assert!(error.to_string().contains("0001-sqlite.md"), "{error}");
     }
 
     #[test]
