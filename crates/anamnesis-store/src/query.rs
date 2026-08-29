@@ -17,7 +17,7 @@ use std::collections::HashMap;
 
 use anamnesis_core::ids::{PageId, ProjectId};
 use anamnesis_core::page::{Entity, PagePath, PageStatus, Tier};
-use anamnesis_core::retrieval::{RRF_K, authority_multiplier, fuse_and_rank, tokenize};
+use anamnesis_core::retrieval::{RRF_K, Tuning, fuse_and_rank, fuse_weighted, tokenize};
 use jiff::Timestamp;
 use rusqlite::types::Value;
 use rusqlite::{OptionalExtension, params, params_from_iter};
@@ -124,6 +124,25 @@ impl Store {
         now: Timestamp,
         embedding: Option<(&str, &[f32])>,
     ) -> Result<Vec<PageHit>> {
+        self.query_pages_with(project_id, query, limit, now, embedding, &Tuning::default())
+    }
+
+    /// [`Store::query_pages`], with the fusion constants named rather than
+    /// assumed.
+    ///
+    /// The same call the server makes, which is the point: `anamnesis eval
+    /// --sweep` scores settings by running real queries through this, so what
+    /// a sweep reports is the ranking that would ship rather than a model of
+    /// it. Production passes [`Tuning::default`] and always has.
+    pub fn query_pages_with(
+        &self,
+        project_id: ProjectId,
+        query: &str,
+        limit: usize,
+        now: Timestamp,
+        embedding: Option<(&str, &[f32])>,
+        tuning: &Tuning,
+    ) -> Result<Vec<PageHit>> {
         let tokens = tokenize(query);
         if tokens.is_empty() || limit == 0 {
             return Ok(Vec::new());
@@ -148,7 +167,16 @@ impl Store {
             _ => Vec::new(),
         };
 
-        let fused = fuse_and_rank(&[fts, entity, links, vectors], RRF_K);
+        let weights = tuning.weights();
+        let fused = fuse_weighted(
+            &[
+                (fts.as_slice(), weights[0]),
+                (entity.as_slice(), weights[1]),
+                (links.as_slice(), weights[2]),
+                (vectors.as_slice(), weights[3]),
+            ],
+            tuning.rrf_k,
+        );
         if fused.is_empty() {
             return Ok(Vec::new());
         }
@@ -161,7 +189,7 @@ impl Store {
             .filter_map(|(id, score)| {
                 let row = rows.get(&id)?;
                 let adjusted = score
-                    * authority_multiplier(row.pinned, row.canonical, row.path.is_authoritative());
+                    * tuning.authority(row.pinned, row.canonical, row.path.is_authoritative());
                 Some(PageHit {
                     page_id: id,
                     project_id: row.project_id,

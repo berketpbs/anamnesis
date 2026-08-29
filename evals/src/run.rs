@@ -1,6 +1,7 @@
 //! Running a suite and reporting what happened.
 
 use anamnesis_core::page::PagePath;
+use anamnesis_core::retrieval::Tuning;
 use jiff::Timestamp;
 
 use crate::EvalError;
@@ -85,10 +86,23 @@ impl Report {
 /// only because the clock is held still.
 pub fn run(suite: &Suite, now: Timestamp) -> Result<Report, EvalError> {
     let corpus = Corpus::build(suite, now)?;
+    run_on(&corpus, suite, now, &Tuning::default())
+}
 
+/// Score a suite against a corpus that is already built.
+///
+/// Separate from [`run`] because a sweep asks the same questions of the same
+/// pages sixty times over, and building the corpus is the expensive half: every
+/// page is a file written into a git repository and committed.
+pub fn run_on(
+    corpus: &Corpus,
+    suite: &Suite,
+    now: Timestamp,
+    tuning: &Tuning,
+) -> Result<Report, EvalError> {
     let mut cases = Vec::with_capacity(suite.cases.len());
     for case in &suite.cases {
-        cases.push(run_case(&corpus, case, suite.limit, now)?);
+        cases.push(run_case(corpus, case, suite.limit, now, tuning)?);
     }
 
     let scores: Vec<CaseScore> = cases.iter().map(|case| case.score.clone()).collect();
@@ -115,10 +129,12 @@ fn run_case(
     case: &Case,
     limit: usize,
     now: Timestamp,
+    tuning: &Tuning,
 ) -> Result<CaseOutcome, EvalError> {
-    let hits = corpus
-        .store
-        .query_pages(corpus.project_id, &case.query, limit, now, None)?;
+    let hits =
+        corpus
+            .store
+            .query_pages_with(corpus.project_id, &case.query, limit, now, None, tuning)?;
 
     let returned: Vec<String> = hits
         .iter()
