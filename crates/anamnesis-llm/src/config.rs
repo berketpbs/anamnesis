@@ -16,6 +16,7 @@ use secrecy::SecretString;
 
 use crate::LlmError;
 use crate::anthropic::Anthropic;
+use crate::openai::OpenAiCompatible;
 use crate::provider::Provider;
 
 /// Which backend to talk to.
@@ -24,6 +25,13 @@ pub enum ProviderKind {
     /// The Anthropic Messages API.
     #[default]
     Anthropic,
+    /// The OpenAI chat-completions API, or a gateway presenting it.
+    OpenAi,
+    /// Ollama, on this machine. The same wire format as [`ProviderKind::OpenAi`]
+    /// with a different default address and no credential to present — kept
+    /// separate so that "consolidation ran locally" is a thing the logs can
+    /// say.
+    Ollama,
     /// No model. Consolidation stays deterministic.
     None,
 }
@@ -34,9 +42,11 @@ impl FromStr for ProviderKind {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
             "anthropic" | "claude" => Ok(Self::Anthropic),
+            "openai" | "openai-compatible" | "oai" => Ok(Self::OpenAi),
+            "ollama" | "local" => Ok(Self::Ollama),
             "none" | "off" | "disabled" => Ok(Self::None),
             other => Err(LlmError::Config(format!(
-                "unknown provider {other:?}; expected \"anthropic\" or \"none\""
+                "unknown provider {other:?}; expected \"anthropic\", \"openai\", \"ollama\" or \"none\""
             ))),
         }
     }
@@ -102,8 +112,22 @@ impl FromStr for Effort {
 /// `ANAMNESIS_LLM_MODEL` overrides this.
 const DEFAULT_MODEL: &str = "claude-opus-5";
 
-/// Default API root.
+/// Default API root for Anthropic.
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+
+/// Default API root for the OpenAI chat-completions API.
+const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+
+/// Default API root for Ollama, which listens here unless told otherwise.
+const DEFAULT_OLLAMA_BASE_URL: &str = "http://127.0.0.1:11434/v1";
+
+/// Default model for Ollama.
+///
+/// Named rather than left as the Anthropic default, which no local server has
+/// ever heard of: a first run that has to be told the model as well as the
+/// provider is a first run most people abandon. Wrong for anyone who pulled
+/// something else, and `ANAMNESIS_LLM_MODEL` is one variable.
+const DEFAULT_OLLAMA_MODEL: &str = "llama3.2";
 
 /// Default ceiling on prompt size, in estimated tokens.
 ///
@@ -192,6 +216,19 @@ impl LlmConfig {
         };
         config.api_key = key.map(SecretString::from);
 
+        // Defaults that depend on which backend was chosen, applied before the
+        // overrides below so that an explicit `ANAMNESIS_LLM_BASE_URL` still
+        // wins. Without this, choosing `ollama` would inherit Anthropic's
+        // address and fail in a way that names neither.
+        match config.provider {
+            ProviderKind::OpenAi => config.base_url = DEFAULT_OPENAI_BASE_URL.to_owned(),
+            ProviderKind::Ollama => {
+                config.base_url = DEFAULT_OLLAMA_BASE_URL.to_owned();
+                config.model = DEFAULT_OLLAMA_MODEL.to_owned();
+            }
+            ProviderKind::Anthropic | ProviderKind::None => {}
+        }
+
         if config.provider == ProviderKind::Anthropic && config.api_key.is_none() {
             return Err(LlmError::Config(
                 "provider is anthropic but no ANTHROPIC_API_KEY (or ANAMNESIS_LLM_API_KEY) is set"
@@ -242,6 +279,8 @@ impl LlmConfig {
         match self.provider {
             ProviderKind::None => Ok(None),
             ProviderKind::Anthropic => Ok(Some(Arc::new(Anthropic::new(self)?))),
+            ProviderKind::OpenAi => Ok(Some(Arc::new(OpenAiCompatible::new(self, "openai")?))),
+            ProviderKind::Ollama => Ok(Some(Arc::new(OpenAiCompatible::new(self, "ollama")?))),
         }
     }
 }
@@ -277,6 +316,60 @@ mod tests {
                 .iter()
                 .find(|(k, _)| k == key)
                 .map(|(_, v)| v.to_owned())
+        }
+    }
+
+    /// The point of the local backend: it runs without a credential. Requiring
+    /// one would make the only configuration that costs nothing, and sends
+    /// nobody's session transcript anywhere, impossible to express.
+    #[test]
+    fn ollama_needs_no_key_and_knows_where_it_lives() {
+        let config = LlmConfig::from_vars(vars(&[("ANAMNESIS_LLM_PROVIDER", "ollama")]))
+            .expect("a local model needs no key");
+
+        assert_eq!(config.provider, ProviderKind::Ollama);
+        assert!(config.api_key.is_none());
+        assert_eq!(config.base_url, "http://127.0.0.1:11434/v1");
+        assert_eq!(config.model, "llama3.2");
+        assert!(config.build().expect("builds").is_some());
+    }
+
+    #[test]
+    fn openai_defaults_to_openai_rather_than_to_anthropics_address() {
+        let config = LlmConfig::from_vars(vars(&[
+            ("ANAMNESIS_LLM_PROVIDER", "openai"),
+            ("ANAMNESIS_LLM_API_KEY", "sk-test"),
+        ]))
+        .expect("config");
+
+        assert_eq!(config.provider, ProviderKind::OpenAi);
+        assert_eq!(config.base_url, "https://api.openai.com/v1");
+    }
+
+    /// The per-provider default is a default, not a decision. Someone pointing
+    /// at a gateway, a second Ollama on another port, or vLLM says so once.
+    #[test]
+    fn an_explicit_base_url_still_wins() {
+        let config = LlmConfig::from_vars(vars(&[
+            ("ANAMNESIS_LLM_PROVIDER", "ollama"),
+            ("ANAMNESIS_LLM_BASE_URL", "http://gpu-box:8000/v1/"),
+            ("ANAMNESIS_LLM_MODEL", "qwen2.5"),
+        ]))
+        .expect("config");
+
+        assert_eq!(config.base_url, "http://gpu-box:8000/v1");
+        assert_eq!(config.model, "qwen2.5");
+    }
+
+    /// A misspelled provider has to name what it could have been, or the
+    /// person retyping it is guessing.
+    #[test]
+    fn an_unknown_provider_lists_the_ones_there_are() {
+        let error = LlmConfig::from_vars(vars(&[("ANAMNESIS_LLM_PROVIDER", "openia")]))
+            .expect_err("should refuse");
+        let message = error.to_string();
+        for expected in ["anthropic", "openai", "ollama", "none"] {
+            assert!(message.contains(expected), "{message}");
         }
     }
 
