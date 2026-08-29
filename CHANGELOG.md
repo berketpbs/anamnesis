@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- A model that escapes its own newlines gets them back. Seen in a real reply
+  from a local model: every paragraph break in the handoff was the two
+  characters `\` and `n`, so the JSON was valid, the fields were non-empty
+  strings, every check passed, and the next session would have been handed one
+  unbroken wall of text with the escapes printed in it. Unescaped only when the
+  text contains no real newline at all — a page that has line breaks *and*
+  writes the sequence is explaining it, most likely in code, and rewriting that
+  would corrupt the one thing it was trying to say
 - The hook says, where it will be read, that capture is not working. This
   repository's own memory recorded nothing for four days: the server was not
   running, every hook failed to connect, and the only report was a line on
