@@ -51,9 +51,17 @@ pub use suite::{Case, FixturePage, Suite, Thresholds};
 /// thing from an installed binary as it does from a checkout.
 pub const RETRIEVAL_SUITE: &str = include_str!("../suites/retrieval.toml");
 
+/// The suite retrieval is *not* tuned on.
+///
+/// Twice the corpus, most questions with a plausible competitor, and half the
+/// answers on pages with no authority at all. A knob chosen because it suits
+/// ten questions will suit those ten questions; this is the set that says
+/// whether it suits anything else.
+pub const CROWDED_SUITE: &str = include_str!("../suites/crowded.toml");
+
 /// The suites built into this binary, by name.
 pub fn builtin_suites() -> Vec<(&'static str, &'static str)> {
-    vec![("retrieval", RETRIEVAL_SUITE)]
+    vec![("retrieval", RETRIEVAL_SUITE), ("crowded", CROWDED_SUITE)]
 }
 
 /// Something an eval could not do.

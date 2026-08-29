@@ -1,0 +1,426 @@
+# The crowded suite: can memory find the right page when several are plausible?
+#
+# `retrieval.toml` asks whether an answer is reachable. This one asks whether
+# it wins. The corpus is twice the size, most questions have two or three pages
+# that could sound like the answer, and the links between them are dense enough
+# that neighbour expansion pulls in wrong pages as readily as right ones.
+#
+# It exists to be the set no knob is tuned on. Three numbers in retrieval —
+# the RRF constant, the authority multiplier, the weight of each stream — were
+# chosen by argument, and a sweep run against ten questions would find whatever
+# those ten questions happen to reward. A second corpus, written to a different
+# shape, is what separates a real improvement from a fitted one.
+#
+# It found something before any knob was touched. See the thresholds below.
+#
+# So the shape is deliberate:
+#
+#   - Several questions are answered by an ordinary note while an authoritative
+#     `decisions/` page shares their words. Weight authority too heavily and
+#     these are the cases that break; a corpus where the canonical page is
+#     always right would call that weighting free.
+#   - The pages are linked in a cluster around the incident, so link expansion
+#     has both genuine signal and genuine noise to offer.
+#   - One decision replaces another. The replaced page stays in the wiki and
+#     must stop being offered.
+#   - Sessions outnumber decisions, as they do in a real project, and they use
+#     the same vocabulary.
+
+name = "crowded"
+description = "Ranking under competition: a corpus where more than one page could plausibly answer"
+
+limit = 5
+
+# Measured, then rounded down. These are a floor, not a target — and this
+# floor is low because the first run found something.
+#
+# As of the first run: MRR 0.436, recall 0.533. Full-text search **on its own**
+# scores 0.900 / 0.933 over the same questions. Fusion is not trading rank for
+# recall here; it is losing pages full text ranked first, seven of fifteen of
+# them, and the eight questions only full text can answer are exactly the ones
+# it loses. On `retrieval.toml`'s ten-page corpus fusion gained recall (1.000
+# against full text's 0.800), which is why this went unseen: the effect needs a
+# corpus with enough linked, entity-bearing pages to crowd out a single
+# stream's favourite, and real memory becomes one within a month.
+#
+# Raising these numbers is the tuning work, not this suite's job. The suite's
+# job is to be the number that says whether the tuning worked.
+[thresholds]
+min_mrr = 0.43
+min_recall = 0.53
+
+# ---------------------------------------------------------------------------
+# Rules: pinned, canonical, and in an authoritative namespace — everything the
+# ranking is told to prefer, all at once.
+# ---------------------------------------------------------------------------
+
+[[page]]
+path = "_rules/release-window.md"
+title = "When releases go out"
+tier = "procedural"
+canonical = true
+pinned = true
+entities = ["release window"]
+body = """
+Tuesday through Thursday, before 16:00. Not Friday, and not the day before a
+holiday: the rule is about who is awake to notice, not about the day itself.
+
+An exception needs someone on call who agreed to it in advance. See
+[[procedures/rollback.md]].
+"""
+
+[[page]]
+path = "_rules/secrets.md"
+title = "Secrets never live in the repository"
+tier = "procedural"
+canonical = true
+pinned = true
+entities = ["secrets"]
+body = """
+No credential, token, or connection string is committed, including in a file
+that is only meant to be an example. A .env file belongs in the ignore list
+and in the deployment environment, nowhere else.
+
+Anything that reaches a commit is treated as leaked and rotated.
+"""
+
+# ---------------------------------------------------------------------------
+# Decisions: authoritative, canonical, durable. Two of them are about adjacent
+# subjects and share most of their vocabulary, which is the point.
+# ---------------------------------------------------------------------------
+
+[[page]]
+path = "decisions/0001-queue.md"
+title = "Redis for the job queue"
+tier = "semantic"
+canonical = true
+entities = ["Redis", "Kafka"]
+body = """
+Jobs are queued in Redis. Kafka was rejected: the ordering guarantees it
+offers are ones this workload never needed, and the operational weight is
+real.
+
+The queue is not the store of record. A job lost in a restart is replayed from
+the database it was derived from. See [[notes/queue-latency.md]].
+"""
+
+[[page]]
+path = "decisions/0002-retries.md"
+title = "Three retries, with jitter"
+tier = "semantic"
+canonical = true
+entities = ["exponential backoff", "jitter"]
+body = """
+A failed job is retried three times with exponential backoff, and the delay
+carries jitter so that a downstream outage does not produce a synchronised
+stampede when it ends.
+
+Past three, the job is parked for a person to look at. Retrying forever turns
+one broken job into a permanent load.
+
+See [[notes/postmortem-2026-07-14.md]].
+"""
+
+[[page]]
+path = "decisions/0003-timeouts.md"
+title = "Client timeout is 30 seconds"
+tier = "semantic"
+entities = ["timeout"]
+body = """
+Outbound calls give up after 30 seconds.
+
+Replaced: 30 seconds was chosen when one downstream service was slow, and it
+outlived the reason. See [[decisions/0005-timeouts.md]].
+"""
+
+[[page]]
+path = "decisions/0005-timeouts.md"
+title = "Outbound calls give up after five seconds"
+tier = "semantic"
+canonical = true
+supersedes = "decisions/0003-timeouts.md"
+entities = ["timeout", "deadline"]
+body = """
+Five seconds, measured end to end, and the deadline travels with the request
+rather than being reset at each hop.
+
+A call that has not answered in five seconds is not going to answer usefully:
+the caller has already given up, and the work done after that is work nobody
+is waiting for.
+"""
+
+[[page]]
+path = "decisions/0004-migrations.md"
+title = "Schema changes ship before the code that needs them"
+tier = "semantic"
+canonical = true
+entities = ["expand contract"]
+body = """
+Every schema change is expand then contract: add the new shape, deploy code
+that writes both, backfill, then remove the old shape in a later release.
+
+The reason is rollback. A deploy that cannot be reversed because the schema
+moved under it is a deploy nobody can undo at three in the morning.
+"""
+
+# ---------------------------------------------------------------------------
+# Procedures and gotchas: authoritative namespaces, but ordinary content.
+# ---------------------------------------------------------------------------
+
+[[page]]
+path = "procedures/rollback.md"
+title = "Rolling back a deploy"
+tier = "procedural"
+entities = ["rollback"]
+body = """
+Redeploy the previous image tag; do not revert the commit first. The tag is
+already built and already tested, and reverting produces a new artifact nobody
+has run.
+
+If the release included a schema change, read [[decisions/0004-migrations.md]]
+before touching anything.
+"""
+
+[[page]]
+path = "procedures/oncall-handover.md"
+title = "Handing over the pager"
+tier = "procedural"
+entities = ["pager"]
+body = """
+The outgoing shift writes what is still open, what was silenced and until
+when, and anything running that should not be interrupted. A handover with
+nothing open still gets written; silence is not the same as nothing to say.
+"""
+
+[[page]]
+path = "gotchas/clock-skew.md"
+title = "Two hosts, two clocks"
+tier = "procedural"
+entities = ["clock skew", "NTP"]
+body = """
+Scheduled work compared timestamps across hosts and fired twice a day for a
+week. The hosts were forty seconds apart; NTP had been failing quietly on one
+of them since it was rebuilt.
+
+Compare durations, not wall clocks, whenever the two ends are different
+machines.
+"""
+
+# ---------------------------------------------------------------------------
+# Notes: plain pages, no authority, and several of them are the right answer to
+# a question an authoritative page also sounds like it answers.
+# ---------------------------------------------------------------------------
+
+[[page]]
+path = "notes/postmortem-2026-07-14.md"
+title = "Postmortem: the queue backed up for nine hours"
+entities = ["postmortem"]
+body = """
+A downstream API started refusing every request at 02:10. Retries were working
+exactly as designed, and that was the problem: every parked job was retried on
+the same schedule, so the queue drained slower than it filled for nine hours.
+
+What actually fixed it was pausing the workers, not changing any limit.
+
+Related: [[decisions/0002-retries.md]], [[notes/queue-latency.md]],
+[[procedures/rollback.md]]
+"""
+
+[[page]]
+path = "notes/redis-memory.md"
+title = "Keys vanishing under load"
+entities = ["maxmemory", "eviction"]
+body = """
+Under memory pressure the server started evicting keys, including ones nothing
+expected to expire, because the policy was allkeys-lru rather than
+volatile-lru. Jobs disappeared without an error anywhere.
+
+Related: [[decisions/0001-queue.md]]
+"""
+
+[[page]]
+path = "notes/queue-latency.md"
+title = "Where the time actually goes"
+body = """
+Enqueue to start is a few milliseconds. Almost all of the latency anyone
+notices is the work itself, and most of the rest is one downstream call.
+
+Related: [[decisions/0001-queue.md]]
+"""
+
+[[page]]
+path = "notes/timeout-tuning.md"
+title = "Numbers we tried"
+body = """
+Sixty seconds hid the problem, ten seconds was fine for everything except one
+report endpoint, and the report endpoint turned out to be doing work that
+belonged in a job.
+
+Related: [[decisions/0005-timeouts.md]]
+"""
+
+[[page]]
+path = "notes/staging-parity.md"
+title = "Staging is not production"
+body = """
+One instance, no replicas, and a database restored from a two-week-old
+snapshot. Load behaviour proved nothing there, and twice a change looked fine
+in staging for exactly that reason.
+"""
+
+[[page]]
+path = "notes/flaky-test.md"
+title = "The test that only fails in CI"
+entities = ["tempdir"]
+body = """
+It passes locally every time. In CI the temporary directory is on a different
+filesystem, and the test asserted on the order the entries came back in.
+"""
+
+[[page]]
+path = "notes/old-runbook-link.md"
+title = "The runbook moved"
+body = """
+The old wiki page is gone; rollback steps live in [[procedures/rollback.md]]
+now.
+"""
+
+# ---------------------------------------------------------------------------
+# Sessions: episodic, and the majority of the corpus, exactly as they are in a
+# real project. They share vocabulary with everything above.
+# ---------------------------------------------------------------------------
+
+[[page]]
+path = "sessions/2026-07-14-a1b2c3d4.md"
+title = "Session: the morning the queue backed up"
+entities = ["worker.rs"]
+body = """
+Paused the workers, drained by hand, brought them back a third at a time.
+Nobody changed a retry limit, though three people suggested it.
+
+Related: [[notes/postmortem-2026-07-14.md]]
+"""
+
+[[page]]
+path = "sessions/2026-07-21-b2c3d4e5.md"
+title = "Session: shortened the client timeout"
+entities = ["client.rs"]
+body = """
+Took the outbound timeout down and watched the error rate for an afternoon. It
+did not move, which was the argument.
+
+Related: [[decisions/0005-timeouts.md]], [[notes/timeout-tuning.md]]
+"""
+
+[[page]]
+path = "sessions/2026-08-03-c3d4e5f6.md"
+title = "Session: expand and contract, first try"
+entities = ["migrate.rs"]
+body = """
+Shipped the additive half, backfilled overnight, and left the old column in
+place for a week. The contract half was four lines and took a minute.
+
+Related: [[decisions/0004-migrations.md]]
+"""
+
+[[page]]
+path = "sessions/2026-08-11-d4e5f6a7.md"
+title = "Session: chased eviction for an afternoon"
+entities = ["redis.conf"]
+body = """
+Spent most of it convinced the queue was dropping jobs. It was the eviction
+policy. Changed the policy, added an alert on used memory.
+
+Related: [[notes/redis-memory.md]]
+"""
+
+[[page]]
+path = "sessions/2026-08-19-e5f6a7b8.md"
+title = "Session: rolled back a release"
+entities = ["deploy.sh"]
+body = """
+Redeployed the previous tag eleven minutes after the release. The schema
+change was additive, so there was nothing to undo underneath it.
+
+Related: [[procedures/rollback.md]], [[decisions/0004-migrations.md]]
+"""
+
+# ---------------------------------------------------------------------------
+# The questions. Roughly half are answered by a page with no authority at all,
+# and most have a plausible competitor.
+# ---------------------------------------------------------------------------
+
+[[case]]
+query = "why did the queue back up in july"
+relevant = ["notes/postmortem-2026-07-14.md", "sessions/2026-07-14-a1b2c3d4.md"]
+note = "The answer is a plain note; a canonical decision page about retries shares its whole vocabulary and links to it. If authority is weighted too heavily, the decision wins and this case says so."
+
+[[case]]
+query = "keys disappearing under load"
+relevant = ["notes/redis-memory.md"]
+note = "Again a note against a canonical page: the queue decision is the page that says Redis, but the one that answers this says maxmemory and eviction."
+
+[[case]]
+query = "how long before we give up on a call"
+relevant = ["decisions/0005-timeouts.md"]
+note = "Paraphrase — the page says give up after five seconds, the question says how long. It also has to beat the page it replaced, which is still in the wiki."
+
+[[case]]
+query = "timeout"
+relevant = ["decisions/0005-timeouts.md"]
+note = "The superseded page declares the same entity and says timeout in its title. Retrieval must offer the replacement, not the page it replaced."
+
+[[case]]
+query = "can i deploy on friday"
+relevant = ["_rules/release-window.md"]
+note = "Question shape: the page never says Friday except to exclude it, and never says deploy at all."
+
+[[case]]
+query = "jitter"
+relevant = ["decisions/0002-retries.md"]
+note = "A single entity, declared by one page and said once in its body. Both the entity and full-text streams should reach it."
+
+[[case]]
+query = "expand contract migration"
+relevant = ["decisions/0004-migrations.md", "sessions/2026-08-03-c3d4e5f6.md"]
+note = "A decision and the session that carried it out. Either is a fair answer; the decision is the better one."
+
+[[case]]
+query = "roll back a bad release"
+relevant = ["procedures/rollback.md", "sessions/2026-08-19-e5f6a7b8.md"]
+note = "Three pages link to the procedure, so this is the case where link expansion is genuinely earning its place rather than adding neighbours."
+
+[[case]]
+query = "scheduled job ran twice"
+relevant = ["gotchas/clock-skew.md"]
+note = "Not one word of the question appears in the page, which says fired twice a day and compares timestamps across hosts."
+
+[[case]]
+query = "test passes locally fails in ci"
+relevant = ["notes/flaky-test.md"]
+note = "Full text alone, in a corpus where nothing else is about tests. The case that notices if the FTS stream is weighted down too far."
+
+[[case]]
+query = "env file committed"
+relevant = ["_rules/secrets.md"]
+note = "A punctuated token against a page that says .env once, in a body about credentials."
+
+[[case]]
+query = "load test looked fine before release"
+relevant = ["notes/staging-parity.md"]
+note = "The answer is the least connected page in the corpus: no entities, no inbound links, nothing but its body."
+
+[[case]]
+query = "who writes what is still open at shift end"
+relevant = ["procedures/oncall-handover.md"]
+note = "Question shape against a procedure. The release rule is pinned, canonical, and also about who is awake — the competitor is deliberate."
+
+[[case]]
+query = "kafka"
+relevant = ["decisions/0001-queue.md"]
+note = "A name that appears in exactly one page, as the thing that was rejected. Being about the alternative is still being about the subject."
+
+[[case]]
+query = "where did the runbook go"
+relevant = ["notes/old-runbook-link.md", "procedures/rollback.md"]
+note = "A stub whose only content is a pointer. The page it points at is a fair answer too, and is what link expansion should surface."
