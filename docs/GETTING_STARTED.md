@@ -277,8 +277,10 @@ the hooks have recorded — which is the shape this took on the machine anamnesi
 is developed on, for four months, with nothing saying so.
 
 ```bash
-anamnesis install-mcp                 # prints the entry for .mcp.json
-anamnesis install-mcp --write         # merges it in
+anamnesis install-mcp                        # prints the entry, .mcp.json
+anamnesis install-mcp --agent cursor --write     # .cursor/mcp.json
+anamnesis install-mcp --agent gemini-cli --write # .gemini/settings.json
+anamnesis install-mcp --agent codex --write      # .codex/config.toml
 ```
 
 Run the copy of the binary you actually use, the same way as for hooks: the
@@ -290,11 +292,17 @@ registers a server that cannot start when it is not.
 `--write` puts there is an absolute path on one machine. Ignore it, or expect a
 colleague's checkout to point at your home directory.
 
-Only Claude Code is registered this way for now. Codex, Gemini CLI and Cursor
-all speak MCP and each keeps its registration somewhere of its own; the hooks
-for those three were written only once their formats had been checked against
-the harness, and this will be too. The server itself is harness-agnostic —
-`anamnesis mcp --repo <dir>` over stdio is all any of them need.
+Four harnesses, three shapes of file. Cursor and Gemini CLI keep the same
+`mcpServers` object Claude Code does, in their own directories; Gemini's is the
+settings file its hooks already live in, and only the `mcpServers` key is
+touched. Codex is TOML, and its table is `mcp_servers` rather than
+`mcpServers` — merged with `toml_edit`, so the comments and key order in an
+existing `config.toml` come back as they were.
+
+OpenCode is not registered, for the reason its hooks are not: it extends
+through a TypeScript plugin API rather than a configuration file. The server
+itself is harness-agnostic — `anamnesis mcp --repo <dir>` over stdio is all any
+of them need.
 
 Hooks need `anamnesis serve` running. MCP does not — it opens the store
 directly.
