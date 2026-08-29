@@ -21,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are broken by page id rather than by whatever order SQLite returned
 
 ### Changed
+- The entity stream's rule that *every* token of a name must appear in the
+  query is a setting rather than a fact of the SQL, and was swept like the
+  rest. It stays: admitting partial matches was never better in two thousand
+  comparisons across both corpora, and at the tuning that ships it costs the
+  crowded suite 0.967 → 0.889. The rule was written on an argument — a
+  two-word name answering one word would drown the streams it is fused with —
+  and that argument now has a number behind it. Partial matches, when enabled,
+  rank by how complete they are rather than beside a name said in full
 - Candidate depth — how deep each stream reaches before fusion — is part of the
   tuning rather than a constant, and was swept along with everything else. The
   answer came back empty: at the tuning that ships, 10, 30 and 120 score

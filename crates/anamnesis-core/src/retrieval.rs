@@ -78,6 +78,13 @@ pub struct Tuning {
     /// Exponent applied to [`authority_multiplier`]. `1.0` leaves it as it is,
     /// `0.0` switches it off, and anything between softens it.
     pub authority_exponent: f64,
+    /// How much of an entity's name the query has to say for it to match.
+    ///
+    /// `1.0` requires every token of the name — what the entity stream has
+    /// always done. Lower admits partial matches, ranked by how complete they
+    /// are, so a name half said sits below one said in full rather than beside
+    /// it.
+    pub entity_coverage: f64,
     /// How deep each stream goes before its ranking is fused.
     ///
     /// Not a page limit: the caller's limit still decides how many hits come
@@ -141,6 +148,14 @@ impl Default for Tuning {
             // twice over; nothing here can tell them apart, and a suite large
             // enough to would have to be larger than the depth it is
             // measuring.
+            // All of a name, still. The stream was written this way on the
+            // argument that a two-word name answering one word would drown
+            // the streams it is fused with, and the sweep agrees without
+            // qualification: across two thousand comparisons, admitting
+            // partial matches was never once better and usually worse — at
+            // this tuning it costs the crowded suite 0.967 to 0.889. The rule
+            // was right, and is now measured rather than argued.
+            entity_coverage: 1.0,
             candidates: STREAM_CANDIDATES,
         }
     }

@@ -1763,7 +1763,7 @@ fn print_sweep(report: &anamnesis_evals::SweepReport, verbose: bool) {
     /// Rows shown when the caller did not ask for all of them.
     const SHOWN: usize = 12;
 
-    let mut header = String::from("        k  entity  links   auth  depth");
+    let mut header = String::from("        k  entity  links   auth  cover  depth");
     for suite in &report.suites {
         header.push_str(&format!("  {:>12}", truncate(suite, 12)));
     }
@@ -1787,11 +1787,12 @@ fn print_sweep(report: &anamnesis_evals::SweepReport, verbose: bool) {
 
     for point in shown {
         let mut row = format!(
-            "  {:>6.0}  {:>6.2}  {:>5.2}  {:>5.2}  {:>5}",
+            "  {:>6.0}  {:>6.2}  {:>5.2}  {:>5.2}  {:>5.2}  {:>5}",
             point.tuning.rrf_k,
             point.tuning.entity,
             point.tuning.links,
             point.tuning.authority_exponent,
+            point.tuning.entity_coverage,
             point.tuning.candidates
         );
         for score in &point.scores {
