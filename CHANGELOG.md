@@ -79,6 +79,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are still preferred
 
 ### Added
+- `anamnesis forget <path>...` removes named pages from the wiki and the index.
+  `sweep` forgets what decayed; nothing forgot what was *wrong*. A page written
+  from a bad model reply, a note that turned out to be untrue, a duplicate —
+  the only ways out were to wait for a decay that never comes for a pinned or
+  durable page, or to delete the file by hand and hope the watcher was running
+  to notice. Index row first and file second, the recoverable order; every path
+  resolved before anything is removed, so one typo does not leave a half-done
+  job; and the commit it prints still holds the content, because the wiki is a
+  git repository
 - An OpenAI-compatible provider, which is also the Ollama one: `openai` and
   `ollama` are one client over one wire format, differing in their default
   address and in whether a credential is expected. A model running on this

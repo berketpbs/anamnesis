@@ -299,6 +299,18 @@ enum Commands {
         repo: Option<PathBuf>,
     },
 
+    /// Remove a page on purpose, from the wiki and the index
+    ///
+    /// The counterpart to `sweep`, which forgets what decayed. This forgets
+    /// what was wrong: a page written from a bad reply, a note that turned out
+    /// to be untrue, a duplicate. The wiki is a git repository, so what is
+    /// removed stays recoverable from its history.
+    Forget {
+        /// Page paths, e.g. `sessions/2026-08-29-3da85483.md`
+        #[arg(required = true)]
+        paths: Vec<String>,
+    },
+
     /// Rebuild the index from the wiki and the raw transcripts
     ///
     /// Safe to run at any time: every identifier is derived, so a rebuild
@@ -542,6 +554,9 @@ fn main() -> anyhow::Result<()> {
             sweep,
         } => {
             cmd_eval(suite.as_deref(), verbose, check, streams, sweep)?;
+        }
+        Commands::Forget { paths } => {
+            cmd_forget(&paths, cli.data_dir.clone())?;
         }
         Commands::Reindex => {
             cmd_reindex(cli.data_dir.clone())?;
@@ -2884,6 +2899,103 @@ fn cmd_sessions(limit: Option<usize>, data_dir: Option<PathBuf>) -> anyhow::Resu
     Ok(())
 }
 
+/// Remove a page somebody named, from the wiki and the index.
+///
+/// The counterpart to `sweep`, which forgets what decayed. This forgets what
+/// was *wrong*: a page written from a bad reply, a note that turned out to be
+/// untrue, a duplicate. Until now the only ways out were to wait for decay —
+/// which never comes for a pinned or durable page — or to delete the file by
+/// hand and hope the watcher was running to notice.
+///
+/// Deliberately not gated behind `--apply`, unlike the sweep. A sweep proposes
+/// a judgement over pages nobody named, and the report is where that judgement
+/// is checked; here a person has named the page. What the command owes them
+/// instead is to say what it removed and where it went, which the wiki's git
+/// history makes answerable.
+fn cmd_forget(paths: &[String], data_dir: Option<PathBuf>) -> anyhow::Result<()> {
+    let (scope, data, store) = open_project(data_dir)?;
+    let wiki = Wiki::open(data.wiki())?;
+
+    // Every path is resolved before anything is removed. Forgetting two pages
+    // and then refusing the third would leave the caller to work out which of
+    // the three names was the typo.
+    let mut doomed = Vec::with_capacity(paths.len());
+    for path in paths {
+        let page_path = anamnesis_core::page::PagePath::parse(path)?;
+        if !wiki.exists(&scope.scope, &page_path) {
+            anyhow::bail!(
+                "no page at {page_path} — looked in {}",
+                wiki.locate(&scope.scope, &page_path).display()
+            );
+        }
+        let title = wiki
+            .read_page(&scope.scope, &page_path)
+            .map(|page| page.frontmatter.title)
+            // A page whose frontmatter no longer parses is exactly the kind
+            // worth removing, so it is described by its path and removed.
+            .unwrap_or_else(|_| "(unreadable frontmatter)".to_owned());
+        doomed.push((page_path, title));
+    }
+
+    println!("🗑  Forgetting from {}", scope.scope);
+    println!();
+    for (path, title) in &doomed {
+        println!("  {path}");
+        println!("     {title}");
+    }
+    println!();
+
+    // Index first, then the wiki — the order `sweep` chose, for its reason: an
+    // interruption here leaves a page briefly unfindable and wholly
+    // recoverable by `reindex`, where the reverse order leaves the index
+    // pointing at markdown that is gone and no rebuild can repair.
+    let mut rows = 0;
+    for (path, _) in &doomed {
+        if store.delete_page(anamnesis_core::ids::PageId::derive(scope.project_id, path))? {
+            rows += 1;
+        }
+    }
+
+    let removed: Vec<anamnesis_core::page::PagePath> =
+        doomed.iter().map(|(path, _)| path.clone()).collect();
+    let message = forget_commit_message(&doomed);
+    let commit = wiki
+        .delete_pages(&scope.scope, &removed, &message)
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "{error}\n\
+                 {rows} index row(s) were already dropped, but the wiki still holds every page. \
+                 Nothing is lost: run `anamnesis reindex` to put the index back."
+            )
+        })?;
+
+    println!("  {} page(s), {rows} index row(s).", doomed.len());
+    match commit {
+        Some(commit) => {
+            println!("  Committed {}.", &commit[..commit.len().min(8)]);
+            println!();
+            println!("  Still recoverable — the wiki is a git repository:");
+            println!("    git -C {} show {commit}", data.wiki().display());
+        }
+        None => println!("  Nothing for git to record."),
+    }
+    Ok(())
+}
+
+/// What the wiki's history says about a deliberate removal.
+///
+/// Named pages and a person's decision, rather than the sweep's decay scores:
+/// once the pages are gone this message is the only remaining account of what
+/// was here, and "someone decided" is the part that would otherwise be lost.
+fn forget_commit_message(doomed: &[(anamnesis_core::page::PagePath, String)]) -> String {
+    let mut message = format!("forget: {} page(s) removed on request\n", doomed.len());
+    for (path, title) in doomed {
+        message.push_str(&format!("\n- {path} — {title}"));
+    }
+    message.push('\n');
+    message
+}
+
 fn cmd_show_page(path: &str, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
     let (scope, data, store) = open_project(data_dir)?;
     let wiki = Wiki::open(data.wiki())?;
@@ -3186,6 +3298,35 @@ mod tests {
         let frontmatter =
             anamnesis_core::page::Frontmatter::new("t", Vec::new()).expect("frontmatter");
         assert!(!describe_page(&frontmatter).contains("active"));
+    }
+
+    /// Once the pages are gone this message is the only account of what was
+    /// here, so it has to carry both halves: which pages, and that a person
+    /// asked for it rather than a decay score deciding.
+    #[test]
+    fn the_forget_commit_names_every_page_and_says_who_asked() {
+        let doomed = vec![
+            (
+                anamnesis_core::page::PagePath::parse("notes/wrong.md").expect("path"),
+                "A note that turned out to be untrue".to_owned(),
+            ),
+            (
+                anamnesis_core::page::PagePath::parse("sessions/2026-08-29-abcd.md").expect("path"),
+                "2026-08-29: a session".to_owned(),
+            ),
+        ];
+
+        let message = forget_commit_message(&doomed);
+
+        assert!(message.starts_with("forget: 2 page(s) removed on request"));
+        assert!(
+            message.contains("notes/wrong.md — A note that turned out"),
+            "{message}"
+        );
+        assert!(
+            message.contains("sessions/2026-08-29-abcd.md — 2026-08-29: a session"),
+            "{message}"
+        );
     }
 
     /// The failure this whole notice exists for: the server was down for four
