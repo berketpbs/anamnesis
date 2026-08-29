@@ -152,7 +152,8 @@ The HTTP server hooks deliver to.
   rendered, and `?q=` to search a scope. Its index also says what this server
   is doing (auth, consolidation, embedding) and when each scope last recorded
   anything, because "is memory still recording" is the question people arrive
-  with. Read-only, and `serve --no-ui` leaves it out
+  with. A scope whose wiki and index disagree says so, in both directions.
+  Read-only, and `serve --no-ui` leaves it out
 - The consolidation pipeline, which runs *after* the response is sent
 
 > There is no search page and no git visualization; the browser lists and

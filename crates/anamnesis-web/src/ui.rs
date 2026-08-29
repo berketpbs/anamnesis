@@ -23,7 +23,7 @@
 //!   rendered as the text it is, and link destinations that are not http(s)
 //!   or mailto are defused.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anamnesis_core::page::{Frontmatter, PagePath};
 use anamnesis_core::scope::Scope;
@@ -311,6 +311,7 @@ fn search_form(base: &str, asked: &str) -> String {
 /// Everything the index holds for one scope.
 fn listing(state: &AppState, found: &ProjectRow) -> Result<String, UiError> {
     let mut pages = state.store.sweep_rows(found.project_id)?;
+    let notice = drift_notice(state, found, &pages)?;
     // Newest first: an index of a memory is read to see what it has learned
     // lately far more often than to find something alphabetically. The path
     // tiebreak keeps two pages written in the same second in a stable order.
@@ -344,19 +345,134 @@ fn listing(state: &AppState, found: &ProjectRow) -> Result<String, UiError> {
     }
 
     if pages.is_empty() {
-        return Ok("<p class=\"muted\">This scope has no pages in the index. \
+        return Ok(format!(
+            "{notice}<p class=\"muted\">This scope has no pages in the index. \
              If the wiki has files in it, <code>anamnesis reindex</code> puts them back.</p>"
-            .to_owned());
+        ));
     }
 
     Ok(format!(
-        "<table><thead><tr><th>Page</th><th></th>\
+        "{notice}\
+         <table><thead><tr><th>Page</th><th></th>\
          <th class=\"num\">Written</th><th class=\"num\">Reads</th></tr></thead>\
          <tbody>{rows}</tbody></table>\
          <p class=\"muted\">{count} pages. Reads are what the decay sweep counts; \
          opening one here is not one of them.</p>",
         count = pages.len()
     ))
+}
+
+/// What the wiki and the index disagree about, said out loud.
+///
+/// The two can drift apart in both directions and neither is visible from
+/// anywhere else. A page written into the wiki while the server was down is
+/// not in the index, so search cannot find it however plainly it sits in the
+/// editor; a row whose file was deleted the same way answers with a page that
+/// is gone. `reindex` repairs both, and the watcher prevents both while the
+/// server is up — but nothing said which had happened, which is why "my
+/// search cannot find a page I am looking at" had no answer.
+///
+/// A missing scope directory is reported as itself rather than as every page
+/// having been deleted. `Wiki::pages` returns the same empty list for "no
+/// pages" and "no directory", and the second is a wrong data directory far
+/// more often than it is a wiki somebody emptied — the same distinction
+/// `reindex` refuses to delete rows over.
+fn drift_notice(
+    state: &AppState,
+    found: &ProjectRow,
+    indexed: &[anamnesis_store::SweepRow],
+) -> Result<String, UiError> {
+    let (on_disk, has_directory) = {
+        let wiki = state.wiki.lock();
+        (
+            wiki.pages(&found.scope)?,
+            wiki.scope_root(&found.scope).is_dir(),
+        )
+    };
+
+    if !has_directory {
+        if indexed.is_empty() {
+            return Ok(String::new());
+        }
+        return Ok(format!(
+            "<p class=\"warn\">The index holds {count} pages for this scope and the wiki has \
+             no directory for it. That is a data directory pointing somewhere unexpected far \
+             more often than it is {count} deleted pages, which is why <code>reindex</code> \
+             forgets nothing while the directory is missing.</p>",
+            count = indexed.len()
+        ));
+    }
+
+    let rows: Vec<&str> = indexed.iter().map(|row| row.path.as_str()).collect();
+    let disk: Vec<&str> = on_disk.iter().map(|path| path.as_str()).collect();
+    let (unindexed, orphaned) = drift(&disk, &rows);
+
+    let mut notice = String::new();
+    if !unindexed.is_empty() {
+        notice.push_str(&format!(
+            "<p class=\"warn\">{count} in the wiki that the index has never seen — search \
+             cannot find {them} until <code>anamnesis reindex</code> runs. {names}</p>",
+            count = plural(unindexed.len(), "page", "pages"),
+            them = if unindexed.len() == 1 { "it" } else { "them" },
+            names = names(&unindexed),
+        ));
+    }
+    if !orphaned.is_empty() {
+        notice.push_str(&format!(
+            "<p class=\"warn\">{count} in the index with no file in the wiki — opening \
+             {them} says so, and <code>anamnesis reindex</code> forgets {them}. {names}</p>",
+            count = plural(orphaned.len(), "page", "pages"),
+            them = if orphaned.len() == 1 { "it" } else { "them" },
+            names = names(&orphaned),
+        ));
+    }
+    Ok(notice)
+}
+
+/// What each side has that the other does not.
+///
+/// The two directions are not symmetric — one is a page search cannot find,
+/// the other is a row that answers with a file that is gone — so they are
+/// returned apart and named at the call site.
+fn drift<'a>(on_disk: &[&'a str], indexed: &[&'a str]) -> (Vec<&'a str>, Vec<&'a str>) {
+    let disk: HashSet<&str> = on_disk.iter().copied().collect();
+    let rows: HashSet<&str> = indexed.iter().copied().collect();
+
+    let mut unindexed: Vec<&str> = disk.difference(&rows).copied().collect();
+    let mut orphaned: Vec<&str> = rows.difference(&disk).copied().collect();
+    // Sorted because a set has no order and a notice that reshuffles itself on
+    // every refresh reads as new trouble each time.
+    unindexed.sort_unstable();
+    orphaned.sort_unstable();
+    (unindexed, orphaned)
+}
+
+/// The first few names, which is what somebody needs to recognise the problem.
+///
+/// Not all of them: a wiki that was never indexed would put its whole contents
+/// into a warning, and the count above already says how big it is.
+fn names(paths: &[&str]) -> String {
+    const SHOWN: usize = 8;
+    let listed: Vec<String> = paths
+        .iter()
+        .take(SHOWN)
+        .map(|path| format!("<code>{}</code>", escape(path)))
+        .collect();
+    let rest = paths.len().saturating_sub(SHOWN);
+    if rest == 0 {
+        listed.join(" ")
+    } else {
+        format!("{} and {rest} more", listed.join(" "))
+    }
+}
+
+/// `1 page`, `2 pages`.
+fn plural(count: usize, one: &str, many: &str) -> String {
+    if count == 1 {
+        format!("{count} {one}")
+    } else {
+        format!("{count} {many}")
+    }
 }
 
 /// What the four streams make of a question.
@@ -1176,6 +1292,97 @@ mod tests {
             .expect("routed");
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ---------------------------------------------------------------
+    // What the wiki and the index disagree about.
+    // ---------------------------------------------------------------
+
+    /// The page is right there in the editor and search will not return it.
+    /// Until now nothing said why.
+    #[tokio::test]
+    async fn a_page_the_index_has_never_seen_is_named() {
+        let harness = harness();
+        write(&harness, "notes/known.md", "Known", "Body.\n");
+        // Written the way an editor writes: into the wiki, with nothing told.
+        let by_hand = harness.state.wiki.lock().locate(
+            &harness.scope.scope,
+            &PagePath::parse("notes/byhand.md").expect("path"),
+        );
+        std::fs::write(&by_hand, "---\ntitle: By hand\n---\n\nBody.\n").expect("write");
+
+        let (status, body) = get_page(&harness.state, "/ui/default/widget").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("notes/byhand.md"), "{body}");
+        assert!(body.contains("reindex"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_row_whose_file_is_gone_is_named_too() {
+        let harness = harness();
+        let page = write(&harness, "notes/one.md", "One", "Body.\n");
+        let file = harness
+            .state
+            .wiki
+            .lock()
+            .locate(&harness.scope.scope, &page.path);
+        std::fs::remove_file(file).expect("remove");
+
+        let (_, body) = get_page(&harness.state, "/ui/default/widget").await;
+
+        assert!(body.contains("no file in the wiki"), "{body}");
+        assert!(body.contains("notes/one.md"), "{body}");
+    }
+
+    /// A wiki and an index that agree should say nothing at all: a notice that
+    /// is always there is one nobody reads when it matters.
+    #[tokio::test]
+    async fn a_scope_that_agrees_with_itself_says_nothing() {
+        let harness = harness();
+        write(&harness, "notes/one.md", "One", "Body.\n");
+
+        let (_, body) = get_page(&harness.state, "/ui/default/widget").await;
+
+        assert!(!body.contains("class=\"warn\""), "{body}");
+    }
+
+    /// `Wiki::pages` cannot tell an empty scope from an absent one, and the
+    /// second is a wrong data directory far more often than it is a wiki
+    /// somebody emptied — the distinction `reindex` refuses to delete over.
+    #[tokio::test]
+    async fn an_absent_scope_directory_is_reported_as_itself() {
+        let harness = harness();
+        write(&harness, "notes/one.md", "One", "Body.\n");
+        let root = harness.state.wiki.lock().scope_root(&harness.scope.scope);
+        std::fs::remove_dir_all(root).expect("remove");
+
+        let (_, body) = get_page(&harness.state, "/ui/default/widget").await;
+
+        assert!(body.contains("no directory for it"), "{body}");
+        assert!(!body.contains("no file in the wiki"), "{body}");
+    }
+
+    #[test]
+    fn each_side_is_compared_against_the_other_and_the_order_is_stable() {
+        let disk = ["b.md", "a.md", "shared.md"];
+        let rows = ["shared.md", "gone.md"];
+
+        let (unindexed, orphaned) = drift(&disk, &rows);
+
+        assert_eq!(unindexed, ["a.md", "b.md"]);
+        assert_eq!(orphaned, ["gone.md"]);
+    }
+
+    #[test]
+    fn a_long_list_is_cut_and_says_how_much_it_cut() {
+        let many: Vec<String> = (0..10).map(|n| format!("p{n}.md")).collect();
+        let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+
+        let rendered = names(&refs);
+
+        assert!(rendered.contains("p0.md"), "{rendered}");
+        assert!(rendered.ends_with("and 2 more"), "{rendered}");
     }
 
     /// The question people arrive with is "is memory still recording", and
