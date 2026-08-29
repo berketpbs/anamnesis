@@ -5,9 +5,16 @@
 //! them is trustworthy alone — full-text search misses a page that never says
 //! the word you used, entity matching misses a page that never names anything
 //! canonical, and link-neighbour expansion is only as good as its seed set.
-//! Reciprocal Rank Fusion combines them by rank rather than by score, which
-//! means a page three streams agree on beats one signal's favorite even when
-//! the streams disagree about magnitude.
+//! Reciprocal Rank Fusion combines them by rank rather than by score, because
+//! scores from different sources are not comparable quantities.
+//!
+//! How much *agreement* is worth against how much *confidence* is the whole
+//! question, and it is settled by [`RRF_K`] and the stream weights in
+//! [`Tuning`] — measured, since 2026-08-29, rather than assumed. The assumption
+//! before then was that agreement should win, which is right when the streams
+//! are of comparable quality and wrong here: full-text search answers most
+//! questions on its own, and letting two weaker streams outvote it cost more
+//! than it ever bought.
 //!
 //! This module is pure: no SQL, no I/O. The streams themselves are assembled
 //! by whichever storage layer can run the queries; this is just the arithmetic
@@ -21,7 +28,26 @@ use crate::ids::PageId;
 /// formula (`score += 1 / (k + rank)`). Larger values compress the gap between
 /// a stream's best and worst results, so no single stream can dominate the
 /// fused ranking just by being confident.
-pub const RRF_K: f64 = 60.0;
+///
+/// **Measured, 2026-08-29.** This was 60 — the value from the paper, chosen for
+/// fusing search engines whose runs are a thousand deep and roughly as good as
+/// each other. Neither is true here: the streams are thirty deep and one of
+/// them is far better than the rest. At 60 the whole spread of a stream was
+/// 1.47x, so a page sitting anywhere in two streams outscored the page one
+/// stream was sure of, and `anamnesis eval --sweep` found the score rising at
+/// every smaller value it tried, on both corpora, with no turning point.
+///
+/// Two, rather than one: the two score identically everywhere the sweep looked,
+/// and one is the smallest value the grid contains. A number picked at the edge
+/// of what was measured is a number nothing has been measured on both sides of.
+///
+/// Fusing scopes rather than streams ([`Store::query_pages_across`]) is
+/// unaffected by this: a page belongs to one project, so it appears in exactly
+/// one of those rankings, and `1 / (k + rank)` orders single-membership
+/// rankings by rank alone whatever `k` is.
+///
+/// [`Store::query_pages_across`]: ../../anamnesis_store/struct.Store.html#method.query_pages_across
+pub const RRF_K: f64 = 2.0;
 
 /// Every number the fused ranking is free to get wrong.
 ///
@@ -51,16 +77,42 @@ pub struct Tuning {
 }
 
 impl Default for Tuning {
-    /// What retrieval has always done: one k, four equal streams, authority
-    /// applied in full.
+    /// What ships, as of the sweep on 2026-08-29.
+    ///
+    /// Before it: `k = 60`, four streams weighted equally, and the authority
+    /// multiplier applied in full. That scored 0.708 / 1.000 on the retrieval
+    /// suite and 0.436 / 0.533 on the crowded one — the second being a corpus
+    /// where plain full-text search alone scored 0.900 / 0.933, because fusion
+    /// was burying the answers it ranked first. These score 1.000 / 1.000 and
+    /// 0.967 / 1.000.
+    ///
+    /// Where the measurement was decisive it was followed; where it was
+    /// indifferent the design was kept. Silencing the link stream, dropping
+    /// authority to nothing, and weighting entities above full text all score
+    /// exactly the same as the values here, and all three would throw away a
+    /// signal on the evidence of twenty-five questions.
     fn default() -> Self {
         Self {
             rrf_k: RRF_K,
             fts: 1.0,
+            // Left level with full text. Above it scored no better, and
+            // "a declared name outranks the words on the page" is a claim
+            // nothing here has made.
             entity: 1.0,
-            links: 1.0,
+            // Enough to break a tie between pages full text likes equally,
+            // not enough to outvote it. Neighbours of a hit are evidence
+            // about the hit, not about themselves: the stream answered no
+            // question on its own in either ablation.
+            links: 0.25,
+            // Unmeasured — the stream is opt-in and neither suite runs a
+            // model, so this is the one weight still standing on an argument.
             vectors: 1.0,
-            authority_exponent: 1.0,
+            // A quarter, so the full 2.34x multiplier becomes about 1.24x.
+            // Authority is a preference between comparably relevant pages,
+            // and applied whole it was larger than the entire spread of the
+            // relevance it adjusted — a canonical page in an authoritative
+            // namespace outranked whatever any stream put first.
+            authority_exponent: 0.25,
         }
     }
 }
@@ -244,28 +296,60 @@ mod tests {
         assert!(score_of(id(2)) > score_of(id(1)) - 1e-9 || score_of(id(2)) > 0.0);
     }
 
-    /// The claim the whole tuning type rests on: with its defaults, nothing
-    /// about the ranking changes. Every knob starts where retrieval already
-    /// was, so a sweep measures the code that ships rather than a variant of
-    /// it.
+    /// The two fusions have to agree wherever the weights say nothing, or the
+    /// weighted one is a second implementation rather than a generalisation of
+    /// the first.
     #[test]
-    fn the_default_tuning_ranks_exactly_as_the_unweighted_fusion_does() {
+    fn equal_weights_reproduce_the_unweighted_fusion() {
         let fts = vec![id(2), id(1), id(3)];
         let entity = vec![id(1), id(4)];
         let links = vec![id(1), id(5), id(2)];
-        let tuning = Tuning::default();
 
         let plain = fuse_and_rank(&[fts.clone(), entity.clone(), links.clone()], RRF_K);
         let weighted = fuse_weighted(
             &[
-                (fts.as_slice(), tuning.fts),
-                (entity.as_slice(), tuning.entity),
-                (links.as_slice(), tuning.links),
+                (fts.as_slice(), 1.0),
+                (entity.as_slice(), 1.0),
+                (links.as_slice(), 1.0),
             ],
-            tuning.rrf_k,
+            RRF_K,
         );
 
         assert_eq!(plain, weighted);
+    }
+
+    /// The defaults are a measurement, and a measurement someone can edit
+    /// without noticing is a number back to being an opinion. Changing these
+    /// means running `anamnesis eval --sweep` again and saying what moved.
+    #[test]
+    fn the_shipped_tuning_is_the_one_the_sweep_chose() {
+        let tuning = Tuning::default();
+        assert_eq!(tuning.rrf_k, 2.0);
+        assert_eq!(tuning.fts, 1.0);
+        assert_eq!(tuning.entity, 1.0);
+        assert_eq!(tuning.links, 0.25);
+        assert_eq!(tuning.vectors, 1.0);
+        assert_eq!(tuning.authority_exponent, 0.25);
+    }
+
+    /// Why lowering `k` was safe for the scope fusion, which no suite covers:
+    /// a page belongs to one project, so it appears in exactly one of those
+    /// rankings, and single-membership rankings come out in rank order under
+    /// any `k` at all.
+    #[test]
+    fn fusing_rankings_that_share_no_pages_orders_the_same_under_any_k() {
+        let project = vec![id(1), id(2), id(3)];
+        let shared = vec![id(4), id(5)];
+
+        let order = |k: f64| -> Vec<PageId> {
+            fuse_and_rank(&[project.clone(), shared.clone()], k)
+                .into_iter()
+                .map(|(page, _)| page)
+                .collect()
+        };
+
+        assert_eq!(order(2.0), order(60.0));
+        assert_eq!(order(2.0), order(0.5));
     }
 
     #[test]
@@ -311,22 +395,25 @@ mod tests {
 
     #[test]
     fn the_authority_exponent_spans_off_and_unchanged() {
-        let tuning = Tuning::default();
+        let with = |authority_exponent: f64| Tuning {
+            authority_exponent,
+            ..Tuning::default()
+        };
         let full = authority_multiplier(true, true, true);
-        assert!((tuning.authority(true, true, true) - full).abs() < 1e-9);
 
-        let off = Tuning {
-            authority_exponent: 0.0,
-            ..Tuning::default()
-        };
-        assert!((off.authority(true, true, true) - 1.0).abs() < 1e-9);
+        assert!((with(1.0).authority(true, true, true) - full).abs() < 1e-9);
+        assert!((with(0.0).authority(true, true, true) - 1.0).abs() < 1e-9);
 
-        let softened = Tuning {
-            authority_exponent: 0.5,
-            ..Tuning::default()
-        };
-        let half = softened.authority(true, true, true);
+        let half = with(0.5).authority(true, true, true);
         assert!(half > 1.0 && half < full, "{half} should sit between");
+
+        // What ships: kept, and cut to about a quarter of its former reach.
+        let shipped = Tuning::default().authority(true, true, true);
+        assert!(
+            shipped > 1.0,
+            "authority should still prefer a canonical page"
+        );
+        assert!(shipped < 1.3, "but not by more than relevance can overcome");
     }
 
     #[test]

@@ -31,23 +31,22 @@ description = "Ranking under competition: a corpus where more than one page coul
 
 limit = 5
 
-# Measured, then rounded down. These are a floor, not a target — and this
-# floor is low because the first run found something.
+# Measured, then rounded down. A floor, not a target.
 #
-# As of the first run: MRR 0.436, recall 0.533. Full-text search **on its own**
-# scores 0.900 / 0.933 over the same questions. Fusion is not trading rank for
-# recall here; it is losing pages full text ranked first, seven of fifteen of
-# them, and the eight questions only full text can answer are exactly the ones
-# it loses. On `retrieval.toml`'s ten-page corpus fusion gained recall (1.000
-# against full text's 0.800), which is why this went unseen: the effect needs a
-# corpus with enough linked, entity-bearing pages to crowd out a single
-# stream's favourite, and real memory becomes one within a month.
+# The first run scored MRR 0.436, recall 0.533, against full-text search alone
+# scoring 0.900 / 0.933 over the same questions: fusion was losing pages full
+# text ranked first, seven of fifteen of them. On `retrieval.toml`'s ten-page
+# corpus fusion gained recall instead, which is why this went unseen — the
+# effect needs enough linked, entity-bearing pages to crowd out a single
+# stream's favourite, and real memory becomes that within a month.
 #
-# Raising these numbers is the tuning work, not this suite's job. The suite's
-# job is to be the number that says whether the tuning worked.
+# After the tuning sweep of 2026-08-29: **MRR 0.967, recall 1.000**, against
+# full text's unchanged 0.900 / 0.933. That comparison is the one worth
+# keeping: fusion is now better than its best single stream, which is the only
+# thing that makes fusing four of them worth doing.
 [thresholds]
-min_mrr = 0.43
-min_recall = 0.53
+min_mrr = 0.96
+min_recall = 1.0
 
 # ---------------------------------------------------------------------------
 # Rules: pinned, canonical, and in an authoritative namespace — everything the

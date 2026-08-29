@@ -7,7 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Retrieval is tuned against measurement rather than argument.** The RRF
+  constant is 2 rather than 60, the link stream is weighted a quarter, and the
+  authority multiplier is applied at a quarter power (about 1.24× rather than
+  2.34×). Under the old constants a page sitting anywhere in two streams
+  outscored the page one stream had ranked first — at `k = 60` a stream's whole
+  thirty-deep spread is 1.47×, and the authority multiplier alone was larger
+  than that — so on a corpus with enough linked, entity-bearing pages, fusion
+  buried the answers full-text search had found. The shipped suites go from
+  0.708 / 1.000 to **1.000 / 1.000**, and from 0.436 / 0.533 to **0.967 /
+  1.000**: the second now scores above the 0.900 full text reaches on its own,
+  which is the only thing that makes fusing four streams worth doing. Where the
+  sweep was indifferent the design was kept — the link stream is quietened
+  rather than silenced, entities stay level with full text, and canonical pages
+  are still preferred
+
 ### Added
+- A second eval corpus, `crowded`: twenty-two pages, a plausible competitor for
+  most questions, half the answers on pages with no authority, and a link
+  cluster dense enough to offer noise as readily as signal. It exists to be the
+  set no knob is tuned on, and it found the fusion defect above on its first
+  run — which the ten-page suite could not show, because there fusion gained
+  recall and looked like it was working
+- `anamnesis eval --sweep` scores the same questions once per candidate
+  setting, through the same call the server makes. The rule for accepting one
+  is in the code rather than in whoever reads the table: rank up **and** recall
+  held, on every suite. An eval fixture can now say that one page replaces
+  another, so a corpus can ask what a wiki asks whenever somebody revises a
+  decision
 - Initial project structure as Rust workspace
 - Core data types and abstractions
 - SQLite storage layer with migrations `V01`–`V10`

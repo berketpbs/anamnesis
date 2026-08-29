@@ -139,7 +139,7 @@ impl SweepReport {
 /// how a sweep talks somebody into a value it never actually measured.
 pub fn default_grid() -> Vec<Tuning> {
     let mut grid = Vec::new();
-    for rrf_k in [2.0, 5.0, 10.0, 20.0, 30.0, 60.0] {
+    for rrf_k in [1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0] {
         for entity in [0.5, 1.0, 1.5] {
             for links in [0.0, 0.25, 0.5, 1.0] {
                 for authority_exponent in [0.0, 0.25, 0.5, 1.0] {

@@ -243,6 +243,23 @@ Tier is a bounded signal applied *after* candidates are generated, never an
 independent retriever: otherwise a targeted search for something said once in
 one session would be buried under durable pages that merely outrank it.
 
+The numbers fusion is built from live in `anamnesis_core::retrieval::Tuning`,
+and since 2026-08-29 they are measured rather than argued (see **Evaluation**):
+
+| | | why |
+|---|---|---|
+| `rrf_k` | 2 | was 60, the value from the paper — written for fusing runs a thousand deep from engines of comparable quality. Neither holds here: streams are thirty deep and one is far better than the rest. At 60 a stream's whole spread was 1.47×, so a page sitting anywhere in two streams outscored the page one stream was sure of |
+| `fts` / `entity` | 1.0 | level with each other. Weighting declared names above the words on the page scored no better and claims more |
+| `links` | 0.25 | enough to break a tie between pages full text likes equally, not enough to outvote it. Neighbours of a hit are evidence about the hit |
+| `vectors` | 1.0 | unmeasured: the stream is opt-in and no suite runs a model. The one weight still standing on an argument |
+| `authority_exponent` | 0.25 | the multiplier reached 2.34×, larger than the entire spread of relevance it adjusts, so a canonical page in an authoritative namespace outranked whatever any stream put first. Now about 1.24× — a preference between comparable answers, which is what it was always described as |
+
+Where the sweep was decisive it was followed; where it was indifferent the
+design was kept. Silencing the link stream, dropping authority to nothing, and
+weighting entities above full text each scored exactly the same as the values
+above, and each would have thrown away a signal on the evidence of
+twenty-five questions.
+
 Pages that something else has replaced are excluded outright (`is_latest`),
 because an agent that recorded "this decision replaces that one" should not be
 answered with the decision it replaced. Links to them still resolve, though:
@@ -251,7 +268,7 @@ being replaced changes how a page ranks, not whether it exists.
 ### Evaluation
 
 ```
-anamnesis eval [--suite FILE] [--check]
+anamnesis eval [--suite FILE] [--streams] [--sweep] [--check]
     │
     ├─→ build a throwaway corpus from the suite's pages
     │     (wiki write → index upsert → entities → links: the live path)
@@ -263,9 +280,21 @@ anamnesis eval [--suite FILE] [--check]
 
 Everything else in the workspace is tested for being *correct*. This is the
 only thing that asks whether memory is any *good*: whether the page that
-answers a question comes back, and comes back near the top. The fusion
-constant, the entity weighting, and the authority multiplier were each chosen
-by argument, and the suite is what makes the next such argument answerable.
+answers a question comes back, and comes back near the top.
+
+Two suites ship. `retrieval` asks whether an answer is *reachable*: ten pages,
+sparse links, mostly one right answer. `crowded` asks whether it *wins*:
+twenty-two pages, a plausible competitor for most questions, half the answers
+on pages with no authority at all, and a link cluster dense enough to offer
+noise as readily as signal. The second exists to be the corpus no knob is
+tuned on — a sweep run against ten questions finds whatever those ten
+questions reward.
+
+It earned that role immediately. Under the constants retrieval shipped with,
+`crowded` scored MRR 0.436 / recall 0.533 while plain full-text search alone
+scored 0.900 / 0.933 over the same questions: fusion was burying the answers
+one stream had ranked first. Nothing on the smaller suite showed it, where
+fusion gained recall and looked like it was working.
 
 Three constraints, all of them deliberate:
 
@@ -287,10 +316,21 @@ job of its own.
 `--streams` scores each stream separately, and reports the measure that
 actually decides whether one stays: how many questions **only** it answers. A
 stream with a respectable average and nothing unique behind it is one the
-others already cover. Over the shipped suite, full text alone reaches a higher
-MRR than the fused ranking while missing a fifth of the questions — fusion
-buys recall with rank — and the link stream contributes nothing the others
-miss. Both are findings to act on, not settings to tune blind.
+others already cover.
+
+`--sweep` scores the same questions once per candidate setting, building each
+corpus once and querying it through the same call the server makes. The rule
+for accepting a setting is in the code rather than in whoever reads the table
+(`SweepPoint::improves_on`): rank up **and** recall held, on *every* suite. The
+mean across corpora is a sort key and nothing else — deciding by it is how a
+gain on one corpus pays for a loss on another. Every knob spans values on both
+sides of the shipped one, because a grid whose best row sits on its own edge
+has found a direction, not an optimum.
+
+The tuning it produced took `retrieval` from 0.708 to **1.000 / 1.000** and
+`crowded` from 0.436 / 0.533 to **0.967 / 1.000** — the second now above the
+0.900 that full text reaches alone, which is the only thing that makes fusing
+four streams worth doing.
 
 ### Forgetting
 
