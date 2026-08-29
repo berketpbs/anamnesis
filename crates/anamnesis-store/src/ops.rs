@@ -5,6 +5,7 @@
 //! agent never notices, and one that takes hundreds is a stutter in someone's
 //! editing session.
 
+use anamnesis_core::embedding::{Embed, page_text};
 use anamnesis_core::handoff::{Handoff, HandoffState, Slot};
 use anamnesis_core::ids::{HandoffId, ObservationId, PageId, ProjectId, SessionId, WorkstreamId};
 use anamnesis_core::observation::{BoundedBody, EventKind, Observation, ToolRef};
@@ -127,6 +128,52 @@ impl Store {
         let rows = statement.query_map(params![session_id.to_string()], read_observation)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    /// Put everything the index knows about a page in place: the row, the
+    /// names it declares, the links it makes, and its vector.
+    ///
+    /// **The one way to index a page.** There were seven, hand-written, in as
+    /// many modules — consolidation, the wiki watcher, `reindex`, `bootstrap`,
+    /// `write-page`, the MCP tool, and the auto-improve pass — and they had
+    /// already drifted twice. Once when the live path wrote a page without its
+    /// links, so the link-neighbour stream was blind to every page this system
+    /// wrote for itself until somebody rebuilt. And again, still true when this
+    /// was written: exactly one of the seven embedded anything, so a vector
+    /// stream that was switched on covered the pages an agent had written by
+    /// hand through MCP and nothing else — not one session summary.
+    ///
+    /// A caller with no embedder passes `None` and gets what it had before. The
+    /// difference is that the choice is now in the signature, where the next
+    /// person writing a page has to see it, instead of being four calls they
+    /// might make three of.
+    ///
+    /// An embedding that fails is logged and stepped over. It costs the page
+    /// one retrieval stream; refusing the write would cost the page.
+    pub fn index_page(
+        &self,
+        project_id: ProjectId,
+        page: &Page,
+        links: &[String],
+        embedder: Option<&dyn Embed>,
+        now: Timestamp,
+    ) -> Result<()> {
+        self.upsert_page(page, now)?;
+        self.set_page_entities(project_id, page.id, &page.frontmatter.entities)?;
+        self.set_page_links(project_id, page.id, links)?;
+
+        if let Some(embedder) = embedder {
+            let text = page_text(&page.frontmatter.title, &page.body);
+            match embedder.embed(&text) {
+                Ok(vector) => self.set_page_embedding(page.id, embedder.model(), &vector)?,
+                Err(error) => tracing::warn!(
+                    %error,
+                    path = %page.path,
+                    "page embedding failed; the page is indexed without one"
+                ),
+            }
+        }
+        Ok(())
     }
 
     /// Insert or refresh the index row for a page.
@@ -1219,6 +1266,100 @@ mod tests {
     /// The case this exists for: a note written from a bad reply, dropped
     /// before any session is handed it. Claiming it to be rid of it would put
     /// it in exactly the context it was being kept out of.
+    struct FakeEmbedder;
+
+    impl anamnesis_core::embedding::Embed for FakeEmbedder {
+        fn model(&self) -> &str {
+            "fake-embed-1"
+        }
+        fn embed(&self, _text: &str) -> std::result::Result<Vec<f32>, String> {
+            Ok(vec![1.0, 0.0])
+        }
+    }
+
+    struct BrokenEmbedder;
+
+    impl anamnesis_core::embedding::Embed for BrokenEmbedder {
+        fn model(&self) -> &str {
+            "broken"
+        }
+        fn embed(&self, _text: &str) -> std::result::Result<Vec<f32>, String> {
+            Err("no model loaded".to_owned())
+        }
+    }
+
+    fn indexable_page(project: ProjectId) -> Page {
+        let frontmatter = anamnesis_core::page::Frontmatter::new(
+            "Why SQLite",
+            vec![anamnesis_core::page::Entity::parse("SQLite").expect("entity")],
+        )
+        .expect("frontmatter");
+        Page::new(
+            project,
+            anamnesis_core::page::PagePath::parse("decisions/0001-storage.md").expect("path"),
+            frontmatter,
+            "One file on disk. See [[notes/windows.md]].",
+        )
+    }
+
+    /// The four writes that make a page findable, in one call. Any one of them
+    /// missing is a page that is reachable through some streams and not
+    /// others, which is what six of the seven old copies did with the vector.
+    #[test]
+    fn indexing_a_page_writes_the_row_the_names_the_links_and_the_vector() {
+        let (_dir, store, project, _workspace) = fixture();
+        let page = indexable_page(project);
+
+        store
+            .index_page(
+                project,
+                &page,
+                &["notes/windows.md".to_owned()],
+                Some(&FakeEmbedder),
+                now(),
+            )
+            .expect("index");
+
+        assert_eq!(store.page_count(project).expect("count"), 1);
+        let hits = store
+            .query_pages(project, "sqlite", 5, now(), None)
+            .expect("query");
+        assert_eq!(hits.len(), 1, "the entity stream should reach it");
+
+        let by_vector = store
+            .query_pages(
+                project,
+                "sqlite",
+                5,
+                now(),
+                Some(("fake-embed-1", &[1.0, 0.0])),
+            )
+            .expect("query");
+        assert_eq!(by_vector.len(), 1, "and so should the vector stream");
+    }
+
+    /// An embedding costs a page one retrieval stream when it fails. Refusing
+    /// the write would cost the page.
+    #[test]
+    fn a_failing_embedder_does_not_cost_the_page() {
+        let (_dir, store, project, _workspace) = fixture();
+        let page = indexable_page(project);
+
+        store
+            .index_page(project, &page, &[], Some(&BrokenEmbedder), now())
+            .expect("the page is still indexed");
+
+        assert_eq!(store.page_count(project).expect("count"), 1);
+        assert_eq!(
+            store
+                .query_pages(project, "sqlite", 5, now(), Some(("broken", &[1.0, 0.0])))
+                .expect("query")
+                .len(),
+            1,
+            "reachable by every stream but the one that failed"
+        );
+    }
+
     #[test]
     fn a_discarded_handoff_is_never_handed_to_anybody() {
         let (_dir, store, project, workspace) = fixture();

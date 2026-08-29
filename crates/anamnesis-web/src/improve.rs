@@ -177,7 +177,6 @@ fn promote(
 
     let mut frontmatter = parsed.frontmatter;
     frontmatter.tier = Tier::Semantic;
-    let entities = frontmatter.entities.clone();
     let mut page = Page::new(project_id, path.clone(), frontmatter, parsed.body);
 
     let commit = wiki.write_page(
@@ -187,12 +186,12 @@ fn promote(
     )?;
     page.git_commit = Some(commit.clone());
 
-    store.upsert_page(&page, now)?;
-    store.set_page_entities(project_id, page.id, &entities)?;
-    store.set_page_links(
+    store.index_page(
         project_id,
-        page.id,
+        &page,
         &anamnesis_wiki::extract_links(&page.body),
+        None,
+        now,
     )?;
     store.decide_proposal(proposal.id, ProposalState::Applied, now)?;
 

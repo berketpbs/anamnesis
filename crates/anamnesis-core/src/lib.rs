@@ -21,6 +21,7 @@ pub mod capture;
 pub mod config;
 pub mod datadir;
 pub mod decay;
+pub mod embedding;
 pub mod error;
 pub mod handoff;
 pub mod ids;

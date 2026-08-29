@@ -129,7 +129,6 @@ pub fn sync(
         }
     };
 
-    let entities = parsed.frontmatter.entities.clone();
     let body = parsed.body.clone();
     let page = Page::new(
         project_id,
@@ -142,9 +141,13 @@ pub fn sync(
         return Ok(Synced::Unchanged);
     }
 
-    store.upsert_page(&page, now)?;
-    store.set_page_entities(project_id, page.id, &entities)?;
-    store.set_page_links(project_id, page.id, &anamnesis_wiki::extract_links(&body))?;
+    store.index_page(
+        project_id,
+        &page,
+        &anamnesis_wiki::extract_links(&body),
+        None,
+        now,
+    )?;
     Ok(Synced::Indexed)
 }
 

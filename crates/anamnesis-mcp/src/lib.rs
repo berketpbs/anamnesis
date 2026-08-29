@@ -472,12 +472,18 @@ impl AnamnesisMcp {
 
         let now = Timestamp::now();
         self.store.upsert_project(&self.scope, now)?;
-        self.store.upsert_page(&page, now)?;
-        self.store
-            .set_page_entities(self.scope.project_id, page.id, &entities)?;
+        // Row, entities, links and — when one is configured — the vector, in
+        // the one call every writer makes.
         let links = anamnesis_wiki::extract_links(&request.body);
-        self.store
-            .set_page_links(self.scope.project_id, page.id, &links)?;
+        self.store.index_page(
+            self.scope.project_id,
+            &page,
+            &links,
+            self.embedder
+                .as_deref()
+                .map(|embedder| embedder as &dyn anamnesis_core::embedding::Embed),
+            now,
+        )?;
 
         // Embedding failure costs this page its place in the vector stream,
         // not the write itself — the page is already committed to the wiki
@@ -945,13 +951,16 @@ mod tests {
     struct FakeEmbedder;
 
     impl Embedder for FakeEmbedder {
-        fn model(&self) -> &str {
-            "fake-embed-1"
-        }
         fn dimension(&self) -> usize {
             2
         }
-        fn embed(&self, _text: &str) -> Result<Vec<f32>, anamnesis_llm::EmbedError> {
+    }
+
+    impl anamnesis_core::embedding::Embed for FakeEmbedder {
+        fn model(&self) -> &str {
+            "fake-embed-1"
+        }
+        fn embed(&self, _text: &str) -> Result<Vec<f32>, String> {
             Ok(vec![1.0, 0.0])
         }
     }
@@ -959,14 +968,17 @@ mod tests {
     struct BrokenEmbedder;
 
     impl Embedder for BrokenEmbedder {
-        fn model(&self) -> &str {
-            "broken"
-        }
         fn dimension(&self) -> usize {
             2
         }
-        fn embed(&self, _text: &str) -> Result<Vec<f32>, anamnesis_llm::EmbedError> {
-            Err(anamnesis_llm::EmbedError::Inference("boom".to_owned()))
+    }
+
+    impl anamnesis_core::embedding::Embed for BrokenEmbedder {
+        fn model(&self) -> &str {
+            "broken"
+        }
+        fn embed(&self, _text: &str) -> Result<Vec<f32>, String> {
+            Err("boom".to_owned())
         }
     }
 
