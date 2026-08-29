@@ -118,6 +118,88 @@ see [Requiring a token](#requiring-a-token).
 The MCP server is a separate process the agent launches itself; `serve` does
 not start one.
 
+#### Keep it running
+
+Started by hand in a terminal, the server lives exactly as long as that
+terminal. This repository's own memory recorded nothing for four days for that
+reason: the window was closed, every hook after it failed to connect, and the
+only report was a line on stderr that no harness shows. A session that starts
+while the server is down now says so in the agent's context, and `anamnesis
+status` says it any time — but the fix is to not need either.
+
+Whatever you use, four settings matter, and each one is a way it has actually
+stopped or would:
+
+- **start it at login**, since the terminal it was started from will close
+- **restart it if it dies**, since a crash is otherwise indistinguishable from
+  never having started
+- **never time it out.** Windows Task Scheduler kills a task after three days
+  by default, which reintroduces the same silent failure on a schedule
+- **refuse a second copy**, so a restart attempt against a live server is
+  dropped rather than fighting it for the port
+
+**Windows.** Register it as a logon task for your own account:
+
+```powershell
+$exe = Join-Path $env:APPDATA 'anamnesis\bin\anamnesis.exe'
+
+# Hidden, because the server runs in the foreground and a bare action would
+# leave a console window open forever.
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
+    -Argument "-NoProfile -WindowStyle Hidden -Command `"& '$exe' serve`""
+
+# Two triggers. The first covers the ordinary case. The second is what makes a
+# crash survivable: Task Scheduler's own "restart on failure" does **not**
+# cover the launched program exiting non-zero — killing the server leaves the
+# task in Ready with result 1 and nothing restarts it. A trigger that fires
+# every minute restarts a dead server and, with IgnoreNew below, does nothing
+# at all to a live one.
+$triggers = @(
+    (New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME),
+    (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
+        -RepetitionInterval (New-TimeSpan -Minutes 1) `
+        -RepetitionDuration ([TimeSpan]::MaxValue))
+)
+
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries -DontStopOnIdleEnd -StartWhenAvailable `
+    -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+
+Register-ScheduledTask -TaskName 'Anamnesis Memory Server' `
+    -Action $action -Trigger $triggers -Settings $settings -Force
+```
+
+Point it at the copy under `%APPDATA%\anamnesis\bin\`, not at one in
+`target/`: Windows will not let `cargo build` overwrite a running executable.
+
+**Linux**, as a user unit in `~/.config/systemd/user/anamnesis.service`:
+
+```ini
+[Unit]
+Description=Anamnesis memory server
+
+[Service]
+ExecStart=%h/.local/bin/anamnesis serve
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+Then `systemctl --user enable --now anamnesis`, and
+`loginctl enable-linger $USER` if it should survive logout.
+
+**macOS**, as a launchd agent in
+`~/Library/LaunchAgents/dev.anamnesis.server.plist`, with `RunAtLoad` and
+`KeepAlive` both true.
+
+Whichever it is, check it the way you would check anything else that claims to
+be running: `anamnesis status` names the server, says whether it answers, and
+says when it last recorded something. `<data_dir>/logs/` holds what the server
+itself said, one file a day, which is the only account left once the terminal
+is gone.
+
 ### 4. Connect Your Agent
 
 Claude Code talks to anamnesis two ways, and they are independent.
