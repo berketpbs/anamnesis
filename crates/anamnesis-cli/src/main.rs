@@ -380,12 +380,41 @@ fn main() -> anyhow::Result<()> {
     // handoff to stdout, and the harness injects whatever appears there into
     // the model context. A log line on that stream would become part of the
     // agent memory it was describing.
+    //
+    // The server also writes to a file, because it is the one command nobody
+    // is watching. It runs for days in a terminal that gets closed, and when
+    // it stops, stderr stops with it: this repository's own memory went four
+    // days without recording anything, and afterwards there was no way to say
+    // when the server had died or why. `logs/` has been in the data-directory
+    // layout since the first commit, documented as "rolling trace output",
+    // with nothing ever written to it.
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter(cli.debug)));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .init();
+    let log_file = matches!(cli.command, Commands::Serve { .. })
+        .then(|| open_log_file(cli.data_dir.clone()))
+        .flatten();
+
+    {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        let registry = tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr));
+        match log_file {
+            // Written straight through rather than through a background
+            // buffer: what a buffer loses is the last few lines before a
+            // crash, which are the ones this file exists to keep.
+            Some(file) => registry
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_ansi(false)
+                        .with_writer(file),
+                )
+                .init(),
+            None => registry.init(),
+        }
+    }
 
     match cli.command {
         Commands::Status {
@@ -530,6 +559,31 @@ fn main() -> anyhow::Result<()> {
 ///
 /// `--debug` restores it, and so does an explicit `RUST_LOG`: a migration that
 /// fails halfway is exactly when someone wants to see the statement.
+/// Open the server's rolling log, or nothing if the data directory cannot be
+/// reached.
+///
+/// Failing to log is never a reason to fail to serve: a data directory that
+/// cannot be resolved is about to be reported properly by `serve` itself, and
+/// reporting it twice — once from a logging helper that has no subscriber yet
+/// — would replace a clear error with a confusing one.
+///
+/// One file per day, fourteen kept. A log nobody prunes is a data directory
+/// that grows without limit, and two weeks is longer than it has ever taken to
+/// notice that memory stopped.
+fn open_log_file(
+    data_dir: Option<PathBuf>,
+) -> Option<tracing_appender::rolling::RollingFileAppender> {
+    let data = DataDir::resolve(data_dir).ok()?;
+    data.ensure_layout().ok()?;
+    tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("anamnesis")
+        .filename_suffix("log")
+        .max_log_files(14)
+        .build(data.logs())
+        .ok()
+}
+
 fn default_filter(debug: bool) -> &'static str {
     if debug {
         "debug"
@@ -1217,6 +1271,7 @@ fn cmd_serve(
         anamnesis_web::improve::TICK.as_secs()
     );
     println!("   transcripts: {}", raw.root().display());
+    println!("   logs:        {}", data.logs().display());
     println!(
         "   wiki edits:  {}",
         if watch_wiki {
@@ -1233,6 +1288,16 @@ fn cmd_serve(
         ),
         None => println!("   consolidation: counted (no model configured)"),
     }
+
+    // The banner above goes to the terminal this was started from, which is
+    // exactly the thing that will not exist later. This line goes to the file,
+    // so that "when did memory stop" has a first half to compare against.
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        %address,
+        data_dir = %data.root().display(),
+        "anamnesis server starting"
+    );
 
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(anamnesis_web::serve(

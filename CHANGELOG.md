@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- The hook says, where it will be read, that capture is not working. This
+  repository's own memory recorded nothing for four days: the server was not
+  running, every hook failed to connect, and the only report was a line on
+  stderr from a process that exits zero, which no harness surfaces. A session
+  that starts while the server is unreachable now says so through stdout — the
+  channel the handoff already uses — naming itself, so it cannot be read as
+  memory. A handoff that fails when capture is working gets a different
+  sentence, because sending someone to restart a running server is its own
+  false alarm. Every path out of the hook now goes through one function:
+  a failed POST used to return early and print nothing, so Gemini CLI, which
+  parses stdout as one JSON object on every event, got silence exactly when
+  the server was down
+- `serve` writes to `logs/`, which the data-directory layout has documented as
+  "rolling trace output" since the first commit with nothing ever written to
+  it. The server is the one command nobody watches — it runs for days in a
+  terminal that gets closed — so when it stopped there was no way to say when
+  or why. One file a day, fourteen kept, written straight through rather than
+  buffered, because what a buffer loses is the last few lines before a crash
 - Link-neighbour expansion no longer throws away the rank of the page it
   expanded from. Neighbours were ordered by `COUNT(*)` of the edges reaching
   them, so a neighbour of the best full-text hit and a neighbour of the

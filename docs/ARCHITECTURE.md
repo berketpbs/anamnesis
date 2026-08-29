@@ -546,7 +546,7 @@ git history:
   raw/      immutable sanitized transcripts
   db/       SQLite indexes, rebuildable from wiki/
   models/   local embedding models
-  logs/     rolling trace output
+  logs/     rolling trace output, one file a day, written by `serve`
 ```
 
 Resolution order: `--data-dir`, then `ANAMNESIS_DATA_DIR`, then the platform
