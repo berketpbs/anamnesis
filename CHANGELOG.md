@@ -138,6 +138,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   than guessed at: a reasoning model that spends its whole budget thinking
   returns HTTP 200 with an empty answer, and a structured-output refusal
   arrives as a field on a success rather than as an error status
+- `anamnesis install-mcp` registers with Cursor, Gemini CLI and Codex as well
+  as Claude Code, each format checked against its own documentation first, as
+  the hooks were. Three of them keep the same `mcpServers` object in different
+  files — Gemini's being the settings file its hooks already live in, where
+  only that one key is touched — and Codex keeps TOML under `mcp_servers`,
+  merged with `toml_edit` so an existing `config.toml` comes back with its
+  comments and key order intact. OpenCode is refused with the reason its hooks
+  are refused
 - `anamnesis install-mcp` registers the MCP server with a harness, the half of
   connecting an agent that had no command. Hooks had one because setup steps
   nobody writes down fail silently; MCP had a line of documentation that
