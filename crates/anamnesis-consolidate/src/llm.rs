@@ -327,8 +327,8 @@ fn digest_from_json(value: &Value, session: &Session) -> Result<SessionDigest, S
     };
 
     let title = field("title")?;
-    let body = field("body")?;
-    let handoff = field("handoff")?;
+    let body = unescape_newlines(&field("body")?);
+    let handoff = unescape_newlines(&field("handoff")?);
 
     // Titles carry the date so that a directory listing sorts by time and so
     // that model-written and counted pages look alike. The model is told not
@@ -371,6 +371,29 @@ fn digest_from_json(value: &Value, session: &Session) -> Result<SessionDigest, S
         handoff,
         entities,
     })
+}
+
+/// Undo the escaping a model applied to prose it had already put in a string.
+///
+/// Seen in the wild, from a small local model: a handoff whose every paragraph
+/// break is the two characters `\` and `n` rather than a newline. The JSON was
+/// valid, the field was a non-empty string, and every check this module makes
+/// passed — the text simply arrives as one unbroken wall, and a handoff is
+/// injected into the next session's context exactly as written.
+///
+/// Only when there is **no** real newline in the whole string. A page that
+/// already has line breaks and also writes the escape sequence is discussing
+/// it, most likely in code, and rewriting that would corrupt the one thing it
+/// was trying to say. Nothing else is unescaped: tabs and quotes are rarer,
+/// more ambiguous, and were not the failure.
+fn unescape_newlines(text: &str) -> String {
+    const ESCAPED: &str = r"\n";
+    const ESCAPED_CRLF: &str = r"\r\n";
+
+    if text.contains('\n') || !text.contains(ESCAPED) {
+        return text.to_owned();
+    }
+    text.replace(ESCAPED_CRLF, "\n").replace(ESCAPED, "\n")
 }
 
 /// Entity names from a model reply, validated and bounded.
@@ -638,6 +661,41 @@ mod tests {
         let reply = json!({"title": "t", "body": "b", "handoff": "h", "entities": many});
         let digest = digest_from_json(&reply, &session()).expect("a digest");
         assert_eq!(digest.entities.len(), MAX_ENTITIES);
+    }
+
+    /// Taken from a real reply: a local model escaped its own paragraph breaks,
+    /// so the handoff arrived as one wall of text with `\n` printed in it. Every
+    /// check here passed — the JSON was valid and the fields were non-empty
+    /// strings — and the next session would have been handed that verbatim.
+    #[test]
+    fn a_model_that_escaped_its_own_newlines_gets_them_back() {
+        let reply = json!({
+            "title": "t",
+            "body": r"Goal: ship it.\n\nDone: the provider.",
+            "handoff": r"What to know:\n- it works\n\nWhat to do:\n1. check it",
+            "entities": [],
+        });
+        let digest = digest_from_json(&reply, &session()).expect("a digest");
+
+        assert!(
+            digest.body.contains("ship it.\n\nDone"),
+            "{:?}",
+            digest.body
+        );
+        assert!(!digest.handoff.contains(r"\n"), "{:?}", digest.handoff);
+        assert_eq!(digest.handoff.lines().count(), 5);
+    }
+
+    /// The line this must not cross. A page with real line breaks that also
+    /// writes the escape sequence is talking *about* it — almost always in
+    /// code — and rewriting it would corrupt the one thing it was explaining.
+    #[test]
+    fn text_that_already_has_line_breaks_is_left_alone() {
+        let body = "The parser splits on:\n\n    text.split('\\n')\n\nand keeps order.";
+        let reply = json!({"title": "t", "body": body, "handoff": "h", "entities": []});
+        let digest = digest_from_json(&reply, &session()).expect("a digest");
+
+        assert_eq!(digest.body, body, "an explanation of an escape survives it");
     }
 
     #[test]
