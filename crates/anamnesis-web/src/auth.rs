@@ -282,7 +282,37 @@ impl Auth {
 
         let header = header.ok_or(Rejection::Missing)?;
         let presented = bearer(header).ok_or(Rejection::Malformed)?;
+        self.identify(presented)
+    }
 
+    /// The same decision, for a request a person's browser made.
+    ///
+    /// Also accepts the token as an HTTP Basic password. A browser cannot be
+    /// asked to attach a bearer token to a link somebody clicked, so without
+    /// this the wiki browser would be unreachable on exactly the servers that
+    /// took the trouble to configure a token.
+    ///
+    /// The username is ignored. The secret is the whole credential — that is
+    /// what `ANAMNESIS_TOKENS` maps to an operator — and a username that had
+    /// to match as well would only add a way to fail whose error message
+    /// cannot say which half was wrong without saying something about the
+    /// other. Only the browser routes call this; a credential a browser
+    /// attaches by itself must not be able to authorise `POST /hook`.
+    pub fn authenticate_browser(&self, header: Option<&str>) -> Result<Identity, Rejection> {
+        if self.is_open() {
+            return Ok(Identity::Anonymous);
+        }
+
+        let header = header.ok_or(Rejection::Missing)?;
+        let presented = match bearer(header) {
+            Some(token) => token.to_owned(),
+            None => basic_password(header).ok_or(Rejection::Malformed)?,
+        };
+        self.identify(&presented)
+    }
+
+    /// Whose secret this is, if it is one this server accepts.
+    fn identify(&self, presented: &str) -> Result<Identity, Rejection> {
         // Every credential is compared, and each comparison is constant-time.
         // Returning on the first match would make the server's answer depend on
         // where in the list the caller's secret sits.
@@ -318,6 +348,26 @@ fn bearer(header: &str) -> Option<&str> {
     }
     let token = token.trim();
     (!token.is_empty()).then_some(token)
+}
+
+/// The password out of an `Authorization: Basic <base64 user:password>` header.
+///
+/// The username is dropped without being looked at: see
+/// [`Auth::authenticate_browser`]. A password containing a colon survives —
+/// the first colon separates the two halves and the rest belongs to the
+/// secret, which matters because a generated token is base64url and a pasted
+/// one can be anything.
+fn basic_password(header: &str) -> Option<String> {
+    let (scheme, encoded) = header.trim().split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("basic") {
+        return None;
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded.trim())
+        .ok()?;
+    let decoded = String::from_utf8(decoded).ok()?;
+    let (_user, password) = decoded.split_once(':')?;
+    (!password.is_empty()).then(|| password.to_owned())
 }
 
 /// Mint a token nobody has to invent.
@@ -421,6 +471,90 @@ mod tests {
             auth.authenticate(Some("Bearer   ")),
             Err(Rejection::Malformed)
         );
+    }
+
+    /// What a browser sends after somebody types the token into the prompt.
+    #[test]
+    fn a_browser_may_present_the_token_as_a_basic_password() {
+        let auth = Auth::parse(None, Some("alice=s3cret")).expect("parse");
+        let header = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode("anyone:s3cret")
+        );
+
+        assert_eq!(
+            auth.authenticate_browser(Some(&header)),
+            Ok(Identity::Operator(operator("alice")))
+        );
+        // The API keeps the header-only rule, so a credential the browser
+        // attaches on its own cannot reach `POST /hook`.
+        assert_eq!(auth.authenticate(Some(&header)), Err(Rejection::Malformed));
+    }
+
+    /// The username is not a second half of the secret.
+    #[test]
+    fn any_username_will_do_and_a_wrong_token_still_fails() {
+        let auth = Auth::parse(None, Some("alice=s3cret")).expect("parse");
+
+        for user in ["alice", "bob", ""] {
+            let header = format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode(format!("{user}:s3cret"))
+            );
+            assert_eq!(
+                auth.authenticate_browser(Some(&header)),
+                Ok(Identity::Operator(operator("alice"))),
+                "username {user:?}"
+            );
+        }
+
+        let wrong = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode("alice:not-it")
+        );
+        assert_eq!(
+            auth.authenticate_browser(Some(&wrong)),
+            Err(Rejection::Unknown)
+        );
+    }
+
+    /// A generated token is base64url and a pasted one can be anything, so the
+    /// split has to be at the first colon and no other.
+    #[test]
+    fn a_password_may_contain_a_colon() {
+        let auth = Auth::parse(Some("a:b:c"), None).expect("parse");
+        let header = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode("user:a:b:c")
+        );
+
+        assert_eq!(
+            auth.authenticate_browser(Some(&header)),
+            Ok(Identity::Unnamed)
+        );
+    }
+
+    #[test]
+    fn a_browser_route_still_takes_a_bearer_token() {
+        let auth = Auth::parse(Some("s3cret"), None).expect("parse");
+
+        assert_eq!(
+            auth.authenticate_browser(Some("Bearer s3cret")),
+            Ok(Identity::Unnamed)
+        );
+        assert_eq!(
+            auth.authenticate_browser(Some("Basic not-base64!")),
+            Err(Rejection::Malformed)
+        );
+        assert_eq!(auth.authenticate_browser(None), Err(Rejection::Missing));
+    }
+
+    /// An open server is open to a browser too: no prompt, nothing to type.
+    #[test]
+    fn a_server_with_no_tokens_lets_a_browser_in() {
+        let auth = Auth::open();
+
+        assert_eq!(auth.authenticate_browser(None), Ok(Identity::Anonymous));
     }
 
     #[test]

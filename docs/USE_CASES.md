@@ -203,11 +203,13 @@ Based on these use cases, implement in order:
       on a per-project schedule the server runs
 
 ### Phase 4: Web UI & Admin
-- [x] Web server (Axum) — `/hook`, `/handoff`, `/health`
-- [ ] Wiki browser UI
+- [x] Web server (Axum) — `/hook`, `/handoff`, `/whoami`, `/health`
+- [x] Wiki browser UI — `/ui`, read-only, off with `serve --no-ui`
 - [ ] Search interface
 - [ ] Admin endpoints
-- [ ] Authentication, without which none of the above should be exposed
+- [x] Authentication, without which none of the above should be exposed —
+      bearer tokens on the API, the same token as a Basic password in the
+      browser
 
 ### Phase 5: Multi-Agent & DevOps
 - [x] Cross-harness workstreams
