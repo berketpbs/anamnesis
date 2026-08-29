@@ -206,7 +206,9 @@ Based on these use cases, implement in order:
 - [x] Web server (Axum) — `/hook`, `/handoff`, `/whoami`, `/health`
 - [x] Wiki browser UI — `/ui`, read-only, off with `serve --no-ui`
 - [x] Search interface — `?q=` on a scope, the same fused query an agent runs
-- [ ] Admin endpoints
+- [ ] Admin endpoints — the browser *shows* what wants attention (drift
+      between wiki and index, open proposals); carrying anything out is still
+      a CLI command, deliberately
 - [x] Authentication, without which none of the above should be exposed —
       bearer tokens on the API, the same token as a Basic password in the
       browser

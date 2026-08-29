@@ -357,8 +357,63 @@ fn listing(state: &AppState, found: &ProjectRow) -> Result<String, UiError> {
          <th class=\"num\">Written</th><th class=\"num\">Reads</th></tr></thead>\
          <tbody>{rows}</tbody></table>\
          <p class=\"muted\">{count} pages. Reads are what the decay sweep counts; \
-         opening one here is not one of them.</p>",
-        count = pages.len()
+         opening one here is not one of them.</p>{proposals}",
+        count = pages.len(),
+        proposals = proposals(state, found)?,
+    ))
+}
+
+/// What auto-improve has noticed and is waiting on a person about.
+///
+/// Shown and not offered: every one of these changes somebody's memory, and
+/// this surface does not write. Promoting a page is a retention decision — the
+/// durable tiers are the ones the decay sweep cannot reach — which is why
+/// `require_approval` defaults to true, and approval means a person running
+/// the command rather than a button on a page anyone who can reach the port
+/// could press. The command is printed with the id already in it, because the
+/// work this page can do is get somebody to the point of deciding.
+///
+/// Open ones only, and nothing at all when there are none. A section that is
+/// always there is one nobody reads on the day it says something.
+fn proposals(state: &AppState, found: &ProjectRow) -> Result<String, UiError> {
+    let open = state.store.proposals(found.project_id, true)?;
+    if open.is_empty() {
+        return Ok(String::new());
+    }
+
+    let base = scope_href(&found.scope);
+    let mut items = String::new();
+    for proposal in &open {
+        let id = proposal.id.to_string();
+        let short = &id[..id.len().min(8)];
+        // A proposal to write a missing page has nothing to link to, which is
+        // the whole of what it is reporting.
+        let subject = match (proposal.page_id, PagePath::parse(&proposal.subject)) {
+            (Some(_), Ok(path)) => format!(
+                "<a href=\"{href}\">{path}</a>",
+                href = escape(&format!("{base}/{}", encode_path(path.as_str()))),
+                path = escape(path.as_str()),
+            ),
+            _ => format!("<code>{}</code>", escape(&proposal.subject)),
+        };
+
+        items.push_str(&format!(
+            "<li><strong>{action}</strong> {subject}\
+             <p class=\"muted\">{rationale}</p>\
+             <p class=\"path\">anamnesis improve --apply {short}</p></li>",
+            action = escape(proposal.kind.action()),
+            rationale = escape(&proposal.rationale),
+            short = escape(short),
+        ));
+    }
+
+    Ok(format!(
+        "<h2>Proposals</h2>\
+         <ul class=\"proposals\">{items}</ul>\
+         <p class=\"muted\">{count} waiting. Nothing here changes anything: a proposal is \
+         carried out by a person running the command it prints, or refused with \
+         <code>anamnesis improve --dismiss</code>.</p>",
+        count = open.len()
     ))
 }
 
@@ -990,6 +1045,9 @@ ol.hits p{margin:.15rem 0}\
 dl.facts{display:grid;grid-template-columns:auto 1fr;gap:.15rem .8rem;margin:.4rem 0 1.2rem;font-size:.87rem}\
 dl.facts dt{color:var(--muted)}\
 dl.facts dd{margin:0}\
+ul.proposals{list-style:none;padding:0}\
+ul.proposals li{margin:.7rem 0;padding-left:.7rem;border-left:2px solid var(--line)}\
+ul.proposals p{margin:.15rem 0}\
 article{margin-top:1rem}\
 article img{max-width:100%}\
 code{font:13px ui-monospace,SFMono-Regular,Consolas,monospace;background:rgba(127,127,127,.13);padding:.1rem .25rem;border-radius:3px}\
@@ -1002,6 +1060,8 @@ blockquote{margin:.8rem 0;padding-left:.8rem;border-left:3px solid var(--line);c
 mod tests {
     use super::*;
 
+    use anamnesis_core::ids::PageId;
+    use anamnesis_core::improve::{Proposal, ProposalKind};
     use anamnesis_core::page::{Entity, Page, PageStatus, Tier};
     use anamnesis_core::scope::{ResolvedScope, resolve_scope};
     use anamnesis_store::Store;
@@ -1292,6 +1352,104 @@ mod tests {
             .expect("routed");
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ---------------------------------------------------------------
+    // Proposals: shown, never offered.
+    // ---------------------------------------------------------------
+
+    /// Filed the way a pass files them, so the browser reads what the pass
+    /// wrote rather than a shape invented for it.
+    fn propose(harness: &Harness, kind: ProposalKind, subject: &str, page_id: Option<PageId>) {
+        harness
+            .state
+            .store
+            .record_proposals(
+                harness.scope.project_id,
+                &[Proposal {
+                    kind,
+                    subject: subject.to_owned(),
+                    page_id,
+                    rationale: "retrieved 4 times, 21 days old".to_owned(),
+                }],
+                now(),
+            )
+            .expect("filed");
+    }
+
+    #[tokio::test]
+    async fn an_open_proposal_is_shown_with_the_command_that_carries_it_out() {
+        let harness = harness();
+        let page = write(&harness, "notes/one.md", "One", "Body.\n");
+        propose(
+            &harness,
+            ProposalKind::PromoteTier,
+            page.path.as_str(),
+            Some(page.id),
+        );
+
+        let (status, body) = get_page(&harness.state, "/ui/default/widget").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("promote to the semantic tier"), "{body}");
+        assert!(body.contains("anamnesis improve --apply"), "{body}");
+        assert!(
+            body.contains("href=\"/ui/default/widget/notes/one.md\""),
+            "{body}"
+        );
+    }
+
+    /// A section that is always there is one nobody reads on the day it says
+    /// something.
+    #[tokio::test]
+    async fn a_scope_with_nothing_to_propose_says_nothing() {
+        let harness = harness();
+        write(&harness, "notes/one.md", "One", "Body.\n");
+
+        let (_, body) = get_page(&harness.state, "/ui/default/widget").await;
+
+        assert!(!body.contains("Proposals"), "{body}");
+    }
+
+    /// The missing page is the whole of what that proposal reports, so there
+    /// is nothing to link to.
+    #[tokio::test]
+    async fn a_proposal_to_write_a_missing_page_links_nowhere() {
+        let harness = harness();
+        write(&harness, "notes/one.md", "One", "Body.\n");
+        propose(
+            &harness,
+            ProposalKind::WriteMissingPage,
+            "notes/absent.md",
+            None,
+        );
+
+        let (_, body) = get_page(&harness.state, "/ui/default/widget").await;
+
+        assert!(body.contains("write the page"), "{body}");
+        assert!(
+            !body.contains("href=\"/ui/default/widget/notes/absent.md\""),
+            "{body}"
+        );
+    }
+
+    /// A subject can be any `[[target]]` a page body wrote, which means it is
+    /// text a model or a prompt chose.
+    #[tokio::test]
+    async fn a_proposals_subject_is_escaped() {
+        let harness = harness();
+        write(&harness, "notes/one.md", "One", "Body.\n");
+        propose(
+            &harness,
+            ProposalKind::WriteMissingPage,
+            "<script>alert(1)</script>",
+            None,
+        );
+
+        let (_, body) = get_page(&harness.state, "/ui/default/widget").await;
+
+        assert!(!body.contains("<script>alert"), "{body}");
+        assert!(body.contains("&lt;script&gt;"), "{body}");
     }
 
     // ---------------------------------------------------------------
