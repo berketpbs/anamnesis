@@ -1387,6 +1387,123 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
+    // Attribution: whose session a page describes.
+    // ---------------------------------------------------------------
+
+    /// On a shared server this is the difference between a wiki of sessions
+    /// and a wiki of *somebody's* sessions.
+    #[test]
+    fn a_session_page_says_who_ran_the_session() {
+        let harness = harness();
+        let operator = anamnesis_core::scope::OperatorName::parse("alice").expect("name");
+        run_as(&harness, "SessionStart", json!({}), Some(&operator));
+        run_as(
+            &harness,
+            "UserPromptSubmit",
+            json!({"prompt": "why is the index rebuildable"}),
+            Some(&operator),
+        );
+        let ingested = run_as(&harness, "SessionEnd", json!({}), Some(&operator));
+
+        let path = ingested.page.expect("page");
+        let scope = resolve_scope(&harness.cwd).expect("scope");
+        let page = harness
+            .state
+            .wiki
+            .lock()
+            .read_page(
+                &scope.scope,
+                &anamnesis_core::page::PagePath::parse(&path).expect("path"),
+            )
+            .expect("read");
+
+        assert!(page.body.contains("Recorded by alice."), "{}", page.body);
+    }
+
+    /// A server with no tokens has no name to write, and "unknown" on every
+    /// page of every single-person install is noise standing in for a fact
+    /// nobody was missing.
+    #[test]
+    fn a_session_nobody_was_named_for_says_nothing_about_an_operator() {
+        let harness = harness();
+        run(&harness, "SessionStart", json!({}));
+        run(
+            &harness,
+            "UserPromptSubmit",
+            json!({"prompt": "why is the index rebuildable"}),
+        );
+        let ingested = run(&harness, "SessionEnd", json!({}));
+
+        let path = ingested.page.expect("page");
+        let scope = resolve_scope(&harness.cwd).expect("scope");
+        let page = harness
+            .state
+            .wiki
+            .lock()
+            .read_page(
+                &scope.scope,
+                &anamnesis_core::page::PagePath::parse(&path).expect("path"),
+            )
+            .expect("read");
+
+        assert!(!page.body.contains("Recorded by"), "{}", page.body);
+    }
+
+    /// The attribution is a fact about the session, so a summary written by a
+    /// model carries it exactly as a counted one does — and the model is never
+    /// told the name in the first place.
+    #[tokio::test]
+    async fn a_page_a_model_wrote_carries_the_attribution_too() {
+        let harness = harness();
+        let operator = anamnesis_core::scope::OperatorName::parse("alice").expect("name");
+        run_as(&harness, "SessionStart", json!({}), Some(&operator));
+        run_as(
+            &harness,
+            "UserPromptSubmit",
+            json!({"prompt": "why is the index rebuildable"}),
+            Some(&operator),
+        );
+        let ingested = run_as(&harness, "SessionEnd", json!({}), Some(&operator));
+
+        let provider = Arc::new(Fake::answering(json!({
+            "title": "Rebuildable index",
+            "body": "## What happened\n\nThe index was explained.",
+            "handoff": "Nothing pending.",
+            "entities": []
+        })));
+        let scope = resolve_scope(&harness.cwd).expect("scope");
+        let page = finalize_with_llm(
+            &harness.state.store,
+            &harness.state.wiki,
+            &scope,
+            ingested.session_id,
+            None,
+            now(),
+            &settings(provider.clone()),
+        )
+        .await
+        .expect("finalized")
+        .expect("page");
+
+        let written = harness
+            .state
+            .wiki
+            .lock()
+            .read_page(
+                &scope.scope,
+                &anamnesis_core::page::PagePath::parse(&page).expect("path"),
+            )
+            .expect("read");
+
+        assert!(
+            written.body.contains("Recorded by alice."),
+            "{}",
+            written.body
+        );
+        assert!(!provider.prompt().contains("alice"), "the name is not sent");
+    }
+
+    // ---------------------------------------------------------------
     // The guard. Exercised through the real router, because what is
     // interesting here is the wiring — which routes the layer covers, and
     // what a request that never reaches a handler leaves behind.

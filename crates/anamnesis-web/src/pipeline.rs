@@ -268,7 +268,7 @@ fn commit(
         scope.project_id,
         path.clone(),
         frontmatter,
-        digest.body.clone(),
+        attributed(&digest.body, session),
     );
     let commit = wiki.write_page(&scope.scope, &page, &format!("session: {}", digest.title))?;
     page.git_commit = Some(commit);
@@ -294,6 +294,26 @@ fn commit(
     store.close_session(session.id, now)?;
 
     Ok(path.as_str().to_owned())
+}
+
+/// The session's own account of who ran it.
+///
+/// Written here rather than in either renderer, because whose session this was
+/// is a fact about the session and not about how its summary was written: the
+/// deterministic path and the model path must not be able to disagree about
+/// it. The model is never told the name to begin with — an operator's identity
+/// is not something to hand a provider along with their transcript — so a
+/// summary it wrote could not carry the attribution even if asked.
+///
+/// A server with no tokens has no name to write, and stamping "unknown" on
+/// every page of every single-person install would be noise standing in for a
+/// fact nobody was missing. On a shared server the line is the difference
+/// between a wiki of sessions and a wiki of *somebody's* sessions.
+fn attributed(body: &str, session: &Session) -> String {
+    match &session.operator {
+        None => body.to_owned(),
+        Some(operator) => format!("{}\n\nRecorded by {operator}.\n", body.trim_end()),
+    }
 }
 
 /// Read the project's consolidation preferences, if it has written any.

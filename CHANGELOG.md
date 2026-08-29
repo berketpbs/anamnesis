@@ -109,6 +109,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are still preferred
 
 ### Added
+- A session page says who ran the session, when the server could name them.
+  The index has recorded a session's operator since per-user slots existed and
+  the page never mentioned it, so a shared server's wiki was an anonymous pile
+  of sessions. The line is added where the page is committed rather than in
+  either summariser: whose session it was is a fact about the session, not
+  about how its summary was written, and the counted path and the model path
+  must not be able to disagree about it. The model is never told the name —
+  an operator's identity is not something to hand a provider along with their
+  transcript — and a test asserts it never appears in a prompt. A server with
+  no tokens has no name to write and the line is absent, rather than stamping
+  "unknown" on every page of every single-person install
 - Each page says what retention has in store for it: whether the decay sweep
   can reach it at all, and when it can, the tier, age and read count it is
   judged on. Until now "will this page still be here next month" could only be
