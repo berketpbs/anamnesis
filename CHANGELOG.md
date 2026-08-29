@@ -109,6 +109,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are still preferred
 
 ### Added
+- The browser's front page says whether memory is still recording. Each scope
+  now shows its sessions and how long ago it last captured an event, and the
+  page above them says what this server is doing: whether a token is required,
+  which model consolidates, whether embedding is on. This repository once lost
+  four days to a server that was not running and nothing said so; `status`
+  answers that on the machine memory lives on, and this answers it from any
+  browser that can reach the port. No secret appears — the token count says
+  whether a door is locked, never what opens it
 - Search in the wiki browser: `?q=` on a scope, which is where the page list
   already was. It runs `query_pages_across` — the workspace's shared scope
   included, the opt-in embedder with it, at the same default limit — so what a

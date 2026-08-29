@@ -143,38 +143,114 @@ pub(crate) fn challenge(reason: &str) -> Response {
         .into_response()
 }
 
-/// Every scope this server holds memory for.
+/// Every scope this server holds memory for, and whether it is still filling.
+///
+/// The counts are here because the question people actually arrive with is not
+/// "what does memory hold" but "is memory still recording" — this repository
+/// lost four days to a server that was not running, and nothing said so. A
+/// scope whose last observation is a week old on a machine somebody worked in
+/// yesterday is that failure, visible.
 async fn index(State(state): State<AppState>) -> Result<Html<String>, UiError> {
     let projects = state.store.projects()?;
+    let now = Timestamp::now();
 
     let mut rows = String::new();
     for project in &projects {
         let pages = state.store.page_count(project.project_id)?;
+        let sessions = state.store.session_count(project.project_id)?;
+        let recorded = state.store.last_observation_at(project.project_id)?;
         rows.push_str(&format!(
             "<tr><td><a href=\"{href}\">{workspace}/{project_name}</a></td>\
-             <td class=\"num\">{pages}</td></tr>",
+             <td class=\"num\">{pages}</td>\
+             <td class=\"num\">{sessions}</td>\
+             <td class=\"num\">{recorded}</td></tr>",
             href = escape(&scope_href(&project.scope)),
             workspace = escape(project.scope.workspace.as_str()),
             project_name = escape(project.scope.project.as_str()),
+            recorded = match recorded {
+                Some(at) => ago(now, at),
+                // Not a fault on its own: a scope written to by hand, or one
+                // whose pages came from `bootstrap`, has pages and no capture.
+                None => "never".to_owned(),
+            },
         ));
     }
 
     let body = if projects.is_empty() {
         // Empty is the normal state of a server nobody has run hooks against
         // yet, and saying so beats an empty table that reads like a fault.
-        "<h1>anamnesis</h1><p class=\"muted\">No project has been registered here yet. \
-         A scope appears once a session is captured for it, or once \
-         <code>anamnesis init</code> runs inside a repository.</p>"
-            .to_owned()
+        format!(
+            "<h1>anamnesis</h1>{}<p class=\"muted\">No project has been registered here yet. \
+             A scope appears once a session is captured for it, or once \
+             <code>anamnesis init</code> runs inside a repository.</p>",
+            server_facts(&state)
+        )
     } else {
         format!(
-            "<h1>anamnesis</h1>\
-             <table><thead><tr><th>Scope</th><th class=\"num\">Pages</th></tr></thead>\
-             <tbody>{rows}</tbody></table>"
+            "<h1>anamnesis</h1>{facts}\
+             <table><thead><tr><th>Scope</th><th class=\"num\">Pages</th>\
+             <th class=\"num\">Sessions</th><th class=\"num\">Last recorded</th></tr></thead>\
+             <tbody>{rows}</tbody></table>",
+            facts = server_facts(&state)
         )
     };
 
     Ok(Html(shell("anamnesis", &body)))
+}
+
+/// What this server is doing, in the three settings that decide what memory
+/// ends up being.
+///
+/// The same three lines `serve` prints when it starts — which is a terminal
+/// nobody has open a week later, on a machine that may not be the one holding
+/// the browser. No secret appears here: the token count says whether a door is
+/// locked, never what opens it.
+fn server_facts(state: &AppState) -> String {
+    let auth = if state.auth.is_open() {
+        "open — no token required".to_owned()
+    } else {
+        format!("token required ({} accepted)", state.auth.len())
+    };
+    let consolidation = match &state.llm {
+        Some(settings) => format!(
+            "{} ({})",
+            settings.provider.model(),
+            settings.provider.name()
+        ),
+        None => "counted — no model configured".to_owned(),
+    };
+    let embedding = match &state.embedder {
+        Some(embedder) => embedder.model().to_owned(),
+        None => "off — set ANAMNESIS_EMBED_ENABLED=1".to_owned(),
+    };
+
+    format!(
+        "<dl class=\"facts\">\
+         <dt>Auth</dt><dd>{}</dd>\
+         <dt>Consolidation</dt><dd>{}</dd>\
+         <dt>Embedding</dt><dd>{}</dd></dl>",
+        escape(&auth),
+        escape(&consolidation),
+        escape(&embedding),
+    )
+}
+
+/// How long ago something happened, in the coarsest unit that still answers
+/// the question.
+///
+/// A reader looking at this is asking "is capture still working", and no
+/// version of that question is answered better by a timestamp than by
+/// "3d ago". A stamp from the future is reported as just now rather than as a
+/// negative age: the clock is wrong somewhere, which is not what this column
+/// is for.
+fn ago(now: Timestamp, then: Timestamp) -> String {
+    let seconds = (now.as_second() - then.as_second()).max(0);
+    match seconds {
+        0..90 => "just now".to_owned(),
+        90..5400 => format!("{}m ago", seconds / 60),
+        5400..172_800 => format!("{}h ago", seconds / 3600),
+        _ => format!("{}d ago", seconds / 86_400),
+    }
 }
 
 /// What the reader typed into the search box, if anything.
@@ -795,6 +871,9 @@ form.search button{padding:.4rem .8rem;font:inherit;color:var(--bg);background:v
 ol.hits{padding-left:1.4rem}\
 ol.hits li{margin:.7rem 0}\
 ol.hits p{margin:.15rem 0}\
+dl.facts{display:grid;grid-template-columns:auto 1fr;gap:.15rem .8rem;margin:.4rem 0 1.2rem;font-size:.87rem}\
+dl.facts dt{color:var(--muted)}\
+dl.facts dd{margin:0}\
 article{margin-top:1rem}\
 article img{max-width:100%}\
 code{font:13px ui-monospace,SFMono-Regular,Consolas,monospace;background:rgba(127,127,127,.13);padding:.1rem .25rem;border-radius:3px}\
@@ -887,6 +966,19 @@ mod tests {
             .upsert_page(&page, now())
             .expect("index");
         page
+    }
+
+    /// Put one real lifecycle event through the capture path.
+    fn capture(harness: &Harness, event: &str) {
+        let payload = serde_json::json!({
+            "session_id": "session-ui",
+            "hook_event_name": event,
+            "cwd": harness.scope.root.to_string_lossy(),
+        });
+        let hook =
+            anamnesis_hooks::parse(&anamnesis_core::session::AgentKind::ClaudeCode, &payload)
+                .expect("parse");
+        crate::record(&harness.state.store, None, &hook, Timestamp::now(), None).expect("record");
     }
 
     async fn get_page(state: &AppState, uri: &str) -> (StatusCode, String) {
@@ -1084,6 +1176,79 @@ mod tests {
             .expect("routed");
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// The question people arrive with is "is memory still recording", and
+    /// the answer used to be somewhere else entirely.
+    #[tokio::test]
+    async fn the_index_says_when_a_scope_last_recorded_anything() {
+        let harness = harness();
+        write(&harness, "notes/one.md", "One", "Body.\n");
+
+        let (_, before) = get_page(&harness.state, PREFIX).await;
+        assert!(before.contains("never"), "{before}");
+
+        capture(&harness, "SessionStart");
+
+        let (_, after) = get_page(&harness.state, PREFIX).await;
+        assert!(after.contains("just now"), "{after}");
+        assert!(!after.contains(">never<"), "{after}");
+    }
+
+    /// Three settings decide what memory ends up being, and `serve` says them
+    /// once, to a terminal nobody has open a week later.
+    #[tokio::test]
+    async fn the_index_says_what_this_server_is_doing() {
+        let harness = harness();
+
+        let (_, body) = get_page(&harness.state, PREFIX).await;
+
+        assert!(body.contains("open — no token required"), "{body}");
+        assert!(body.contains("counted — no model configured"), "{body}");
+        assert!(body.contains("ANAMNESIS_EMBED_ENABLED"), "{body}");
+    }
+
+    /// A locked door is worth saying; what opens it is not.
+    #[tokio::test]
+    async fn the_facts_never_include_the_secret() {
+        let harness = harness();
+        let guarded = harness
+            .state
+            .clone()
+            .with_auth(crate::Auth::parse(None, Some("alice=s3cret")).expect("tokens"));
+
+        let credential = base64::engine::general_purpose::STANDARD.encode("anyone:s3cret");
+        let response = crate::router(guarded, true)
+            .oneshot(
+                Request::builder()
+                    .uri(PREFIX)
+                    .header(header::AUTHORIZATION, format!("Basic {credential}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("routed");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body = String::from_utf8_lossy(&bytes);
+
+        assert!(body.contains("token required (1 accepted)"), "{body}");
+        assert!(!body.contains("s3cret"), "{body}");
+    }
+
+    #[test]
+    fn an_age_is_reported_in_the_coarsest_unit_that_answers_the_question() {
+        let now: Timestamp = "2026-08-30T12:00:00Z".parse().expect("now");
+        let seconds = |n: i64| now - jiff::Span::new().seconds(n);
+
+        assert_eq!(ago(now, seconds(0)), "just now");
+        assert_eq!(ago(now, seconds(89)), "just now");
+        assert_eq!(ago(now, seconds(600)), "10m ago");
+        assert_eq!(ago(now, seconds(7200)), "2h ago");
+        assert_eq!(ago(now, seconds(60 * 60 * 24 * 9)), "9d ago");
+        // A machine whose clock runs fast is not what this column reports on.
+        assert_eq!(ago(now, seconds(-30)), "just now");
     }
 
     // ---------------------------------------------------------------

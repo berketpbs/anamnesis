@@ -149,8 +149,10 @@ The HTTP server hooks deliver to.
 - `GET /whoami` — what the server makes of the caller's token
 - `GET /health`
 - `GET /ui` — the wiki browser: scopes, the pages in one, one page
-  rendered, and `?q=` to search a scope. Read-only, and `serve --no-ui`
-  leaves it out
+  rendered, and `?q=` to search a scope. Its index also says what this server
+  is doing (auth, consolidation, embedding) and when each scope last recorded
+  anything, because "is memory still recording" is the question people arrive
+  with. Read-only, and `serve --no-ui` leaves it out
 - The consolidation pipeline, which runs *after* the response is sent
 
 > There is no search page and no git visualization; the browser lists and
