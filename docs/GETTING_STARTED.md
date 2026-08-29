@@ -223,12 +223,30 @@ OpenCode is not wired: it extends through a TypeScript plugin API rather than
 a command hook, so there is nothing for `install-hooks` to register. Running
 it against `--agent opencode` says so.
 
-**MCP** lets the agent search memory and write pages on purpose. Register the
-server as a stdio subprocess:
+**MCP** lets the agent search memory and write pages on purpose. Without it an
+agent is handed one summary at startup and can read nothing else, however much
+the hooks have recorded — which is the shape this took on the machine anamnesis
+is developed on, for four months, with nothing saying so.
 
 ```bash
-claude mcp add anamnesis -- anamnesis mcp --repo .
+anamnesis install-mcp                 # prints the entry for .mcp.json
+anamnesis install-mcp --write         # merges it in
 ```
+
+Run the copy of the binary you actually use, the same way as for hooks: the
+registration names the executable that ran it. `claude mcp add anamnesis --
+anamnesis mcp --repo .` does the same thing when `anamnesis` is on `PATH`, and
+registers a server that cannot start when it is not.
+
+`.mcp.json` is read from the project root and is often committed, but what
+`--write` puts there is an absolute path on one machine. Ignore it, or expect a
+colleague's checkout to point at your home directory.
+
+Only Claude Code is registered this way for now. Codex, Gemini CLI and Cursor
+all speak MCP and each keeps its registration somewhere of its own; the hooks
+for those three were written only once their formats had been checked against
+the harness, and this will be too. The server itself is harness-agnostic —
+`anamnesis mcp --repo <dir>` over stdio is all any of them need.
 
 Hooks need `anamnesis serve` running. MCP does not — it opens the store
 directly.
