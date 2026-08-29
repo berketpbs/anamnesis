@@ -19,15 +19,20 @@ limit = 5
 # pushes the numbers up should raise them, and a change that pushes them down
 # has to say so in the diff.
 #
-# As of the first run: MRR 0.708, recall 1.000. Everything is findable; not
-# everything is findable *first*. The lowest-placed answer is the paraphrase
-# case — "why is vector search off by default" against a page that says
-# "opt-in" — which comes back at rank four, because no word in the question
-# appears in the page and only the entity and link streams reach it at all.
-# That is the case the opt-in embedder exists for, and this is the number that
-# would show it earning its place.
+# The first run scored MRR 0.708: everything findable, not everything findable
+# *first*. The lowest-placed answer was the paraphrase case — "why is vector
+# search off by default" against a page that says "opt-in" — at rank four,
+# because no word in the question appears in the page.
+#
+# After the tuning sweep of 2026-08-29: **MRR 1.000, recall 1.000**. Every
+# answer comes back first, the paraphrase case included; it was never a failure
+# of the streams that reached that page, but of a fusion flat enough that
+# anything two streams half-agreed on sat above it.
+#
+# A floor at 1.000 leaves no room, which is the point. There is nowhere further
+# for this corpus to go, so any change that costs it a rank has to say so here.
 [thresholds]
-min_mrr = 0.70
+min_mrr = 1.0
 min_recall = 1.0
 
 # ---------------------------------------------------------------------------
