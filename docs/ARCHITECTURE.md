@@ -176,6 +176,17 @@ the secret is the whole credential. The API keeps the header-only rule, so a
 credential the browser sends on its own cannot authorise `POST /hook` — a page
 on another site cannot make somebody's browser write to their memory.
 
+**A page says what retention has in store for it.** The exemptions are the
+half of the decay sweep that needs no configuration — pinned, durable,
+canonical and known-wrong put a page out of reach whatever the thresholds
+are — so a page states its own plainly. The score is not stated: it comes from
+the `[decay]` table in the project's marker, which lives in a working copy the
+server may not be able to see, and a number computed from defaults would be a
+claim about what `anamnesis sweep` will do made by something that has not read
+what the sweep reads. A page that is both exempt and past its own `expires_at`
+shows the contradiction rather than resolving it, exactly as the sweep reports
+it. A page with no index row says so where somebody is reading it.
+
 **Proposals are shown, never offered.** Every proposal changes somebody's
 memory — promoting a page is a retention decision, since the durable tiers are
 the ones the decay sweep cannot reach — which is why `require_approval`

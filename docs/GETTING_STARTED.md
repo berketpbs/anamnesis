@@ -150,6 +150,12 @@ what `anamnesis reindex` repairs. Proposals waiting on a person are listed
 there too, each with the `anamnesis improve --apply <id>` that carries it
 out — the browser shows them and never acts on them.
 
+Each page says whether the decay sweep can reach it at all — `pinned`,
+`semantic`/`procedural`, `canonical` and `do-not-answer-from` are out of
+reach — and, when it can, what it is judged on: tier, age, and how often it
+has been read. The score itself belongs to `anamnesis sweep`, which reads the
+`[decay]` table in the project's marker.
+
 It is read-only, and `serve --no-ui` leaves it out. Opening a page does not
 count as reading it, because the decay sweep watches those counters; being
 handed one by a search does, exactly as `anamnesis search` already does. On a

@@ -656,12 +656,13 @@ async fn page(
     // retrieval stopped offering this page the moment something replaced it,
     // so a reader who arrived here by name has no other way to learn that.
     let replaced = state.store.superseded_by(found.project_id, &page_path)?;
+    let retention = retention(&state, &found, &page_path)?;
 
     let base = scope_href(&found.scope);
     let body = format!(
         "{crumbs}<h1>{title}</h1>\
          <div class=\"meta\">{badges}<span class=\"path\">{path}</span></div>\
-         {notes}\
+         {notes}{retention}\
          <article>{rendered}</article>",
         crumbs = crumbs(&[
             ("anamnesis", PREFIX),
@@ -721,6 +722,82 @@ fn resolve_link(
         }
     }
     None
+}
+
+/// What retention has in store for this page.
+///
+/// The exemptions are the half of the decay sweep that needs no configuration
+/// — pinned, durable, canonical, and known-wrong put a page out of reach
+/// whatever the thresholds are — so they can be stated here plainly. The score
+/// cannot: it is computed from the `[decay]` table in the project's marker,
+/// which lives in a working copy this server may not be able to see. Printing
+/// a number from default settings would be a claim about what `anamnesis
+/// sweep` will do, made by something that has not read what it reads.
+///
+/// The contradiction is reported rather than resolved, exactly as the sweep
+/// reports it: a page that is both exempt and past its own `expires_at` is two
+/// instructions from the same author, and the sweep obeys the exemption.
+fn retention(state: &AppState, found: &ProjectRow, path: &PagePath) -> Result<String, UiError> {
+    let Some(row) = state.store.sweep_row(found.project_id, path)? else {
+        // Readable here, unfindable by search: the page is on disk and has no
+        // index row. The scope's listing names every page in this state; this
+        // is the one somebody is looking at.
+        return Ok(
+            "<p class=\"warn\">This page is not in the index — search cannot find it \
+             until <code>anamnesis reindex</code> runs.</p>"
+                .to_owned(),
+        );
+    };
+
+    let now = Timestamp::now();
+    let facts = &row.facts;
+    let expired = facts.has_expired(now);
+
+    let mut out = String::new();
+    match facts.exemption() {
+        Some(exemption) => {
+            out.push_str(&format!(
+                "<p class=\"muted\">The decay sweep does not reach this page: {}.</p>",
+                escape(exemption.as_str())
+            ));
+            if expired {
+                out.push_str(&format!(
+                    "<p class=\"warn\">It also carries an expiry that passed on {}. \
+                     Two instructions from the same author: the sweep keeps the page and \
+                     reports the contradiction rather than resolving it.</p>",
+                    facts
+                        .expires_at
+                        .map(|at| at.strftime("%Y-%m-%d").to_string())
+                        .unwrap_or_default()
+                ));
+            }
+        }
+        None => {
+            let read = match (facts.access_count, facts.last_accessed_at) {
+                (0, _) | (_, None) => "never read".to_owned(),
+                (count, Some(at)) => format!(
+                    "read {}, last {}",
+                    plural(count as usize, "time", "times"),
+                    ago(now, at)
+                ),
+            };
+            out.push_str(&format!(
+                "<p class=\"muted\">The decay sweep can reach this page: {tier}, written {age}, \
+                 {read}. Whether it goes depends on this project's <code>[decay]</code> settings, \
+                 which <code>anamnesis sweep</code> reads — it reports by default and deletes \
+                 only with <code>--apply</code>.</p>",
+                tier = escape(facts.tier.as_str()),
+                age = ago(now, facts.written_at),
+            ));
+            if expired {
+                out.push_str(
+                    "<p class=\"warn\">Its own expiry has passed, so the next sweep forgets it \
+                     whatever its score.</p>",
+                );
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Frontmatter worth showing above the body.
@@ -1352,6 +1429,106 @@ mod tests {
             .expect("routed");
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ---------------------------------------------------------------
+    // What retention has in store for a page.
+    // ---------------------------------------------------------------
+
+    /// The durable tiers are the ones the sweep cannot reach, which is what
+    /// makes promoting a page a retention decision.
+    #[tokio::test]
+    async fn a_durable_page_says_the_sweep_cannot_reach_it() {
+        let harness = harness();
+        write(&harness, "notes/one.md", "One", "Body.\n");
+
+        let (_, body) = get_page(&harness.state, "/ui/default/widget/notes/one.md").await;
+
+        assert!(body.contains("does not reach this page: durable"), "{body}");
+    }
+
+    /// And the score is not claimed: it comes from a marker this server may
+    /// not be able to see.
+    #[tokio::test]
+    async fn a_reachable_page_says_what_it_is_judged_on_and_not_the_score() {
+        let harness = harness();
+        let mut frontmatter = Frontmatter::new("Ordinary", Vec::new()).expect("frontmatter");
+        frontmatter.tier = Tier::Episodic;
+        let page = Page::new(
+            harness.scope.project_id,
+            PagePath::parse("notes/two.md").expect("path"),
+            frontmatter,
+            "Body.",
+        );
+        harness
+            .state
+            .wiki
+            .lock()
+            .write_page(&harness.scope.scope, &page, "write")
+            .expect("write");
+        harness
+            .state
+            .store
+            .upsert_page(&page, now())
+            .expect("index");
+
+        let (_, body) = get_page(&harness.state, "/ui/default/widget/notes/two.md").await;
+
+        assert!(body.contains("can reach this page: episodic"), "{body}");
+        assert!(body.contains("never read"), "{body}");
+        assert!(body.contains("anamnesis sweep"), "{body}");
+    }
+
+    /// Pinned and past its own deadline is two instructions from one author.
+    /// The sweep obeys the pin and says so; so does this.
+    #[tokio::test]
+    async fn a_pinned_page_past_its_own_expiry_shows_the_contradiction() {
+        let harness = harness();
+        let mut frontmatter = Frontmatter::new("Kept", Vec::new()).expect("frontmatter");
+        frontmatter.tier = Tier::Episodic;
+        frontmatter.pinned = true;
+        frontmatter.expires_at = Some(now() - jiff::Span::new().hours(48));
+        let page = Page::new(
+            harness.scope.project_id,
+            PagePath::parse("notes/kept.md").expect("path"),
+            frontmatter,
+            "Body.",
+        );
+        harness
+            .state
+            .wiki
+            .lock()
+            .write_page(&harness.scope.scope, &page, "write")
+            .expect("write");
+        harness
+            .state
+            .store
+            .upsert_page(&page, now())
+            .expect("index");
+
+        let (_, body) = get_page(&harness.state, "/ui/default/widget/notes/kept.md").await;
+
+        assert!(body.contains("does not reach this page: pinned"), "{body}");
+        assert!(body.contains("expiry that passed"), "{body}");
+    }
+
+    /// Readable here, unfindable by search — the page somebody is looking at
+    /// while wondering why nothing returns it.
+    #[tokio::test]
+    async fn a_page_with_no_index_row_says_so_on_the_page_itself() {
+        let harness = harness();
+        write(&harness, "notes/one.md", "One", "Body.\n");
+        let by_hand = harness.state.wiki.lock().locate(
+            &harness.scope.scope,
+            &PagePath::parse("notes/byhand.md").expect("path"),
+        );
+        std::fs::write(&by_hand, "---\ntitle: By hand\n---\n\nBody.\n").expect("write");
+
+        let (status, body) = get_page(&harness.state, "/ui/default/widget/notes/byhand.md").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("not in the index"), "{body}");
+        assert!(body.contains("reindex"), "{body}");
     }
 
     // ---------------------------------------------------------------
