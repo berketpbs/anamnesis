@@ -48,7 +48,16 @@ pub struct Ablation {
 
 /// Score each stream separately over a suite.
 pub fn ablate(suite: &Suite, now: Timestamp) -> Result<Ablation, EvalError> {
-    let corpus = Corpus::build(suite, now)?;
+    ablate_with(suite, now, None)
+}
+
+/// The same, with the embedding stream switched on.
+pub fn ablate_with(
+    suite: &Suite,
+    now: Timestamp,
+    embedder: Option<&dyn anamnesis_core::embedding::Embed>,
+) -> Result<Ablation, EvalError> {
+    let corpus = Corpus::build_with(suite, now, embedder)?;
 
     // Indexed by stream, then by case: `per_stream[s][c]` is how stream `s`
     // did on case `c`.
@@ -57,11 +66,19 @@ pub fn ablate(suite: &Suite, now: Timestamp) -> Result<Ablation, EvalError> {
     let mut found_by_none = Vec::new();
 
     for (index, case) in suite.cases.iter().enumerate() {
+        let vector = embedder.and_then(|embedder| {
+            embedder
+                .embed(&case.query)
+                .ok()
+                .map(|vector| (embedder.model().to_owned(), vector))
+        });
         let breakdown = corpus.store.query_streams(
             corpus.project_id,
             &case.query,
             suite.limit,
-            None,
+            vector
+                .as_ref()
+                .map(|(model, vector)| (model.as_str(), vector.as_slice())),
             &Tuning::default(),
         )?;
 

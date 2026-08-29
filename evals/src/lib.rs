@@ -40,9 +40,9 @@ pub mod score;
 pub mod suite;
 pub mod sweep;
 
-pub use ablation::{Ablation, StreamScore, ablate};
+pub use ablation::{Ablation, StreamScore, ablate, ablate_with};
 pub use corpus::Corpus;
-pub use run::{CaseOutcome, Report, run, run_on};
+pub use run::{CaseOutcome, Report, run, run_embedded, run_on};
 pub use score::{CaseScore, mean_reciprocal_rank, recall, score_case};
 pub use suite::{Case, FixturePage, Suite, Thresholds};
 pub use sweep::{SuiteScore, SweepPoint, SweepReport, default_grid, sweep};

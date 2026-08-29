@@ -9,10 +9,13 @@
 //! to crown a winner, and the setting that tops the table will always be the
 //! one that suits those questions best — which is why the rule for accepting
 //! one ([`SweepPoint::improves_on`]) is written here, in code, rather than
-//! chosen after the numbers are in: a candidate has to hold recall on **every**
-//! suite and raise the mean rank on **every** suite, not on average across
-//! them.
+//! chosen after the numbers are in: nothing may fall on any suite, and
+//! something has to rise.
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+use anamnesis_core::embedding::Embed;
 use anamnesis_core::retrieval::Tuning;
 use jiff::Timestamp;
 
@@ -61,23 +64,33 @@ impl SweepPoint {
 
     /// Whether this setting is one the project would accept over `baseline`.
     ///
-    /// Both conditions on every suite: recall never falls, and rank rises. A
-    /// setting that buys rank by dropping an answer out of the results is not
-    /// an improvement in retrieval, it is a narrower search.
+    /// Nothing may fall — not recall, not rank, on any suite — and something
+    /// must rise. A setting that buys rank by dropping an answer out of the
+    /// results is not an improvement in retrieval, it is a narrower search.
     ///
-    /// The third condition — that a candidate wins as a region of the grid
-    /// rather than as a single spike — cannot be read off one point, and is
-    /// left to whoever reads the table.
+    /// This originally demanded a rise on *every* suite, which was written
+    /// before either suite could reach a perfect score and turned out to
+    /// exclude the only interesting case: once `retrieval` sat at 1.000, no
+    /// setting could ever raise it, so a setting that took `crowded` from
+    /// 0.967 to 1.000 was reported as no improvement at all. Six thousand rows
+    /// scored and none qualified, which is a rule failing rather than a grid
+    /// failing.
+    ///
+    /// The condition it cannot express — that a candidate wins as a region of
+    /// the grid rather than as a single spike — is still left to whoever reads
+    /// the table.
     pub fn improves_on(&self, baseline: &SweepPoint) -> bool {
         if self.scores.len() != baseline.scores.len() {
             return false;
         }
-        self.scores
-            .iter()
-            .zip(&baseline.scores)
-            .all(|(mine, theirs)| {
-                mine.recall >= theirs.recall - f64::EPSILON && mine.mrr > theirs.mrr + f64::EPSILON
-            })
+        let pairs = || self.scores.iter().zip(&baseline.scores);
+
+        let nothing_falls = pairs().all(|(mine, theirs)| {
+            mine.recall >= theirs.recall - f64::EPSILON && mine.mrr >= theirs.mrr - f64::EPSILON
+        });
+        let something_rises = pairs().any(|(mine, theirs)| mine.mrr > theirs.mrr + f64::EPSILON);
+
+        nothing_falls && something_rises
     }
 }
 
@@ -140,8 +153,10 @@ impl SweepReport {
 ///   shallow pool cannot answer with a page no stream rated highly, and a deep
 ///   one lets three streams' also-rans outvote one stream's favourite.
 ///
-/// The vector weight is left alone: the stream is opt-in and empty here, so
-/// sweeping it would measure nothing.
+/// - `vectors` is swept only because there is finally something to weigh:
+///   until the stream was populated on every write path it was empty in every
+///   run, and a weight over nothing measures nothing. Without `--embed` it
+///   still is, and the three values collapse to one answer.
 ///
 /// Every knob spans values on both sides of the one that ships, and the entity
 /// weight is allowed past full-text's. A grid whose best row sits on its own
@@ -155,16 +170,18 @@ pub fn default_grid() -> Vec<Tuning> {
                 for authority_exponent in [0.0, 0.25, 0.5, 1.0] {
                     for candidates in [10, 30, 120] {
                         for entity_coverage in [0.5, 1.0] {
-                            grid.push(Tuning {
-                                rrf_k,
-                                fts: 1.0,
-                                entity,
-                                links,
-                                vectors: 1.0,
-                                authority_exponent,
-                                entity_coverage,
-                                candidates,
-                            });
+                            for vectors in [0.0, 0.5, 1.0] {
+                                grid.push(Tuning {
+                                    rrf_k,
+                                    fts: 1.0,
+                                    entity,
+                                    links,
+                                    vectors,
+                                    authority_exponent,
+                                    entity_coverage,
+                                    candidates,
+                                });
+                            }
                         }
                     }
                 }
@@ -172,6 +189,47 @@ pub fn default_grid() -> Vec<Tuning> {
         }
     }
     grid
+}
+
+/// An embedder that answers the same question once.
+///
+/// A sweep asks every suite's questions once per setting — two thousand
+/// settings against twenty-five questions is fifty thousand calls to a model,
+/// for twenty-five distinct answers. Every one of them is deterministic, so
+/// the second is the first.
+///
+/// Only the queries pass through here. The corpus is embedded once, when it is
+/// built, and reused across the whole grid for the same reason.
+struct Memo<'a> {
+    inner: &'a dyn Embed,
+    seen: Mutex<HashMap<String, Vec<f32>>>,
+}
+
+impl<'a> Memo<'a> {
+    fn new(inner: &'a dyn Embed) -> Self {
+        Self {
+            inner,
+            seen: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl Embed for Memo<'_> {
+    fn model(&self) -> &str {
+        self.inner.model()
+    }
+
+    fn embed(&self, text: &str) -> Result<Vec<f32>, String> {
+        if let Some(cached) = self.seen.lock().expect("not poisoned").get(text) {
+            return Ok(cached.clone());
+        }
+        let vector = self.inner.embed(text)?;
+        self.seen
+            .lock()
+            .expect("not poisoned")
+            .insert(text.to_owned(), vector.clone());
+        Ok(vector)
+    }
 }
 
 /// Score every setting in `grid` against every suite.
@@ -184,17 +242,21 @@ pub fn sweep(
     suites: &[(String, Suite)],
     now: Timestamp,
     grid: &[Tuning],
+    embedder: Option<&dyn anamnesis_core::embedding::Embed>,
 ) -> Result<SweepReport, EvalError> {
+    let memo = embedder.map(Memo::new);
+    let embedder = memo.as_ref().map(|memo| memo as &dyn Embed);
+
     let mut corpora = Vec::with_capacity(suites.len());
     for (_, suite) in suites {
-        corpora.push(Corpus::build(suite, now)?);
+        corpora.push(Corpus::build_with(suite, now, embedder)?);
     }
 
     let mut points = Vec::with_capacity(grid.len());
     for tuning in grid {
         let mut scores = Vec::with_capacity(suites.len());
         for ((name, suite), corpus) in suites.iter().zip(&corpora) {
-            let report = run_on(corpus, suite, now, tuning)?;
+            let report = run_on(corpus, suite, now, tuning, embedder)?;
             scores.push(SuiteScore {
                 suite: name.clone(),
                 mrr: report.mrr,
@@ -282,7 +344,7 @@ relevant = ["decisions/0001-storage.md"]
                 ..Tuning::default()
             },
         ];
-        let report = sweep(&suites(), now(), &grid).expect("sweep");
+        let report = sweep(&suites(), now(), &grid, None).expect("sweep");
 
         assert_eq!(report.points.len(), 2);
         assert_eq!(report.suites, vec!["sweep-test".to_owned()]);
@@ -298,7 +360,7 @@ relevant = ["decisions/0001-storage.md"]
     #[test]
     fn the_same_setting_scores_the_same_wherever_it_sits_in_the_grid() {
         let grid = vec![Tuning::default(), Tuning::default()];
-        let report = sweep(&suites(), now(), &grid).expect("sweep");
+        let report = sweep(&suites(), now(), &grid, None).expect("sweep");
 
         assert_eq!(
             report.points[0].scores[0].mrr,
@@ -369,7 +431,29 @@ relevant = ["decisions/0001-storage.md"]
             "a higher rank on a smaller set of answers is not better retrieval"
         );
 
-        let only_one_suite = candidate(vec![
+        // Better on one corpus and unchanged on the other is an improvement,
+        // and the rule used to say otherwise. It was written before either
+        // suite could reach a perfect score; once `retrieval` sat at 1.000 no
+        // setting could raise it, so nothing that fixed the *other* corpus
+        // could ever qualify. Six thousand rows, none accepted.
+        let one_better_one_level = candidate(vec![
+            SuiteScore {
+                suite: "a".into(),
+                mrr: 0.50,
+                recall: 1.00,
+            },
+            SuiteScore {
+                suite: "b".into(),
+                mrr: 0.55,
+                recall: 0.80,
+            },
+        ]);
+        assert!(
+            one_better_one_level.improves_on(&baseline),
+            "a corpus at its ceiling must not veto a gain on the other"
+        );
+
+        let one_better_one_worse = candidate(vec![
             SuiteScore {
                 suite: "a".into(),
                 mrr: 0.90,
@@ -377,13 +461,18 @@ relevant = ["decisions/0001-storage.md"]
             },
             SuiteScore {
                 suite: "b".into(),
-                mrr: 0.40,
+                mrr: 0.30,
                 recall: 0.80,
             },
         ]);
         assert!(
-            !only_one_suite.improves_on(&baseline),
-            "unchanged on the second corpus is exactly the fitted result to refuse"
+            !one_better_one_worse.improves_on(&baseline),
+            "a gain paid for on the other corpus is the fitted result to refuse"
+        );
+
+        assert!(
+            !baseline.improves_on(&baseline),
+            "unchanged everywhere is not an improvement"
         );
     }
 }

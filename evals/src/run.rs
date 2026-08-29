@@ -1,5 +1,6 @@
 //! Running a suite and reporting what happened.
 
+use anamnesis_core::embedding::Embed;
 use anamnesis_core::page::PagePath;
 use anamnesis_core::retrieval::Tuning;
 use jiff::Timestamp;
@@ -86,7 +87,22 @@ impl Report {
 /// only because the clock is held still.
 pub fn run(suite: &Suite, now: Timestamp) -> Result<Report, EvalError> {
     let corpus = Corpus::build(suite, now)?;
-    run_on(&corpus, suite, now, &Tuning::default())
+    run_on(&corpus, suite, now, &Tuning::default(), None)
+}
+
+/// Score a suite with the embedding stream switched on.
+///
+/// Both halves matter and both are the caller's embedder: the corpus is
+/// embedded page by page, and every question is embedded with the same model,
+/// because a query vector from one model and a page vector from another are
+/// not comparable and nothing downstream would say so.
+pub fn run_embedded(
+    suite: &Suite,
+    now: Timestamp,
+    embedder: &dyn Embed,
+) -> Result<Report, EvalError> {
+    let corpus = Corpus::build_with(suite, now, Some(embedder))?;
+    run_on(&corpus, suite, now, &Tuning::default(), Some(embedder))
 }
 
 /// Score a suite against a corpus that is already built.
@@ -99,10 +115,11 @@ pub fn run_on(
     suite: &Suite,
     now: Timestamp,
     tuning: &Tuning,
+    embedder: Option<&dyn Embed>,
 ) -> Result<Report, EvalError> {
     let mut cases = Vec::with_capacity(suite.cases.len());
     for case in &suite.cases {
-        cases.push(run_case(corpus, case, suite.limit, now, tuning)?);
+        cases.push(run_case(corpus, case, suite.limit, now, tuning, embedder)?);
     }
 
     let scores: Vec<CaseScore> = cases.iter().map(|case| case.score.clone()).collect();
@@ -130,11 +147,29 @@ fn run_case(
     limit: usize,
     now: Timestamp,
     tuning: &Tuning,
+    embedder: Option<&dyn Embed>,
 ) -> Result<CaseOutcome, EvalError> {
-    let hits =
-        corpus
-            .store
-            .query_pages_with(corpus.project_id, &case.query, limit, now, None, tuning)?;
+    // A question that cannot be embedded is asked without a vector rather than
+    // failing the case: the other three streams are what most of this measures,
+    // and a suite that refused to score because one model call failed would be
+    // measuring the model.
+    let vector = embedder.and_then(|embedder| {
+        embedder
+            .embed(&case.query)
+            .ok()
+            .map(|vector| (embedder.model().to_owned(), vector))
+    });
+
+    let hits = corpus.store.query_pages_with(
+        corpus.project_id,
+        &case.query,
+        limit,
+        now,
+        vector
+            .as_ref()
+            .map(|(model, vector)| (model.as_str(), vector.as_slice())),
+        tuning,
+    )?;
 
     let returned: Vec<String> = hits
         .iter()
