@@ -91,7 +91,10 @@ LLM provider abstraction, and the local embedder.
 - Prompt building, with a token budget that trims long sessions from the middle
 - Structured output enforced by a JSON schema
 - Local embeddings (candle, CPU, all-MiniLM-L6-v2), off unless
-  `ANAMNESIS_EMBED_ENABLED=1`
+  `ANAMNESIS_EMBED_ENABLED=1`. When on, every path that writes a page embeds
+  it — consolidation, the wiki watcher, `write-page`, `bootstrap`, `reindex`
+  and the MCP tool — because a vector stream that covered only one of them
+  would answer differently depending on which command happened to write a page
 
 **Supports:**
 - Anthropic Messages API.

@@ -1167,11 +1167,17 @@ fn cmd_write_page(
     // Entities as well as links, which this command used to skip because it
     // could not set any. A page whose entities never reach the index is one
     // the entity stream cannot find, however carefully they were declared.
+    // And a vector, when one is enabled: a page written here is a page
+    // somebody meant, and leaving it out of the vector stream would make the
+    // stream depend on which command wrote a page rather than on what it says.
+    let embedder = anamnesis_llm::EmbedConfig::from_env().build(&data.models())?;
     store.index_page(
         scope.project_id,
         &page,
         &anamnesis_wiki::extract_links(body),
-        None,
+        embedder
+            .as_deref()
+            .map(|embedder| embedder as &dyn anamnesis_core::embedding::Embed),
         now,
     )?;
 
@@ -1319,6 +1325,10 @@ fn cmd_serve(
     // error someone sees rather than a warning that only surfaces hours later,
     // after sessions have already been summarised without one.
     let llm = anamnesis_llm::LlmConfig::from_env()?;
+    // The same opt-in embedder the MCP server builds. Without one here, the
+    // vector stream covered only the pages an agent wrote through MCP — not a
+    // single session summary, and nothing anybody edited by hand.
+    let embedder = anamnesis_llm::EmbedConfig::from_env().build(&data.models())?;
     let settings = llm.build()?.map(|provider| anamnesis_web::LlmSettings {
         provider,
         max_input_tokens: llm.max_input_tokens,
@@ -1351,6 +1361,10 @@ fn cmd_serve(
         ),
         None => println!("   consolidation: counted (no model configured)"),
     }
+    match &embedder {
+        Some(embedder) => println!("   embedding:     {}", embedder.model()),
+        None => println!("   embedding:     off (set ANAMNESIS_EMBED_ENABLED=1)"),
+    }
 
     // The banner above goes to the terminal this was started from, which is
     // exactly the thing that will not exist later. This line goes to the file,
@@ -1368,7 +1382,8 @@ fn cmd_serve(
         anamnesis_web::AppState::new(store, wiki)
             .with_raw(Some(raw))
             .with_llm(settings)
-            .with_auth(auth),
+            .with_auth(auth)
+            .with_embedder(embedder),
         watch_wiki,
     ))?;
     Ok(())
@@ -2253,14 +2268,18 @@ fn cmd_reindex(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
     println!();
 
     let now = Timestamp::now();
-    let report = reindex::rebuild(&store, &wiki, &raw, &scope, now)?;
+    let embedder = anamnesis_llm::EmbedConfig::from_env().build(&data.models())?;
+    let embed = embedder
+        .as_deref()
+        .map(|embedder| embedder as &dyn anamnesis_core::embedding::Embed);
+    let report = reindex::rebuild(&store, &wiki, &raw, &scope, embed, now)?;
 
     // The shared scope is rebuilt with the project, because a rebuild that
     // left it out would drop the index rows for pages every project in the
     // workspace can see — and nothing else would ever put them back.
     let global = global_scope(&scope, &data);
     let shared = if data.wiki_global(&scope.scope.workspace).exists() {
-        Some(reindex::rebuild(&store, &wiki, &raw, &global, now)?)
+        Some(reindex::rebuild(&store, &wiki, &raw, &global, embed, now)?)
     } else {
         None
     };
@@ -2363,7 +2382,18 @@ fn cmd_bootstrap(
     store.migrate()?;
     let wiki = Wiki::open(data.wiki())?;
 
-    let report = bootstrap::seed(&store, &wiki, &scope, &drafts, force, now)?;
+    let embedder = anamnesis_llm::EmbedConfig::from_env().build(&data.models())?;
+    let report = bootstrap::seed(
+        &store,
+        &wiki,
+        &scope,
+        &drafts,
+        force,
+        embedder
+            .as_deref()
+            .map(|embedder| embedder as &dyn anamnesis_core::embedding::Embed),
+        now,
+    )?;
 
     for path in &report.written {
         println!("  wrote   {path}");

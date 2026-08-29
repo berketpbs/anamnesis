@@ -47,6 +47,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are broken by page id rather than by whatever order SQLite returned
 
 ### Changed
+- There is one way to index a page, and every path that writes one embeds it.
+  `Store::index_page` writes the row, the entities, the links and — when an
+  embedder is enabled — the vector; five hand-written copies of that sequence
+  became calls to it, and the two rebuilds that resolve links in a second pass
+  keep their own sequence and say so. The copies had drifted twice: once when
+  the live path wrote pages without their links, so the link-neighbour stream
+  was blind to everything this system wrote for itself, and again in a way that
+  was still true — exactly one of the seven embedded anything, so switching the
+  embedder on bought a vector stream over the pages an agent had written
+  through `memory_write_page` and nothing else. No session summary, no
+  bootstrap page, no hand edit. `serve` now builds the embedder the MCP server
+  already built, and says on startup whether it has one; a rebuild embeds too,
+  or a wiki rebuilt from disk would answer differently from the same wiki
+  written page by page
 - The entity stream's rule that *every* token of a name must appear in the
   query is a setting rather than a fact of the SQL, and was swept like the
   rest. It stays: admitting partial matches was never better in two thousand

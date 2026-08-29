@@ -58,12 +58,13 @@ pub fn rebuild(
     wiki: &Wiki,
     raw: &RawSpool,
     scope: &ResolvedScope,
+    embedder: Option<&dyn anamnesis_core::embedding::Embed>,
     now: Timestamp,
 ) -> anyhow::Result<Rebuilt> {
     let mut report = Rebuilt::default();
     store.upsert_project(scope, now)?;
 
-    let pages = rebuild_pages(store, wiki, scope, now)?;
+    let pages = rebuild_pages(store, wiki, scope, embedder, now)?;
     report.pages = pages.indexed;
     report.removed = pages.removed;
     report.skipped_removal = pages.skipped_removal;
@@ -103,6 +104,7 @@ fn rebuild_pages(
     store: &Store,
     wiki: &Wiki,
     scope: &ResolvedScope,
+    embedder: Option<&dyn anamnesis_core::embedding::Embed>,
     now: Timestamp,
 ) -> anyhow::Result<Pages> {
     let paths = wiki.pages(&scope.scope)?;
@@ -140,6 +142,11 @@ fn rebuild_pages(
             store.upsert_page(&page, now)?;
         }
         store.set_page_entities(scope.project_id, page.id, &entities)?;
+        // A rebuild has to reproduce the index the live path builds, vectors
+        // included: a wiki rebuilt without them would answer differently from
+        // the same wiki written page by page, which is the difference #30 was
+        // about.
+        store.embed_page(&page, embedder)?;
         indexed.push((page.id, parsed.body));
     }
 
@@ -356,6 +363,7 @@ mod tests {
             &harness.wiki,
             &harness.raw,
             &harness.scope,
+            None,
             now(),
         )
         .expect("rebuild");
@@ -387,6 +395,7 @@ mod tests {
             &harness.wiki,
             &harness.raw,
             &harness.scope,
+            None,
             now(),
         )
         .expect("first");
@@ -395,6 +404,7 @@ mod tests {
             &harness.wiki,
             &harness.raw,
             &harness.scope,
+            None,
             now(),
         )
         .expect("second");
@@ -448,6 +458,7 @@ mod tests {
             &harness.wiki,
             &harness.raw,
             &harness.scope,
+            None,
             now(),
         )
         .expect("rebuild");
@@ -477,6 +488,7 @@ mod tests {
             &harness.wiki,
             &harness.raw,
             &harness.scope,
+            None,
             now(),
         )
         .expect("rebuild");
@@ -521,6 +533,7 @@ mod tests {
             &harness.wiki,
             &harness.raw,
             &harness.scope,
+            None,
             now(),
         )
         .expect("rebuild");
@@ -558,6 +571,7 @@ mod tests {
             &harness.wiki,
             &harness.raw,
             &harness.scope,
+            None,
             now(),
         )
         .expect("rebuild");
@@ -607,6 +621,7 @@ mod tests {
             &harness.wiki,
             &harness.raw,
             &harness.scope,
+            None,
             now(),
         )
         .expect("rebuild");
@@ -630,6 +645,7 @@ mod tests {
             &harness.wiki,
             &harness.raw,
             &harness.scope,
+            None,
             now(),
         )
         .expect("rebuild")
@@ -690,6 +706,7 @@ mod tests {
             &harness.wiki,
             &harness.raw,
             &harness.scope,
+            None,
             "2026-09-01T09:00:00Z".parse().expect("timestamp"),
         )
         .expect("rebuild");
@@ -706,6 +723,7 @@ mod tests {
             &harness.wiki,
             &harness.raw,
             &harness.scope,
+            None,
             "2026-09-02T09:00:00Z".parse().expect("timestamp"),
         )
         .expect("rebuild");
@@ -806,6 +824,7 @@ mod tests {
             &harness.wiki,
             &harness.raw,
             &harness.scope,
+            None,
             now(),
         )
         .expect("rebuild");
