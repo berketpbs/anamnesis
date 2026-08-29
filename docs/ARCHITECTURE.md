@@ -148,8 +148,9 @@ The HTTP server hooks deliver to.
 - `GET /handoff` — hand the next session what the last one left
 - `GET /whoami` — what the server makes of the caller's token
 - `GET /health`
-- `GET /ui` — the wiki browser: scopes, the pages in one, and one page
-  rendered. Read-only, and `serve --no-ui` leaves it out
+- `GET /ui` — the wiki browser: scopes, the pages in one, one page
+  rendered, and `?q=` to search a scope. Read-only, and `serve --no-ui`
+  leaves it out
 - The consolidation pipeline, which runs *after* the response is sent
 
 > There is no search page and no git visualization; the browser lists and
@@ -170,14 +171,22 @@ the secret is the whole credential. The API keeps the header-only rule, so a
 credential the browser sends on its own cannot authorise `POST /hook` — a page
 on another site cannot make somebody's browser write to their memory.
 
-**What the browser deliberately does not do.** It never records a page access.
-`query_pages` bumps those counters because retrieval finding a page useful is
-evidence about the page, and the decay sweep reads exactly them; a person
-clicking through an index is not the same claim, and browsing must not be able
-to rescue a page from being forgotten. Page bodies come from the wiki rather
-than from the index's copy — the file is what a person edits and what git
-holds — and raw HTML in a body is rendered as text, since bodies are written
-by models and by capture.
+**What the browser deliberately does not do.** Opening a page never records
+an access. `query_pages` bumps those counters because retrieval finding a page
+useful is evidence about the page, and the decay sweep reads exactly them; a
+person clicking through an index is not the same claim, and browsing must not
+be able to rescue a page from being forgotten. Searching *does* record one,
+here as in `anamnesis search` and `memory_query` — a search hands somebody a
+page it chose, which is the act the counter is about. Page bodies come from
+the wiki rather than from the index's copy — the file is what a person edits
+and what git holds — and raw HTML in a body is rendered as text, since bodies
+are written by models and by capture.
+
+**Search is the same call an agent makes.** `?q=` runs `query_pages_across`
+with the workspace's shared scope and the opt-in embedder, at the same default
+limit, so what a person is shown is what an agent would have been handed. A
+browser that ranked pages its own way would be a second retrieval that
+`anamnesis eval` does not measure.
 
 ### anamnesis-cli
 Command-line interface.

@@ -139,11 +139,13 @@ anamnesis serve
 
 This binds `127.0.0.1:8080` and serves `POST /hook`, `GET /handoff`,
 `GET /whoami`, `GET /health`, and the wiki browser at
-<http://127.0.0.1:8080/ui> — scopes, the pages in one, and one page rendered.
-It is read-only, it never counts as reading a page (the decay sweep watches
-those counters), and `serve --no-ui` leaves it out. On a server that requires a
-token, the browser asks for a username and password: any username, and the
-token as the password.
+<http://127.0.0.1:8080/ui> — scopes, the pages in one, one page rendered, and
+a search box that runs the same fused query an agent's `memory_query` does.
+It is read-only, and `serve --no-ui` leaves it out. Opening a page does not
+count as reading it, because the decay sweep watches those counters; being
+handed one by a search does, exactly as `anamnesis search` already does. On a
+server that requires a token, the browser asks for a username and password:
+any username, and the token as the password.
 
 By default no token is required, which is why the default bind is loopback:
 there, the port is the boundary. To serve any other address, protect it first —
