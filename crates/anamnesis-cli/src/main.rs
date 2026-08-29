@@ -2,6 +2,7 @@
 
 mod bootstrap;
 mod hooks;
+mod mcp_config;
 mod reindex;
 mod sweep;
 
@@ -268,6 +269,36 @@ enum Commands {
         check: bool,
     },
 
+    /// Register the MCP server with a harness, so an agent can read memory
+    ///
+    /// The other half of connecting an agent. Hooks record what happens; this
+    /// is what lets the agent search what was recorded, rather than being
+    /// handed one summary at startup and nothing else.
+    InstallMcp {
+        /// Which harness to configure
+        #[arg(long, default_value = "claude-code")]
+        agent: String,
+
+        /// Merge the registration into the configuration file instead of
+        /// printing it
+        #[arg(long)]
+        write: bool,
+
+        /// Configuration file to write to, when `--write` is given
+        ///
+        /// Defaults to this project's `.mcp.json`.
+        #[arg(long)]
+        config: Option<PathBuf>,
+
+        /// Repository the server should resolve its scope from
+        ///
+        /// Defaults to the current directory. Passed explicitly rather than
+        /// left to the subprocess's working directory, which the harness
+        /// chooses.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+
     /// Rebuild the index from the wiki and the raw transcripts
     ///
     /// Safe to run at any time: every identifier is derived, so a rebuild
@@ -491,6 +522,14 @@ fn main() -> anyhow::Result<()> {
             settings,
         } => {
             cmd_install_hooks(&agent, &server, write, settings)?;
+        }
+        Commands::InstallMcp {
+            agent,
+            write,
+            config,
+            repo,
+        } => {
+            cmd_install_mcp(&agent, write, config, repo)?;
         }
         Commands::Token { operator } => {
             cmd_token(operator.as_deref())?;
@@ -1676,6 +1715,119 @@ fn cmd_token(operator: Option<&str>) -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Register the MCP server with a harness.
+///
+/// The counterpart to `install-hooks`, and it exists for the same reason that
+/// one does. Connecting an agent takes two steps; only one of them had a
+/// command, and the other was a line of documentation that assumed the binary
+/// was on `PATH`. On the machine this project is developed on it is not — it is
+/// copied out of `target/` so that `cargo build` can overwrite it — so the
+/// documented line would have registered a server that cannot start. It was
+/// never run at all: hooks recorded four months of sessions the agent could not
+/// search.
+fn cmd_install_mcp(
+    agent: &str,
+    write: bool,
+    config_path: Option<PathBuf>,
+    repo: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    // One harness, on purpose. Codex, Gemini CLI and Cursor all speak MCP and
+    // all keep it somewhere of their own; writing a file whose shape has not
+    // been checked against the harness that reads it is how somebody's
+    // configuration gets a broken entry in it. The hooks for those three were
+    // written only after their formats were confirmed, and this will be too.
+    if agent != "claude-code" {
+        println!("No MCP template for {agent} yet.");
+        println!();
+        println!("  Registered today: claude-code.");
+        println!("  Codex, Gemini CLI and Cursor all speak MCP, but each keeps");
+        println!("  its registration in a place and shape this has not checked.");
+        println!("  Guessing would write a broken entry into a file somebody");
+        println!("  else's tools read.");
+        println!();
+        println!("  The server itself is harness-agnostic: `anamnesis mcp --repo <dir>`");
+        println!("  over stdio is all any of them need.");
+        return Ok(());
+    }
+
+    let binary = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("anamnesis"));
+    let repo = match repo {
+        Some(repo) => repo,
+        None => std::env::current_dir()?,
+    };
+    let entry = mcp_config::server_entry(&binary, &repo);
+    let document = serde_json::json!({ "mcpServers": { mcp_config::SERVER_NAME: entry.clone() } });
+
+    if !write {
+        println!(
+            "Add this to {}:",
+            mcp_config::config_path(std::path::Path::new(".")).display()
+        );
+        println!();
+        println!("{}", serde_json::to_string_pretty(&document)?);
+        println!();
+        println!("Or run this again with `--write` to merge it in for you.");
+        println!();
+        println!("The MCP server does not need `anamnesis serve`: it opens the");
+        println!("store directly. Hooks are the half that needs the server.");
+        return Ok(());
+    }
+
+    let path = match config_path {
+        Some(path) => path,
+        None => mcp_config::config_path(&std::env::current_dir()?),
+    };
+
+    // Same rule as the hooks: a file that exists and does not parse is
+    // somebody's configuration and possibly the only copy of it.
+    let mut existing = match hooks::read_settings(&path) {
+        Ok(config) => config,
+        Err(error) => {
+            println!("Could not read {} — {error}", path.display());
+            println!();
+            println!("Nothing was changed. Add this by hand:");
+            println!();
+            println!("{}", serde_json::to_string_pretty(&document)?);
+            return Ok(());
+        }
+    };
+
+    let outcome = mcp_config::register(&mut existing, mcp_config::SERVER_NAME, &entry);
+    if outcome.changed() {
+        hooks::write_settings(&path, &existing)?;
+    }
+
+    println!("🔌 {}", path.display());
+    println!();
+    match &outcome {
+        mcp_config::Registration::Added => {
+            println!("  Registered:   {}", mcp_config::describe(&entry));
+        }
+        mcp_config::Registration::Replaced(previous) => {
+            println!("  Registered:   {}", mcp_config::describe(&entry));
+            println!("  Replaced:     {previous}");
+        }
+        mcp_config::Registration::Unchanged => {
+            println!("  Already registered: {}", mcp_config::describe(&entry));
+            println!();
+            println!("  Nothing to do.");
+            return Ok(());
+        }
+    }
+
+    println!();
+    println!("  Takes effect in the next session, not this one.");
+    println!("  Then the agent can call memory_query rather than waiting to be");
+    println!("  handed one summary at startup.");
+    println!();
+    // Said because the file is one a project may commit, and what is in it is
+    // this machine's: an absolute path to a binary nobody else has.
+    println!("  This names paths on this machine. `.mcp.json` is read from the");
+    println!("  project root and is often committed — ignore it, or expect a");
+    println!("  colleague's checkout to point at your home directory.");
     Ok(())
 }
 

@@ -71,6 +71,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are still preferred
 
 ### Added
+- `anamnesis install-mcp` registers the MCP server with a harness, the half of
+  connecting an agent that had no command. Hooks had one because setup steps
+  nobody writes down fail silently; MCP had a line of documentation that
+  assumed the binary was on `PATH`. On the machine this project is developed on
+  it is not — it is copied out of `target/` so `cargo build` can overwrite it —
+  so following that line would have registered a server that cannot start. It
+  was never run at all: four months of captured sessions the agent could not
+  search, and nothing said so. The registration names the executable that ran
+  the command, merges rather than replaces, is idempotent, refuses to touch a
+  file it cannot parse, and replaces a stale entry of its own only while saying
+  what it replaced
 - A second eval corpus, `crowded`: twenty-two pages, a plausible competitor for
   most questions, half the answers on pages with no authority, and a link
   cluster dense enough to offer noise as readily as signal. It exists to be the

@@ -63,3 +63,8 @@ Thumbs.db
 *.so
 *.dylib
 *.dll
+
+# MCP registration written by `anamnesis install-mcp --write`. It names an
+# absolute path to a binary on one machine, so a checkout that inherited it
+# would point at somebody else's home directory.
+.mcp.json
