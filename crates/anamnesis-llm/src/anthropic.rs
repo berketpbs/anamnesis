@@ -11,14 +11,13 @@
 //! block read by position instead of by type — and none of them need a socket
 //! to find.
 
-use std::time::Duration;
-
 use async_trait::async_trait;
 use secrecy::ExposeSecret;
 use serde_json::{Value, json};
 
 use crate::LlmError;
 use crate::config::LlmConfig;
+use crate::http;
 use crate::provider::{Completion, CompletionOutput, Provider};
 
 /// API version. Pinned, not tracked: this is the version the request shape
@@ -90,17 +89,12 @@ impl Anthropic {
 
         // The delay has to be read before the body is consumed, and it is the
         // only trustworthy source for how long a 429 wants us to wait.
-        let retry_after = response
-            .headers()
-            .get("retry-after")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.trim().parse::<u64>().ok())
-            .map(Duration::from_secs);
+        let retry_after = http::retry_after(response.headers());
 
         let text = response.text().await?;
 
         if !status.is_success() {
-            return Err(api_error(status.as_u16(), &text, retry_after));
+            return Err(http::api_error(status.as_u16(), &text, retry_after));
         }
 
         let payload: Value = serde_json::from_str(&text)
@@ -133,7 +127,7 @@ impl Provider for Anthropic {
             match self.attempt(&body).await {
                 Ok(output) => return Ok(output),
                 Err(error) if attempt < self.max_retries && error.is_retryable() => {
-                    let delay = retry_delay(&error, attempt);
+                    let delay = http::retry_delay(&error, attempt);
                     tracing::warn!(
                         attempt = attempt + 1,
                         delay_ms = delay.as_millis(),
@@ -238,72 +232,9 @@ fn parse_response(payload: &Value) -> Result<CompletionOutput, LlmError> {
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_owned(),
-        input_tokens: usage(payload, "input_tokens"),
-        output_tokens: usage(payload, "output_tokens"),
+        input_tokens: http::usage(payload, "input_tokens"),
+        output_tokens: http::usage(payload, "output_tokens"),
     })
-}
-
-/// One usage counter, defaulting to zero rather than failing the request over
-/// a missing accounting field.
-fn usage(payload: &Value, field: &str) -> u32 {
-    payload
-        .get("usage")
-        .and_then(|usage| usage.get(field))
-        .and_then(Value::as_u64)
-        .unwrap_or(0)
-        .try_into()
-        .unwrap_or(u32::MAX)
-}
-
-/// Classify a non-2xx response.
-fn api_error(status: u16, body: &str, retry_after: Option<Duration>) -> LlmError {
-    let parsed: Option<Value> = serde_json::from_str(body).ok();
-    let kind = parsed
-        .as_ref()
-        .and_then(|value| value.get("error"))
-        .and_then(|error| error.get("type"))
-        .and_then(Value::as_str)
-        .unwrap_or("unknown")
-        .to_owned();
-    let message = parsed
-        .as_ref()
-        .and_then(|value| value.get("error"))
-        .and_then(|error| error.get("message"))
-        .and_then(Value::as_str)
-        .unwrap_or(body)
-        .to_owned();
-
-    // Folded into the message rather than a field: the only consumer is a log
-    // line and the retry loop, and the loop reads it back below.
-    let message = match retry_after {
-        Some(delay) => format!("{message} (retry after {}s)", delay.as_secs()),
-        None => message,
-    };
-
-    LlmError::Api {
-        status,
-        kind,
-        message,
-    }
-}
-
-/// How long to wait before trying again.
-///
-/// Honours a `retry-after` the API sent, and otherwise backs off
-/// exponentially from a second. Capped, because the session is already over
-/// and a page that arrives ten minutes late is worth less than the process
-/// being free to handle the next one.
-fn retry_delay(error: &LlmError, attempt: u32) -> Duration {
-    if let LlmError::Api { message, .. } = error
-        && let Some(seconds) = message
-            .rsplit_once("(retry after ")
-            .and_then(|(_, rest)| rest.split_once("s)"))
-            .and_then(|(seconds, _)| seconds.parse::<u64>().ok())
-    {
-        return Duration::from_secs(seconds.min(60));
-    }
-
-    Duration::from_secs(2_u64.saturating_pow(attempt).min(30))
 }
 
 #[cfg(test)]
@@ -423,58 +354,5 @@ mod tests {
             parse_response(&payload),
             Err(LlmError::Malformed(_))
         ));
-    }
-
-    #[test]
-    fn api_errors_carry_their_type_and_message() {
-        let error = api_error(
-            400,
-            r#"{"type":"error","error":{"type":"invalid_request_error","message":"bad model"}}"#,
-            None,
-        );
-        match &error {
-            LlmError::Api {
-                status,
-                kind,
-                message,
-            } => {
-                assert_eq!(*status, 400);
-                assert_eq!(kind, "invalid_request_error");
-                assert_eq!(message, "bad model");
-            }
-            other => panic!("expected an api error, got {other:?}"),
-        }
-        assert!(!error.is_retryable());
-    }
-
-    #[test]
-    fn a_non_json_error_body_is_still_reported() {
-        let error = api_error(502, "<html>bad gateway</html>", None);
-        assert!(error.to_string().contains("bad gateway"));
-        assert!(error.is_retryable());
-    }
-
-    #[test]
-    fn rate_limits_and_server_faults_are_retryable() {
-        for status in [429, 500, 529] {
-            assert!(api_error(status, "{}", None).is_retryable(), "{status}");
-        }
-        for status in [400, 401, 403, 404, 413] {
-            assert!(!api_error(status, "{}", None).is_retryable(), "{status}");
-        }
-    }
-
-    #[test]
-    fn a_retry_after_header_wins_over_the_backoff_curve() {
-        let error = api_error(429, "{}", Some(Duration::from_secs(7)));
-        assert_eq!(retry_delay(&error, 0), Duration::from_secs(7));
-    }
-
-    #[test]
-    fn backoff_grows_and_then_stops_growing() {
-        let error = api_error(500, "{}", None);
-        assert_eq!(retry_delay(&error, 0), Duration::from_secs(1));
-        assert_eq!(retry_delay(&error, 2), Duration::from_secs(4));
-        assert_eq!(retry_delay(&error, 20), Duration::from_secs(30));
     }
 }

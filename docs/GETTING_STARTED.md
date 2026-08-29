@@ -69,9 +69,9 @@ else has a default.
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `ANTHROPIC_API_KEY` | — | Credential. `ANAMNESIS_LLM_API_KEY` overrides it. |
-| `ANAMNESIS_LLM_PROVIDER` | `anthropic` when a key is set | `anthropic` or `none`. Set `none` to turn the model off without unsetting the key. |
-| `ANAMNESIS_LLM_MODEL` | `claude-opus-5` | Model id. |
-| `ANAMNESIS_LLM_BASE_URL` | `https://api.anthropic.com` | Point at a gateway or a local server. |
+| `ANAMNESIS_LLM_PROVIDER` | `anthropic` when a key is set | `anthropic`, `openai`, `ollama`, or `none`. Set `none` to turn the model off without unsetting the key. |
+| `ANAMNESIS_LLM_MODEL` | `claude-opus-5`, or `llama3.2` for `ollama` | Model id. |
+| `ANAMNESIS_LLM_BASE_URL` | per provider | `https://api.anthropic.com`, `https://api.openai.com/v1`, or `http://127.0.0.1:11434/v1`. Point at a gateway, a second Ollama, or vLLM. |
 | `ANAMNESIS_LLM_EFFORT` | `high` | `low`, `medium`, `high`, `xhigh`, or `max`. |
 | `ANAMNESIS_LLM_MAX_INPUT_TOKENS` | `6500` | Prompt budget. Long sessions are trimmed from the middle to fit. |
 | `ANAMNESIS_LLM_MAX_OUTPUT_TOKENS` | `2000` | Reply budget, floored at 1000. |
@@ -83,6 +83,35 @@ A typo is reported at startup rather than at the end of the first session:
 `anamnesis serve` refuses to bind if the settings do not parse, and prints
 which model it will consolidate with when they do. `anamnesis status
 --verbose` reports the same thing.
+
+#### A model on this machine
+
+`openai` and `ollama` are the same client — one wire format, several backends:
+OpenAI itself, Ollama, vLLM, LM Studio, and any gateway presenting
+`/chat/completions`. The difference between the two names is the default
+address and that `ollama` expects no credential, because a model running here
+has none to present.
+
+```bash
+export ANAMNESIS_LLM_PROVIDER=ollama
+export ANAMNESIS_LLM_MODEL=llama3.2          # whatever `ollama list` shows
+```
+
+Two things learned pointing this at a real Ollama, both worth knowing before
+you conclude the setup is broken:
+
+**A reasoning model can spend the whole reply budget thinking.** It comes back
+as HTTP 200 with a full `reasoning` field and an empty answer, and anamnesis
+says so by name rather than reporting a parse error. `deepseek-r1` needed the
+budget raised to 4000 to answer at all; at the default 2000 it thought until
+the tokens ran out.
+
+**A model that satisfies the schema can still write a poor page.** The reply is
+constrained to the fields consolidation asks for, and every one of them is
+checked before a page is written — but nothing can check whether the prose
+inside them is any good. A small local model produced a valid page whose body
+was JSON fragments. The page is only as good as the model; the schema keeps it
+*parseable*, not *worth reading*.
 
 **Nothing depends on the model being reachable.** If a request times out, is
 declined, or comes back as something other than a page, the counted summary is

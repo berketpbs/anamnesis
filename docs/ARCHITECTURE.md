@@ -94,8 +94,14 @@ LLM provider abstraction, and the local embedder.
   `ANAMNESIS_EMBED_ENABLED=1`
 
 **Supports:**
-- Anthropic Messages API. `ANAMNESIS_LLM_BASE_URL` points it at a gateway
-  that speaks the same wire format; there is no OpenAI or Ollama provider.
+- Anthropic Messages API.
+- The OpenAI chat-completions API, and everything that speaks it: OpenAI,
+  Ollama, vLLM, LM Studio, any gateway presenting `/chat/completions`. One
+  client rather than two, because they are one wire format — `ollama` differs
+  from `openai` only in its default address and in expecting no credential,
+  which is what lets a model on the same machine be dropped in where a hosted
+  one was.
+- `ANAMNESIS_LLM_BASE_URL` points any of them at somewhere else.
 
 Requests are not streamed: consolidation is one POST per finished session,
 made after the hook's response has already been sent.

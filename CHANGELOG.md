@@ -71,6 +71,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are still preferred
 
 ### Added
+- An OpenAI-compatible provider, which is also the Ollama one: `openai` and
+  `ollama` are one client over one wire format, differing in their default
+  address and in whether a credential is expected. A model running on this
+  machine has none to present, and requiring one would have made the only
+  configuration that costs nothing — and sends nobody's transcript anywhere —
+  impossible to express. Verified against Ollama before it was written: a
+  `response_format` carrying a JSON schema is honoured, and unknown request
+  fields are ignored, which is what lets the same body carry `reasoning_effort`
+  to a backend that has never heard of it. Two failure modes are named rather
+  than guessed at: a reasoning model that spends its whole budget thinking
+  returns HTTP 200 with an empty answer, and a structured-output refusal
+  arrives as a field on a success rather than as an error status
 - `anamnesis install-mcp` registers the MCP server with a harness, the half of
   connecting an agent that had no command. Hooks had one because setup steps
   nobody writes down fail silently; MCP had a line of documentation that
