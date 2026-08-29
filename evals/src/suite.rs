@@ -83,6 +83,13 @@ pub struct FixturePage {
     /// Exempt from decay.
     #[serde(default)]
     pub pinned: bool,
+    /// The page this one replaces, if it replaces one.
+    ///
+    /// A corpus that cannot express this cannot ask the question a wiki asks
+    /// every time somebody revises a decision: the old page is still on disk,
+    /// still says what it said, and must stop being offered.
+    #[serde(default)]
+    pub supersedes: String,
 }
 
 impl FixturePage {
@@ -111,6 +118,16 @@ impl FixturePage {
         }
         Tier::parse(&self.tier)
             .map_err(|error| EvalError::Suite(format!("{error} (on {})", self.path)))
+    }
+
+    /// The page this one claims to replace.
+    pub fn parsed_supersedes(&self) -> Result<Option<PagePath>, EvalError> {
+        if self.supersedes.trim().is_empty() {
+            return Ok(None);
+        }
+        PagePath::parse(&self.supersedes)
+            .map(Some)
+            .map_err(EvalError::from)
     }
 }
 
@@ -179,9 +196,26 @@ impl Suite {
             page.page_path()?;
             page.parsed_entities()?;
             page.parsed_tier()?;
+            page.parsed_supersedes()?;
         }
 
         let paths: Vec<&str> = self.pages.iter().map(|page| page.path.as_str()).collect();
+
+        // A claim naming a page that is not here resolves to nothing, and a
+        // suite whose supersession quietly did not happen measures a corpus
+        // where nothing was ever replaced — while reading as though it did.
+        for page in &self.pages {
+            if let Some(target) = page.parsed_supersedes()?
+                && !paths.contains(&target.as_str())
+            {
+                return Err(EvalError::Suite(format!(
+                    "page {:?} supersedes {:?}, which the corpus does not contain",
+                    page.path,
+                    target.as_str()
+                )));
+            }
+        }
+
         for case in &self.cases {
             if case.relevant.is_empty() {
                 return Err(EvalError::Suite(format!(
@@ -255,6 +289,20 @@ relevant = ["decisions/0001-sqlite.md"]
         // the reader is which page it was on.
         assert!(error.to_string().contains("semantik"), "{error}");
         assert!(error.to_string().contains("0001-sqlite.md"), "{error}");
+    }
+
+    /// The same failure as a case naming a missing page, one step earlier: the
+    /// claim resolves to nothing, no page is superseded, and the suite goes on
+    /// scoring a corpus that reads as though one was.
+    #[test]
+    fn superseding_a_page_the_corpus_lacks_is_refused() {
+        let source = MINIMAL.replace(
+            "title = \"Why SQLite\"",
+            "title = \"Why SQLite\"\nsupersedes = \"decisions/0000-postgres.md\"",
+        );
+        let error = Suite::from_toml(&source).expect_err("should refuse");
+        assert!(error.to_string().contains("does not contain"), "{error}");
+        assert!(error.to_string().contains("0000-postgres.md"), "{error}");
     }
 
     #[test]

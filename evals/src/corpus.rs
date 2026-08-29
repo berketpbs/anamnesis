@@ -73,6 +73,7 @@ impl Corpus {
             frontmatter.tier = fixture.parsed_tier()?;
             frontmatter.canonical = fixture.canonical;
             frontmatter.pinned = fixture.pinned;
+            frontmatter.supersedes = fixture.parsed_supersedes()?;
 
             let mut page = Page::new(
                 project_id,
@@ -158,6 +159,50 @@ relevant = ["decisions/0001-sqlite.md"]
         assert!(
             hits.len() >= 2,
             "the link neighbour was not reached: {hits:?}"
+        );
+    }
+
+    /// A suite can say one page replaced another, and the replacement has to
+    /// reach the index rather than only the frontmatter — which is the exact
+    /// shape of the bug fixed in #32, and would make every superseded page in
+    /// a corpus a page still being offered.
+    #[test]
+    fn a_superseded_page_stops_being_offered() {
+        let source = r#"
+name = "supersede-test"
+description = "one page replaces another"
+
+[[page]]
+path = "decisions/0001-timeout.md"
+title = "Timeout is thirty seconds"
+body = "Outbound calls give up after thirty seconds."
+
+[[page]]
+path = "decisions/0002-timeout.md"
+title = "Timeout is five seconds"
+supersedes = "decisions/0001-timeout.md"
+body = "Outbound calls give up after five seconds."
+
+[[case]]
+query = "timeout"
+relevant = ["decisions/0002-timeout.md"]
+"#;
+        let suite = Suite::from_toml(source).expect("suite");
+        let corpus = Corpus::build(&suite, now()).expect("build");
+
+        let hits = corpus
+            .store
+            .query_pages(corpus.project_id, "outbound calls give up", 5, now(), None)
+            .expect("query");
+        let paths: Vec<&str> = hits.iter().map(|hit| hit.path.as_str()).collect();
+
+        assert!(
+            paths.contains(&"decisions/0002-timeout.md"),
+            "the replacement should answer: {paths:?}"
+        );
+        assert!(
+            !paths.contains(&"decisions/0001-timeout.md"),
+            "the replaced page is still being offered: {paths:?}"
         );
     }
 
