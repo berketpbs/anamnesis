@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Link-neighbour expansion no longer throws away the rank of the page it
+  expanded from. Neighbours were ordered by `COUNT(*)` of the edges reaching
+  them, so a neighbour of the best full-text hit and a neighbour of the
+  thirtieth ranked identically, and two neighbours of the thirtieth outranked
+  one neighbour of the first. Each edge now counts for `1 / (k + rank)` of its
+  seed — the same reciprocal-rank form fusion uses, and the same constant,
+  because both are answering how much a ranking's order should matter. The
+  stream's own MRR on the crowded suite rises from 0.178 to 0.256; what it is
+  worth in the fusion was re-measured and left at 0.25, which is the weight
+  a stream that answers no question alone should carry. Ties within the stream
+  are broken by page id rather than by whatever order SQLite returned
+
 ### Changed
 - **Retrieval is tuned against measurement rather than argument.** The RRF
   constant is 2 rather than 60, the link stream is weighted a quarter, and the

@@ -12,6 +12,7 @@
 //! contribute is a stream the others already cover.
 
 use anamnesis_core::ids::PageId;
+use anamnesis_core::retrieval::Tuning;
 use jiff::Timestamp;
 
 use crate::EvalError;
@@ -56,10 +57,13 @@ pub fn ablate(suite: &Suite, now: Timestamp) -> Result<Ablation, EvalError> {
     let mut found_by_none = Vec::new();
 
     for (index, case) in suite.cases.iter().enumerate() {
-        let breakdown =
-            corpus
-                .store
-                .query_streams(corpus.project_id, &case.query, suite.limit, None)?;
+        let breakdown = corpus.store.query_streams(
+            corpus.project_id,
+            &case.query,
+            suite.limit,
+            None,
+            &Tuning::default(),
+        )?;
 
         let mut any_found = false;
         for (position, (name, ranking)) in breakdown.named().iter().enumerate() {
