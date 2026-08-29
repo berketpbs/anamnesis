@@ -166,6 +166,7 @@ Command-line interface.
 - `reindex` — rebuild the index from `wiki/` and `raw/`
 - `bootstrap` — seed a new project's memory from its git history
 - `sweep` — forget pages that have decayed; reports unless `--apply`
+- `forget` — remove named pages on purpose, from the wiki and the index
 - `improve` — file and act on proposals about the memory itself
 
 ## Data Flow

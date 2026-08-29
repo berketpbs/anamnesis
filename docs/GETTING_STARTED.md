@@ -553,6 +553,33 @@ throwaway directory — it never touches your own memory, because every query
 would otherwise count as a read and the decay sweep believes those. Write your
 own with `--suite path/to/suite.toml`; the format is the shipped file.
 
+### Forget a Page on Purpose
+
+`sweep` forgets what decayed. This forgets what was *wrong* — a page written
+from a bad model reply, a note that turned out to be untrue, a duplicate:
+
+```bash
+anamnesis forget sessions/2026-08-29-3da85483.md
+```
+
+It removes the index row first and the file second, so an interruption leaves
+the page briefly unfindable and wholly recoverable with `anamnesis reindex`,
+rather than leaving the index pointing at markdown that is gone.
+
+No `--apply`, unlike the sweep: a sweep proposes a judgement over pages nobody
+named, and its report is where that judgement gets checked. Here you named the
+page. What the command owes you instead is to say what it removed and where it
+went — the wiki is a git repository, so the commit it prints will still have
+the content:
+
+```bash
+git -C <data_dir>/wiki show <commit>
+```
+
+A path that names no page is refused before anything is removed, and so are
+all of them if any one is wrong: forgetting two pages and then complaining
+about the third leaves you working out which name was the typo.
+
 ### Rebuild the Index
 
 The database is disposable. If it is lost or corrupted, rebuild it from the
