@@ -109,6 +109,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are still preferred
 
 ### Added
+- Each page says what retention has in store for it: whether the decay sweep
+  can reach it at all, and when it can, the tier, age and read count it is
+  judged on. Until now "will this page still be here next month" could only be
+  answered by running the sweep over the whole project from the machine memory
+  lives on. The score is deliberately not shown — it comes from the `[decay]`
+  table in a marker the server may not be able to see, and a number from
+  default settings would be a claim about what `anamnesis sweep` will do, made
+  by something that has not read what the sweep reads. A page that is both
+  exempt and past its own `expires_at` shows the contradiction rather than
+  resolving it, as the sweep does; a page with no index row says so where
+  somebody is reading it
+- `Store::sweep_row` reads one page's facts through the same projection
+  `sweep_rows` uses, so a page's own account of itself and a sweep's account
+  of it cannot disagree
 - Open proposals are listed on the scope that has them, each with the
   `anamnesis improve --apply <id>` that carries it out. Auto-improve has filed
   them since it existed, and the only way to see one was to run a pass from

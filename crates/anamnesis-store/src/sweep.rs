@@ -57,32 +57,34 @@ impl Store {
              FROM pages WHERE project_id = ?1 ORDER BY path",
         )?;
 
-        let rows = statement.query_map(params![project_id.to_string()], |row| {
-            Ok(SweepRow {
-                page_id: parse_id(row.get::<_, String>(0)?),
-                path: parse_page_path(&row.get::<_, String>(1)?),
-                title: row.get(2)?,
-                facts: PageFacts {
-                    tier: Tier::from_storage(&row.get::<_, String>(3)?),
-                    status: PageStatus::from_storage(&row.get::<_, String>(4)?),
-                    pinned: row.get(5)?,
-                    canonical: row.get(6)?,
-                    salience: row.get(7)?,
-                    // Stored as INTEGER and read as one: a negative count is
-                    // impossible from this crate, and saturating is closer to
-                    // the truth than wrapping to four billion reads.
-                    access_count: row.get::<_, i64>(8)?.clamp(0, i64::from(u32::MAX)) as u32,
-                    last_accessed_at: row.get::<_, Option<String>>(9)?.map(|raw| parse_time(&raw)),
-                    expires_at: row
-                        .get::<_, Option<String>>(10)?
-                        .map(|raw| parse_time(&raw)),
-                    written_at: parse_time(&row.get::<_, String>(11)?),
-                },
-            })
-        })?;
+        let rows = statement.query_map(params![project_id.to_string()], read_sweep_row)?;
 
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    /// The same facts, for one page.
+    ///
+    /// Shares the read above rather than scanning it: a caller asking about
+    /// one page — the browser showing what retention has in store for it — is
+    /// not a maintenance pass over a project, and the two must not be able to
+    /// disagree about what a row says.
+    pub fn sweep_row(&self, project_id: ProjectId, path: &PagePath) -> Result<Option<SweepRow>> {
+        let conn = self.connection();
+        let mut statement = conn.prepare(
+            "SELECT id, path, title, tier, status, pinned, canonical, salience,
+                    access_count, last_accessed_at, expires_at, updated_at
+             FROM pages WHERE project_id = ?1 AND path = ?2",
+        )?;
+
+        let mut rows = statement.query_map(
+            params![project_id.to_string(), path.as_str()],
+            read_sweep_row,
+        )?;
+        match rows.next() {
+            None => Ok(None),
+            Some(row) => Ok(Some(row?)),
+        }
     }
 
     /// Drop a page's index row, and with it everything derived from the page.
@@ -103,6 +105,31 @@ impl Store {
         )?;
         Ok(removed > 0)
     }
+}
+
+/// One row of the sweep's projection, however it was selected.
+fn read_sweep_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SweepRow> {
+    Ok(SweepRow {
+        page_id: parse_id(row.get::<_, String>(0)?),
+        path: parse_page_path(&row.get::<_, String>(1)?),
+        title: row.get(2)?,
+        facts: PageFacts {
+            tier: Tier::from_storage(&row.get::<_, String>(3)?),
+            status: PageStatus::from_storage(&row.get::<_, String>(4)?),
+            pinned: row.get(5)?,
+            canonical: row.get(6)?,
+            salience: row.get(7)?,
+            // Stored as INTEGER and read as one: a negative count is
+            // impossible from this crate, and saturating is closer to the
+            // truth than wrapping to four billion reads.
+            access_count: row.get::<_, i64>(8)?.clamp(0, i64::from(u32::MAX)) as u32,
+            last_accessed_at: row.get::<_, Option<String>>(9)?.map(|raw| parse_time(&raw)),
+            expires_at: row
+                .get::<_, Option<String>>(10)?
+                .map(|raw| parse_time(&raw)),
+            written_at: parse_time(&row.get::<_, String>(11)?),
+        },
+    })
 }
 
 #[cfg(test)]
