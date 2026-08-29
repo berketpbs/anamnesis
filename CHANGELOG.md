@@ -109,6 +109,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are still preferred
 
 ### Added
+- A scope says when its wiki and its index have drifted apart, in both
+  directions: pages in the wiki the index has never seen, and rows whose file
+  is gone. The first is why "search cannot find a page I am looking at in my
+  editor" had no answer anywhere — a page written while the server was down
+  reaches the index only through `anamnesis reindex`, and nothing said which
+  pages those were. An absent scope directory is reported as itself rather
+  than as every page having been deleted: `Wiki::pages` cannot tell an empty
+  scope from a missing one, and the second is a data directory pointing
+  somewhere unexpected far more often than it is a wiki somebody emptied,
+  which is the same distinction `reindex` refuses to delete rows over. A wiki
+  and an index that agree say nothing at all
 - The browser's front page says whether memory is still recording. Each scope
   now shows its sessions and how long ago it last captured an event, and the
   page above them says what this server is doing: whether a token is required,

@@ -144,6 +144,9 @@ a search box that runs the same fused query an agent's `memory_query` does.
 Its front page also answers the question `anamnesis status` answers — what
 this server is doing, and when each scope last recorded an event — from any
 browser that can reach it, which need not be the machine memory lives on.
+A scope whose wiki and index have drifted apart says so: pages the index has
+never seen (search cannot find them yet) and rows whose file is gone. Both are
+what `anamnesis reindex` repairs.
 
 It is read-only, and `serve --no-ui` leaves it out. Opening a page does not
 count as reading it, because the decay sweep watches those counters; being
