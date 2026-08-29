@@ -572,6 +572,47 @@ throwaway directory — it never touches your own memory, because every query
 would otherwise count as a read and the decay sweep believes those. Write your
 own with `--suite path/to/suite.toml`; the format is the shipped file.
 
+### Turn On Semantic Search
+
+Retrieval fuses four streams, and one of them is off unless asked: cosine
+similarity against a local embedding model. It costs a download of about 90 MB
+on first use, into `<data_dir>/models/`, and runs on CPU.
+
+```bash
+export ANAMNESIS_EMBED_ENABLED=1
+```
+
+Set it in the environment the **server** runs in, and in any shell you run
+`anamnesis search` from. Everything that writes a page then embeds it —
+consolidation, the wiki watcher, `write-page`, `bootstrap`, and the MCP tool.
+
+**Pages written before you turned it on have no vector**, and nothing
+backfills them on its own. One command does:
+
+```bash
+ANAMNESIS_EMBED_ENABLED=1 anamnesis reindex
+```
+
+What it buys is the question whose words are not in the answer. From this
+repository's own memory, the same query twice:
+
+```
+$ anamnesis search "who has been committing here"
+bootstrap/hotspots.md      Where the work concentrates
+
+$ ANAMNESIS_EMBED_ENABLED=1 anamnesis search "who has been committing here"
+bootstrap/contributors.md  Contributors
+```
+
+Neither page says "committing here". Full text picked the one about *files*
+because it says "commits" more often; the embedding stream picked the one about
+*people*.
+
+Scored rather than assumed: `anamnesis eval --embed` puts the stream's own
+recall second of the four, and with it on, the questions only full-text search
+can answer drop from three to one on one suite and from eight to two on the
+other.
+
 ### Forget a Page on Purpose
 
 `sweep` forgets what decayed. This forgets what was *wrong* — a page written
