@@ -205,7 +205,7 @@ Based on these use cases, implement in order:
 ### Phase 4: Web UI & Admin
 - [x] Web server (Axum) — `/hook`, `/handoff`, `/whoami`, `/health`
 - [x] Wiki browser UI — `/ui`, read-only, off with `serve --no-ui`
-- [ ] Search interface
+- [x] Search interface — `?q=` on a scope, the same fused query an agent runs
 - [ ] Admin endpoints
 - [x] Authentication, without which none of the above should be exposed —
       bearer tokens on the API, the same token as a Basic password in the

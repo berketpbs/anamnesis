@@ -109,6 +109,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are still preferred
 
 ### Added
+- Search in the wiki browser: `?q=` on a scope, which is where the page list
+  already was. It runs `query_pages_across` — the workspace's shared scope
+  included, the opt-in embedder with it, at the same default limit — so what a
+  person is shown is what an agent asking the same question would have been
+  handed, rather than a second retrieval nothing measures. Hits say which
+  scope they came from, because a policy that applies to every project and a
+  note about this one are different kinds of answer and the path does not say
+  which is which. Unlike opening a page, a search *does* record an access for
+  what it returns: it hands somebody a page it chose, which is the act those
+  counters are about, and `anamnesis search` has always recorded it
+- The workspace's shared scope is derived in one place, `Wiki::global_scope`.
+  Where its pages sit and what project identifier its rows carry have to
+  agree between every reader, or a page written through one is invisible to
+  the other; the MCP server now asks the wiki instead of rebuilding the path
 - A wiki browser at `/ui`, served by `anamnesis serve`. Until now memory could
   only be read by asking it something — `search`, `show-page`, or an agent's
   MCP query — which meant a stale page, a summary the model wrote badly, and a

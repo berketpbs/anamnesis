@@ -632,13 +632,7 @@ impl AnamnesisMcp {
     /// does in the CLI. Its root is where its pages live: there is no
     /// repository behind it.
     fn global_scope(&self) -> ResolvedScope {
-        let root = {
-            let wiki = self.wiki.lock();
-            wiki.root()
-                .join(self.scope.scope.workspace.as_str())
-                .join(anamnesis_core::scope::GLOBAL_PROJECT)
-        };
-        ResolvedScope::global(&self.scope.scope.workspace, root)
+        self.wiki.lock().global_scope(&self.scope.scope.workspace)
     }
 
     fn require_workstream(&self, slug: &str) -> Result<Workstream, McpError> {

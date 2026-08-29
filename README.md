@@ -61,9 +61,9 @@ Anamnesis is organized as a Rust workspace with modular crates:
 These have configuration or a placeholder in the tree, and nothing behind it.
 They are listed so nobody plans around them:
 
-- **Search and admin pages** — `/ui` browses the wiki (scopes, pages, one
-  page rendered), and that is all it does. There is no search box in the
-  browser and nothing there can change what it is reading.
+- **Admin pages** — `/ui` browses and searches the wiki, and that is all it
+  does. Nothing there can change what it is reading: proposals are applied
+  with `anamnesis improve`, pages removed with `anamnesis forget`.
 
 ## Getting Started
 

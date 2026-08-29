@@ -28,12 +28,14 @@ use std::collections::HashMap;
 use anamnesis_core::page::{Frontmatter, PagePath};
 use anamnesis_core::scope::Scope;
 use anamnesis_store::ProjectRow;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Router, middleware};
+use jiff::Timestamp;
 use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, TagEnd, html::push_html};
+use serde::Deserialize;
 
 use crate::AppState;
 
@@ -43,6 +45,14 @@ pub const PREFIX: &str = "/ui";
 
 /// The realm a browser shows in its credential prompt.
 const REALM: &str = "anamnesis";
+
+/// How many hits one search shows.
+///
+/// The same default `memory_query` and `anamnesis search` use. A reader who
+/// has to page through results is being asked to do the ranking's job, and
+/// if the answer is not in twenty the fix is in the ranking, which
+/// `anamnesis eval` measures.
+const SEARCH_LIMIT: usize = 20;
 
 /// Routes for the browsable wiki, behind the guard a browser can satisfy.
 pub(crate) fn routes(state: &AppState) -> Router<AppState> {
@@ -167,13 +177,63 @@ async fn index(State(state): State<AppState>) -> Result<Html<String>, UiError> {
     Ok(Html(shell("anamnesis", &body)))
 }
 
-/// Every page in one scope.
+/// What the reader typed into the search box, if anything.
+#[derive(Debug, Deserialize)]
+struct Search {
+    /// The query. Absent is a plain listing; so is an empty one.
+    q: Option<String>,
+}
+
+/// One scope: its pages, or the answers to a question about them.
+///
+/// Search lives on the listing rather than at a route of its own because it is
+/// the same page about the same subject — and because a wiki's index is where
+/// somebody is standing when they realise they do not know the name of the
+/// thing they are looking for.
 async fn scope(
     State(state): State<AppState>,
     Path((workspace, project)): Path<(String, String)>,
+    Query(search): Query<Search>,
 ) -> Result<Html<String>, UiError> {
     let found = find_scope(&state, &workspace, &project)?;
+    let query = search.q.unwrap_or_default();
+    let asked = query.trim();
 
+    let heading = format!(
+        "<h1>{}/{}</h1>",
+        escape(found.scope.workspace.as_str()),
+        escape(found.scope.project.as_str())
+    );
+    let form = search_form(&scope_href(&found.scope), asked);
+    let body = if asked.is_empty() {
+        listing(&state, &found)?
+    } else {
+        results(&state, &found, asked)?
+    };
+
+    let page = format!("{}{heading}{form}{body}", crumbs(&[("anamnesis", PREFIX)]));
+    Ok(Html(shell(&format!("{workspace}/{project}"), &page)))
+}
+
+/// The box the question goes in.
+fn search_form(base: &str, asked: &str) -> String {
+    let clear = if asked.is_empty() {
+        String::new()
+    } else {
+        format!("<a class=\"muted\" href=\"{}\">clear</a>", escape(base))
+    };
+    format!(
+        "<form class=\"search\" method=\"get\" action=\"{action}\">\
+         <input type=\"search\" name=\"q\" value=\"{value}\" \
+         placeholder=\"Ask this memory something\" aria-label=\"Search\">\
+         <button type=\"submit\">Search</button>{clear}</form>",
+        action = escape(base),
+        value = escape(asked),
+    )
+}
+
+/// Everything the index holds for one scope.
+fn listing(state: &AppState, found: &ProjectRow) -> Result<String, UiError> {
     let mut pages = state.store.sweep_rows(found.project_id)?;
     // Newest first: an index of a memory is read to see what it has learned
     // lately far more often than to find something alphabetically. The path
@@ -207,31 +267,111 @@ async fn scope(
         ));
     }
 
-    let heading = format!(
-        "<h1>{}/{}</h1>",
-        escape(found.scope.workspace.as_str()),
-        escape(found.scope.project.as_str())
-    );
-
-    let body = if pages.is_empty() {
-        format!(
-            "{heading}<p class=\"muted\">This scope has no pages in the index. \
+    if pages.is_empty() {
+        return Ok("<p class=\"muted\">This scope has no pages in the index. \
              If the wiki has files in it, <code>anamnesis reindex</code> puts them back.</p>"
-        )
-    } else {
-        format!(
-            "{heading}\
-             <table><thead><tr><th>Page</th><th></th>\
-             <th class=\"num\">Written</th><th class=\"num\">Reads</th></tr></thead>\
-             <tbody>{rows}</tbody></table>\
-             <p class=\"muted\">{count} pages. Reads are what the decay sweep counts; \
-             opening one here is not one of them.</p>",
-            count = pages.len()
-        )
-    };
+            .to_owned());
+    }
 
-    let page = format!("{}{body}", crumbs(&[("anamnesis", PREFIX)]));
-    Ok(Html(shell(&format!("{workspace}/{project}"), &page)))
+    Ok(format!(
+        "<table><thead><tr><th>Page</th><th></th>\
+         <th class=\"num\">Written</th><th class=\"num\">Reads</th></tr></thead>\
+         <tbody>{rows}</tbody></table>\
+         <p class=\"muted\">{count} pages. Reads are what the decay sweep counts; \
+         opening one here is not one of them.</p>",
+        count = pages.len()
+    ))
+}
+
+/// What the four streams make of a question.
+///
+/// The same call `memory_query` and `anamnesis search` make — the workspace's
+/// shared scope included, and the opt-in embedder with it — so what a person
+/// sees here is what an agent would have been handed. A browser that ranked
+/// pages its own way would be a second retrieval that nothing measures.
+///
+/// This *does* record an access for every page it returns, which the page view
+/// deliberately does not. They are different acts: a search hands somebody a
+/// page it chose, and that is the evidence the decay sweep reads; opening a
+/// page you already knew the name of is not.
+fn results(state: &AppState, found: &ProjectRow, query: &str) -> Result<String, UiError> {
+    // A broken or slow embedder costs the search its fourth stream, not the
+    // search — the same rule an agent's query follows.
+    let vector = state.embedder.as_ref().and_then(|embedder| {
+        match embedder.embed(query) {
+            Ok(vector) => Some((embedder.model().to_owned(), vector)),
+            Err(error) => {
+                tracing::warn!(%error, "query embedding failed; searching without the vector stream");
+                None
+            }
+        }
+    });
+
+    let global = state.wiki.lock().global_scope(&found.scope.workspace);
+    let hits = state.store.query_pages_across(
+        found.project_id,
+        &[global.project_id],
+        query,
+        SEARCH_LIMIT,
+        Timestamp::now(),
+        vector
+            .as_ref()
+            .map(|(model, vector)| (model.as_str(), vector.as_slice())),
+    )?;
+
+    if hits.is_empty() {
+        return Ok(format!(
+            "<p class=\"muted\">Nothing matched {}. Only what the index holds is \
+             searchable — a page added to the wiki while the server was down reaches \
+             it through <code>anamnesis reindex</code>.</p>",
+            escape(&format!("{query:?}"))
+        ));
+    }
+
+    let own = scope_href(&found.scope);
+    let shared = scope_href(&global.scope);
+    let mut rows = String::new();
+    for hit in &hits {
+        // Which scope a hit came from is not cosmetic: a policy that applies to
+        // every project and a note about this one are different kinds of answer,
+        // and the path alone does not say which is which.
+        let from_shared =
+            hit.project_id == global.project_id && global.project_id != found.project_id;
+        let base = if from_shared { &shared } else { &own };
+        let mark = if from_shared {
+            format!(
+                "<span class=\"badge pin\">{}</span>",
+                escape(anamnesis_core::scope::GLOBAL_PROJECT)
+            )
+        } else {
+            String::new()
+        };
+
+        rows.push_str(&format!(
+            "<li><a href=\"{href}\">{title}</a> {badges}{mark}\
+             <div class=\"path\">{path} · score {score:.4}</div>\
+             <p class=\"muted\">{snippet}</p></li>",
+            href = escape(&format!("{base}/{}", encode_path(hit.path.as_str()))),
+            title = escape(&hit.title),
+            badges = badges(
+                hit.tier.as_str(),
+                hit.status.as_str(),
+                hit.pinned,
+                hit.canonical
+            ),
+            path = escape(hit.path.as_str()),
+            score = hit.score,
+            snippet = escape(&hit.snippet.replace('\n', " ")),
+        ));
+    }
+
+    Ok(format!(
+        "<ol class=\"hits\">{rows}</ol>\
+         <p class=\"muted\">{count} of at most {SEARCH_LIMIT}, ranked by the same four \
+         fused streams an agent's query uses. Being handed a page counts as reading it, \
+         here as in <code>anamnesis search</code>.</p>",
+        count = hits.len()
+    ))
 }
 
 /// One page, rendered.
@@ -649,6 +789,12 @@ td.num,th.num{text-align:right;white-space:nowrap;color:var(--muted);font-varian
 .badge{display:inline-block;font-size:.72rem;padding:.1rem .4rem;border:1px solid var(--line);border-radius:.7rem;color:var(--muted)}\
 .badge.pin{border-color:var(--accent);color:var(--accent)}\
 .missing{color:var(--warn);border-bottom:1px dotted var(--warn)}\
+form.search{display:flex;gap:.4rem;align-items:center;margin:.6rem 0 1rem}\
+form.search input{flex:1;padding:.4rem .55rem;font:inherit;color:var(--fg);background:transparent;border:1px solid var(--line);border-radius:5px}\
+form.search button{padding:.4rem .8rem;font:inherit;color:var(--bg);background:var(--accent);border:0;border-radius:5px;cursor:pointer}\
+ol.hits{padding-left:1.4rem}\
+ol.hits li{margin:.7rem 0}\
+ol.hits p{margin:.15rem 0}\
 article{margin-top:1rem}\
 article img{max-width:100%}\
 code{font:13px ui-monospace,SFMono-Regular,Consolas,monospace;background:rgba(127,127,127,.13);padding:.1rem .25rem;border-radius:3px}\
@@ -708,11 +854,23 @@ mod tests {
 
     /// Write a page to the wiki and the index, as every real writer does.
     fn write(harness: &Harness, path: &str, title: &str, body: &str) -> Page {
+        let scope = harness.scope.clone();
+        write_in(harness, &scope, path, title, body)
+    }
+
+    /// The same, into any scope this workspace has — the shared one included.
+    fn write_in(
+        harness: &Harness,
+        scope: &ResolvedScope,
+        path: &str,
+        title: &str,
+        body: &str,
+    ) -> Page {
         let mut frontmatter = Frontmatter::new(title, Vec::new()).expect("frontmatter");
         frontmatter.tier = Tier::Semantic;
         frontmatter.status = PageStatus::Active;
         let page = Page::new(
-            harness.scope.project_id,
+            scope.project_id,
             PagePath::parse(path).expect("path"),
             frontmatter,
             body,
@@ -721,7 +879,7 @@ mod tests {
             .state
             .wiki
             .lock()
-            .write_page(&harness.scope.scope, &page, "write")
+            .write_page(&scope.scope, &page, "write")
             .expect("write");
         harness
             .state
@@ -926,6 +1084,144 @@ mod tests {
             .expect("routed");
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ---------------------------------------------------------------
+    // Search, which is the listing with a question on it.
+    // ---------------------------------------------------------------
+
+    /// The same fused call `memory_query` and `anamnesis search` make. A
+    /// browser that ranked pages its own way would be a second retrieval that
+    /// nothing measures.
+    #[tokio::test]
+    async fn a_question_finds_the_page_that_answers_it() {
+        let harness = harness();
+        write(
+            &harness,
+            "notes/storage.md",
+            "Why SQLite",
+            "The index is rebuildable, which is why SQLite is enough.",
+        );
+        write(
+            &harness,
+            "notes/versioning.md",
+            "Why the wiki is a repository",
+            "Pages are versioned so a deletion stays explainable.",
+        );
+
+        let (status, body) = get_page(&harness.state, "/ui/default/widget?q=sqlite").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Why SQLite"), "{body}");
+        assert!(!body.contains("Why the wiki is a repository"), "{body}");
+    }
+
+    /// The counterpart to `browsing_does_not_count_as_reading`, and the reason
+    /// that one is not simply "the browser never writes": a search hands
+    /// somebody a page it chose, which is exactly what the counter is for.
+    #[tokio::test]
+    async fn being_handed_a_page_by_a_search_counts_as_reading_it() {
+        let harness = harness();
+        write(
+            &harness,
+            "notes/storage.md",
+            "Why SQLite",
+            "SQLite is enough.",
+        );
+
+        get_page(&harness.state, "/ui/default/widget?q=sqlite").await;
+
+        let rows = harness
+            .state
+            .store
+            .sweep_rows(harness.scope.project_id)
+            .expect("rows");
+        assert_eq!(rows[0].facts.access_count, 1);
+        assert!(rows[0].facts.last_accessed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_search_that_matches_nothing_says_what_is_searchable() {
+        let harness = harness();
+        write(
+            &harness,
+            "notes/storage.md",
+            "Why SQLite",
+            "SQLite is enough.",
+        );
+
+        let (status, body) = get_page(&harness.state, "/ui/default/widget?q=kubernetes").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("reindex"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn an_empty_query_is_the_listing_again() {
+        let harness = harness();
+        write(
+            &harness,
+            "notes/storage.md",
+            "Why SQLite",
+            "SQLite is enough.",
+        );
+
+        let (_, body) = get_page(&harness.state, "/ui/default/widget?q=%20").await;
+
+        assert!(body.contains("Why SQLite"), "{body}");
+        assert!(
+            body.contains("pages. Reads are what the decay sweep counts"),
+            "{body}"
+        );
+    }
+
+    /// The question is echoed back into an attribute, which is the shortest
+    /// path from a link somebody else wrote to a script running here.
+    #[tokio::test]
+    async fn a_query_is_escaped_where_it_is_echoed_back() {
+        let harness = harness();
+
+        let (_, body) = get_page(
+            &harness.state,
+            "/ui/default/widget?q=%22%3E%3Cscript%3Ealert(1)%3C%2Fscript%3E",
+        )
+        .await;
+
+        assert!(!body.contains("<script>alert"), "{body}");
+        assert!(body.contains("&quot;&gt;&lt;script&gt;"), "{body}");
+    }
+
+    /// A policy in the workspace's shared scope answers a question asked in
+    /// any project under it, and the two kinds of answer have to be tellable
+    /// apart — the path alone does not say which is which.
+    #[tokio::test]
+    async fn a_hit_from_the_shared_scope_says_so_and_links_into_it() {
+        let harness = harness();
+        let global = harness
+            .state
+            .wiki
+            .lock()
+            .global_scope(&harness.scope.scope.workspace);
+        harness
+            .state
+            .store
+            .upsert_project(&global, now())
+            .expect("shared project");
+        write_in(
+            &harness,
+            &global,
+            "policy/commits.md",
+            "How commits are written",
+            "Every commit message explains why, not what.",
+        );
+
+        let (_, body) = get_page(&harness.state, "/ui/default/widget?q=commits").await;
+
+        assert!(
+            body.contains("/ui/default/_global/policy/commits.md"),
+            "{body}"
+        );
+        assert!(body.contains("_global</span>"), "{body}");
     }
 
     /// Without the challenge a browser has no way to send anything: it does

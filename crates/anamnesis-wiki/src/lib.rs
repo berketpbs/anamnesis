@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 
 use anamnesis_core::page::{Frontmatter, Page, PagePath};
-use anamnesis_core::scope::Scope;
+use anamnesis_core::scope::{ProjectName, ResolvedScope, Scope, WorkspaceName};
 
 mod markdown;
 
@@ -220,6 +220,21 @@ impl Wiki {
         collect_pages(&root, &root, &mut found)?;
         found.sort();
         Ok(found)
+    }
+
+    /// The workspace's shared `_global` scope, as this wiki lays it out.
+    ///
+    /// Every reader of the shared scope has to derive the same two things —
+    /// where its pages sit, and the project identifier its index rows carry —
+    /// and they have to agree, or a page written through one is invisible to
+    /// the other. Derived once, here, because the wiki is what decides where
+    /// a scope's pages live.
+    pub fn global_scope(&self, workspace: &WorkspaceName) -> ResolvedScope {
+        let scope = Scope {
+            workspace: workspace.clone(),
+            project: ProjectName::global(),
+        };
+        ResolvedScope::global(workspace, self.scope_root(&scope))
     }
 
     /// Directory holding one scope's pages, whether or not it exists.
