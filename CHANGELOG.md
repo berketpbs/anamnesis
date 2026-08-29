@@ -21,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are broken by page id rather than by whatever order SQLite returned
 
 ### Changed
+- Candidate depth — how deep each stream reaches before fusion — is part of the
+  tuning rather than a constant, and was swept along with everything else. The
+  answer came back empty: at the tuning that ships, 10, 30 and 120 score
+  identically on both corpora, so it stays at 30. Depth only mattered where the
+  rest of the fusion was wrong, a shallower pool leaving fewer also-rans to
+  outvote the stream that had the answer — which is worth knowing, because it
+  is the shape of a fix somebody would otherwise reach for. The suites are 10
+  and 22 pages, so nothing in them can tell 30 from 120
 - **Retrieval is tuned against measurement rather than argument.** The RRF
   constant is 2 rather than 60, the link stream is weighted a quarter, and the
   authority multiplier is applied at a quarter power (about 1.24× rather than

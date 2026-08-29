@@ -49,6 +49,10 @@ use crate::ids::PageId;
 /// [`Store::query_pages_across`]: ../../anamnesis_store/struct.Store.html#method.query_pages_across
 pub const RRF_K: f64 = 2.0;
 
+/// How many candidates each stream offers before fusion, unless a [`Tuning`]
+/// says otherwise.
+pub const STREAM_CANDIDATES: usize = 30;
+
 /// Every number the fused ranking is free to get wrong.
 ///
 /// These were all chosen by argument. Gathering them into one type is what
@@ -74,6 +78,14 @@ pub struct Tuning {
     /// Exponent applied to [`authority_multiplier`]. `1.0` leaves it as it is,
     /// `0.0` switches it off, and anything between softens it.
     pub authority_exponent: f64,
+    /// How deep each stream goes before its ranking is fused.
+    ///
+    /// Not a page limit: the caller's limit still decides how many hits come
+    /// back. This is how many candidates each stream is allowed to offer, and
+    /// it cuts both ways — a shallow pool cannot answer with a page no stream
+    /// rated highly, and a deep one lets three streams' also-rans outvote one
+    /// stream's favourite.
+    pub candidates: usize,
 }
 
 impl Default for Tuning {
@@ -115,6 +127,21 @@ impl Default for Tuning {
             // relevance it adjusted — a canonical page in an authoritative
             // namespace outranked whatever any stream put first.
             authority_exponent: 0.25,
+            // Thirty, unchanged — and the one knob whose measurement came
+            // back empty. At the tuning above, ten, thirty and a hundred and
+            // twenty score identically on both corpora. Depth only mattered
+            // where the rest of the fusion was wrong: at `k = 60` with the
+            // link stream and authority at full strength, a shallower pool
+            // scored better, because fewer also-rans were available to outvote
+            // the stream that had the answer. Fixing the fusion removed the
+            // reason to cut it.
+            //
+            // Read with the corpora in mind. They are ten and twenty-two
+            // pages, so thirty and a hundred and twenty are the same request
+            // twice over; nothing here can tell them apart, and a suite large
+            // enough to would have to be larger than the depth it is
+            // measuring.
+            candidates: STREAM_CANDIDATES,
         }
     }
 }

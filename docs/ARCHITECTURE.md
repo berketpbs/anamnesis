@@ -252,6 +252,7 @@ and since 2026-08-29 they are measured rather than argued (see **Evaluation**):
 | `fts` / `entity` | 1.0 | level with each other. Weighting declared names above the words on the page scored no better and claims more |
 | `links` | 0.25 | enough to break a tie between pages full text likes equally, not enough to outvote it. Neighbours of a hit are evidence about the hit |
 | `vectors` | 1.0 | unmeasured: the stream is opt-in and no suite runs a model. The one weight still standing on an argument |
+| `candidates` | 30 | unchanged, and the one knob whose measurement came back empty: at the tuning above, 10, 30 and 120 score identically on both corpora. Depth only mattered where the rest of the fusion was wrong — a shallower pool left fewer also-rans to outvote the stream that had the answer. The suites are 10 and 22 pages, so nothing here can tell 30 from 120; measuring that needs a corpus larger than the depth |
 | `authority_exponent` | 0.25 | the multiplier reached 2.34×, larger than the entire spread of relevance it adjusts, so a canonical page in an authoritative namespace outranked whatever any stream put first. Now about 1.24× — a preference between comparable answers, which is what it was always described as |
 
 Where the sweep was decisive it was followed; where it was indifferent the
