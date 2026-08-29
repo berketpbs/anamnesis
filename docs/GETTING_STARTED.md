@@ -154,11 +154,15 @@ $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
 # task in Ready with result 1 and nothing restarts it. A trigger that fires
 # every minute restarts a dead server and, with IgnoreNew below, does nothing
 # at all to a live one.
+#
+# No -RepetitionDuration: an absent <Duration> in the task XML means repeat
+# indefinitely. [TimeSpan]::MaxValue looks like the way to say that and is not
+# - it serialises to P99999999DT23H59M59S, which Task Scheduler rejects as out
+# of range, refusing the whole registration.
 $triggers = @(
     (New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME),
     (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
-        -RepetitionInterval (New-TimeSpan -Minutes 1) `
-        -RepetitionDuration ([TimeSpan]::MaxValue))
+        -RepetitionInterval (New-TimeSpan -Minutes 1))
 )
 
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
@@ -171,6 +175,21 @@ Register-ScheduledTask -TaskName 'Anamnesis Memory Server' `
 
 Point it at the copy under `%APPDATA%\anamnesis\bin\`, not at one in
 `target/`: Windows will not let `cargo build` overwrite a running executable.
+
+Then check what you registered rather than what you asked for. A failed
+`Register-ScheduledTask` leaves whatever was there before, and the next command
+in a script will happily describe *that*, which reads exactly like success:
+
+```powershell
+$task = Get-ScheduledTask -TaskName 'Anamnesis Memory Server'
+$task.Triggers | Select-Object @{n='type';e={$_.CimClass.CimClassName}},
+                               @{n='repeats';e={$_.Repetition.Interval}}
+$task.Settings.ExecutionTimeLimit   # PT0S, or it is killed in three days
+```
+
+Two triggers, one of them repeating, and `PT0S`. Killing the server should then
+bring it back within the repetition interval - measured at 50 seconds here, and
+the restart is in `logs/`, where the next person can see that it happened.
 
 **Linux**, as a user unit in `~/.config/systemd/user/anamnesis.service`:
 
