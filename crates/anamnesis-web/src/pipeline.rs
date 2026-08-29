@@ -9,6 +9,7 @@ use std::path::Path;
 
 use anamnesis_consolidate::{PREFERENCES_PAGE, SessionDigest, consolidate, consolidate_with_llm};
 use anamnesis_core::capture::CaptureFilter;
+use anamnesis_core::embedding::Embed;
 use anamnesis_core::handoff::Slot;
 use anamnesis_core::ids::SessionId;
 use anamnesis_core::observation::{EventKind, Observation};
@@ -40,6 +41,7 @@ pub fn ingest(
     wiki: &Wiki,
     raw: Option<&RawSpool>,
     hook: &ParsedHook,
+    embedder: Option<&dyn Embed>,
     now: Timestamp,
     operator: Option<&OperatorName>,
 ) -> Result<Ingested, WebError> {
@@ -53,7 +55,7 @@ pub fn ingest(
         });
     }
 
-    let page = finalize(store, wiki, &scope, session_id, now)?;
+    let page = finalize(store, wiki, &scope, session_id, embedder, now)?;
     Ok(Ingested {
         session_id,
         consolidated: true,
@@ -169,6 +171,7 @@ pub fn finalize(
     wiki: &Wiki,
     scope: &ResolvedScope,
     session_id: SessionId,
+    embedder: Option<&dyn Embed>,
     now: Timestamp,
 ) -> Result<Option<String>, WebError> {
     let Some((session, observations)) = prepare(store, session_id, now)? else {
@@ -181,7 +184,7 @@ pub fn finalize(
         return Ok(None);
     };
 
-    commit(store, wiki, scope, &session, &digest, now).map(Some)
+    commit(store, wiki, scope, &session, &digest, embedder, now).map(Some)
 }
 
 /// Close a session, asking a model what it was about.
@@ -197,6 +200,7 @@ pub async fn finalize_with_llm(
     wiki: &Mutex<Wiki>,
     scope: &ResolvedScope,
     session_id: SessionId,
+    embedder: Option<&dyn Embed>,
     now: Timestamp,
     llm: &LlmSettings,
 ) -> Result<Option<String>, WebError> {
@@ -225,7 +229,7 @@ pub async fn finalize_with_llm(
     };
 
     let wiki = wiki.lock();
-    commit(store, &wiki, scope, &session, &digest, now).map(Some)
+    commit(store, &wiki, scope, &session, &digest, embedder, now).map(Some)
 }
 
 /// Load what a finished session consists of.
@@ -253,6 +257,7 @@ fn commit(
     scope: &ResolvedScope,
     session: &Session,
     digest: &SessionDigest,
+    embedder: Option<&dyn Embed>,
     now: Timestamp,
 ) -> Result<String, WebError> {
     let path = session_page_path(&session.started_at, session.id)?;
@@ -275,7 +280,7 @@ fn commit(
         scope.project_id,
         &page,
         &anamnesis_wiki::extract_links(&page.body),
-        None,
+        embedder,
         now,
     )?;
 

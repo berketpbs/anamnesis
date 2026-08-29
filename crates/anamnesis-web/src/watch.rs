@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anamnesis_core::page::{Page, PagePath};
@@ -106,6 +107,7 @@ pub fn sync(
     wiki: &Wiki,
     project_id: anamnesis_core::ids::ProjectId,
     located: &Located,
+    embedder: Option<&dyn anamnesis_core::embedding::Embed>,
     now: Timestamp,
 ) -> anyhow::Result<Synced> {
     let file = wiki.scope_root(&located.scope).join(located.page.as_str());
@@ -145,7 +147,7 @@ pub fn sync(
         project_id,
         &page,
         &anamnesis_wiki::extract_links(&body),
-        None,
+        embedder,
         now,
     )?;
     Ok(Synced::Indexed)
@@ -174,7 +176,14 @@ fn registered(store: &Store) -> HashMap<(String, String), anamnesis_core::ids::P
 }
 
 /// Apply one batch of changed paths, newest state of each wins.
-fn apply(store: &Store, wiki: &Mutex<Wiki>, paths: Vec<PathBuf>, root: &Path, now: Timestamp) {
+fn apply(
+    store: &Store,
+    wiki: &Mutex<Wiki>,
+    paths: Vec<PathBuf>,
+    root: &Path,
+    embedder: Option<&Arc<dyn anamnesis_llm::Embedder>>,
+    now: Timestamp,
+) {
     let mut located: Vec<Located> = Vec::new();
     for path in paths {
         if let Some(found) = interpret(root, &path)
@@ -205,7 +214,14 @@ fn apply(store: &Store, wiki: &Mutex<Wiki>, paths: Vec<PathBuf>, root: &Path, no
         // wiki against every session ending in the same second.
         let outcome = {
             let wiki = wiki.lock();
-            sync(store, &wiki, project_id, &found, now)
+            sync(
+                store,
+                &wiki,
+                project_id,
+                &found,
+                embedder.map(|embedder| embedder.as_ref() as &dyn anamnesis_core::embedding::Embed),
+                now,
+            )
         };
 
         match outcome {
@@ -254,7 +270,14 @@ pub fn run(state: AppState) {
                     .into_iter()
                     .flat_map(|event| event.paths.clone())
                     .collect();
-                apply(&state.store, &state.wiki, paths, &root, Timestamp::now());
+                apply(
+                    &state.store,
+                    &state.wiki,
+                    paths,
+                    &root,
+                    state.embedder.as_ref(),
+                    Timestamp::now(),
+                );
             }
             // Dropped events mean the index may be behind, which is what
             // `reindex` is for. Losing the watcher entirely would be worse.
@@ -392,6 +415,7 @@ mod tests {
             &harness.wiki,
             harness.scope.project_id,
             &located_in(harness, path),
+            None,
             now(),
         )
         .expect("sync")

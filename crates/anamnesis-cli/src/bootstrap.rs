@@ -337,6 +337,7 @@ pub fn seed(
     scope: &ResolvedScope,
     drafts: &[Draft],
     force: bool,
+    embedder: Option<&dyn anamnesis_core::embedding::Embed>,
     now: Timestamp,
 ) -> anyhow::Result<Seeded> {
     let mut report = Seeded::default();
@@ -365,6 +366,7 @@ pub fn seed(
 
         store.upsert_page(&page, now)?;
         store.set_page_entities(scope.project_id, page.id, &entities)?;
+        store.embed_page(&page, embedder)?;
         indexed.push((page.id, item.body.clone()));
         report.written.push(item.path.clone());
     }
@@ -1009,6 +1011,7 @@ mod tests {
             &memory.scope,
             &drafts,
             false,
+            None,
             now(),
         )
         .expect("seed");
@@ -1048,6 +1051,7 @@ mod tests {
             &memory.scope,
             &drafts,
             false,
+            None,
             now(),
         )
         .expect("first");
@@ -1064,6 +1068,7 @@ mod tests {
             &memory.scope,
             &drafts,
             false,
+            None,
             now(),
         )
         .expect("second");
@@ -1091,6 +1096,7 @@ mod tests {
             &memory.scope,
             &drafts,
             false,
+            None,
             now(),
         )
         .expect("first");
@@ -1104,6 +1110,7 @@ mod tests {
             &memory.scope,
             &drafts,
             true,
+            None,
             now(),
         )
         .expect("second");

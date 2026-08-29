@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use anamnesis_core::observation::EventKind;
 use anamnesis_core::session::AgentKind;
-use anamnesis_llm::Provider;
+use anamnesis_llm::{Embedder, Provider};
 use anamnesis_store::{RawSpool, Store};
 use anamnesis_wiki::Wiki;
 use axum::extract::{Query, Request, State};
@@ -112,6 +112,10 @@ pub struct AppState {
     /// The tokens this server accepts. Open by default, which is what every
     /// install did before tokens existed.
     pub auth: Auth,
+    /// The embedder, when one is enabled. Every page this server writes gets a
+    /// vector, so the stream covers the memory rather than the corner of it an
+    /// agent happened to write through MCP.
+    pub embedder: Option<Arc<dyn Embedder>>,
 }
 
 impl AppState {
@@ -123,6 +127,7 @@ impl AppState {
             raw: None,
             llm: None,
             auth: Auth::open(),
+            embedder: None,
         }
     }
 
@@ -141,6 +146,12 @@ impl AppState {
     /// Require one of these tokens on every request that touches memory.
     pub fn with_auth(mut self, auth: Auth) -> Self {
         self.auth = auth;
+        self
+    }
+
+    /// Embed the pages this server writes, when an embedder is enabled.
+    pub fn with_embedder(mut self, embedder: Option<Arc<dyn Embedder>>) -> Self {
+        self.embedder = embedder;
         self
     }
 }
@@ -335,6 +346,10 @@ async fn receive_hook(
                 &wiki,
                 state.raw.as_deref(),
                 &hook,
+                state
+                    .embedder
+                    .as_ref()
+                    .map(|embedder| embedder.as_ref() as &dyn anamnesis_core::embedding::Embed),
                 now,
                 identity.operator(),
             )?
@@ -369,6 +384,10 @@ async fn receive_hook(
                 &background.wiki,
                 &scope,
                 session_id,
+                background
+                    .embedder
+                    .as_ref()
+                    .map(|embedder| embedder.as_ref() as &dyn anamnesis_core::embedding::Embed),
                 now,
                 &settings,
             )
@@ -497,6 +516,7 @@ mod tests {
             &harness.state.wiki.lock(),
             harness.state.raw.as_deref(),
             &hook(harness, event, extra),
+            None,
             now(),
             operator,
         )
@@ -996,6 +1016,7 @@ mod tests {
             &harness.state.wiki.lock(),
             harness.state.raw.as_deref(),
             &parse(&payload),
+            None,
             now(),
             None,
         )
@@ -1006,6 +1027,7 @@ mod tests {
             &harness.state.wiki.lock(),
             harness.state.raw.as_deref(),
             &parse(&payload),
+            None,
             now(),
             None,
         )
@@ -1051,6 +1073,7 @@ mod tests {
             &harness.state.wiki.lock(),
             harness.state.raw.as_deref(),
             &hook,
+            None,
             now(),
             None,
         );
@@ -1165,6 +1188,7 @@ mod tests {
             &harness.state.wiki,
             &scope,
             session_id,
+            None,
             now(),
             &settings(provider.clone()),
         )
@@ -1210,6 +1234,7 @@ mod tests {
             &harness.state.wiki,
             &scope,
             session_id,
+            None,
             now(),
             &settings(Arc::new(Fake::broken())),
         )
@@ -1252,6 +1277,7 @@ mod tests {
             &harness.state.wiki,
             &scope,
             session_id,
+            None,
             now(),
             &settings(provider.clone()),
         )
@@ -1278,6 +1304,7 @@ mod tests {
             &harness.state.wiki,
             &scope,
             session_id,
+            None,
             now(),
             &settings(provider.clone()),
         )

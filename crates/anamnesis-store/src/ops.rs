@@ -162,16 +162,29 @@ impl Store {
         self.set_page_entities(project_id, page.id, &page.frontmatter.entities)?;
         self.set_page_links(project_id, page.id, links)?;
 
-        if let Some(embedder) = embedder {
-            let text = page_text(&page.frontmatter.title, &page.body);
-            match embedder.embed(&text) {
-                Ok(vector) => self.set_page_embedding(page.id, embedder.model(), &vector)?,
-                Err(error) => tracing::warn!(
-                    %error,
-                    path = %page.path,
-                    "page embedding failed; the page is indexed without one"
-                ),
-            }
+        self.embed_page(page, embedder)
+    }
+
+    /// Give a page its vector, if there is an embedder to make one.
+    ///
+    /// Split out for the two rebuilds — `reindex` and `bootstrap` — which
+    /// resolve links in a second pass and so cannot use [`Store::index_page`]
+    /// as it stands. They call this instead, which keeps the one thing that
+    /// must not vary between writers: what text a page is embedded as. Two
+    /// call sites that disagreed would fill one index with two kinds of vector
+    /// and no way to tell them apart.
+    pub fn embed_page(&self, page: &Page, embedder: Option<&dyn Embed>) -> Result<()> {
+        let Some(embedder) = embedder else {
+            return Ok(());
+        };
+        let text = page_text(&page.frontmatter.title, &page.body);
+        match embedder.embed(&text) {
+            Ok(vector) => self.set_page_embedding(page.id, embedder.model(), &vector)?,
+            Err(error) => tracing::warn!(
+                %error,
+                path = %page.path,
+                "page embedding failed; the page is indexed without one"
+            ),
         }
         Ok(())
     }
