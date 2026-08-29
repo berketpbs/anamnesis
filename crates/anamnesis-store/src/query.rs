@@ -158,7 +158,7 @@ impl Store {
             }
         }
         seeds.truncate(STREAM_CANDIDATES);
-        let links = self.link_stream(project_id, &seeds, STREAM_CANDIDATES)?;
+        let links = self.link_stream(project_id, &seeds, STREAM_CANDIDATES, tuning.rrf_k)?;
 
         let vectors = match embedding {
             Some((model, vector)) if !vector.is_empty() => {
@@ -237,6 +237,7 @@ impl Store {
         query: &str,
         limit: usize,
         embedding: Option<(&str, &[f32])>,
+        tuning: &Tuning,
     ) -> Result<StreamBreakdown> {
         let tokens = tokenize(query);
         if tokens.is_empty() || limit == 0 {
@@ -255,7 +256,7 @@ impl Store {
             }
         }
         seeds.truncate(STREAM_CANDIDATES);
-        let links = self.link_stream(project_id, &seeds, limit)?;
+        let links = self.link_stream(project_id, &seeds, limit, tuning.rrf_k)?;
 
         let vectors = match embedding {
             Some((model, vector)) if !vector.is_empty() => {
@@ -624,33 +625,51 @@ impl Store {
 
     /// Link-neighbour stream: pages one hop away, in either direction, from
     /// the pages the other two streams already found relevant.
+    ///
+    /// Each edge counts for what its seed was worth, `1 / (k + rank)` — the
+    /// same reciprocal-rank form fusion uses, and the same `k`, because both
+    /// are answering the question of how much a ranking's order should matter.
+    ///
+    /// It used to count edges, `ORDER BY COUNT(*)`, which threw the seed's rank
+    /// away: a neighbour of the best full-text hit and a neighbour of the
+    /// thirtieth ranked identically, and two neighbours of the thirtieth beat
+    /// one neighbour of the first. That is backwards. A neighbour is not
+    /// evidence about itself — it is evidence about the page that pointed at
+    /// it, and worth exactly what that page was worth.
     fn link_stream(
         &self,
         project_id: ProjectId,
         seeds: &[PageId],
         limit: usize,
+        k: f64,
     ) -> Result<Vec<PageId>> {
         if seeds.is_empty() {
             return Ok(Vec::new());
         }
-        let seed_list = placeholders(seeds.len());
+
+        let seed_rows = vec!["(?, ?)"; seeds.len()].join(", ");
         let sql = format!(
-            "SELECT links.page_id FROM (
-                 SELECT to_page_id AS page_id FROM page_links
-                 WHERE from_page_id IN ({seed_list}) AND to_page_id IS NOT NULL
+            "WITH seeds(id, weight) AS (VALUES {seed_rows})
+             SELECT links.page_id FROM (
+                 SELECT from_page_id AS seed_id, to_page_id AS page_id FROM page_links
+                 WHERE from_page_id IN (SELECT id FROM seeds) AND to_page_id IS NOT NULL
                  UNION ALL
-                 SELECT from_page_id AS page_id FROM page_links
-                 WHERE to_page_id IN ({seed_list})
+                 SELECT to_page_id AS seed_id, from_page_id AS page_id FROM page_links
+                 WHERE to_page_id IN (SELECT id FROM seeds)
              ) links
              JOIN pages p ON p.id = links.page_id
+             JOIN seeds s ON s.id = links.seed_id
              WHERE p.project_id = ? AND p.is_latest = 1 AND p.status != 'superseded'
              GROUP BY links.page_id
-             ORDER BY COUNT(*) DESC
+             ORDER BY SUM(s.weight) DESC, links.page_id ASC
              LIMIT ?"
         );
 
-        let mut values: Vec<Value> = seeds.iter().map(|id| Value::Text(id.to_string())).collect();
-        values.extend(seeds.iter().map(|id| Value::Text(id.to_string())));
+        let mut values: Vec<Value> = Vec::with_capacity(seeds.len() * 2 + 2);
+        for (rank, id) in seeds.iter().enumerate() {
+            values.push(Value::Text(id.to_string()));
+            values.push(Value::Real(1.0 / (k + rank as f64 + 1.0)));
+        }
         values.push(Value::Text(project_id.to_string()));
         values.push(Value::Integer(limit as i64));
 
@@ -1053,6 +1072,86 @@ mod tests {
             .query_pages(project, "sqlite", 10, now(), None)
             .unwrap();
         assert!(hits.iter().any(|hit| hit.title == "Windows BOM"));
+    }
+
+    /// A neighbour is worth what the page that pointed at it was worth.
+    ///
+    /// The stream used to rank neighbours by `COUNT(*)` of the edges reaching
+    /// them, which threw the seed's own rank away: a neighbour of the best
+    /// full-text hit and a neighbour of the thirtieth ranked identically.
+    ///
+    /// Both queries here reach both seeds, so the seed *set* is the same and
+    /// only its order differs — which is exactly what counting edges cannot
+    /// see. The neighbour of whichever page the query is really about has to
+    /// come first.
+    #[test]
+    fn a_neighbour_of_a_better_seed_comes_first() {
+        let (_dir, store, project, _workspace) = fixture();
+
+        let alpha = write_page(
+            &store,
+            project,
+            "notes/alpha.md",
+            "Alpha",
+            "widget alpha alpha alpha",
+            Vec::new(),
+        );
+        let beta = write_page(
+            &store,
+            project,
+            "notes/beta.md",
+            "Beta",
+            "widget beta beta beta",
+            Vec::new(),
+        );
+        let near_alpha = write_page(
+            &store,
+            project,
+            "notes/near-alpha.md",
+            "Near alpha",
+            "Nothing either query says.",
+            Vec::new(),
+        );
+        let near_beta = write_page(
+            &store,
+            project,
+            "notes/near-beta.md",
+            "Near beta",
+            "Nothing either query says.",
+            Vec::new(),
+        );
+
+        store
+            .set_page_links(project, alpha, &["notes/near-alpha.md".to_owned()])
+            .unwrap();
+        store
+            .set_page_links(project, beta, &["notes/near-beta.md".to_owned()])
+            .unwrap();
+
+        let links_for = |query: &str| -> Vec<PageId> {
+            store
+                .query_streams(project, query, 10, None, &Tuning::default())
+                .expect("streams")
+                .links
+        };
+
+        let about_alpha = links_for("widget alpha");
+        let about_beta = links_for("widget beta");
+
+        assert_eq!(
+            about_alpha.first(),
+            Some(&near_alpha),
+            "the neighbour of the page the query is about should lead"
+        );
+        assert_eq!(
+            about_beta.first(),
+            Some(&near_beta),
+            "and it should change when the query changes which page that is"
+        );
+        assert!(
+            about_alpha.contains(&near_beta) && about_beta.contains(&near_alpha),
+            "both neighbours stay in the stream; what changes is their order"
+        );
     }
 
     #[test]

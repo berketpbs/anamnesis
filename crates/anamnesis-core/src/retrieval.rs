@@ -102,7 +102,9 @@ impl Default for Tuning {
             // Enough to break a tie between pages full text likes equally,
             // not enough to outvote it. Neighbours of a hit are evidence
             // about the hit, not about themselves: the stream answered no
-            // question on its own in either ablation.
+            // question on its own in either ablation. Re-measured after the
+            // stream began weighting neighbours by their seed's rank, which
+            // improved its own ordering without moving what it is worth here.
             links: 0.25,
             // Unmeasured — the stream is opt-in and neither suite runs a
             // model, so this is the one weight still standing on an argument.

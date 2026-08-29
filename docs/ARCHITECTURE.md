@@ -223,7 +223,7 @@ Next Session Starts
     ├─→ four independent streams
     │     ├─ FTS5 over pages_fts
     │     ├─ entity matching, by token, weighted by inverse frequency
-    │     ├─ link neighbours, over page_links
+    │     ├─ link neighbours, over page_links, weighted by their seed's rank
     │     └─ vector cosine (only when the local embedder is enabled)
     │
     ├─→ reciprocal-rank fusion (anamnesis_core::retrieval, a pure function)
