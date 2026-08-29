@@ -308,6 +308,45 @@ impl Store {
         Ok(body)
     }
 
+    /// Drop the pending handoff in a slot without handing it to anybody.
+    ///
+    /// The third thing that can happen to a note, after being claimed and
+    /// being superseded by a newer one: somebody read it and decided the next
+    /// session is better off without it. A summary written from a bad model
+    /// reply is the case this exists for — until now the only way to get rid of
+    /// one was to let a session claim it, which means it lands in that
+    /// session's context, which is the thing being avoided.
+    ///
+    /// Marked `expired` rather than deleted, and it is the same state a newer
+    /// handoff already puts the older one in. A row that says a note was
+    /// written and never delivered is a more honest account than no row, and
+    /// the body stays readable behind it.
+    ///
+    /// Returns what was dropped, so the caller can say what it was rather than
+    /// reporting a silent success.
+    pub fn discard_handoff(&self, project_id: ProjectId, slot: &Slot) -> Result<Option<String>> {
+        let conn = self.connection();
+        conn.query_row(
+            "UPDATE handoffs SET state = 'expired'
+             WHERE id = (
+                 SELECT id FROM handoffs
+                 WHERE project_id = ?1 AND state = 'pending'
+                   AND COALESCE(workstream_id, '') = COALESCE(?2, '')
+                   AND COALESCE(operator, '') = COALESCE(?3, '')
+                 ORDER BY created_at DESC LIMIT 1
+             )
+             RETURNING body",
+            params![
+                project_id.to_string(),
+                slot.workstream_key(),
+                slot.operator_key()
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     /// Read the pending handoff without consuming it.
     ///
     /// The counterpart to [`Store::claim_handoff`], for showing someone what
@@ -1175,6 +1214,91 @@ mod tests {
                 .expect("claim"),
             None
         );
+    }
+
+    /// The case this exists for: a note written from a bad reply, dropped
+    /// before any session is handed it. Claiming it to be rid of it would put
+    /// it in exactly the context it was being kept out of.
+    #[test]
+    fn a_discarded_handoff_is_never_handed_to_anybody() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+        store
+            .record_handoff(&new_handoff(
+                project,
+                session.id,
+                Slot::shared(),
+                "nonsense the model wrote",
+                now(),
+            ))
+            .expect("record");
+
+        assert_eq!(
+            store
+                .discard_handoff(project, &Slot::shared())
+                .expect("discard")
+                .as_deref(),
+            Some("nonsense the model wrote"),
+            "the caller is told what it dropped, not just that it worked"
+        );
+        assert_eq!(
+            store.peek_handoff(project, &Slot::shared()).expect("peek"),
+            None
+        );
+
+        let claimant = SessionId::derive(project, "next");
+        let next = Session {
+            id: claimant,
+            ..session_for(project, workspace)
+        };
+        store.ensure_session(&next).expect("session");
+        assert_eq!(
+            store
+                .claim_handoff(project, claimant, &Slot::shared(), now())
+                .expect("claim"),
+            None
+        );
+    }
+
+    #[test]
+    fn discarding_nothing_says_nothing_rather_than_failing() {
+        let (_dir, store, project, _workspace) = fixture();
+        assert_eq!(
+            store
+                .discard_handoff(project, &Slot::shared())
+                .expect("discard"),
+            None
+        );
+    }
+
+    /// Slots are separate for discarding as they are for everything else: one
+    /// operator throwing away their own note must not throw away another's.
+    #[test]
+    fn discarding_one_slot_leaves_the_others_pending() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+
+        let alice = Slot::shared().for_operator(Some(
+            anamnesis_core::scope::OperatorName::parse("alice").expect("name"),
+        ));
+        for (slot, body) in [(Slot::shared(), "shared"), (alice.clone(), "alice's")] {
+            store
+                .record_handoff(&new_handoff(project, session.id, slot, body, now()))
+                .expect("record");
+        }
+
+        store.discard_handoff(project, &alice).expect("discard");
+
+        assert_eq!(
+            store
+                .peek_handoff(project, &Slot::shared())
+                .expect("peek")
+                .as_deref(),
+            Some("shared")
+        );
+        assert_eq!(store.peek_handoff(project, &alice).expect("peek"), None);
     }
 
     #[test]

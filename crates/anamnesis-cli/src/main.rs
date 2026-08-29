@@ -395,6 +395,14 @@ enum Commands {
         /// of whoever ran the command.
         #[arg(long)]
         operator: Option<String>,
+
+        /// Throw the waiting handoff away instead of showing it
+        ///
+        /// For a note that is wrong: written from a bad model reply, or about
+        /// work that was abandoned. Claiming it to be rid of it would put it
+        /// in a session's context, which is the thing being avoided.
+        #[arg(long)]
+        discard: bool,
     },
 
     /// List recent sessions, newest first
@@ -586,8 +594,9 @@ fn main() -> anyhow::Result<()> {
         Commands::Handoff {
             workstream,
             operator,
+            discard,
         } => {
-            cmd_handoff(workstream, operator, cli.data_dir.clone())?;
+            cmd_handoff(workstream, operator, discard, cli.data_dir.clone())?;
         }
         Commands::Sessions { limit } => {
             cmd_sessions(limit, cli.data_dir.clone())?;
@@ -2796,6 +2805,7 @@ fn describe_exemptions(plan: &sweep::Plan) -> String {
 fn cmd_handoff(
     workstream: Option<String>,
     operator: Option<String>,
+    discard: bool,
     data_dir: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let (scope, _data, store) = open_project(data_dir)?;
@@ -2832,6 +2842,33 @@ fn cmd_handoff(
 
     let slot =
         anamnesis_core::handoff::Slot::for_workstream(workstream_id).for_operator(operator.clone());
+
+    if discard {
+        // Read back rather than reported as a bare success: a note is being
+        // thrown away, and the person doing it should see what it said in case
+        // it was not the one they meant.
+        return match store.discard_handoff(scope.project_id, &slot)? {
+            Some(body) => {
+                println!(
+                    "🗑  Discarded the handoff{}:",
+                    describe_slot(&workstream, &operator)
+                );
+                println!();
+                println!("{body}");
+                println!();
+                println!("  The next session will start without one. The row is kept,");
+                println!("  marked expired, so what was written is still on record.");
+                Ok(())
+            }
+            None => {
+                println!(
+                    "Nothing waiting{} — nothing to discard.",
+                    describe_slot(&workstream, &operator)
+                );
+                Ok(())
+            }
+        };
+    }
 
     match store.peek_handoff(scope.project_id, &slot)? {
         Some(body) => {

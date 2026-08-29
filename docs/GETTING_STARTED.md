@@ -435,6 +435,25 @@ anamnesis sessions       # recent sessions, newest first
 anamnesis show-page bootstrap/repository.md
 ```
 
+Peeking never consumes it: looking is what a person does, claiming is what a
+starting session does, and conflating the two would mean checking on a note
+costs the next session its context.
+
+A note that is wrong — written from a bad model reply, or about work that was
+abandoned — can be thrown away instead:
+
+```bash
+anamnesis handoff --discard
+```
+
+It prints what it dropped, because a handoff being discarded should be seen
+once by somebody in case it was not the one they meant. The row is kept and
+marked expired, the same state a newer handoff already puts an older one in: a
+record saying a note was written and never delivered is a more honest account
+than no record. Without this the only way to be rid of one is to let a session
+claim it — which puts it in that session's context, which is the thing being
+avoided.
+
 ### Forget What Has Decayed
 
 A wiki that only grows gets worse at answering, so pages that nobody writes to

@@ -79,6 +79,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are still preferred
 
 ### Added
+- `anamnesis handoff --discard` throws away the note waiting for the next
+  session. A handoff written from a bad model reply had exactly one way out:
+  let a session claim it, which puts it in that session's context — the thing
+  being avoided. It prints what it dropped, and the row is kept and marked
+  expired, the same state a newer handoff already puts an older one in, because
+  a record saying a note was written and never delivered is more honest than no
+  record. Slots are separate here as everywhere: discarding one operator's note
+  leaves everyone else's pending
 - `anamnesis forget <path>...` removes named pages from the wiki and the index.
   `sweep` forgets what decayed; nothing forgot what was *wrong*. A page written
   from a bad model reply, a note that turned out to be untrue, a duplicate —
