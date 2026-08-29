@@ -141,6 +141,10 @@ This binds `127.0.0.1:8080` and serves `POST /hook`, `GET /handoff`,
 `GET /whoami`, `GET /health`, and the wiki browser at
 <http://127.0.0.1:8080/ui> — scopes, the pages in one, one page rendered, and
 a search box that runs the same fused query an agent's `memory_query` does.
+Its front page also answers the question `anamnesis status` answers — what
+this server is doing, and when each scope last recorded an event — from any
+browser that can reach it, which need not be the machine memory lives on.
+
 It is read-only, and `serve --no-ui` leaves it out. Opening a page does not
 count as reading it, because the decay sweep watches those counters; being
 handed one by a search does, exactly as `anamnesis search` already does. On a
