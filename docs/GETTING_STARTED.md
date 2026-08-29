@@ -146,7 +146,9 @@ this server is doing, and when each scope last recorded an event — from any
 browser that can reach it, which need not be the machine memory lives on.
 A scope whose wiki and index have drifted apart says so: pages the index has
 never seen (search cannot find them yet) and rows whose file is gone. Both are
-what `anamnesis reindex` repairs.
+what `anamnesis reindex` repairs. Proposals waiting on a person are listed
+there too, each with the `anamnesis improve --apply <id>` that carries it
+out — the browser shows them and never acts on them.
 
 It is read-only, and `serve --no-ui` leaves it out. Opening a page does not
 count as reading it, because the decay sweep watches those counters; being

@@ -109,6 +109,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are still preferred
 
 ### Added
+- Open proposals are listed on the scope that has them, each with the
+  `anamnesis improve --apply <id>` that carries it out. Auto-improve has filed
+  them since it existed, and the only way to see one was to run a pass from
+  the machine memory lives on. They are shown and not offered: every proposal
+  changes somebody's memory — promoting a page is a retention decision,
+  because the durable tiers are the ones the decay sweep cannot reach — and
+  `require_approval` defaulting to true means a person running a command, not
+  a button anything that can reach the port could press. A scope with nothing
+  to propose says nothing at all
 - A scope says when its wiki and its index have drifted apart, in both
   directions: pages in the wiki the index has never seen, and rows whose file
   is gone. The first is why "search cannot find a page I am looking at in my

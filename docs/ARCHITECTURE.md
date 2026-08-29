@@ -152,8 +152,10 @@ The HTTP server hooks deliver to.
   rendered, and `?q=` to search a scope. Its index also says what this server
   is doing (auth, consolidation, embedding) and when each scope last recorded
   anything, because "is memory still recording" is the question people arrive
-  with. A scope whose wiki and index disagree says so, in both directions.
-  Read-only, and `serve --no-ui` leaves it out
+  with. A scope whose wiki and index disagree says so, in both directions,
+  and the proposals auto-improve is waiting on a person about are listed with
+  the command that carries each one out. Read-only, and `serve --no-ui`
+  leaves it out
 - The consolidation pipeline, which runs *after* the response is sent
 
 > There is no search page and no git visualization; the browser lists and
@@ -173,6 +175,13 @@ clicked but will ask for a password and remember it. Any username is accepted:
 the secret is the whole credential. The API keeps the header-only rule, so a
 credential the browser sends on its own cannot authorise `POST /hook` — a page
 on another site cannot make somebody's browser write to their memory.
+
+**Proposals are shown, never offered.** Every proposal changes somebody's
+memory — promoting a page is a retention decision, since the durable tiers are
+the ones the decay sweep cannot reach — which is why `require_approval`
+defaults to true. Approval means a person running `anamnesis improve --apply`,
+not a button on a page anyone who can reach the port could press, so the
+browser prints the command with the id already in it and stops there.
 
 **What the browser deliberately does not do.** Opening a page never records
 an access. `query_pages` bumps those counters because retrieval finding a page
