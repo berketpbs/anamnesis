@@ -1323,6 +1323,8 @@ fn cmd_hook(agent: &str, server: &str, token: Option<&str>) {
                 .map(str::to_owned)
         });
 
+    let starting = is_starting(event.as_deref(), agent);
+
     // These budgets are deliberately tight. A hook runs before every tool call
     // an agent makes, so any delay here is multiplied by hundreds within one
     // session — and the case that matters is the server being *down*, where a
@@ -1354,17 +1356,25 @@ fn cmd_hook(agent: &str, server: &str, token: Option<&str>) {
     match post {
         Err(error) => {
             eprintln!("anamnesis: could not reach {server}: {error}");
+            announce(
+                agent,
+                starting,
+                &capture_notice(server, "could not be reached"),
+            );
             return;
         }
-        // A refused event is still an event lost. Saying so on stderr costs the
-        // session nothing and is the only way anyone finds out that capture
-        // has quietly stopped working.
+        // A refused event is still an event lost.
         Ok(response) if !response.status().is_success() => {
             let status = response.status();
             let detail = response.text().unwrap_or_default();
             eprintln!(
                 "anamnesis: server rejected event ({status}): {}",
                 detail.trim()
+            );
+            announce(
+                agent,
+                starting,
+                &capture_notice(server, &format!("refused the event ({status})")),
             );
             return;
         }
@@ -1379,7 +1389,7 @@ fn cmd_hook(agent: &str, server: &str, token: Option<&str>) {
     // empty when there is nothing to say. Printing plain text there would not
     // fail loudly — it would fail as a parse error inside the harness, which
     // is the kind of failure this system is worst at explaining.
-    if is_starting(event.as_deref(), agent) {
+    if starting {
         let (session_id, cwd) = session_and_cwd(&payload);
         let mut request = client.get(format!("{server}/handoff")).query(&[
             ("agent", agent),
@@ -1396,22 +1406,38 @@ fn cmd_hook(agent: &str, server: &str, token: Option<&str>) {
         match request.send() {
             Ok(response) if response.status().is_success() => match response.text() {
                 Ok(text) => print!("{}", handoff_reply(agent, &text)),
-                Err(error) => eprintln!("anamnesis: handoff unavailable: {error}"),
+                Err(error) => {
+                    eprintln!("anamnesis: handoff unavailable: {error}");
+                    announce(
+                        agent,
+                        starting,
+                        &handoff_notice("its reply could not be read"),
+                    );
+                }
             },
             Ok(response) => {
                 let status = response.status();
                 let detail = response.text().unwrap_or_default();
                 eprintln!("anamnesis: handoff refused ({status}): {}", detail.trim());
-                print!("{}", handoff_reply(agent, ""));
+                announce(
+                    agent,
+                    starting,
+                    &handoff_notice(&format!("the server refused it ({status})")),
+                );
             }
             Err(error) => {
                 eprintln!("anamnesis: handoff unavailable: {error}");
-                print!("{}", handoff_reply(agent, ""));
+                announce(
+                    agent,
+                    starting,
+                    &handoff_notice("the server could not be reached"),
+                );
             }
         }
-    } else if agent == "gemini-cli" {
-        // Every other event, for the harness that wants one object per call.
-        print!("{}", handoff_reply(agent, ""));
+    } else {
+        // Every other event. Says nothing, except to the harness that wants an
+        // object per call.
+        announce(agent, false, "");
     }
 }
 
@@ -1423,6 +1449,67 @@ fn cmd_hook(agent: &str, server: &str, token: Option<&str>) {
 /// outright would need one, and this is where it would go.
 fn is_starting(event: Option<&str>, _agent: &str) -> bool {
     event.is_some_and(|event| event.eq_ignore_ascii_case("sessionstart"))
+}
+
+/// Say something on stdout, in the shape this harness reads back.
+///
+/// Every path out of the hook goes through here, because stdout is a contract
+/// and the contract does not lapse when something has gone wrong. Gemini CLI
+/// parses stdout as one JSON object on **every** event it fires; before this,
+/// a failed POST returned early and printed nothing at all, so the harness
+/// least able to survive silence got silence exactly when the server was down.
+///
+/// Only a starting session carries a message. A notice on every tool call
+/// would be the same sentence a hundred times in one context window, and the
+/// place to learn that capture is down is the top of the session, once.
+fn announce(agent: &str, starting: bool, text: &str) {
+    if starting {
+        print!("{}", handoff_reply(agent, text));
+    } else if agent == "gemini-cli" {
+        print!("{}", handoff_reply(agent, ""));
+    }
+}
+
+/// What the model is told when the event it triggered never reached memory.
+///
+/// This exists because of how the failure looked from the outside: the server
+/// was not running for four days, every hook in every session failed to
+/// connect, and nothing anyone would see said so. The hook writes to stderr
+/// and exits zero — deliberately, since a hook that fails loudly at the shell
+/// level would interrupt hundreds of tool calls — and no harness surfaces
+/// that. `anamnesis status` says it plainly, but only to someone who already
+/// suspects.
+///
+/// stdout is the one channel a harness is guaranteed to read: it is how the
+/// handoff reaches the model. So the notice goes there, at session start,
+/// where whoever is working can be told in the same breath as the memory they
+/// asked for.
+///
+/// It names itself. The standing rule is that a server's *response body* must
+/// never be printed here — an error page injected as context would not fail,
+/// it would be believed — and the way this stays on the right side of that
+/// rule is that anamnesis wrote it, says so, and says what to do about it.
+fn capture_notice(server: &str, reason: &str) -> String {
+    format!(
+        "[anamnesis] This session is NOT being recorded: the memory server at {server} {reason}. \
+         Nothing said here will be remembered until it is running — `anamnesis status` says why, \
+         `anamnesis serve` starts it."
+    )
+}
+
+/// What the model is told when the event was recorded but the handoff was not.
+///
+/// Deliberately not the same sentence. Capture is working here, and saying
+/// otherwise would send someone to restart a server that is already up. The
+/// thing worth knowing is narrower and easy to misread: an empty handoff and a
+/// handoff that could not be fetched look identical to a model, and one of them
+/// means the last session left notes that are still waiting.
+fn handoff_notice(reason: &str) -> String {
+    format!(
+        "[anamnesis] The previous session's handoff could not be collected: {reason}. This \
+         session is starting without it and there may be notes still waiting; capture itself is \
+         working."
+    )
 }
 
 /// The handoff, in the shape the harness reads back.
@@ -2882,6 +2969,71 @@ mod tests {
         let frontmatter =
             anamnesis_core::page::Frontmatter::new("t", Vec::new()).expect("frontmatter");
         assert!(!describe_page(&frontmatter).contains("active"));
+    }
+
+    /// The failure this whole notice exists for: the server was down for four
+    /// days, every hook failed to connect, and nothing anyone would read said
+    /// so. Whatever else it says, it has to say that nothing is being kept.
+    #[test]
+    fn the_capture_notice_says_that_nothing_is_being_recorded() {
+        let notice = capture_notice("http://127.0.0.1:8080", "could not be reached");
+
+        assert!(notice.contains("NOT being recorded"), "{notice}");
+        assert!(notice.contains("http://127.0.0.1:8080"), "{notice}");
+        assert!(notice.contains("anamnesis serve"), "{notice}");
+        assert!(
+            !notice.contains('\n'),
+            "one line, not a paragraph: {notice}"
+        );
+    }
+
+    /// It is injected where a handoff goes, so it has to be impossible to read
+    /// as one. The standing rule is that a server's response body is never
+    /// printed there — this stays on the right side of it by being written
+    /// here, and saying whose words they are.
+    #[test]
+    fn a_notice_names_itself_rather_than_passing_as_memory() {
+        assert!(capture_notice("http://x", "could not be reached").starts_with("[anamnesis]"));
+        assert!(handoff_notice("the server could not be reached").starts_with("[anamnesis]"));
+    }
+
+    /// Two failures that need different sentences. Telling someone capture is
+    /// dead when only the handoff failed sends them to restart a server that
+    /// is already running, and the notice would be its own false alarm.
+    #[test]
+    fn a_failed_handoff_does_not_claim_capture_is_broken() {
+        let notice = handoff_notice("the server refused it (401 Unauthorized)");
+
+        assert!(notice.contains("401 Unauthorized"), "{notice}");
+        assert!(notice.contains("capture itself is working"), "{notice}");
+        assert!(!notice.contains("NOT being recorded"), "{notice}");
+    }
+
+    /// A notice is delivered the same way a handoff is, so it survives every
+    /// harness's idea of stdout — including the one that parses it as JSON.
+    #[test]
+    fn a_notice_reaches_every_harness_in_its_own_shape() {
+        let notice = capture_notice("http://127.0.0.1:8080", "could not be reached");
+
+        let gemini: serde_json::Value =
+            serde_json::from_str(&handoff_reply("gemini-cli", &notice)).expect("valid JSON");
+        assert!(
+            gemini["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .expect("context")
+                .contains("NOT being recorded")
+        );
+
+        let cursor: serde_json::Value =
+            serde_json::from_str(&handoff_reply("cursor", &notice)).expect("valid JSON");
+        assert!(
+            cursor["additional_context"]
+                .as_str()
+                .expect("context")
+                .contains("NOT being recorded")
+        );
+
+        assert!(handoff_reply("claude-code", &notice).starts_with("[anamnesis]"));
     }
 
     /// The harness that shapes this: Gemini CLI parses stdout as one JSON
