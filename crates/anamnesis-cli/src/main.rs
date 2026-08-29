@@ -254,6 +254,15 @@ enum Commands {
         #[arg(long)]
         streams: bool,
 
+        /// Score the same questions once per candidate setting, and rank them
+        ///
+        /// The knobs fusion is built from were chosen by argument. This is
+        /// what replaces the argument with a table — and with more than one
+        /// suite loaded, with a table that says whether a setting suits
+        /// retrieval or merely suits one corpus.
+        #[arg(long)]
+        sweep: bool,
+
         /// Exit non-zero when a suite scores below its own thresholds
         #[arg(long)]
         check: bool,
@@ -462,8 +471,9 @@ fn main() -> anyhow::Result<()> {
             verbose,
             check,
             streams,
+            sweep,
         } => {
-            cmd_eval(suite.as_deref(), verbose, check, streams)?;
+            cmd_eval(suite.as_deref(), verbose, check, streams, sweep)?;
         }
         Commands::Reindex => {
             cmd_reindex(cli.data_dir.clone())?;
@@ -1645,6 +1655,7 @@ fn cmd_eval(
     verbose: bool,
     check: bool,
     streams: bool,
+    sweep: bool,
 ) -> anyhow::Result<()> {
     // Held still on purpose. Freshness is an input to nothing a suite scores,
     // and it can only be that way if two runs are handed the same instant.
@@ -1662,6 +1673,18 @@ fn cmd_eval(
             })
             .collect::<Result<Vec<_>, _>>()?,
     };
+
+    if sweep {
+        let grid = anamnesis_evals::default_grid();
+        println!(
+            "Sweeping {} settings over {} suite(s). Nothing here changes what ships.",
+            grid.len(),
+            suites.len()
+        );
+        println!();
+        print_sweep(&anamnesis_evals::sweep(&suites, now, &grid)?, verbose);
+        return Ok(());
+    }
 
     let mut failed = 0usize;
     for (source, suite) in &suites {
@@ -1726,6 +1749,88 @@ fn print_report(report: &anamnesis_evals::Report, source: &str, verbose: bool) {
     }
 
     println!();
+}
+
+/// Every setting tried, best mean rank first.
+///
+/// Two things the table has to make impossible to miss. The row that ships
+/// today is marked wherever it lands, because a list of alternatives with no
+/// baseline says nothing about what changing costs. And the rows that clear
+/// the acceptance rule — rank up and recall held on *every* suite — are marked
+/// separately from the rows that merely sit at the top, because sorting by a
+/// mean is exactly how a gain on one corpus pays for a loss on another.
+fn print_sweep(report: &anamnesis_evals::SweepReport, verbose: bool) {
+    /// Rows shown when the caller did not ask for all of them.
+    const SHOWN: usize = 12;
+
+    let mut header = String::from("        k  entity  links   auth");
+    for suite in &report.suites {
+        header.push_str(&format!("  {:>12}", truncate(suite, 12)));
+    }
+    header.push_str("     mean");
+    println!("{header}");
+
+    let baseline = report.baseline();
+    let improvements = report.improvements();
+
+    let mut shown: Vec<&anamnesis_evals::SweepPoint> = if verbose {
+        report.points.iter().collect()
+    } else {
+        report.points.iter().take(SHOWN).collect()
+    };
+    // Always visible, however far down the table it sits.
+    if !shown.iter().any(|point| point.is_default())
+        && let Some(base) = baseline
+    {
+        shown.push(base);
+    }
+
+    for point in shown {
+        let mut row = format!(
+            "  {:>6.0}  {:>6.2}  {:>5.2}  {:>5.2}",
+            point.tuning.rrf_k,
+            point.tuning.entity,
+            point.tuning.links,
+            point.tuning.authority_exponent
+        );
+        for score in &point.scores {
+            row.push_str(&format!("  {:>5.3} {:>5.3}", score.mrr, score.recall));
+        }
+        row.push_str(&format!("  {:>7.3}", point.mean_mrr()));
+
+        if point.is_default() {
+            row.push_str("  ← ships today");
+        } else if baseline.is_some_and(|base| point.improves_on(base)) {
+            row.push_str("  ✓");
+        }
+        println!("{row}");
+    }
+
+    println!();
+    match baseline {
+        None => println!(
+            "  The grid does not contain today's defaults, so none of this says what changing would cost."
+        ),
+        Some(_) => println!(
+            "  {} of {} settings raise the mean rank on every suite without losing recall on any (✓).",
+            improvements.len(),
+            report.points.len()
+        ),
+    }
+    println!("  A row winning here is not on its own a reason to adopt it: prefer the middle of a");
+    println!(
+        "  region that wins over a single spike, which this many questions cannot tell apart."
+    );
+    println!();
+}
+
+/// Cut a name down to fit a column, ending in an ellipsis when it is cut.
+fn truncate(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_owned();
+    }
+    let kept: String = text.chars().take(width.saturating_sub(1)).collect();
+    format!("{kept}…")
 }
 
 /// What each stream contributes on its own.
