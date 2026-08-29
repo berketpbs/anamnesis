@@ -264,6 +264,15 @@ enum Commands {
         #[arg(long)]
         sweep: bool,
 
+        /// Score with the embedding stream switched on
+        ///
+        /// Off by default, as it is in production: the model is a download
+        /// this should not require to say anything about the other three
+        /// streams. With it, the corpus is embedded page by page and every
+        /// question with the same model.
+        #[arg(long)]
+        embed: bool,
+
         /// Exit non-zero when a suite scores below its own thresholds
         #[arg(long)]
         check: bool,
@@ -560,8 +569,17 @@ fn main() -> anyhow::Result<()> {
             check,
             streams,
             sweep,
+            embed,
         } => {
-            cmd_eval(suite.as_deref(), verbose, check, streams, sweep)?;
+            cmd_eval(
+                suite.as_deref(),
+                verbose,
+                check,
+                streams,
+                sweep,
+                embed,
+                cli.data_dir.clone(),
+            )?;
         }
         Commands::Forget { paths } => {
             cmd_forget(&paths, cli.data_dir.clone())?;
@@ -1999,6 +2017,8 @@ fn cmd_eval(
     check: bool,
     streams: bool,
     sweep: bool,
+    embed: bool,
+    data_dir: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     // Held still on purpose. Freshness is an input to nothing a suite scores,
     // and it can only be that way if two runs are handed the same instant.
@@ -2017,6 +2037,28 @@ fn cmd_eval(
             .collect::<Result<Vec<_>, _>>()?,
     };
 
+    // Built once, whatever is being scored, and only when asked: loading it
+    // means a model on disk and a few seconds, which nothing about the three
+    // SQL streams should have to wait for.
+    let embedder = if embed {
+        let data = DataDir::resolve(data_dir)?;
+        let built = anamnesis_llm::EmbedConfig::enabled().build(&data.models())?;
+        match &built {
+            Some(embedder) => println!(
+                "Embedding with {}.
+",
+                embedder.model()
+            ),
+            None => anyhow::bail!("--embed was asked for but no embedder could be built"),
+        }
+        built
+    } else {
+        None
+    };
+    let embed = embedder
+        .as_deref()
+        .map(|embedder| embedder as &dyn anamnesis_core::embedding::Embed);
+
     if sweep {
         let grid = anamnesis_evals::default_grid();
         println!(
@@ -2025,16 +2067,22 @@ fn cmd_eval(
             suites.len()
         );
         println!();
-        print_sweep(&anamnesis_evals::sweep(&suites, now, &grid)?, verbose);
+        print_sweep(
+            &anamnesis_evals::sweep(&suites, now, &grid, embed)?,
+            verbose,
+        );
         return Ok(());
     }
 
     let mut failed = 0usize;
     for (source, suite) in &suites {
-        let report = anamnesis_evals::run(suite, now)?;
+        let report = match embed {
+            Some(embedder) => anamnesis_evals::run_embedded(suite, now, embedder)?,
+            None => anamnesis_evals::run(suite, now)?,
+        };
         print_report(&report, source, verbose);
         if streams {
-            print_ablation(&anamnesis_evals::ablate(suite, now)?);
+            print_ablation(&anamnesis_evals::ablate_with(suite, now, embed)?);
         }
         if !report.passed() {
             failed += 1;
@@ -2106,7 +2154,7 @@ fn print_sweep(report: &anamnesis_evals::SweepReport, verbose: bool) {
     /// Rows shown when the caller did not ask for all of them.
     const SHOWN: usize = 12;
 
-    let mut header = String::from("        k  entity  links   auth  cover  depth");
+    let mut header = String::from("        k  entity  links   vect   auth  cover  depth");
     for suite in &report.suites {
         header.push_str(&format!("  {:>12}", truncate(suite, 12)));
     }
@@ -2130,10 +2178,11 @@ fn print_sweep(report: &anamnesis_evals::SweepReport, verbose: bool) {
 
     for point in shown {
         let mut row = format!(
-            "  {:>6.0}  {:>6.2}  {:>5.2}  {:>5.2}  {:>5.2}  {:>5}",
+            "  {:>6.0}  {:>6.2}  {:>5.2}  {:>5.2}  {:>5.2}  {:>5.2}  {:>5}",
             point.tuning.rrf_k,
             point.tuning.entity,
             point.tuning.links,
+            point.tuning.vectors,
             point.tuning.authority_exponent,
             point.tuning.entity_coverage,
             point.tuning.candidates
@@ -2157,7 +2206,7 @@ fn print_sweep(report: &anamnesis_evals::SweepReport, verbose: bool) {
             "  The grid does not contain today's defaults, so none of this says what changing would cost."
         ),
         Some(_) => println!(
-            "  {} of {} settings raise the mean rank on every suite without losing recall on any (✓).",
+            "  {} of {} settings improve on it: nothing lower anywhere, something higher (✓).",
             improvements.len(),
             report.points.len()
         ),

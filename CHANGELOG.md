@@ -47,6 +47,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are broken by page id rather than by whatever order SQLite returned
 
 ### Changed
+- The vector stream is measured, and stays where it is. `anamnesis eval
+  --embed` embeds the corpus page by page and every question with the same
+  model, through the same call the server makes. On its own the stream has the
+  second-best recall of the four (0.700 on the retrieval suite, 0.533 on the
+  crowded one) and takes full text's *unique* answers from 3 to 1 and from 8 to
+  2 — it independently reaches most of what only full text reached. Its weight
+  does not separate: the best rows use 0.5 and 1.0 alike, so 1.0 stays. Nothing
+  else changes either: the twelve settings that beat what ships all need
+  embeddings on **and** a shallower candidate pool, and a corpus of ten and
+  twenty-two pages cannot say whether a shallow pool is safe on a real wiki
+- The sweep's acceptance rule was wrong at the ceiling. It required a rise on
+  *every* suite, which was written before either suite could reach a perfect
+  score; once `retrieval` sat at 1.000 nothing could raise it, so a setting
+  that took `crowded` from 0.967 to 1.000 was reported as no improvement, and
+  six thousand rows produced none. It now asks that nothing falls anywhere and
+  something rises
 - There is one way to index a page, and every path that writes one embeds it.
   `Store::index_page` writes the row, the entities, the links and — when an
   embedder is enabled — the vector; five hand-written copies of that sequence

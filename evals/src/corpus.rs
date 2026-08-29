@@ -43,6 +43,20 @@ pub struct Corpus {
 impl Corpus {
     /// Write a suite's pages into a fresh index and wiki.
     pub fn build(suite: &Suite, now: Timestamp) -> Result<Self, EvalError> {
+        Self::build_with(suite, now, None)
+    }
+
+    /// The same, with every page embedded.
+    ///
+    /// The embedder is passed in rather than built here for the reason this
+    /// crate has no dependency on `anamnesis-llm`: scoring three SQL streams
+    /// should not oblige a `cargo test` to wait on a machine-learning
+    /// toolchain, and the fourth stream is opt-in in production too.
+    pub fn build_with(
+        suite: &Suite,
+        now: Timestamp,
+        embedder: Option<&dyn anamnesis_core::embedding::Embed>,
+    ) -> Result<Self, EvalError> {
         let dir = tempfile::tempdir().map_err(|error| {
             EvalError::Corpus(format!("could not create a temporary directory: {error}"))
         })?;
@@ -84,12 +98,15 @@ impl Corpus {
             let commit = wiki.write_page(&scope, &page, &format!("eval: {}", fixture.path))?;
             page.git_commit = Some(commit);
 
-            store.upsert_page(&page, now)?;
-            store.set_page_entities(project_id, page.id, &page.frontmatter.entities)?;
-            store.set_page_links(
+            // The one call the live path makes, embedder included: a corpus
+            // built any other way would be one no running system produces,
+            // which is the whole rule this module is written to.
+            store.index_page(
                 project_id,
-                page.id,
+                &page,
                 &anamnesis_wiki::extract_links(&page.body),
+                embedder,
+                now,
             )?;
         }
 

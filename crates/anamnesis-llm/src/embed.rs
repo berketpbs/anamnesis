@@ -253,6 +253,18 @@ impl EmbedConfig {
         Self::from_vars(|key| std::env::var(key).ok())
     }
 
+    /// Enabled, taking the model from the environment if it names one.
+    ///
+    /// For a caller that has already been asked for the embedder in its own
+    /// words — `anamnesis eval --embed` — where making them also set the
+    /// environment variable would be asking twice.
+    pub fn enabled() -> Self {
+        Self {
+            enabled: true,
+            ..Self::from_env()
+        }
+    }
+
     /// Read settings from an arbitrary lookup, so this is testable without
     /// mutating the environment of a parallel test run.
     pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> Self {
