@@ -17,6 +17,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use anamnesis_core::embedding::Embed;
 use candle_core::{Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config, DTYPE};
@@ -54,17 +55,15 @@ pub enum EmbedError {
 }
 
 /// Something that turns text into a fixed-size, L2-normalized vector.
-pub trait Embedder: Send + Sync {
-    /// Model identifier, recorded alongside every vector this embedder
-    /// writes so a later query never compares vectors from two different
-    /// embedding spaces (see [`anamnesis_store::Store::set_page_embedding`]).
-    fn model(&self) -> &str;
-
+///
+/// Built on [`Embed`], which is what the index writes with: naming the model
+/// and producing a vector are the whole of what storing one requires, and
+/// keeping that pair in `anamnesis-core` is what spares the storage layer a
+/// dependency on a machine-learning toolchain. An embedder is that, plus the
+/// dimension nothing but this crate needs.
+pub trait Embedder: Embed {
     /// Length of the vector this embedder produces.
     fn dimension(&self) -> usize;
-
-    /// Embed one piece of text.
-    fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError>;
 }
 
 /// A BERT-family sentence-embedding model, running locally on CPU via candle.
@@ -176,22 +175,30 @@ fn fetch_cached(
 }
 
 impl Embedder for LocalEmbedder {
-    fn model(&self) -> &str {
-        &self.model_id
-    }
-
     fn dimension(&self) -> usize {
         self.dim
+    }
+}
+
+impl Embed for LocalEmbedder {
+    /// Recorded alongside every vector this writes, so a later query never
+    /// compares vectors from two different embedding spaces.
+    fn model(&self) -> &str {
+        &self.model_id
     }
 
     /// Tokenize, run the encoder, mean-pool the token outputs, and
     /// L2-normalize — the standard recipe `sentence-transformers` models are
     /// trained against, and the only one this crate implements.
-    fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+    ///
+    /// The typed failures are kept internally and flattened here: nothing
+    /// above this distinguishes a tokenizer fault from an inference one, and
+    /// both cost a page the same thing.
+    fn embed(&self, text: &str) -> Result<Vec<f32>, String> {
         let encoding = self
             .tokenizer
             .encode(text, true)
-            .map_err(|error| EmbedError::Tokenize(error.to_string()))?;
+            .map_err(|error| EmbedError::Tokenize(error.to_string()).to_string())?;
 
         let inference = || -> candle_core::Result<Tensor> {
             let ids = &encoding.get_ids()[..encoding.get_ids().len().min(self.max_tokens)];
@@ -214,7 +221,7 @@ impl Embedder for LocalEmbedder {
 
         inference()
             .and_then(|tensor| tensor.to_vec1::<f32>())
-            .map_err(|error| EmbedError::Inference(error.to_string()))
+            .map_err(|error| EmbedError::Inference(error.to_string()).to_string())
     }
 }
 

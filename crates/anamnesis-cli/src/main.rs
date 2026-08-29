@@ -1164,15 +1164,15 @@ fn cmd_write_page(
     let commit = wiki.write_page(&scope.scope, &page, &format!("cli: write {page_path}"))?;
     page.git_commit = Some(commit.clone());
 
-    store.upsert_page(&page, now)?;
     // Entities as well as links, which this command used to skip because it
     // could not set any. A page whose entities never reach the index is one
     // the entity stream cannot find, however carefully they were declared.
-    store.set_page_entities(scope.project_id, page.id, &entities)?;
-    store.set_page_links(
+    store.index_page(
         scope.project_id,
-        page.id,
+        &page,
         &anamnesis_wiki::extract_links(body),
+        None,
+        now,
     )?;
 
     if options.global {
