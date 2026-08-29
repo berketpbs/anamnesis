@@ -147,7 +147,7 @@ impl Store {
 
         let depth = tuning.candidates;
         let fts = self.fts_stream(project_id, &tokens, depth)?;
-        let entity = self.entity_stream(project_id, &tokens, depth)?;
+        let entity = self.entity_stream(project_id, &tokens, depth, tuning.entity_coverage)?;
 
         let mut seeds: Vec<PageId> = Vec::with_capacity(fts.len() + entity.len());
         for id in fts.iter().chain(entity.iter()) {
@@ -243,7 +243,7 @@ impl Store {
         }
 
         let fts = self.fts_stream(project_id, &tokens, limit)?;
-        let entity = self.entity_stream(project_id, &tokens, limit)?;
+        let entity = self.entity_stream(project_id, &tokens, limit, tuning.entity_coverage)?;
 
         // Seeded exactly as `query_pages` seeds it, or the link stream here
         // would be answering a different question from the one that runs.
@@ -568,48 +568,56 @@ impl Store {
         project_id: ProjectId,
         tokens: &[String],
         limit: usize,
+        coverage: f64,
     ) -> Result<Vec<PageId>> {
         let placeholders = placeholders(tokens.len());
-        // Two ways to match, and the first is the one that matters: an entity
-        // matches when *every* token of its name is in the query, so
-        // `Windows BOM` is found by "windows bom" and not by "windows" alone.
-        // Requiring all of them keeps a two-word name from answering half a
-        // question; the other three streams are what find a page from half a
-        // name.
+        // How much of a name the query has to say. At `coverage = 1.0` an
+        // entity matches only when *every* token of its name is present, so
+        // `Windows BOM` is found by "windows bom" and not by "windows" alone —
+        // which is what this stream has always done, on the argument that a
+        // two-word name answering half a question would drown the streams it
+        // is fused with. Lower thresholds admit partial matches, ranked by how
+        // complete they are, and the argument is now a measurement.
         //
-        // The second is for entities stored before their tokens were: those
-        // rows have no `entity_tokens` at all, and until something rewrites
-        // the page — or `anamnesis reindex` does — they can still be matched
-        // whole, exactly as they were.
+        // The second branch is for entities stored before their tokens were:
+        // those rows have no `entity_tokens` at all, and until something
+        // rewrites the page — or `anamnesis reindex` does — they can still be
+        // matched whole, exactly as they were. A whole-name match is complete
+        // by definition, hence the `COALESCE` in the ordering.
         let sql = format!(
-            "SELECT pe.page_id FROM page_entities pe
+            "WITH matched(entity_id, coverage) AS (
+                 SELECT et.entity_id,
+                        CAST(SUM(CASE WHEN et.token IN ({placeholders}) THEN 1 ELSE 0 END) AS REAL)
+                            / COUNT(*)
+                 FROM entity_tokens et
+                 JOIN entities scoped ON scoped.id = et.entity_id
+                 WHERE scoped.project_id = ?
+                 GROUP BY et.entity_id
+                 HAVING COUNT(*) > 0
+             )
+             SELECT pe.page_id FROM page_entities pe
              JOIN entities e ON e.id = pe.entity_id
              JOIN pages p ON p.id = pe.page_id
+             LEFT JOIN matched m ON m.entity_id = e.id
              WHERE e.project_id = ?
                AND (
-                 e.id IN (
-                   SELECT et.entity_id FROM entity_tokens et
-                   JOIN entities scoped ON scoped.id = et.entity_id
-                   WHERE scoped.project_id = ?
-                   GROUP BY et.entity_id
-                   HAVING COUNT(*) > 0
-                      AND COUNT(*) = SUM(CASE WHEN et.token IN ({placeholders}) THEN 1 ELSE 0 END)
-                 )
+                 (m.coverage IS NOT NULL AND m.coverage > 0.0 AND m.coverage >= ?)
                  OR lower(e.name) IN ({placeholders})
                )
                AND p.is_latest = 1 AND p.status != 'superseded'
              GROUP BY pe.page_id
              ORDER BY SUM(
-                 1.0 / (SELECT COUNT(*) FROM page_entities pe2 WHERE pe2.entity_id = pe.entity_id)
-             ) DESC
+                 COALESCE(m.coverage, 1.0)
+                 / (SELECT COUNT(*) FROM page_entities pe2 WHERE pe2.entity_id = pe.entity_id)
+             ) DESC, pe.page_id ASC
              LIMIT ?"
         );
 
-        let mut values: Vec<Value> = vec![
-            Value::Text(project_id.to_string()),
-            Value::Text(project_id.to_string()),
-        ];
+        let mut values: Vec<Value> = Vec::with_capacity(tokens.len() * 2 + 4);
         values.extend(tokens.iter().map(|token| Value::Text(token.clone())));
+        values.push(Value::Text(project_id.to_string()));
+        values.push(Value::Text(project_id.to_string()));
+        values.push(Value::Real(coverage));
         values.extend(tokens.iter().map(|token| Value::Text(token.clone())));
         values.push(Value::Integer(limit as i64));
 
@@ -930,6 +938,41 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// The rule above is a setting, and this is the setting doing something —
+    /// otherwise `entity_coverage` would be a number nothing reads.
+    ///
+    /// It is not what ships. Lowering it never scored better in the sweep, in
+    /// two thousand comparisons across both corpora, which is the measurement
+    /// the rule above had been standing in for since it was written.
+    #[test]
+    fn a_lower_coverage_lets_half_a_name_match() {
+        let (_dir, store, project, _workspace) = fixture();
+        write_page(
+            &store,
+            project,
+            "gotchas/encoding.md",
+            "Encoding trap",
+            "PowerShell prepends three bytes when piping to a native exe.",
+            vec![Entity::parse("Windows BOM").unwrap()],
+        );
+
+        let half = Tuning {
+            entity_coverage: 0.5,
+            ..Tuning::default()
+        };
+        let found = store
+            .query_streams(project, "windows", 10, None, &half)
+            .unwrap()
+            .entity;
+        assert_eq!(found.len(), 1, "half the name should reach the page");
+
+        let whole = store
+            .query_streams(project, "windows", 10, None, &Tuning::default())
+            .unwrap()
+            .entity;
+        assert!(whole.is_empty(), "and the shipped rule should still refuse");
     }
 
     #[test]
