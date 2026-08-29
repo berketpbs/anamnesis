@@ -25,9 +25,6 @@ use rusqlite::{OptionalExtension, params, params_from_iter};
 use crate::convert::{parse_id, parse_page_path};
 use crate::{Result, Store};
 
-/// How many candidates each individual stream contributes before fusion.
-const STREAM_CANDIDATES: usize = 30;
-
 /// Longest snippet returned with a hit, in characters.
 const SNIPPET_LEN: usize = 240;
 
@@ -148,8 +145,9 @@ impl Store {
             return Ok(Vec::new());
         }
 
-        let fts = self.fts_stream(project_id, &tokens, STREAM_CANDIDATES)?;
-        let entity = self.entity_stream(project_id, &tokens, STREAM_CANDIDATES)?;
+        let depth = tuning.candidates;
+        let fts = self.fts_stream(project_id, &tokens, depth)?;
+        let entity = self.entity_stream(project_id, &tokens, depth)?;
 
         let mut seeds: Vec<PageId> = Vec::with_capacity(fts.len() + entity.len());
         for id in fts.iter().chain(entity.iter()) {
@@ -157,12 +155,12 @@ impl Store {
                 seeds.push(*id);
             }
         }
-        seeds.truncate(STREAM_CANDIDATES);
-        let links = self.link_stream(project_id, &seeds, STREAM_CANDIDATES, tuning.rrf_k)?;
+        seeds.truncate(depth);
+        let links = self.link_stream(project_id, &seeds, depth, tuning.rrf_k)?;
 
         let vectors = match embedding {
             Some((model, vector)) if !vector.is_empty() => {
-                self.vector_stream(project_id, model, vector, STREAM_CANDIDATES)?
+                self.vector_stream(project_id, model, vector, depth)?
             }
             _ => Vec::new(),
         };
@@ -255,7 +253,7 @@ impl Store {
                 seeds.push(*id);
             }
         }
-        seeds.truncate(STREAM_CANDIDATES);
+        seeds.truncate(tuning.candidates);
         let links = self.link_stream(project_id, &seeds, limit, tuning.rrf_k)?;
 
         let vectors = match embedding {

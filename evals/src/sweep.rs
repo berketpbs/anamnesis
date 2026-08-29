@@ -130,6 +130,11 @@ impl SweepReport {
 ///   multiplier reaches 2.34x, which is larger than the entire spread it
 ///   adjusts.
 ///
+/// - `candidates` decides how deep each stream reaches before its ranking is
+///   fused. It cuts both ways, which is why it is here rather than assumed: a
+///   shallow pool cannot answer with a page no stream rated highly, and a deep
+///   one lets three streams' also-rans outvote one stream's favourite.
+///
 /// The vector weight is left alone: the stream is opt-in and empty here, so
 /// sweeping it would measure nothing.
 ///
@@ -143,14 +148,17 @@ pub fn default_grid() -> Vec<Tuning> {
         for entity in [0.5, 1.0, 1.5] {
             for links in [0.0, 0.25, 0.5, 1.0] {
                 for authority_exponent in [0.0, 0.25, 0.5, 1.0] {
-                    grid.push(Tuning {
-                        rrf_k,
-                        fts: 1.0,
-                        entity,
-                        links,
-                        vectors: 1.0,
-                        authority_exponent,
-                    });
+                    for candidates in [10, 30, 120] {
+                        grid.push(Tuning {
+                            rrf_k,
+                            fts: 1.0,
+                            entity,
+                            links,
+                            vectors: 1.0,
+                            authority_exponent,
+                            candidates,
+                        });
+                    }
                 }
             }
         }
