@@ -97,6 +97,11 @@ tower-http = { version = "0.6", features = ["fs", "cors"] }
 tar = "0.4"
 flate2 = "1"
 
+# Markdown rendering for the wiki browser. Raw HTML in a page is shown as
+# text rather than passed through: pages are written by models and by capture,
+# so the body is untrusted input that happens to live on disk.
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+
 # Text munging / hook payload sanitisation.
 regex = "1"
 

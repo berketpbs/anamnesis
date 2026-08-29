@@ -148,9 +148,12 @@ The HTTP server hooks deliver to.
 - `GET /handoff` — hand the next session what the last one left
 - `GET /whoami` — what the server makes of the caller's token
 - `GET /health`
+- `GET /ui` — the wiki browser: scopes, the pages in one, and one page
+  rendered. Read-only, and `serve --no-ui` leaves it out
 - The consolidation pipeline, which runs *after* the response is sent
 
-> There is no web UI: no wiki browser, no search page, no git visualization.
+> There is no search page and no git visualization; the browser lists and
+> renders, and nothing there writes.
 
 **Bearer tokens.** With `ANAMNESIS_TOKEN` or `ANAMNESIS_TOKENS` set, every
 route but `/health` requires `Authorization: Bearer <token>`. With neither set
@@ -159,6 +162,22 @@ binding a non-loopback address that way is refused at startup unless
 `--allow-anonymous` says it was meant. `/health` stays open so `anamnesis
 status` can tell a server that is down from one that refuses this machine's
 token — two problems with different fixes that would otherwise look identical.
+
+**The browser's credential.** `/ui` accepts the same token as an HTTP Basic
+password, because a browser will not attach a bearer token to a link somebody
+clicked but will ask for a password and remember it. Any username is accepted:
+the secret is the whole credential. The API keeps the header-only rule, so a
+credential the browser sends on its own cannot authorise `POST /hook` — a page
+on another site cannot make somebody's browser write to their memory.
+
+**What the browser deliberately does not do.** It never records a page access.
+`query_pages` bumps those counters because retrieval finding a page useful is
+evidence about the page, and the decay sweep reads exactly them; a person
+clicking through an index is not the same claim, and browsing must not be able
+to rescue a page from being forgotten. Page bodies come from the wiki rather
+than from the index's copy — the file is what a person edits and what git
+holds — and raw HTML in a body is rendered as text, since bodies are written
+by models and by capture.
 
 ### anamnesis-cli
 Command-line interface.

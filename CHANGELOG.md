@@ -109,6 +109,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are still preferred
 
 ### Added
+- A wiki browser at `/ui`, served by `anamnesis serve`. Until now memory could
+  only be read by asking it something — `search`, `show-page`, or an agent's
+  MCP query — which meant a stale page, a summary the model wrote badly, and a
+  page that never got indexed all looked identical from outside. Three routes:
+  the scopes this server holds, the pages in one, and one page rendered.
+  It is read-only, and `serve --no-ui` leaves it out: it is the only part of
+  this server that can read the whole of a memory, where the API accepts events
+  and delivers a single handoff. Three deliberate limits. It never records a
+  page access, because the decay sweep reads exactly those counters and
+  browsing an index is not the claim that retrieval found a page useful.
+  Bodies come from the wiki rather than the index's copy of them, since the
+  file is what a person edits and what git holds. And raw HTML in a body is
+  shown as text with non-`http(s)`/`mailto` link destinations defused, because
+  a page body is written by models and by capture. `[[wiki links]]` become
+  links, and ones with no page behind them are marked rather than hidden —
+  the same signal `improve` turns into a proposal
+- The browser's credential: `/ui` also accepts the server's token as an HTTP
+  Basic password, so a token-protected server is still openable. A browser
+  cannot be asked to attach a bearer header to a link somebody clicked, but it
+  will ask for a password. Any username is accepted — the secret is the whole
+  credential. The API is unchanged and stays header-only, so a credential the
+  browser attaches by itself cannot authorise `POST /hook`
 - `anamnesis handoff --discard` throws away the note waiting for the next
   session. A handoff written from a bad model reply had exactly one way out:
   let a session claim it, which puts it in that session's context — the thing

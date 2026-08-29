@@ -160,6 +160,15 @@ enum Commands {
         #[arg(long)]
         no_watch: bool,
 
+        /// Do not serve the wiki browser at /ui
+        ///
+        /// The browser is the one part of this server that can read the whole
+        /// of memory: the API accepts events and delivers one handoff, and
+        /// neither hands back an arbitrary page. Turning it off leaves the
+        /// capture path exactly as it was.
+        #[arg(long)]
+        no_ui: bool,
+
         /// Serve an address other than localhost with no token configured
         ///
         /// Without a token, everything this server holds — every prompt, every
@@ -527,12 +536,16 @@ fn main() -> anyhow::Result<()> {
             port,
             bind,
             no_watch,
+            no_ui,
             allow_anonymous,
         } => {
             cmd_serve(
                 &bind,
                 port,
-                !no_watch,
+                anamnesis_web::ServeOptions {
+                    watch_wiki: !no_watch,
+                    ui: !no_ui,
+                },
                 allow_anonymous,
                 cli.data_dir.clone(),
             )?;
@@ -1317,7 +1330,7 @@ fn cmd_mcp(repo: &std::path::Path, data_dir: Option<PathBuf>) -> anyhow::Result<
 fn cmd_serve(
     bind: &str,
     port: u16,
-    watch_wiki: bool,
+    options: anamnesis_web::ServeOptions,
     allow_anonymous: bool,
     data_dir: Option<PathBuf>,
 ) -> anyhow::Result<()> {
@@ -1356,6 +1369,9 @@ fn cmd_serve(
     println!("🌐 anamnesis serving on http://{address}");
     println!("   data dir: {}", data.root().display());
     println!("   POST /hook   GET /handoff   GET /whoami   GET /health");
+    if options.ui {
+        println!("   wiki browser: http://{address}/ui");
+    }
     println!("   auth: {}", describe_serving_auth(&auth));
     println!(
         "   auto-improve: every {}s, for projects whose marker asks for it",
@@ -1365,7 +1381,7 @@ fn cmd_serve(
     println!("   logs:        {}", data.logs().display());
     println!(
         "   wiki edits:  {}",
-        if watch_wiki {
+        if options.watch_wiki {
             "watched — pages edited by hand are indexed as they are saved"
         } else {
             "not watched — hand edits need `anamnesis reindex`"
@@ -1402,7 +1418,7 @@ fn cmd_serve(
             .with_llm(settings)
             .with_auth(auth)
             .with_embedder(embedder),
-        watch_wiki,
+        options,
     ))?;
     Ok(())
 }

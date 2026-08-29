@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 pub mod auth;
 pub mod improve;
 mod pipeline;
+pub mod ui;
 pub mod watch;
 
 pub use auth::{Auth, Identity};
@@ -164,7 +165,12 @@ impl AppState {
 /// from "the server is up and does not accept your token". Collapsing those two
 /// into one silence is how a person spends an afternoon restarting a server
 /// that was running the whole time.
-pub fn router(state: AppState) -> Router {
+///
+/// `ui` mounts the wiki browser. It is the one part of this surface that can
+/// read the whole of memory — the API delivers a handoff and accepts events,
+/// and neither hands back an arbitrary page — so it is also the one part worth
+/// being able to switch off on a server other people can reach.
+pub fn router(state: AppState, ui: bool) -> Router {
     let guarded = Router::new()
         .route("/hook", post(receive_hook))
         .route("/handoff", get(deliver_handoff))
@@ -176,10 +182,11 @@ pub fn router(state: AppState) -> Router {
             require_token,
         ));
 
-    Router::new()
-        .route("/health", get(health))
-        .merge(guarded)
-        .with_state(state)
+    let mut app = Router::new().route("/health", get(health)).merge(guarded);
+    if ui {
+        app = app.merge(ui::routes(&state));
+    }
+    app.with_state(state)
 }
 
 /// Turn away requests that do not carry an accepted token.
@@ -223,6 +230,44 @@ async fn require_token(
     }
 }
 
+/// The same guard, for requests a person's browser makes.
+///
+/// It differs from [`require_token`] in exactly two ways, and both are about
+/// what a browser can be asked to do. It also accepts the token as an HTTP
+/// Basic password, because a browser will not attach a bearer token to a link
+/// somebody clicked but will ask for a password and remember it. And it
+/// answers with a page and a `WWW-Authenticate: Basic` challenge instead of a
+/// line of text, so the prompt actually appears.
+///
+/// The API keeps the header-only rule: a credential a browser sends on its own
+/// must not be able to authorise `POST /hook`, or a page on another site could
+/// make the browser write to somebody's memory.
+async fn require_browser_token(
+    State(state): State<AppState>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let header = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+
+    match state.auth.authenticate_browser(header) {
+        Ok(identity) => {
+            request.extensions_mut().insert(identity);
+            next.run(request).await
+        }
+        Err(rejection) => {
+            tracing::warn!(
+                path = %request.uri().path(),
+                reason = ?rejection,
+                "rejected an unauthenticated browser request"
+            );
+            ui::challenge(&rejection.message())
+        }
+    }
+}
+
 /// What the server makes of the caller's token.
 #[derive(Debug, Serialize)]
 struct WhoAmI {
@@ -248,8 +293,34 @@ async fn whoami(Extension(identity): Extension<Identity>) -> Json<WhoAmI> {
     })
 }
 
+/// What a running server does beyond answering the API.
+///
+/// A struct rather than two positional booleans: the call site is a long way
+/// from this definition, and `true, false` there says nothing about which
+/// switch is which.
+#[derive(Debug, Clone, Copy)]
+pub struct ServeOptions {
+    /// Index pages edited outside anamnesis as they are saved.
+    pub watch_wiki: bool,
+    /// Mount the wiki browser.
+    pub ui: bool,
+}
+
+impl Default for ServeOptions {
+    fn default() -> Self {
+        Self {
+            watch_wiki: true,
+            ui: true,
+        }
+    }
+}
+
 /// Serve until the process ends.
-pub async fn serve(bind: SocketAddr, state: AppState, watch_wiki: bool) -> std::io::Result<()> {
+pub async fn serve(
+    bind: SocketAddr,
+    state: AppState,
+    options: ServeOptions,
+) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(%bind, "anamnesis listening");
 
@@ -264,12 +335,12 @@ pub async fn serve(bind: SocketAddr, state: AppState, watch_wiki: bool) -> std::
     // be asked. The watcher only makes the index say what the wiki already
     // says. A blocking task because everything it touches — SQLite, git, the
     // wiki mutex — is synchronous.
-    if watch_wiki {
+    if options.watch_wiki {
         let watching = state.clone();
         tokio::task::spawn_blocking(move || watch::run(watching));
     }
 
-    axum::serve(listener, router(state)).await
+    axum::serve(listener, router(state, options.ui)).await
 }
 
 /// Liveness probe.
@@ -1334,7 +1405,7 @@ mod tests {
     }
 
     async fn send(state: &AppState, request: HttpRequest<Body>) -> Response {
-        router(state.clone())
+        router(state.clone(), true)
             .oneshot(request)
             .await
             .expect("routed")
