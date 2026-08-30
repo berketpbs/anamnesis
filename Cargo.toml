@@ -141,3 +141,18 @@ strip = "symbols"
 [profile.dev]
 opt-level = 0
 debug = true
+
+# Dependencies build without debug info, which this project's own crates keep.
+# Measured on a clean build: `target/debug/deps` was 3.3 GB of a 4.2 GB tree,
+# and almost all of it is debug info for crates nobody steps through — candle,
+# tokenizers, rmcp, reqwest, axum, git2. Left alone it is worse than it looks,
+# because cargo never collects the artifacts a changed dependency version
+# leaves behind: the same tree had grown to 7.2 GB, and to 40 GB before that.
+#
+# `"*"` reaches dependencies and not workspace members, so stepping through
+# this repository's code still works and its frames in a backtrace still carry
+# a file and a line. What is given up is inspecting a variable inside a
+# dependency, which is not how anything here has ever been debugged. CI gets
+# it too: every job saves and restores this tree through `rust-cache`.
+[profile.dev.package."*"]
+debug = false
