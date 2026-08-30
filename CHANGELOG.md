@@ -109,6 +109,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are still preferred
 
 ### Fixed
+- Background work that stops now says so. The wiki watcher was spawned and its
+  handle dropped, so the loop returning — or panicking — left the server
+  running, still claiming at startup that hand edits are watched, with nothing
+  anywhere saying they had stopped being indexed. A consolidation task had the
+  same shape: a provider crate is third-party code running where a panic has
+  nowhere to go, and the only trace of one would have been a session that
+  ended and left no page. Both endings are now awaited and logged, and a test
+  puts a panicking provider through the real hook path to show the server
+  stays up, the session stays open and recoverable, and the shutdown drain is
+  not left waiting on a task that already died
 - The server finishes the summaries it owes before it stops. A session's page
   is written *after* the response goes out, because the hook that delivered
   the event is a subprocess of somebody's editor that gives up after a second
