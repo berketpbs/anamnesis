@@ -1411,7 +1411,7 @@ fn cmd_serve(
     );
 
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(anamnesis_web::serve(
+    let served = runtime.block_on(anamnesis_web::serve(
         address,
         anamnesis_web::AppState::new(store, wiki)
             .with_raw(Some(raw))
@@ -1419,7 +1419,23 @@ fn cmd_serve(
             .with_auth(auth)
             .with_embedder(embedder),
         options,
-    ))?;
+    ));
+
+    // The wiki watcher is a blocking task parked on a channel that never
+    // closes, and dropping a runtime waits for blocking tasks to finish. Left
+    // to drop, this one hangs the process *after* it has announced that it
+    // stopped — the worst of both, a server that is not serving and not gone.
+    //
+    // It stayed hidden because the platform that reaches it first kills the
+    // process anyway: Windows allows about five seconds after the console
+    // closes and then terminates it, which is indistinguishable from exiting.
+    // Ctrl-C has nothing to kill it, and hangs forever.
+    //
+    // Nothing is lost by not waiting for it. The index and the wiki are on
+    // disk, and the work that was worth waiting for — sessions still being
+    // summarised — `serve` waited for before it returned.
+    runtime.shutdown_background();
+    served?;
     Ok(())
 }
 
