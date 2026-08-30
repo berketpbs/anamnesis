@@ -109,6 +109,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are still preferred
 
 ### Added
+- CI builds the Docker image, runs it, and checks that it answers `/health`.
+  The image, `Dockerfile.dev`, and the compose profiles have been in the tree
+  since the first weeks with nothing ever building them — a documented way to
+  run anamnesis that nobody had checked. Building alone would not be enough,
+  since an image that builds and will not start is the same broken promise, so
+  the job starts the container and waits for the one route that answers
+  without a token, printing the container's log either way. Two failures of
+  exactly this shape are already in the history: a byte order mark ahead of
+  `FROM`, and an entrypoint script the image never referenced
 - A session page says who ran the session, when the server could name them.
   The index has recorded a session's operator since per-user slots existed and
   the page never mentioned it, so a shared server's wiki was an anonymous pile

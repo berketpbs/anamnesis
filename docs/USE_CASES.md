@@ -217,8 +217,9 @@ Based on these use cases, implement in order:
 - [x] Cross-harness workstreams
 - [x] CI on every push and pull request
 - [ ] Managed session resume
-- [ ] Docker containerization — `Dockerfile`, `Dockerfile.dev`, and compose
-      profiles exist; nothing in CI builds them, so treat them as untested
+- [x] Docker containerization — CI builds the image, runs it, and checks that
+      it answers `/health`; `Dockerfile.dev` and the compose profiles are
+      parsed but never run
 - [ ] Remote server setup
 
 ## Success Metrics
