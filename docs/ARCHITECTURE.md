@@ -635,7 +635,13 @@ data directory.
 **Not implemented — do not rely on these:**
 
 - **Per-operator wiki scopes** — `[slots] per_user` separates handoff slots,
-  not pages. Two operators on one project read and write the same wiki.
+  not pages. Two operators on one project read and write the same wiki. What
+  exists instead is attribution: a session page written for a named operator
+  says so, so a shared wiki is at least a wiki of *somebody's* sessions rather
+  than an anonymous pile. Splitting the pages themselves is deliberately not
+  done — a page's identity is derived from its project and path, and moving
+  pages between scopes changes that identity, taking their access statistics,
+  resolved links, and supersession chains with it.
 
 ## Future Enhancements
 
