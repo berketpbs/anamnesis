@@ -126,6 +126,58 @@ fn builtin_rules() -> &'static [Rule] {
                 "[redacted:openai-key]",
             ),
             rule(
+                // The rule above only sees the original shape. Project,
+                // service-account, and admin keys put a hyphenated word
+                // between the prefix and the secret, which ends the run of
+                // alphanumerics that rule counts on — so every key OpenAI has
+                // issued since projects existed went through untouched. Each
+                // form is named rather than the middle being made optional:
+                // `sk-` followed by anything long enough would start redacting
+                // ordinary hyphenated identifiers out of somebody's prompt.
+                "openai-scoped-key",
+                r"\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_\-]{20,}",
+                "[redacted:openai-key]",
+            ),
+            rule(
+                // Google's shape is fixed at 39 characters and the prefix is
+                // theirs alone, so this cannot fire on anything else. It
+                // belongs here because this project already speaks to Gemini
+                // through a harness and a provider.
+                "google-api-key",
+                r"\bAIza[0-9A-Za-z_\-]{35}\b",
+                "[redacted:google-api-key]",
+            ),
+            rule(
+                "stripe-key",
+                r"\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}\b",
+                "[redacted:stripe-key]",
+            ),
+            rule(
+                "npm-token",
+                r"\bnpm_[A-Za-z0-9]{30,}\b",
+                "[redacted:npm-token]",
+            ),
+            rule(
+                // A webhook URL is a bearer credential wearing a path: anyone
+                // holding it can post as that integration, and it travels in
+                // documentation and pasted commands where nothing looks like a
+                // secret.
+                "slack-webhook",
+                r"https://hooks\.slack\.com/services/[A-Za-z0-9/+_\-]{20,}",
+                "[redacted:slack-webhook]",
+            ),
+            rule(
+                // This system's own token. A memory that records prompts and
+                // shell output is exactly where the key to it ends up — in an
+                // export line, a curl, a settings file somebody pasted — and
+                // storing that would hand the reader of one session the run of
+                // every other. `anamnesis token` mints this shape on purpose,
+                // so it is recognisable wherever it turns up.
+                "anamnesis-token",
+                r"\banam_[A-Za-z0-9_\-]{20,}",
+                "[redacted:anamnesis-token]",
+            ),
+            rule(
                 "github-token",
                 r"\bgh[pousr]_[A-Za-z0-9]{16,}\b",
                 "[redacted:github-token]",
@@ -207,6 +259,68 @@ mod tests {
             );
             assert!(result.hits().contains(&rule), "{rule} did not fire");
         }
+    }
+
+    /// Every key OpenAI has issued since projects existed has a hyphenated
+    /// word between the prefix and the secret, which is exactly what the
+    /// original rule could not see past.
+    #[test]
+    fn scoped_provider_keys_are_removed_too() {
+        for key in [
+            "sk-proj-abcdefghij0123456789ABCDEFGHIJ",
+            "sk-svcacct-abcdefghij0123456789ABCDEFGHIJ",
+            "sk-admin-abcdefghij0123456789ABCDEFGHIJ",
+        ] {
+            let found = redact(&format!("the key is {key} and that is all"));
+            assert!(!found.text().contains(key), "{key}: {}", found.text());
+            assert!(found.text().contains("[redacted:openai-key]"));
+        }
+    }
+
+    /// The line between a secret and a hyphenated identifier is the named
+    /// prefix; without it this rule would start eating ordinary prose.
+    #[test]
+    fn an_ordinary_hyphenated_name_is_not_a_key() {
+        let found = redact("the branch is sk-refactor-the-storage-layer-again");
+
+        assert!(found.is_clean(), "{}", found.text());
+    }
+
+    #[test]
+    fn keys_from_the_other_providers_are_removed() {
+        // The webhook is assembled rather than written out. A literal one here
+        // is indistinguishable from a real one to anything scanning this file
+        // — GitHub's push protection refused the commit that had it — which is
+        // the same reason the rule below exists at all.
+        let webhook = format!(
+            "https://hooks.{}.com/{}/{}",
+            "slack", "services", "T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX"
+        );
+        let cases = [
+            ("AIzaSyA0123456789abcdefghijklmnopqrstuv", "google-api-key"),
+            ("sk_live_0123456789abcdefghij", "stripe-key"),
+            ("npm_0123456789abcdefghijklmnopqrstuvwxyz", "npm-token"),
+            (webhook.as_str(), "slack-webhook"),
+        ];
+
+        for (secret, name) in cases {
+            let found = redact(&format!("value: {secret}"));
+            assert!(!found.text().contains(secret), "{name}: {}", found.text());
+            assert!(found.hits().contains(&name), "{name}: {:?}", found.hits());
+        }
+    }
+
+    /// The key to this memory is the one secret guaranteed to be in reach of
+    /// the thing capturing prompts and shell output.
+    #[test]
+    fn this_systems_own_token_is_redacted() {
+        let found = redact("run it with ANAMNESIS_TOKEN=anam_0123456789abcdefghijKLMNOP now");
+
+        assert!(
+            !found.text().contains("anam_0123456789"),
+            "{}",
+            found.text()
+        );
     }
 
     #[test]

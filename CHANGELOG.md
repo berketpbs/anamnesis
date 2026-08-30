@@ -109,7 +109,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are still preferred
 
 ### Fixed
-- Background work that stops now says so. The wiki watcher was spawned and its
+- Redaction sees the keys providers actually issue now. Every OpenAI key
+  minted since projects existed — `sk-proj-`, `sk-svcacct-`, `sk-admin-` —
+  went through capture untouched, because the rule counted alphanumerics
+  straight after `sk-` and the hyphenated word in the middle ends that run.
+  Demonstrated against the shipped binary rather than argued: the same prompt
+  through the installed build leaves the key in the raw spool and the SQLite
+  write-ahead log, and through this one leaves `[redacted:openai-key]`. Google
+  (`AIza`), Stripe, npm, and Slack webhook URLs are recognised too, and so is
+  this system's **own** token: a memory that records prompts and shell output
+  is exactly where the key to it turns up, and storing that would hand the
+  reader of one session the run of every other. The new rules name their
+  prefixes rather than loosening the old one, so an ordinary hyphenated
+  identifier is still left alone, and there is a test that says so The wiki watcher was spawned and its
   handle dropped, so the loop returning — or panicking — left the server
   running, still claiming at startup that hand edits are watched, with nothing
   anywhere saying they had stopped being indexed. A consolidation task had the
