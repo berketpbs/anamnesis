@@ -346,7 +346,23 @@ pub async fn serve(
     // wiki mutex — is synchronous.
     if options.watch_wiki {
         let watching = state.clone();
-        tokio::task::spawn_blocking(move || watch::run(watching));
+        // Spawned and then *awaited*, which the handle being dropped would
+        // not do. `watch::run` is a loop: it returning at all means the wiki
+        // has stopped being watched, and a panic means the same thing with
+        // less warning. Either way the server carries on looking healthy
+        // while the banner it printed at startup — "wiki edits: watched" —
+        // has quietly stopped being true.
+        tokio::spawn(async move {
+            match tokio::task::spawn_blocking(move || watch::run(watching)).await {
+                Ok(()) => tracing::warn!(
+                    "the wiki watcher stopped; pages edited by hand now reach the index only through `anamnesis reindex`"
+                ),
+                Err(error) => tracing::error!(
+                    %error,
+                    "the wiki watcher panicked; pages edited by hand now reach the index only through `anamnesis reindex`"
+                ),
+            }
+        });
     }
 
     let tasks = state.tasks.clone();
@@ -647,27 +663,40 @@ async fn receive_hook(
         // it to the grave. The transcript survives either way; the summary is
         // the part nothing rebuilds.
         state.tasks.spawn(async move {
-            let outcome = finalize_with_llm(
-                &background.store,
-                &background.wiki,
-                &scope,
-                session_id,
-                background
-                    .embedder
-                    .as_ref()
-                    .map(|embedder| embedder.as_ref() as &dyn anamnesis_core::embedding::Embed),
-                now,
-                &settings,
-            )
-            .await;
+            // The inner spawn is what makes a panic reportable: a task nobody
+            // awaits takes its panic with it, and the only trace of one here
+            // would be a session that ended and left no page. Every failure in
+            // this system that took days to notice had exactly that shape.
+            let handle = tokio::spawn(async move {
+                let outcome = finalize_with_llm(
+                    &background.store,
+                    &background.wiki,
+                    &scope,
+                    session_id,
+                    background
+                        .embedder
+                        .as_ref()
+                        .map(|embedder| embedder.as_ref() as &dyn anamnesis_core::embedding::Embed),
+                    now,
+                    &settings,
+                )
+                .await;
 
-            match outcome {
-                Ok(Some(page)) => tracing::info!(%page, "session consolidated"),
-                Ok(None) => {}
-                // There is nothing left to report this to — the hook exited
-                // long ago — so this log line is the only record that a
-                // session ended without leaving a page.
-                Err(error) => tracing::error!(%error, %session_id, "consolidation failed"),
+                match outcome {
+                    Ok(Some(page)) => tracing::info!(%page, "session consolidated"),
+                    Ok(None) => {}
+                    // There is nothing left to report this to — the hook exited
+                    // long ago — so this log line is the only record that a
+                    // session ended without leaving a page.
+                    Err(error) => tracing::error!(%error, %session_id, "consolidation failed"),
+                }
+            });
+
+            if let Err(error) = handle.await {
+                // The session stays open and its transcript is whole; what is
+                // lost is the summary, and this line is the only place that
+                // says so.
+                tracing::error!(%error, %session_id, "consolidation panicked");
             }
         });
     }
@@ -1361,6 +1390,44 @@ mod tests {
         );
     }
 
+    /// A provider crate is third-party code running in a task nobody awaits.
+    /// If it dies, the server must stay up and the session must stay
+    /// recoverable — half a summary written over a closed session would be
+    /// worse than none.
+    #[tokio::test]
+    async fn a_provider_that_panics_does_not_take_the_server_with_it() {
+        let harness = harness();
+        let provider = Arc::new(Fake::exploding());
+        let state = harness.state.clone().with_llm(Some(settings(provider)));
+
+        send(&state, hook_request(&harness, "SessionStart", None)).await;
+        send(&state, hook_request(&harness, "UserPromptSubmit", None)).await;
+        let response = send(&state, hook_request(&harness, "SessionEnd", None)).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        // A task that dies still *ends*, so the drain must not be left
+        // waiting on it — a panicking provider would otherwise turn every
+        // shutdown into the full fifteen seconds.
+        assert!(finish_in_flight(&state.tasks, std::time::Duration::from_secs(10)).await);
+
+        // No page, which is the honest outcome, and no session pretending to
+        // have been summarised: the transcript is whole and the row is not
+        // closed behind a summary that was never written.
+        assert_eq!(state.store.page_count(project(&harness)).expect("count"), 0);
+        let sessions = state
+            .store
+            .recent_sessions(project(&harness), 10)
+            .expect("sessions");
+        assert!(
+            sessions.iter().all(|session| session.ended_at.is_none()),
+            "the session should not be closed by a consolidation that died"
+        );
+
+        // And the server is still answering, which is the whole point.
+        let alive = send(&state, hook_request(&harness, "SessionStart", None)).await;
+        assert_eq!(alive.status(), StatusCode::ACCEPTED);
+    }
+
     /// A model that has hung must not turn a stop into a hang. The transcript
     /// survives; the summary is the part that is lost, and the log says so.
     #[tokio::test]
@@ -1423,6 +1490,8 @@ mod tests {
         /// How long the provider takes to answer. Zero unless a test needs the
         /// window between the response and the page to be observable.
         takes: std::time::Duration,
+        /// Whether the client panics instead of returning.
+        explodes: bool,
     }
 
     impl Fake {
@@ -1431,6 +1500,7 @@ mod tests {
                 reply: Some(reply),
                 seen: Mutex::new(None),
                 takes: std::time::Duration::ZERO,
+                explodes: false,
             }
         }
 
@@ -1439,6 +1509,7 @@ mod tests {
                 reply: None,
                 seen: Mutex::new(None),
                 takes: std::time::Duration::ZERO,
+                explodes: false,
             }
         }
 
@@ -1446,6 +1517,18 @@ mod tests {
         fn slowly(mut self, takes: std::time::Duration) -> Self {
             self.takes = takes;
             self
+        }
+
+        /// A client that dies rather than answering. Not a hypothetical: a
+        /// provider crate is third-party code running inside a task nobody
+        /// awaits.
+        fn exploding() -> Self {
+            Self {
+                reply: None,
+                seen: Mutex::new(None),
+                takes: std::time::Duration::ZERO,
+                explodes: true,
+            }
         }
 
         fn prompt(&self) -> String {
@@ -1468,6 +1551,7 @@ mod tests {
             request: &anamnesis_llm::Completion,
         ) -> Result<anamnesis_llm::CompletionOutput, anamnesis_llm::LlmError> {
             *self.seen.lock() = Some(request.user.clone());
+            assert!(!self.explodes, "provider exploded");
             if !self.takes.is_zero() {
                 tokio::time::sleep(self.takes).await;
             }
