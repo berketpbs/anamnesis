@@ -1,6 +1,6 @@
 # Multi-stage build for anamnesis
 # Stage 1: Build
-FROM rust:1.95-slim as builder
+FROM rust:1.95-slim AS builder
 
 WORKDIR /app
 
@@ -18,7 +18,10 @@ COPY crates ./crates
 COPY evals ./evals
 
 # Build the CLI binary
-RUN cargo build --release -p anamnesis-cli
+# `--locked`: the lock file is copied in on purpose, and a build that quietly
+# resolved different versions would make the image something other than what
+# CI tested.
+RUN cargo build --release --locked -p anamnesis-cli
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim

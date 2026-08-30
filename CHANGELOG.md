@@ -108,6 +108,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than silenced, entities stay level with full text, and canonical pages
   are still preferred
 
+### Fixed
+- The Docker image builds at all. `.dockerignore` excluded `Cargo.lock` under
+  the heading "Rust build artifacts", and both Dockerfiles copy that file, so
+  every build of either one failed on the `COPY` — an image nobody could have
+  built, sitting in the tree next to documentation explaining how to run it.
+  The lock is not an artifact: it is the pinned resolution the repository was
+  tested with, and the release build now passes `--locked` so a build that
+  would resolve something else fails loudly instead of shipping quietly
+
 ### Added
 - CI builds the Docker image, runs it, and checks that it answers `/health`.
   The image, `Dockerfile.dev`, and the compose profiles have been in the tree

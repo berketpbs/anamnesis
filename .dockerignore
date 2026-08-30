@@ -6,7 +6,13 @@
 
 # Rust build artifacts
 target/
-Cargo.lock
+
+# Cargo.lock is deliberately NOT ignored. It is not a build artifact: it is
+# the pinned resolution of every dependency, and the Dockerfile copies it so
+# the image builds the versions this repository was tested with. Excluding it
+# broke the build outright — `COPY Cargo.lock` cannot copy a file the context
+# does not contain — which is how both Dockerfiles came to be unbuildable
+# without anyone noticing.
 
 # Development and IDE
 .vscode
