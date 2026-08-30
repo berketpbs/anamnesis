@@ -109,6 +109,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are still preferred
 
 ### Fixed
+- The Docker image's binary starts. The builder tracked whichever Debian the
+  Rust image is on — trixie, glibc 2.41 — and the runtime stage was pinned to
+  bookworm, glibc 2.36, so the binary that came out reported
+  `version 'GLIBC_2.39' not found` the first time anything ran it. Nothing
+  about that appears while building: the image is produced and only refuses to
+  work. Both stages now name the same release, with the reason written where
+  the next person will change one of them
 - The Docker image builds at all. `.dockerignore` excluded `Cargo.lock` under
   the heading "Rust build artifacts", and both Dockerfiles copy that file, so
   every build of either one failed on the `COPY` — an image nobody could have
