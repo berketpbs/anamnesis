@@ -120,6 +120,16 @@ jobs:
           docker logs anamnesis-ci
           [ "$answered" = yes ]
 
+      # SIGTERM is what `docker stop`, systemd, and a supervisor all send, and
+      # it is the path nobody takes by hand — Ctrl-C in a terminal is the one
+      # people try. A container is the only place in this project's CI where
+      # the unattended stop can actually be exercised.
+      - name: The server stops when it is asked to
+        run: |
+          docker stop --timeout 20 anamnesis-ci
+          docker logs anamnesis-ci 2>&1 | tail -5
+          docker logs anamnesis-ci 2>&1 | grep -q "anamnesis stopped"
+
       - name: Stop it
         if: always()
         run: docker rm -f anamnesis-ci

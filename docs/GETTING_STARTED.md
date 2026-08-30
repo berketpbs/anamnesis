@@ -178,6 +178,12 @@ only report was a line on stderr that no harness shows. A session that starts
 while the server is down now says so in the agent's context, and `anamnesis
 status` says it any time — but the fix is to not need either.
 
+Closing the window is at least no longer abrupt. The server takes it as a
+request to stop: it finishes the summaries it owes and writes down what stopped
+it, so a gap in `logs/` that begins with a reason is a different thing from one
+that begins with nothing. A server that stopped politely is still a server that
+is not recording.
+
 Whatever you use, four settings matter, and each one is a way it has actually
 stopped or would:
 
@@ -194,10 +200,9 @@ stopped or would:
 ```powershell
 $exe = Join-Path $env:APPDATA 'anamnesis\bin\anamnesis.exe'
 
-# Hidden, because the server runs in the foreground and a bare action would
-# leave a console window open forever.
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-    -Argument "-NoProfile -WindowStyle Hidden -Command `"& '$exe' serve`""
+# No wrapper around it: the principal below leaves the task no desktop for a
+# console to appear on, so the server is launched directly.
+$action = New-ScheduledTaskAction -Execute $exe -Argument 'serve'
 
 # Two triggers. The first covers the ordinary case. The second is what makes a
 # crash survivable: Task Scheduler's own "restart on failure" does **not**
@@ -220,9 +225,28 @@ $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries -DontStopOnIdleEnd -StartWhenAvailable `
     -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
 
+# S4U — "run whether the user is logged on or not" — and this is the setting
+# most people arrive at this section looking for. A task registered without a
+# principal runs interactively, an interactive task has a desktop, and a task
+# with a desktop shows a console window every time it really launches
+# something. With the repeating trigger above that is not once: it is every
+# login and every recovery, each one a window that appears, prints the startup
+# banner, and goes. Hiding it does not work either — wrapping the action in
+# `powershell.exe -WindowStyle Hidden` still flashes, because the console
+# exists before PowerShell has started far enough to hide it. S4U gives the
+# task no desktop, so there is no window to hide.
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
+    -LogonType S4U -RunLevel Limited
+
 Register-ScheduledTask -TaskName 'Anamnesis Memory Server' `
-    -Action $action -Trigger $triggers -Settings $settings -Force
+    -Action $action -Trigger $triggers -Settings $settings -Principal $principal -Force
 ```
+
+S4U runs the task as you without storing your password, which needs the *log on
+as a batch job* right. If the registration is refused with a message about the
+logon type, that right is what is missing; granting it, or registering the task
+from the Task Scheduler UI with "run whether user is logged on or not" ticked,
+is the same thing by another route.
 
 Point it at the copy under `%APPDATA%\anamnesis\bin\`, not at one in
 `target/`: Windows will not let `cargo build` overwrite a running executable.
@@ -236,11 +260,16 @@ $task = Get-ScheduledTask -TaskName 'Anamnesis Memory Server'
 $task.Triggers | Select-Object @{n='type';e={$_.CimClass.CimClassName}},
                                @{n='repeats';e={$_.Repetition.Interval}}
 $task.Settings.ExecutionTimeLimit   # PT0S, or it is killed in three days
+$task.Principal.LogonType          # S4U, or it shows a console on every start
 ```
 
-Two triggers, one of them repeating, and `PT0S`. Killing the server should then
-bring it back within the repetition interval - measured at 50 seconds here, and
-the restart is in `logs/`, where the next person can see that it happened.
+Two triggers, one of them repeating, `PT0S`, and `S4U`. Killing the server
+should then bring it back within the repetition interval - measured at 50
+seconds here, and the restart is in `logs/`, where the next person can see that
+it happened. The stop before it is in there too, with the reason it stopped,
+whenever the server was asked to stop rather than killed outright: a process
+ended with `Stop-Process -Force` gets no say and leaves no line, which is
+itself worth knowing when reading a gap in the log.
 
 **Linux**, as a user unit in `~/.config/systemd/user/anamnesis.service`:
 
