@@ -4,6 +4,7 @@ mod bootstrap;
 mod hooks;
 mod mcp_config;
 mod reindex;
+mod spool;
 mod sweep;
 
 use anamnesis_core::datadir::DataDir;
@@ -555,7 +556,7 @@ fn main() -> anyhow::Result<()> {
             server,
             token,
         } => {
-            cmd_hook(&agent, &server, token.as_deref());
+            cmd_hook(&agent, &server, token.as_deref(), cli.data_dir.clone());
         }
         Commands::InstallHooks {
             agent,
@@ -695,6 +696,7 @@ fn cmd_status(
     let cwd = std::env::current_dir()?;
     let scope = resolve_scope(&cwd)?;
     let data = DataDir::resolve(data_dir)?;
+    let queue = spool::Queue::new(&data);
 
     println!("📚 Anamnesis Memory Status");
     println!();
@@ -713,6 +715,7 @@ fn cmd_status(
             data.wiki_scope(&scope.scope).display()
         );
         println!("  Index:        {}", data.db_file().display());
+        println!("  Queue:        {}", queue.root().display());
         match &scope.marker {
             Some(path) => println!("  Marker:       {}", path.display()),
             None => println!("  Marker:       (none)"),
@@ -752,7 +755,11 @@ fn cmd_status(
     );
     println!(
         "  Capture:   {}",
-        describe_capture(store.last_observation_at(scope.project_id)?, now)
+        describe_capture(
+            store.last_observation_at(scope.project_id)?,
+            now,
+            queue.len()
+        )
     );
     // Where a project keeps a slot per operator, the handoff reported has to
     // be the one *this* machine would be handed. Reporting the shared slot
@@ -930,10 +937,20 @@ fn describe_auth(state: &AuthState, presented: bool) -> String {
 /// A reachable server proves nothing on its own: it records only what a
 /// harness sends it, and hooks that were never installed look exactly like a
 /// quiet afternoon. This is the half of the answer that comes from evidence.
-fn describe_capture(last: Option<Timestamp>, now: Timestamp) -> String {
-    match last {
+fn describe_capture(last: Option<Timestamp>, now: Timestamp, waiting: usize) -> String {
+    let recorded = match last {
         Some(at) => format!("last event {}", describe_age(at, now)),
         None => "nothing captured yet — run `anamnesis install-hooks`".to_owned(),
+    };
+
+    // Silent when the queue is empty, which is every healthy machine. A line
+    // that is always there is a line nobody reads on the day it matters — the
+    // same reason the drift report says nothing when the wiki and the index
+    // agree.
+    match waiting {
+        0 => recorded,
+        1 => format!("{recorded} · 1 event waiting to be delivered"),
+        n => format!("{recorded} · {n} events waiting to be delivered"),
     }
 }
 
@@ -1490,7 +1507,7 @@ fn describe_serving_auth(auth: &anamnesis_web::Auth) -> String {
 ///
 /// Never fails loudly. Hooks run inside someone's editing session, so a server
 /// that is not running should cost them nothing more than a line on stderr.
-fn cmd_hook(agent: &str, server: &str, token: Option<&str>) {
+fn cmd_hook(agent: &str, server: &str, token: Option<&str>, data_dir: Option<PathBuf>) {
     let mut payload = String::new();
     if std::io::Read::read_to_string(&mut std::io::stdin(), &mut payload).is_err() {
         eprintln!("anamnesis: could not read hook payload");
@@ -1518,6 +1535,19 @@ fn cmd_hook(agent: &str, server: &str, token: Option<&str>) {
 
     let starting = is_starting(event.as_deref(), agent);
 
+    // Where an event waits when it cannot be delivered. Resolving the data
+    // directory is path arithmetic — it opens no database and creates nothing
+    // — which is what makes it affordable on a path that runs before every
+    // tool call. A directory that will not resolve is not worth failing the
+    // hook over: the server may well be up, and delivery is the point.
+    let queue = match DataDir::resolve(data_dir) {
+        Ok(data) => Some(spool::Queue::new(&data)),
+        Err(error) => {
+            eprintln!("anamnesis: no queue for undelivered events: {error}");
+            None
+        }
+    };
+
     // These budgets are deliberately tight. A hook runs before every tool call
     // an agent makes, so any delay here is multiplied by hundreds within one
     // session — and the case that matters is the server being *down*, where a
@@ -1536,6 +1566,16 @@ fn cmd_hook(agent: &str, server: &str, token: Option<&str>) {
         }
     };
 
+    // Whatever earlier hooks could not deliver goes first, because a session is
+    // a sequence and its start has to reach the index before its middle. On a
+    // healthy machine — which is every hook of every session that never lost
+    // the server — this costs one read of a directory that is not there.
+    if let Some(queue) = &queue
+        && !queue.is_empty()
+    {
+        replay(&client, server, token, queue);
+    }
+
     let mut post = client
         .post(format!("{server}/hook"))
         .query(&[("agent", agent)])
@@ -1549,14 +1589,22 @@ fn cmd_hook(agent: &str, server: &str, token: Option<&str>) {
     match post {
         Err(error) => {
             eprintln!("anamnesis: could not reach {server}: {error}");
+            let kept = keep(queue.as_ref(), agent, &payload);
             announce(
                 agent,
                 starting,
-                &capture_notice(server, "could not be reached"),
+                &capture_notice(server, "could not be reached", kept),
             );
             return;
         }
-        // A refused event is still an event lost.
+        // Kept as well, though it is tempting not to: a refusal is the server
+        // deciding about *this* event, and re-offering one it will always
+        // refuse would leave the queue stuck at its head. The common refusal
+        // is not that, though — it is a token that does not match, which is
+        // fixed in a minute and after which everything behind it should still
+        // be there. A stuck queue is visible in `anamnesis status`; a dropped
+        // event is visible nowhere, and that is the trade this queue exists to
+        // make.
         Ok(response) if !response.status().is_success() => {
             let status = response.status();
             let detail = response.text().unwrap_or_default();
@@ -1564,10 +1612,11 @@ fn cmd_hook(agent: &str, server: &str, token: Option<&str>) {
                 "anamnesis: server rejected event ({status}): {}",
                 detail.trim()
             );
+            let kept = keep(queue.as_ref(), agent, &payload);
             announce(
                 agent,
                 starting,
-                &capture_notice(server, &format!("refused the event ({status})")),
+                &capture_notice(server, &format!("refused the event ({status})"), kept),
             );
             return;
         }
@@ -1644,6 +1693,106 @@ fn is_starting(event: Option<&str>, _agent: &str) -> bool {
     event.is_some_and(|event| event.eq_ignore_ascii_case("sessionstart"))
 }
 
+/// How long one hook will spend delivering what earlier hooks could not.
+///
+/// The same reasoning as the timeouts in [`cmd_hook`], applied to a queue that
+/// can hold days of work: draining it in one go would spend a session's budget
+/// many times over. Two seconds moves a long outage in the background of the
+/// next few dozen tool calls, which is roughly the pace it filled at.
+const REPLAY_BUDGET: std::time::Duration = std::time::Duration::from_millis(2_000);
+
+/// How many waiting events one read of the queue directory looks at.
+const REPLAY_BATCH: usize = 32;
+
+/// Deliver what earlier hooks could not, oldest first, stopping at the first
+/// event that will not go.
+///
+/// Stopping rather than skipping is the whole point: a session is a sequence,
+/// and replaying its middle before its beginning would leave the index with a
+/// session it cannot make sense of. A queue that will not drain shows up in
+/// `anamnesis status`; the alternative — dropping the event at the head to
+/// keep things moving — is invisible, and invisible loss is what this queue
+/// was written to end.
+fn replay(
+    client: &reqwest::blocking::Client,
+    server: &str,
+    token: Option<&str>,
+    queue: &spool::Queue,
+) {
+    let delivered = drain(queue, REPLAY_BUDGET, |entry| {
+        let Ok(body) = serde_json::to_string(&entry.body) else {
+            return false;
+        };
+        let mut post = client
+            .post(format!("{server}/hook"))
+            .query(&[("agent", entry.agent.as_str())])
+            .header("content-type", "application/json")
+            .body(body);
+        if let Some(token) = token {
+            post = post.bearer_auth(token);
+        }
+        matches!(post.send(), Ok(response) if response.status().is_success())
+    });
+
+    // stderr, never stdout: stdout is the handoff channel, and one harness
+    // parses every byte of it as a single JSON object.
+    if delivered > 0 {
+        eprintln!("anamnesis: delivered {delivered} event(s) that had been waiting");
+    }
+}
+
+/// The order and the stopping, without the HTTP.
+///
+/// Split out for the same reason `finish_in_flight` is: the interesting half
+/// is what happens when delivery starts failing partway through, and a live
+/// server is a poor thing to write that test around. Returns how many went.
+fn drain(
+    queue: &spool::Queue,
+    budget: std::time::Duration,
+    mut deliver: impl FnMut(&spool::Queued) -> bool,
+) -> usize {
+    let started = std::time::Instant::now();
+    let mut delivered = 0usize;
+
+    'draining: while started.elapsed() < budget {
+        let batch = queue.take(REPLAY_BATCH);
+        if batch.is_empty() {
+            break;
+        }
+
+        for (path, entry) in batch {
+            if started.elapsed() >= budget {
+                break 'draining;
+            }
+            if !deliver(&entry) {
+                break 'draining;
+            }
+            queue.remove(&path);
+            delivered += 1;
+        }
+    }
+
+    delivered
+}
+
+/// Keep an event the server did not take, and say whether it was kept.
+///
+/// The answer decides which sentence the session is told, so it has to be what
+/// actually happened rather than what was attempted: a queue that refused the
+/// event because it is full must not produce a notice promising delivery.
+fn keep(queue: Option<&spool::Queue>, agent: &str, payload: &str) -> bool {
+    let Some(queue) = queue else {
+        return false;
+    };
+    match queue.push(agent, payload) {
+        Ok(_) => true,
+        Err(error) => {
+            eprintln!("anamnesis: could not keep the event: {error}");
+            false
+        }
+    }
+}
+
 /// Say something on stdout, in the shape this harness reads back.
 ///
 /// Every path out of the hook goes through here, because stdout is a contract
@@ -1682,12 +1831,25 @@ fn announce(agent: &str, starting: bool, text: &str) {
 /// never be printed here — an error page injected as context would not fail,
 /// it would be believed — and the way this stays on the right side of that
 /// rule is that anamnesis wrote it, says so, and says what to do about it.
-fn capture_notice(server: &str, reason: &str) -> String {
-    format!(
-        "[anamnesis] This session is NOT being recorded: the memory server at {server} {reason}. \
-         Nothing said here will be remembered until it is running — `anamnesis status` says why, \
-         `anamnesis serve` starts it."
-    )
+///
+/// Two sentences, because since the queue there are two different facts. An
+/// event that was kept is not an event that was lost, and telling someone
+/// their afternoon is going unrecorded when it is waiting on disk would be its
+/// own false alarm — the same mistake in the other direction as [`handoff_notice`].
+fn capture_notice(server: &str, reason: &str, kept: bool) -> String {
+    if kept {
+        format!(
+            "[anamnesis] The memory server at {server} {reason}, so nothing here is reaching \
+             memory yet — the events are being kept and will be delivered when it is running. \
+             `anamnesis status` says why, `anamnesis serve` starts it."
+        )
+    } else {
+        format!(
+            "[anamnesis] This session is NOT being recorded: the memory server at {server} \
+             {reason}. Nothing said here will be remembered until it is running — `anamnesis \
+             status` says why, `anamnesis serve` starts it."
+        )
+    }
 }
 
 /// What the model is told when the event was recorded but the handoff was not.
@@ -3236,13 +3398,17 @@ mod tests {
     /// the empty case has to point at the thing that fixes it.
     #[test]
     fn capturing_nothing_yet_points_at_install_hooks() {
-        let line = describe_capture(None, at("2026-08-25T12:00:00Z"));
+        let line = describe_capture(None, at("2026-08-25T12:00:00Z"), 0);
         assert!(line.contains("install-hooks"), "{line}");
     }
 
     #[test]
     fn capture_reports_how_long_ago_the_last_event_landed() {
-        let line = describe_capture(Some(at("2026-08-25T11:57:00Z")), at("2026-08-25T12:00:00Z"));
+        let line = describe_capture(
+            Some(at("2026-08-25T11:57:00Z")),
+            at("2026-08-25T12:00:00Z"),
+            0,
+        );
         assert_eq!(line, "last event 3m ago");
     }
 
@@ -3485,7 +3651,7 @@ mod tests {
     /// so. Whatever else it says, it has to say that nothing is being kept.
     #[test]
     fn the_capture_notice_says_that_nothing_is_being_recorded() {
-        let notice = capture_notice("http://127.0.0.1:8080", "could not be reached");
+        let notice = capture_notice("http://127.0.0.1:8080", "could not be reached", false);
 
         assert!(notice.contains("NOT being recorded"), "{notice}");
         assert!(notice.contains("http://127.0.0.1:8080"), "{notice}");
@@ -3496,13 +3662,118 @@ mod tests {
         );
     }
 
+    fn queued() -> (tempfile::TempDir, spool::Queue) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data = DataDir::resolve(Some(dir.path().to_path_buf())).expect("data dir");
+        let queue = spool::Queue::new(&data);
+        (dir, queue)
+    }
+
+    /// The four days this queue exists for: the server was down, every hook
+    /// failed to connect, and every event went on the floor.
+    #[test]
+    fn an_event_the_server_would_not_take_is_kept() {
+        let (_dir, queue) = queued();
+
+        let kept = keep(
+            Some(&queue),
+            "claude-code",
+            r#"{"hook_event_name":"UserPromptSubmit"}"#,
+        );
+
+        assert!(kept);
+        assert_eq!(queue.len(), 1);
+    }
+
+    /// The notice has to describe what happened, not what was attempted. A
+    /// queue that refused the event must not produce a sentence promising it
+    /// will be delivered later.
+    #[test]
+    fn an_event_the_queue_refused_is_reported_as_lost() {
+        let (_dir, queue) = queued();
+
+        let kept = keep(Some(&queue), "claude-code", "not json at all");
+
+        assert!(!kept);
+        assert!(queue.is_empty());
+        assert!(
+            capture_notice("http://x", "could not be reached", kept).contains("NOT being recorded")
+        );
+    }
+
+    /// And the other direction, which is the one the queue makes possible:
+    /// telling someone their afternoon is unrecorded when it is waiting on
+    /// disk would be the notice's own false alarm.
+    #[test]
+    fn a_kept_event_is_not_reported_as_lost() {
+        let notice = capture_notice("http://127.0.0.1:8080", "could not be reached", true);
+
+        assert!(!notice.contains("NOT being recorded"), "{notice}");
+        assert!(notice.contains("kept"), "{notice}");
+        assert!(notice.contains("anamnesis serve"), "{notice}");
+        assert!(notice.starts_with("[anamnesis]"), "{notice}");
+        assert!(!notice.contains('\n'), "one line: {notice}");
+    }
+
+    /// A session is a sequence. Delivering what is behind a refusal would put
+    /// its middle in the index ahead of its beginning, so the replay stops
+    /// where it fails and leaves the rest in order behind it.
+    #[test]
+    fn waiting_events_replay_oldest_first_and_stop_at_the_first_refusal() {
+        let (_dir, queue) = queued();
+        for n in 0..5 {
+            queue
+                .push("claude-code", &format!(r#"{{"n":{n}}}"#))
+                .expect("queued");
+        }
+
+        // The third will not go: a server that came back and went away again,
+        // which is what a restarting one looks like from here.
+        let mut seen = Vec::new();
+        let delivered = drain(&queue, std::time::Duration::from_secs(5), |entry| {
+            let n = entry.body["n"].as_i64().expect("n");
+            if n == 2 {
+                return false;
+            }
+            seen.push(n);
+            true
+        });
+
+        assert_eq!(delivered, 2);
+        assert_eq!(seen, [0, 1], "oldest first");
+        let left: Vec<i64> = queue
+            .take(10)
+            .iter()
+            .map(|(_, entry)| entry.body["n"].as_i64().expect("n"))
+            .collect();
+        assert_eq!(
+            left,
+            [2, 3, 4],
+            "the refused event stays at the head and nothing behind it was skipped"
+        );
+    }
+
+    /// Silent when there is nothing waiting, because a line that is always
+    /// there is a line nobody reads on the day it says something.
+    #[test]
+    fn capture_says_how_many_events_are_waiting() {
+        let last = Some(at("2026-08-25T11:57:00Z"));
+        let now = at("2026-08-25T12:00:00Z");
+
+        assert!(!describe_capture(last, now, 0).contains("waiting"));
+        assert!(describe_capture(last, now, 1).contains("1 event waiting"));
+        assert!(describe_capture(last, now, 4).contains("4 events waiting"));
+    }
+
     /// It is injected where a handoff goes, so it has to be impossible to read
     /// as one. The standing rule is that a server's response body is never
     /// printed there — this stays on the right side of it by being written
     /// here, and saying whose words they are.
     #[test]
     fn a_notice_names_itself_rather_than_passing_as_memory() {
-        assert!(capture_notice("http://x", "could not be reached").starts_with("[anamnesis]"));
+        assert!(
+            capture_notice("http://x", "could not be reached", false).starts_with("[anamnesis]")
+        );
         assert!(handoff_notice("the server could not be reached").starts_with("[anamnesis]"));
     }
 
@@ -3522,7 +3793,7 @@ mod tests {
     /// harness's idea of stdout — including the one that parses it as JSON.
     #[test]
     fn a_notice_reaches_every_harness_in_its_own_shape() {
-        let notice = capture_notice("http://127.0.0.1:8080", "could not be reached");
+        let notice = capture_notice("http://127.0.0.1:8080", "could not be reached", false);
 
         let gemini: serde_json::Value =
             serde_json::from_str(&handoff_reply("gemini-cli", &notice)).expect("valid JSON");

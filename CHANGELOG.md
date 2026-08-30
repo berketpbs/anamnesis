@@ -8,6 +8,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- An event the hook cannot deliver is kept and delivered later, rather than
+  dropped. The hook's timeouts are a quarter of a second to connect and one to
+  answer, because the case that matters is the server being down and a generous
+  timeout there turns "memory is not running" into "the agent feels broken" —
+  but the price of those budgets was the event itself. This repository lost
+  capture that way twice: four days in August while a server was not running,
+  and nine hours on the day the queue was written, both invisible until someone
+  went looking. Payloads are redacted *before* they reach the queue, by the
+  same rules the server applies, because a queue outlives the process that
+  wrote it and a secret reaching it would be the most durable copy in the
+  system. The next hook that finds the server up delivers what is waiting
+  first, oldest first, and stops at the first event that will not go: a session
+  is a sequence, and replaying its middle ahead of its beginning would leave
+  the index with a session it cannot make sense of. A queue that will not drain
+  is named by `anamnesis status`, which is the failure worth having — the
+  alternative is dropping the event at the head to keep things moving, and
+  invisible loss is what the queue exists to end. When it is full it refuses
+  the newest rather than discarding the oldest, since a queue holding the end
+  of every session and the start of none is worse than one that is honestly
+  full. The notice a starting session is given now matches what happened: an
+  event that was kept is not reported as lost
 - A model that escapes its own newlines gets them back. Seen in a real reply
   from a local model: every paragraph break in the handoff was the two
   characters `\` and `n`, so the JSON was valid, the fields were non-empty
