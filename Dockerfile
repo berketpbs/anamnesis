@@ -1,6 +1,15 @@
 # Multi-stage build for anamnesis
+#
+# The two stages name the same Debian release on purpose. A binary linked
+# against the builder's glibc will not start on an older runtime, and nothing
+# about that failure appears while building — the image is produced, pushed,
+# and only refuses to run. `rust:1.95-slim` alone tracks whichever release the
+# Rust image happens to be on, which is how this pair silently came apart:
+# trixie's glibc 2.41 above, bookworm's 2.36 below, and
+# `version 'GLIBC_2.39' not found` the first time anyone ran it.
+#
 # Stage 1: Build
-FROM rust:1.95-slim as builder
+FROM rust:1.95-slim-trixie AS builder
 
 WORKDIR /app
 
@@ -18,10 +27,13 @@ COPY crates ./crates
 COPY evals ./evals
 
 # Build the CLI binary
-RUN cargo build --release -p anamnesis-cli
+# `--locked`: the lock file is copied in on purpose, and a build that quietly
+# resolved different versions would make the image something other than what
+# CI tested.
+RUN cargo build --release --locked -p anamnesis-cli
 
-# Stage 2: Runtime
-FROM debian:bookworm-slim
+# Stage 2: Runtime — the same release as the builder above.
+FROM debian:trixie-slim
 
 WORKDIR /root
 

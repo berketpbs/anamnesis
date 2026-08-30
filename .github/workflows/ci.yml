@@ -72,6 +72,64 @@ jobs:
             exit 1
           fi
 
+  # The image and the compose file have been in the tree since the first weeks
+  # and nothing has ever built them: a claim about running anamnesis in a
+  # container that nobody had checked. Building is only half of it — an image
+  # that builds and does not start is the same broken promise — so this runs
+  # the thing and asks it for `/health`, the one route that answers without a
+  # token. Two failures this would have caught are already in the history: a
+  # byte order mark ahead of `FROM`, and an entrypoint script the image never
+  # referenced.
+  docker:
+    name: docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: anamnesis:ci
+          # A release build of this workspace compiles a tensor library. Without
+          # a layer cache every run pays for that from scratch, and a check
+          # people wait ten minutes for is a check people start skipping.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: The binary in the image runs
+        run: docker run --rm anamnesis:ci anamnesis --version
+
+      - name: The server starts and answers
+        run: |
+          docker run -d --name anamnesis-ci -p 8080:8080 anamnesis:ci
+          answered=no
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/health >/dev/null; then
+              answered=yes
+              break
+            fi
+            sleep 2
+          done
+          # Printed either way: when it did not answer this is the only
+          # evidence of why, and when it did the banner says what the
+          # container decided about auth, consolidation, and embedding.
+          docker logs anamnesis-ci
+          [ "$answered" = yes ]
+
+      - name: Stop it
+        if: always()
+        run: docker rm -f anamnesis-ci
+
+      # Not run — compose brings up a stack this job has no reason to hold
+      # open — but parsed, which catches a profile naming a build context or a
+      # file that is not there.
+      - name: The compose file resolves
+        run: docker compose config --quiet
+
   # The build every check above implies, run once on the platform the project
   # is actually developed on. Windows is where the paths, the MSVC linker, and
   # the PowerShell BOM handling differ, so a green Linux run is not evidence

@@ -1,5 +1,5 @@
 # Development Dockerfile with hot reload support
-FROM rust:1.95-slim
+FROM rust:1.95-slim-trixie
 
 WORKDIR /app
 

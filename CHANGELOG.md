@@ -108,7 +108,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than silenced, entities stay level with full text, and canonical pages
   are still preferred
 
+### Fixed
+- The Docker image's binary starts. The builder tracked whichever Debian the
+  Rust image is on — trixie, glibc 2.41 — and the runtime stage was pinned to
+  bookworm, glibc 2.36, so the binary that came out reported
+  `version 'GLIBC_2.39' not found` the first time anything ran it. Nothing
+  about that appears while building: the image is produced and only refuses to
+  work. Both stages now name the same release, with the reason written where
+  the next person will change one of them
+- The Docker image builds at all. `.dockerignore` excluded `Cargo.lock` under
+  the heading "Rust build artifacts", and both Dockerfiles copy that file, so
+  every build of either one failed on the `COPY` — an image nobody could have
+  built, sitting in the tree next to documentation explaining how to run it.
+  The lock is not an artifact: it is the pinned resolution the repository was
+  tested with, and the release build now passes `--locked` so a build that
+  would resolve something else fails loudly instead of shipping quietly
+
 ### Added
+- CI builds the Docker image, runs it, and checks that it answers `/health`.
+  The image, `Dockerfile.dev`, and the compose profiles have been in the tree
+  since the first weeks with nothing ever building them — a documented way to
+  run anamnesis that nobody had checked. Building alone would not be enough,
+  since an image that builds and will not start is the same broken promise, so
+  the job starts the container and waits for the one route that answers
+  without a token, printing the container's log either way. Two failures of
+  exactly this shape are already in the history: a byte order mark ahead of
+  `FROM`, and an entrypoint script the image never referenced
 - A session page says who ran the session, when the server could name them.
   The index has recorded a session's operator since per-user slots existed and
   the page never mentioned it, so a shared server's wiki was an anonymous pile
