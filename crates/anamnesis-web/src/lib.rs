@@ -28,6 +28,7 @@ use axum::{Extension, Json, Router};
 use jiff::Timestamp;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use tokio_util::task::TaskTracker;
 
 pub mod auth;
 pub mod improve;
@@ -117,6 +118,13 @@ pub struct AppState {
     /// vector, so the stream covers the memory rather than the corner of it an
     /// agent happened to write through MCP.
     pub embedder: Option<Arc<dyn Embedder>>,
+    /// Work that outlives the request that started it.
+    ///
+    /// Only *finite* work goes here — a session being summarised by a model,
+    /// which the response no longer waits for. The scheduler and the watcher
+    /// are loops that never finish, so tracking them would turn a shutdown
+    /// that waits into a shutdown that hangs.
+    pub tasks: TaskTracker,
 }
 
 impl AppState {
@@ -129,6 +137,7 @@ impl AppState {
             llm: None,
             auth: Auth::open(),
             embedder: None,
+            tasks: TaskTracker::new(),
         }
     }
 
@@ -340,7 +349,90 @@ pub async fn serve(
         tokio::task::spawn_blocking(move || watch::run(watching));
     }
 
-    axum::serve(listener, router(state, options.ui)).await
+    let tasks = state.tasks.clone();
+    axum::serve(listener, router(state, options.ui))
+        .with_graceful_shutdown(stopped())
+        .await?;
+
+    // The listener is closed and every request has been answered; what is left
+    // is the work those requests started and no longer wait for.
+    finish_in_flight(&tasks, SHUTDOWN_GRACE).await;
+    tracing::info!("anamnesis stopped");
+    Ok(())
+}
+
+/// How long a stopping server waits for summaries already being written.
+///
+/// Not the model's timeout, which is 90 seconds by default: `docker stop`
+/// sends SIGKILL 10 seconds after SIGTERM, so a longer wait would mostly be a
+/// promise the container runtime breaks. Fifteen seconds covers a model that
+/// is nearly done and an operator's Ctrl-C, and says plainly what it gave up
+/// on when it does.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Resolve when the operating system asks this process to stop.
+///
+/// Both signals, because they arrive from different places and mean the same
+/// thing here: Ctrl-C from a terminal, SIGTERM from `docker stop`, systemd, or
+/// a supervisor. Without SIGTERM the container case — the one that happens
+/// unattended — would keep taking the abrupt path.
+async fn stopped() {
+    let interrupt = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            // A process that cannot register the handler still stops on
+            // Ctrl-C; refusing to serve over it would be worse.
+            Err(error) => {
+                tracing::warn!(%error, "could not listen for SIGTERM");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = interrupt => tracing::info!("interrupted; stopping"),
+        () = terminate => tracing::info!("asked to terminate; stopping"),
+    }
+}
+
+/// Wait for tracked work, up to `grace`. Returns whether it all finished.
+///
+/// Separate from [`serve`] because the interesting half is what happens when
+/// the wait runs out, and a signal is a poor thing to write a test around.
+async fn finish_in_flight(tasks: &TaskTracker, grace: std::time::Duration) -> bool {
+    tasks.close();
+    if tasks.is_empty() {
+        return true;
+    }
+
+    tracing::info!(
+        summaries = tasks.len(),
+        "waiting for sessions still being summarised"
+    );
+    match tokio::time::timeout(grace, tasks.wait()).await {
+        Ok(()) => true,
+        Err(_) => {
+            // Named, because the alternative is a session that ended and left
+            // no page with nothing anywhere saying why. The observations are
+            // in the index and the raw spool; only the prose is lost.
+            tracing::warn!(
+                summaries = tasks.len(),
+                seconds = grace.as_secs(),
+                "gave up waiting; these sessions end without a summary, though their transcripts are kept"
+            );
+            false
+        }
+    }
 }
 
 /// Liveness probe.
@@ -449,7 +541,11 @@ async fn receive_hook(
 
     if hook.kind == EventKind::SessionEnd {
         let background = state.clone();
-        tokio::spawn(async move {
+        // Spawned on the tracker rather than loose, so a server being shut
+        // down can wait for the page this session is owed instead of taking
+        // it to the grave. The transcript survives either way; the summary is
+        // the part nothing rebuilds.
+        state.tasks.spawn(async move {
             let outcome = finalize_with_llm(
                 &background.store,
                 &background.wiki,
@@ -1118,6 +1214,73 @@ mod tests {
         assert!(!claimed.contains("first task"));
     }
 
+    // ---------------------------------------------------------------
+    // Stopping. The response goes out before the page is written, so a
+    // server that stops the moment it is asked to loses work nothing
+    // rebuilds.
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn a_summary_still_being_written_is_waited_for() {
+        let harness = harness();
+        let provider = Arc::new(
+            Fake::answering(json!({
+                "title": "Rebuildable index",
+                "body": "## What happened\n\nThe index was explained.",
+                "handoff": "Nothing pending.",
+                "entities": []
+            }))
+            .slowly(std::time::Duration::from_millis(250)),
+        );
+        let state = harness
+            .state
+            .clone()
+            .with_llm(Some(settings(provider.clone())));
+
+        send(&state, hook_request(&harness, "SessionStart", None)).await;
+        send(&state, hook_request(&harness, "UserPromptSubmit", None)).await;
+        let response = send(&state, hook_request(&harness, "SessionEnd", None)).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        // The point of the split: the hook is not kept waiting for a model.
+        assert_eq!(
+            state.store.page_count(project(&harness)).expect("count"),
+            0,
+            "the response should come back before the page is written"
+        );
+
+        assert!(
+            finish_in_flight(&state.tasks, std::time::Duration::from_secs(10)).await,
+            "the summary had time to finish"
+        );
+        assert_eq!(
+            state.store.page_count(project(&harness)).expect("count"),
+            1,
+            "the page a stopping server owed this session"
+        );
+    }
+
+    /// A model that has hung must not turn a stop into a hang. The transcript
+    /// survives; the summary is the part that is lost, and the log says so.
+    #[tokio::test]
+    async fn work_that_will_not_finish_does_not_hold_the_shutdown_open() {
+        let tasks = TaskTracker::new();
+        tasks.spawn(async {
+            std::future::pending::<()>().await;
+        });
+
+        let finished = finish_in_flight(&tasks, std::time::Duration::from_millis(50)).await;
+
+        assert!(!finished);
+    }
+
+    #[tokio::test]
+    async fn a_server_with_nothing_in_flight_stops_at_once() {
+        let tasks = TaskTracker::new();
+
+        assert!(finish_in_flight(&tasks, std::time::Duration::from_secs(30)).await);
+    }
+
     #[test]
     fn a_payload_carrying_a_byte_order_mark_is_still_read() {
         // PowerShell adds one when piping into a native process. Without this,
@@ -1156,6 +1319,9 @@ mod tests {
     struct Fake {
         reply: Option<serde_json::Value>,
         seen: Mutex<Option<String>>,
+        /// How long the provider takes to answer. Zero unless a test needs the
+        /// window between the response and the page to be observable.
+        takes: std::time::Duration,
     }
 
     impl Fake {
@@ -1163,6 +1329,7 @@ mod tests {
             Self {
                 reply: Some(reply),
                 seen: Mutex::new(None),
+                takes: std::time::Duration::ZERO,
             }
         }
 
@@ -1170,7 +1337,14 @@ mod tests {
             Self {
                 reply: None,
                 seen: Mutex::new(None),
+                takes: std::time::Duration::ZERO,
             }
+        }
+
+        /// The same provider, answering slowly enough to be caught at it.
+        fn slowly(mut self, takes: std::time::Duration) -> Self {
+            self.takes = takes;
+            self
         }
 
         fn prompt(&self) -> String {
@@ -1193,6 +1367,9 @@ mod tests {
             request: &anamnesis_llm::Completion,
         ) -> Result<anamnesis_llm::CompletionOutput, anamnesis_llm::LlmError> {
             *self.seen.lock() = Some(request.user.clone());
+            if !self.takes.is_zero() {
+                tokio::time::sleep(self.takes).await;
+            }
             match &self.reply {
                 Some(json) => Ok(anamnesis_llm::CompletionOutput {
                     json: json.clone(),

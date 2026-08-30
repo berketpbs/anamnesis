@@ -109,6 +109,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are still preferred
 
 ### Fixed
+- The server finishes the summaries it owes before it stops. A session's page
+  is written *after* the response goes out, because the hook that delivered
+  the event is a subprocess of somebody's editor that gives up after a second
+  — so a server killed in the seconds that follow took the page with it, and
+  nothing rebuilds a summary. `serve` now stops on SIGTERM as well as Ctrl-C
+  (the container case was the one taking the abrupt path, unattended), stops
+  accepting, and then waits up to fifteen seconds for work already in flight.
+  Not longer, because `docker stop` sends SIGKILL after ten and a longer
+  promise would be one the runtime breaks; when the wait runs out the log
+  names how many sessions ended without a summary and says their transcripts
+  are kept. Only finite work is waited for — the scheduler and the watcher are
+  loops, and tracking them would turn a shutdown that waits into one that hangs
 - The Docker image's binary starts. The builder tracked whichever Debian the
   Rust image is on — trixie, glibc 2.41 — and the runtime stage was pinned to
   bookworm, glibc 2.36, so the binary that came out reported
