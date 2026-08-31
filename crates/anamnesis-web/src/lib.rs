@@ -38,7 +38,10 @@ pub mod ui;
 pub mod watch;
 
 pub use auth::{Auth, Identity};
-pub use pipeline::{Ingested, claim_handoff, finalize, finalize_with_llm, ingest, record};
+pub use pipeline::{
+    Consolidation, Ingested, ProbeReport, claim_handoff, finalize, finalize_with_llm, ingest,
+    probe, record,
+};
 
 /// Errors surfaced over HTTP.
 #[derive(Debug, thiserror::Error)]
@@ -611,9 +614,23 @@ struct AgentQuery {
     cwd: Option<PathBuf>,
     /// The harness's session identifier.
     session_id: Option<String>,
+    /// Ask what would be recorded, and record nothing.
+    probe: Option<String>,
 }
 
 impl AgentQuery {
+    /// Whether the caller asked for a dry run.
+    ///
+    /// Presence is the signal, so `?probe` and `?probe=1` mean the same
+    /// thing, and only an explicit `0` or `false` turns it back off. The
+    /// failure being avoided is a diagnostic flag that quietly meant nothing
+    /// because a shell wrote it in a shape the parser did not expect — this
+    /// endpoint writes, and a probe that silently stopped being one would
+    /// record the event it was asked to only describe.
+    fn probing(&self) -> bool {
+        !matches!(self.probe.as_deref(), None | Some("0") | Some("false"))
+    }
+
     /// The harness, defaulting to Claude Code.
     fn agent(&self) -> AgentKind {
         self.agent
@@ -644,6 +661,20 @@ async fn receive_hook(
     }
 
     let now = Timestamp::now();
+
+    // Before every write, because that is the whole promise: a probe reports
+    // what the rest of this function would do and leaves the index, the
+    // spool, and the waiting handoff exactly as it found them.
+    if query.probing() {
+        let report = pipeline::probe(
+            &state.store,
+            &hook,
+            now,
+            identity.operator(),
+            state.llm.is_some(),
+        )?;
+        return Ok((StatusCode::OK, Json(report)).into_response());
+    }
 
     let Some(settings) = state.llm.clone() else {
         // No model: summarising is counting, which is fast enough to finish
@@ -2000,6 +2031,129 @@ mod tests {
 
     fn project(harness: &Harness) -> anamnesis_core::ids::ProjectId {
         resolve_scope(&harness.cwd).expect("scope").project_id
+    }
+
+    // ---------------------------------------------------------------
+    // Probing. The promise is negative — that nothing happened — so every
+    // test here checks the state the request did *not* change.
+    // ---------------------------------------------------------------
+
+    /// A probe request, with whatever the caller wants after `probe=`.
+    fn probe_request(harness: &Harness, query: &str) -> HttpRequest<Body> {
+        let payload = json!({
+            "session_id": "session-probe",
+            "hook_event_name": "UserPromptSubmit",
+            "cwd": harness.cwd.to_string_lossy(),
+            "prompt": "is capture alive",
+        });
+        HttpRequest::builder()
+            .method("POST")
+            .uri(format!("/hook?agent=claude-code&probe={query}"))
+            .header("content-type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .expect("request")
+    }
+
+    #[tokio::test]
+    async fn a_probe_says_what_would_happen_and_records_nothing() {
+        let harness = harness();
+
+        let response = send(&harness.state, probe_request(&harness, "1")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let report: ProbeReport = serde_json::from_str(&body_of(response).await).expect("report");
+        assert!(report.would_record);
+        assert_eq!(report.project, "widget");
+        assert_eq!(report.event, "user-prompt");
+        assert!(!report.session_known, "nothing has recorded this session");
+        assert_eq!(report.consolidation, Consolidation::Counted);
+
+        assert_eq!(
+            harness
+                .state
+                .store
+                .session_count(project(&harness))
+                .expect("count"),
+            0,
+            "a probe must leave no session behind — the whole reason it exists"
+        );
+    }
+
+    /// The failure that shaped this: a diagnostic that proves memory works by
+    /// taking the note the next session was owed.
+    #[tokio::test]
+    async fn a_probe_does_not_claim_the_waiting_handoff() {
+        let harness = harness();
+        run(&harness, "UserPromptSubmit", json!({"prompt": "real work"}));
+        run(&harness, "SessionEnd", json!({}));
+
+        let slot = anamnesis_core::handoff::Slot::default();
+        let before = harness
+            .state
+            .store
+            .peek_handoff(project(&harness), &slot)
+            .expect("peek");
+        assert!(before.is_some(), "the fixture should leave a note waiting");
+
+        let response = send(&harness.state, probe_request(&harness, "1")).await;
+        let report: ProbeReport = serde_json::from_str(&body_of(response).await).expect("report");
+        assert!(report.handoff_waiting, "and the probe should see it");
+
+        assert_eq!(
+            harness
+                .state
+                .store
+                .peek_handoff(project(&harness), &slot)
+                .expect("peek"),
+            before,
+            "seeing a handoff must not consume it"
+        );
+    }
+
+    /// The off switch has to work, or the parameter is decoration.
+    #[tokio::test]
+    async fn a_probe_switched_off_is_an_ordinary_event() {
+        let harness = harness();
+
+        let response = send(&harness.state, probe_request(&harness, "0")).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        assert_eq!(
+            harness
+                .state
+                .store
+                .session_count(project(&harness))
+                .expect("count"),
+            1,
+            "probe=0 is not a probe"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_probe_reports_an_event_the_project_would_drop() {
+        let harness = harness_with("\n[capture]\nignore_paths = [\".env\"]\n");
+
+        let payload = json!({
+            "session_id": "session-probe",
+            "hook_event_name": "PreToolUse",
+            "cwd": harness.cwd.to_string_lossy(),
+            "tool_name": "Read",
+            "tool_input": {"file_path": harness.cwd.join(".env").to_string_lossy()},
+        });
+        let request = HttpRequest::builder()
+            .method("POST")
+            .uri("/hook?agent=claude-code&probe=1")
+            .header("content-type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .expect("request");
+
+        let response = send(&harness.state, request).await;
+        let report: ProbeReport = serde_json::from_str(&body_of(response).await).expect("report");
+        assert!(!report.would_record);
+        assert!(
+            report.excluded.is_some_and(|path| path.ends_with(".env")),
+            "a probe should name the rule that would drop the event"
+        );
     }
 
     /// The default, and the reason absence is not an error: an install that
