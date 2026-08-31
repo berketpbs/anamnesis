@@ -721,14 +721,17 @@ fn cmd_status(
             None => println!("  Marker:       (none)"),
         }
 
-        // Reported here because the alternative is finding out from a page
-        // footer, a week later, that every summary was written by counting.
+        // This shell's environment, which is what a server started from
+        // *here* would use — not what the running server was started with.
+        // The `Summaries:` line above is the server's own answer, and the two
+        // disagreeing is the normal case on a machine where the server is
+        // launched by something else.
         match anamnesis_llm::LlmConfig::from_env() {
             Ok(llm) if llm.provider == anamnesis_llm::ProviderKind::None => {
-                println!("  Model:        (none — summaries are counted)");
+                println!("  Model here:   (none — a server started here would count)");
             }
-            Ok(llm) => println!("  Model:        {}", llm.model),
-            Err(error) => println!("  Model:        misconfigured — {error}"),
+            Ok(llm) => println!("  Model here:   {}", llm.model),
+            Err(error) => println!("  Model here:   misconfigured — {error}"),
         }
     }
 
@@ -746,13 +749,23 @@ fn cmd_status(
 
     let now = Timestamp::now();
     let reachable = probe_server(server);
-    let authenticated = probe_auth(server, token, &reachable);
+    let facts = probe_server_facts(server, token, &reachable);
     println!();
     println!("  Server:    {}", describe_server(server, &reachable));
     println!(
         "  Auth:      {}",
-        describe_auth(&authenticated, token.is_some())
+        describe_auth(&facts.auth, token.is_some())
     );
+    // Asked of the server rather than of this shell, and printed here rather
+    // than behind `--verbose`, because "every summary is a word count" is not
+    // a detail — it is the difference between a memory and a log, and the only
+    // other place that said so was a banner nobody sees.
+    if let Some(line) = describe_consolidation(&facts.consolidation) {
+        println!("  Summaries: {line}");
+    }
+    if let Some(line) = describe_embedding(&facts.embedding) {
+        println!("  Vectors:   {line}");
+    }
     println!(
         "  Capture:   {}",
         describe_capture(
@@ -765,7 +778,7 @@ fn cmd_status(
     // be the one *this* machine would be handed. Reporting the shared slot
     // would tell an operator with a note waiting that nothing is waiting.
     let operator = if scope.slots.per_user {
-        authenticated.operator()
+        facts.auth.operator()
     } else {
         None
     };
@@ -834,9 +847,10 @@ fn describe_server(server: &str, state: &ServerState) -> String {
 }
 
 /// What the server makes of this machine's token.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 enum AuthState {
     /// The server did not answer the question, so nothing is claimed.
+    #[default]
     Unknown,
     /// No token is required. Every caller is accepted.
     Open,
@@ -865,9 +879,9 @@ impl AuthState {
 /// `/whoami` and not `/handoff`, because the question has to be asked without
 /// changing anything: collecting a handoff to find out whether a token works
 /// would spend the handoff.
-fn probe_auth(server: &str, token: Option<&str>, reachable: &ServerState) -> AuthState {
+fn probe_server_facts(server: &str, token: Option<&str>, reachable: &ServerState) -> ServerFacts {
     if *reachable != ServerState::Running {
-        return AuthState::Unknown;
+        return ServerFacts::default();
     }
 
     let Ok(client) = reqwest::blocking::Client::builder()
@@ -875,7 +889,7 @@ fn probe_auth(server: &str, token: Option<&str>, reachable: &ServerState) -> Aut
         .timeout(std::time::Duration::from_secs(2))
         .build()
     else {
-        return AuthState::Unknown;
+        return ServerFacts::default();
     };
 
     let mut request = client.get(format!("{server}/whoami"));
@@ -885,11 +899,11 @@ fn probe_auth(server: &str, token: Option<&str>, reachable: &ServerState) -> Aut
 
     match request.send() {
         Ok(response) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
-            AuthState::Rejected
+            ServerFacts::from(AuthState::Rejected)
         }
         Ok(response) if response.status().is_success() => {
             let body = response.json::<serde_json::Value>().unwrap_or_default();
-            if body.get("auth").and_then(|v| v.as_str()) == Some("open") {
+            let auth = if body.get("auth").and_then(|v| v.as_str()) == Some("open") {
                 AuthState::Open
             } else {
                 AuthState::Accepted(
@@ -897,12 +911,87 @@ fn probe_auth(server: &str, token: Option<&str>, reachable: &ServerState) -> Aut
                         .and_then(|v| v.as_str())
                         .map(str::to_owned),
                 )
+            };
+            ServerFacts {
+                auth,
+                consolidation: ServerModel::read(&body, "consolidation"),
+                embedding: ServerModel::read(&body, "embedding"),
             }
         }
         // Anything else — including the 404 an older server returns — is a
         // question this server did not answer, and guessing at it would be
         // worse than saying so.
-        Ok(_) | Err(_) => AuthState::Unknown,
+        Ok(_) | Err(_) => ServerFacts::default(),
+    }
+}
+
+/// One model a server reported, or did not.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum ServerModel {
+    /// The server never mentioned it, which means it is older than this
+    /// client. Saying "no model" here would be a confident lie about the
+    /// thing this whole report exists to make visible.
+    #[default]
+    Unstated,
+    /// It said, explicitly, that it has none.
+    Absent,
+    /// The model it named.
+    Named(String),
+}
+
+impl ServerModel {
+    /// Read one field of a `/whoami` body, keeping "absent" and "not
+    /// mentioned" apart.
+    fn read(body: &serde_json::Value, field: &str) -> Self {
+        match body.get(field) {
+            None => Self::Unstated,
+            Some(serde_json::Value::String(name)) => Self::Named(name.clone()),
+            Some(_) => Self::Absent,
+        }
+    }
+}
+
+/// What a server said about itself when `status` asked.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ServerFacts {
+    /// What it made of this machine's token.
+    auth: AuthState,
+    /// The model it summarises sessions with.
+    consolidation: ServerModel,
+    /// The model it embeds pages with.
+    embedding: ServerModel,
+}
+
+impl From<AuthState> for ServerFacts {
+    fn from(auth: AuthState) -> Self {
+        Self {
+            auth,
+            ..Self::default()
+        }
+    }
+}
+
+/// How the server turns sessions into pages.
+fn describe_consolidation(model: &ServerModel) -> Option<String> {
+    match model {
+        ServerModel::Unstated => None,
+        ServerModel::Absent => Some(
+            "counted — the server has no model, so pages carry facts and no reading of them"
+                .to_owned(),
+        ),
+        ServerModel::Named(model) => Some(format!("written by {model}")),
+    }
+}
+
+/// Whether the server writes vectors for what it indexes.
+fn describe_embedding(model: &ServerModel) -> Option<String> {
+    match model {
+        ServerModel::Unstated => None,
+        ServerModel::Absent => Some(format!(
+            "off — retrieval runs without them (set {} on the server)",
+            "ANAMNESIS_EMBED_ENABLED=1"
+        )),
+        ServerModel::Named(model) => Some(model.clone()),
     }
 }
 
@@ -3464,6 +3553,58 @@ mod tests {
             describe_auth(&AuthState::Accepted(Some("alice".to_owned())), true).contains("alice")
         );
         assert!(describe_auth(&AuthState::Accepted(None), true).contains("accepted"));
+    }
+
+    /// The failure this line was added for: a memory whose every page was a
+    /// word count, for a week, with nothing in reach saying so.
+    #[test]
+    fn a_server_with_no_model_says_its_summaries_are_counted() {
+        let line = describe_consolidation(&ServerModel::Absent).expect("a line");
+        assert!(line.contains("counted"), "{line}");
+    }
+
+    #[test]
+    fn a_server_with_a_model_names_it() {
+        let line = describe_consolidation(&ServerModel::Named("claude-opus-5".to_owned()))
+            .expect("a line");
+        assert!(line.contains("claude-opus-5"), "{line}");
+        assert!(!line.contains("counted"), "{line}");
+    }
+
+    /// An older server does not answer the question. Reporting "counted" for
+    /// it would be the same confident lie in the other direction.
+    #[test]
+    fn a_server_that_did_not_say_is_not_reported_as_having_no_model() {
+        assert_eq!(describe_consolidation(&ServerModel::Unstated), None);
+        assert_eq!(describe_embedding(&ServerModel::Unstated), None);
+    }
+
+    #[test]
+    fn vectors_being_off_names_the_variable_that_turns_them_on() {
+        let line = describe_embedding(&ServerModel::Absent).expect("a line");
+        assert!(line.contains("ANAMNESIS_EMBED_ENABLED"), "{line}");
+    }
+
+    /// The three cases the wire has to keep apart: a name, an explicit
+    /// nothing, and a field an older server never wrote.
+    #[test]
+    fn a_model_field_tells_absent_apart_from_unmentioned() {
+        let named = serde_json::json!({"consolidation": "claude-opus-5"});
+        let absent = serde_json::json!({"consolidation": null});
+        let older = serde_json::json!({"auth": "open"});
+
+        assert_eq!(
+            ServerModel::read(&named, "consolidation"),
+            ServerModel::Named("claude-opus-5".to_owned())
+        );
+        assert_eq!(
+            ServerModel::read(&absent, "consolidation"),
+            ServerModel::Absent
+        );
+        assert_eq!(
+            ServerModel::read(&older, "consolidation"),
+            ServerModel::Unstated
+        );
     }
 
     /// A server that did not answer is not a server that is open. Saying
