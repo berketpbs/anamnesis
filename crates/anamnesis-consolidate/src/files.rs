@@ -36,11 +36,17 @@ pub fn mentioned_files(observations: &[Observation]) -> Vec<String> {
 }
 
 /// The compiled path pattern.
+///
+/// The drive prefix is optional and spelled out. Without it a Windows
+/// absolute path loses its head: `C:` is not a path character, so no match
+/// can start at the drive letter and one starts at the component after it
+/// instead. `C:\Berke\anamnesis\src\lib.rs` was recorded as
+/// `Berke/anamnesis/src/lib.rs`, which names a directory that does not exist.
 fn pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
         Regex::new(&format!(
-            r"(?i)\b[\w.\-]+(?:[/\\][\w.\-]+)*\.(?:{EXTENSIONS})\b"
+            r"(?i)\b(?:[A-Za-z]:[/\\])?[\w.\-]+(?:[/\\][\w.\-]+)*\.(?:{EXTENSIONS})\b"
         ))
         .expect("file pattern is valid")
     })
@@ -100,6 +106,36 @@ mod tests {
     fn normalises_windows_separators() {
         let files = mentioned_files(&[observation(r"edited crates\store\src\lib.rs")]);
         assert_eq!(files, vec!["crates/store/src/lib.rs".to_owned()]);
+    }
+
+    /// A path with a drive on it is the ordinary shape on Windows, and it used
+    /// to arrive with its head missing: the drive letter cannot start a match,
+    /// so the match started one component in and named a directory that is not
+    /// there. Sessions recorded on this machine are full of the evidence.
+    #[test]
+    fn an_absolute_windows_path_keeps_its_drive() {
+        let files = mentioned_files(&[observation(
+            r"edited C:\Berke\anamnesis\crates\anamnesis-cli\src\hooks.rs today",
+        )]);
+
+        assert_eq!(
+            files,
+            vec!["C:/Berke/anamnesis/crates/anamnesis-cli/src/hooks.rs".to_owned()]
+        );
+    }
+
+    /// The drive is a letter, not the letter `C`, and the shell writes it in
+    /// either case.
+    #[test]
+    fn any_drive_letter_in_either_case_is_kept() {
+        for raw in [r"D:\work\main.rs", r"d:/work/main.rs"] {
+            let files = mentioned_files(&[observation(raw)]);
+            assert_eq!(files.len(), 1, "{raw}: {files:?}");
+            assert!(
+                files[0].to_lowercase().starts_with("d:/work/"),
+                "{raw}: {files:?}"
+            );
+        }
     }
 
     #[test]
