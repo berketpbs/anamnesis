@@ -744,6 +744,42 @@ A path that names no page is refused before anything is removed, and so are
 all of them if any one is wrong: forgetting two pages and then complaining
 about the third leaves you working out which name was the typo.
 
+### Forget a Session That Was Never a Session
+
+`forget` removes a page. This removes the other half of what memory holds: a
+session, its observations, and its transcript.
+
+It exists for the sessions nobody meant to record. Firing a hook by hand to
+check whether capture is alive is the ordinary way to answer that question,
+and every such probe is recorded exactly like somebody's afternoon — counted
+in `status`, listed by `sessions`, and eventually summarised into a page of
+its own. Those transcripts are easy to spot once you know the tell: a probe
+you typed carries the `cwd` you typed, while a harness sends the path in its
+own shape.
+
+```bash
+anamnesis sessions
+anamnesis forget-session a920ec80          # reports, removes nothing
+anamnesis forget-session a920ec80 --apply  # removes it
+```
+
+Any unambiguous prefix names a session, the way `sessions` prints them. A
+prefix matching more than one is refused with all of the candidates rather
+than acted on, and an empty one — which abbreviates every session in the
+project — is refused outright.
+
+Unlike `forget`, this is gated behind `--apply`. The reasoning for a page
+rests on the wiki being a git repository, so a page removed by mistake is
+still in its history. Nothing plays that part here: the transcript under
+`raw/` is the only copy of what a session observed, and it is not versioned.
+Where there is no history to fall back on, the report before the fact is the
+whole safety net.
+
+The index row goes first and the transcript second, so an interruption leaves
+a session that `anamnesis reindex` restores whole — that is where reindex
+rebuilds sessions from. A page the session already produced is not touched;
+`anamnesis forget` is what removes one of those.
+
 ### Rebuild the Index
 
 The database is disposable. If it is lost or corrupted, rebuild it from the
