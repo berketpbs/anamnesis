@@ -116,6 +116,13 @@ pub fn record(
         return Ok((scope, session_id));
     }
 
+    // An agent that went quiet long enough to be summarised and then carried
+    // on gets its session back. Without this the reaper would be destructive:
+    // everything after the summary would land in a closed session that nothing
+    // ever reads again. Ending it a second time rewrites the same page and
+    // supersedes its handoff, so the only cost is the second pass.
+    store.resume_session(session_id)?;
+
     let observation = new_observation(
         session_id,
         hook.kind,

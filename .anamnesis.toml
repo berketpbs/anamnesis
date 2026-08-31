@@ -30,6 +30,25 @@ age_half_life_days = 30.0
 access_half_life_days = 14.0
 access_weight = 0.5
 
+# What happens to a session the harness never closed.
+#
+# Consolidation is driven by `SessionEnd`, and that event is not guaranteed:
+# an editor that crashes, a machine that reboots, a process someone kills
+# sends nothing. Left alone the session stays open forever and its
+# observations never become a page — the transcript under `raw/` survives,
+# but nothing ever reads it again.
+#
+# The server sweeps for these once a minute and summarises the ones that have
+# been silent this long. The number is hours rather than minutes on purpose: a
+# session that died and a session whose operator went to lunch look identical
+# from here, and being early is the mistake with a cost. Being wrong is
+# survivable either way — an agent that comes back has its session reopened,
+# and ending it again rewrites the same page.
+#
+# Zero turns the sweep off for this project.
+[sessions]
+stale_after_minutes = 720
+
 # Per-operator handoff slots, for a server more than one person uses.
 #
 # Left false, a project keeps one pending handoff and whoever starts next is

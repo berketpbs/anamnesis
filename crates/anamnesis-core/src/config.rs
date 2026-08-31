@@ -28,6 +28,8 @@ pub struct MarkerConfig {
     pub decay: DecayConfig,
     /// Per-operator memory slots.
     pub slots: SlotsConfig,
+    /// When a session nobody closed is summarised anyway.
+    pub sessions: SessionsConfig,
     /// Automatic learning proposals.
     pub auto_improve: AutoImproveConfig,
 }
@@ -151,6 +153,32 @@ pub struct SlotsConfig {
     pub per_user: bool,
 }
 
+/// What happens to a session the harness never closed.
+///
+/// Consolidation is driven by `SessionEnd`, and that event is not guaranteed:
+/// an editor that crashes, a machine that reboots, a process someone kills
+/// sends nothing. Without this the session stays open forever and its
+/// observations never become a page — the transcript survives under `raw/`,
+/// but nothing reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SessionsConfig {
+    /// Minutes of silence after which an open session is summarised anyway.
+    ///
+    /// Zero turns this off for the project. The default is long on purpose:
+    /// the cost of waiting is a page that arrives late, and the cost of being
+    /// hasty is summarising a session that was only at lunch.
+    pub stale_after_minutes: u32,
+}
+
+impl Default for SessionsConfig {
+    fn default() -> Self {
+        Self {
+            stale_after_minutes: 720,
+        }
+    }
+}
+
 /// Automatic learning proposal settings.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -203,6 +231,52 @@ mod tests {
         assert!(config.scope.project.is_none());
         assert!(config.auto_improve.require_approval);
         assert!(!config.slots.per_user);
+        assert_eq!(
+            config.sessions,
+            SessionsConfig::default(),
+            "a marker written before this setting existed keeps the default"
+        );
+    }
+
+    /// The default is long on purpose. A session that has merely gone quiet
+    /// looks exactly like one that died, so being hasty would summarise
+    /// somebody's lunch break.
+    #[test]
+    fn abandoned_sessions_are_left_for_hours_by_default() {
+        assert_eq!(SessionsConfig::default().stale_after_minutes, 720);
+    }
+
+    #[test]
+    fn a_project_can_set_or_disable_the_stale_threshold() {
+        let set = MarkerConfig::from_toml(
+            "[sessions]
+stale_after_minutes = 45
+",
+        )
+        .expect("parses");
+        assert_eq!(set.sessions.stale_after_minutes, 45);
+
+        let off = MarkerConfig::from_toml(
+            "[sessions]
+stale_after_minutes = 0
+",
+        )
+        .expect("parses");
+        assert_eq!(off.sessions.stale_after_minutes, 0);
+    }
+
+    /// The marker rejects what it does not know, so a typo surfaces instead of
+    /// quietly meaning nothing.
+    #[test]
+    fn an_unknown_key_in_the_sessions_table_is_refused() {
+        assert!(
+            MarkerConfig::from_toml(
+                "[sessions]
+stale_after_mins = 45
+"
+            )
+            .is_err()
+        );
     }
 
     #[test]

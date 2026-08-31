@@ -13,7 +13,9 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use crate::config::{AutoImproveConfig, CaptureConfig, DecayConfig, MarkerConfig, SlotsConfig};
+use crate::config::{
+    AutoImproveConfig, CaptureConfig, DecayConfig, MarkerConfig, SessionsConfig, SlotsConfig,
+};
 use crate::error::{CoreError, Result};
 use crate::ids::{ProjectId, WorkspaceId};
 
@@ -251,6 +253,8 @@ pub struct ResolvedScope {
     pub auto_improve: AutoImproveConfig,
     /// Whether this project keeps a handoff slot per operator.
     pub slots: SlotsConfig,
+    /// When this project's abandoned sessions are summarised anyway.
+    pub sessions: SessionsConfig,
 }
 
 /// Location of a discovered marker file.
@@ -315,6 +319,7 @@ impl ResolvedScope {
             decay: DecayConfig::default(),
             auto_improve: AutoImproveConfig::default(),
             slots: SlotsConfig::default(),
+            sessions: SessionsConfig::default(),
         }
     }
 }
@@ -350,14 +355,15 @@ pub fn resolve_scope(cwd: &Path) -> Result<ResolvedScope> {
     // Taken apart here rather than at each use: `config` is consumed by the
     // scope fields above, and a later reader should not have to prove that
     // two `map`s over the same `Option` see the same marker file.
-    let (capture, decay, auto_improve, slots) = match config {
+    let (capture, decay, auto_improve, slots, sessions) = match config {
         Some(config) => (
             Some(config.capture),
             Some(config.decay),
             Some(config.auto_improve),
             Some(config.slots),
+            Some(config.sessions),
         ),
-        None => (None, None, None, None),
+        None => (None, None, None, None, None),
     };
 
     // Relative patterns belong to whoever wrote them: the marker's directory
@@ -382,6 +388,7 @@ pub fn resolve_scope(cwd: &Path) -> Result<ResolvedScope> {
         decay: decay.unwrap_or_default(),
         auto_improve: auto_improve.unwrap_or_default(),
         slots: slots.unwrap_or_default(),
+        sessions: sessions.unwrap_or_default(),
     })
 }
 
