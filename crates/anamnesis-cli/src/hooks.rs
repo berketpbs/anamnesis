@@ -157,12 +157,19 @@ pub struct Outcome {
     pub added: Vec<String>,
     /// Events already wired to this command, left untouched.
     pub present: Vec<String>,
+    /// Events whose anamnesis command was stale, and was rewritten in place.
+    ///
+    /// Kept apart from `added` because the file already pointed here, and the
+    /// person needs to be told their old spelling was replaced rather than
+    /// joined: two commands invoking the same binary would record every
+    /// observation twice, and nothing downstream could tell the copies apart.
+    pub replaced: Vec<String>,
 }
 
 impl Outcome {
     /// Whether anything about the file would change.
     pub fn changed(&self) -> bool {
-        !self.added.is_empty()
+        !self.added.is_empty() || !self.replaced.is_empty()
     }
 }
 
@@ -188,9 +195,49 @@ pub fn hook_config(harness: &Harness, command: &str) -> Value {
     Value::Object(config)
 }
 
+/// An executable path a shell will still recognise after parsing it.
+///
+/// A harness does not execute this command itself, it hands the string to a
+/// shell, and which shell that is belongs to the harness rather than to us.
+/// That makes a bare Windows path the one spelling that cannot be written:
+/// under `sh` every backslash is an escape, so `C:\Users\...\anamnesis.exe`
+/// arrives as `C:UsersAppData...` and the shell reports a command it cannot
+/// find — on stderr, which no harness shows, from a hook whose failure is
+/// deliberately not allowed to interrupt the session. Capture stops, and the
+/// settings file goes on looking exactly right.
+///
+/// Forward slashes are accepted by the Windows API, by `cmd`, and by every
+/// POSIX shell, and they survive quoting. The quotes are what carry a path
+/// with a space in it, which `C:\Users\Ada Lovelace\...` makes ordinary.
+pub fn shell_path(binary: &str) -> String {
+    format!("\"{}\"", binary.replace('\\', "/"))
+}
+
 /// The command a hook runs, for this binary and this server.
 pub fn hook_command(binary: &str, agent: &str, server: &str) -> String {
-    format!("{binary} hook --agent {agent} --server {server}")
+    format!(
+        "{} hook --agent {agent} --server {server}",
+        shell_path(binary)
+    )
+}
+
+/// Whether a command already in a settings file is anamnesis calling itself.
+///
+/// Deliberately narrow: the executable's own file name, and the subcommand it
+/// is being asked to run. A hook someone else wrote that merely mentions
+/// anamnesis — a wrapper script, a line that starts the server first — is
+/// theirs, and this is the predicate deciding what may be overwritten.
+fn is_ours(command: &str) -> bool {
+    let mut words = command.split_whitespace();
+    let Some(binary) = words.next() else {
+        return false;
+    };
+    if words.next() != Some("hook") {
+        return false;
+    }
+    let binary = binary.trim_matches('"').replace('\\', "/");
+    let name = binary.rsplit('/').next().unwrap_or(binary.as_str());
+    name.eq_ignore_ascii_case("anamnesis") || name.eq_ignore_ascii_case("anamnesis.exe")
 }
 
 /// Merge `incoming`'s hooks into `settings`, leaving everything else alone.
@@ -245,6 +292,19 @@ pub fn merge(settings: &mut Value, incoming: &Value) -> Outcome {
             continue;
         }
 
+        // An anamnesis command that is not the one we want is this same
+        // install run against a different path, port, or — the case this
+        // exists for — a spelling of the path the harness's shell could not
+        // read. Appending beside it would leave the broken line in place and
+        // add a second one, so it is rewritten where it stands.
+        if let Some(wanted) = wanted.first()
+            && already.iter().any(|command| is_ours(command))
+            && rewrite_ours(existing, wanted)
+        {
+            outcome.replaced.push(event.clone());
+            continue;
+        }
+
         let (Some(existing), Some(matchers)) = (existing.as_array_mut(), matchers.as_array())
         else {
             continue;
@@ -254,6 +314,34 @@ pub fn merge(settings: &mut Value, incoming: &Value) -> Outcome {
     }
 
     outcome
+}
+
+/// Point every anamnesis command in this matcher list at `wanted`.
+///
+/// In place, so that whatever else the matcher carries — a `matcher` pattern,
+/// a timeout, a key some later version of the harness added — is still there
+/// afterwards. Rebuilding the entry from our own template would quietly drop
+/// all of it, and this runs on files we did not write.
+fn rewrite_ours(matchers: &mut Value, wanted: &str) -> bool {
+    let Some(matchers) = matchers.as_array_mut() else {
+        return false;
+    };
+    let mut rewrote = false;
+    for hook in matchers
+        .iter_mut()
+        .filter_map(|matcher| matcher.get_mut("hooks")?.as_array_mut())
+        .flatten()
+    {
+        let ours = hook
+            .get("command")
+            .and_then(Value::as_str)
+            .is_some_and(is_ours);
+        if ours && let Some(command) = hook.get_mut("command") {
+            *command = Value::from(wanted);
+            rewrote = true;
+        }
+    }
+    rewrote
 }
 
 /// Every `command` string reachable inside a settings file's matcher list.
@@ -390,10 +478,13 @@ mod tests {
         assert_eq!(settings["permissions"]["allow"][0], "Bash(git *)");
     }
 
-    /// Pointing the same install at a different server is a different command,
-    /// so it is a hook that is not there yet rather than one already wired.
+    /// Pointing the same install at a different server moves the hooks rather
+    /// than adding a second set. Adding was the old behaviour and it is not
+    /// defensible: it leaves every event delivered twice, once to a server the
+    /// person has just said they are no longer using, and the settings file
+    /// gives no sign which of the two the memory came from.
     #[test]
-    fn a_different_server_is_not_mistaken_for_the_same_hook() {
+    fn a_different_server_moves_the_hooks_rather_than_doubling_them() {
         let mut settings = Value::Object(Map::new());
         merge(&mut settings, &config());
 
@@ -402,7 +493,11 @@ mod tests {
             "anamnesis hook --agent claude-code --server http://other:9000",
         );
         let outcome = merge(&mut settings, &elsewhere);
-        assert_eq!(outcome.added.len(), CLAUDE_CODE.events.len());
+        assert_eq!(outcome.replaced.len(), CLAUDE_CODE.events.len());
+        assert!(outcome.added.is_empty());
+        for event in CLAUDE_CODE.events {
+            assert_eq!(commands_in(&settings["hooks"][event]).len(), 1);
+        }
     }
 
     #[test]
@@ -410,7 +505,7 @@ mod tests {
         let command = hook_command("/usr/bin/anamnesis", "claude-code", "http://127.0.0.1:8080");
         assert_eq!(
             command,
-            "/usr/bin/anamnesis hook --agent claude-code --server http://127.0.0.1:8080"
+            "\"/usr/bin/anamnesis\" hook --agent claude-code --server http://127.0.0.1:8080"
         );
     }
 
@@ -595,5 +690,92 @@ mod tests {
                 harness.agent
             );
         }
+    }
+
+    /// The failure this whole path exists to avoid: a harness hands the command
+    /// to a shell, and under `sh` a backslash is an escape. A Windows path
+    /// written as it comes out of `current_exe` arrives as one unbroken word
+    /// that names no file, the hook exits without reaching the server, and the
+    /// settings file goes on looking exactly right.
+    #[test]
+    fn a_windows_path_survives_a_posix_shell() {
+        let command = hook_command(
+            r"C:\Users\Ada\AppData\Roaming\anamnesis\bin\anamnesis.exe",
+            "claude-code",
+            "http://127.0.0.1:8080",
+        );
+        assert!(!command.contains('\\'), "backslash left in {command}");
+        assert!(command.starts_with('"'), "path not quoted in {command}");
+        assert!(command.contains("/anamnesis/bin/anamnesis.exe\" hook "));
+    }
+
+    /// A path with a space in it is ordinary — `C:\Users\Ada Lovelace\…` — and
+    /// only the quotes keep it one argument.
+    #[test]
+    fn a_path_with_a_space_stays_one_word() {
+        let command = hook_command(r"C:\Users\Ada Lovelace\anamnesis.exe", "codex", "http://s");
+        assert!(command.starts_with("\"C:/Users/Ada Lovelace/anamnesis.exe\" hook "));
+    }
+
+    /// The upgrade case, and the reason `replaced` exists. A file wired by an
+    /// older install carries the unquoted spelling; wiring the new one beside
+    /// it would leave the broken command in place and record everything twice
+    /// once the harness's shell changed back.
+    #[test]
+    fn a_stale_anamnesis_command_is_rewritten_not_joined() {
+        let stale = r"C:\bin\anamnesis.exe hook --agent claude-code --server http://127.0.0.1:8080";
+        let mut settings = serde_json::json!({
+            "hooks": { "SessionStart": [{ "hooks": [{ "type": "command", "command": stale }] }] }
+        });
+
+        let wanted = hook_command(
+            r"C:\bin\anamnesis.exe",
+            "claude-code",
+            "http://127.0.0.1:8080",
+        );
+        let outcome = merge(&mut settings, &hook_config(&CLAUDE_CODE, &wanted));
+
+        assert_eq!(outcome.replaced, vec!["SessionStart".to_owned()]);
+        assert!(outcome.changed());
+        let commands = commands_in(&settings["hooks"]["SessionStart"]);
+        assert_eq!(commands, vec![wanted]);
+    }
+
+    /// The other half of that: a hook someone else wrote is not ours to
+    /// rewrite, however much it mentions anamnesis.
+    #[test]
+    fn somebody_elses_hook_is_never_rewritten() {
+        let theirs = "./scripts/start-anamnesis.sh && anamnesis serve";
+        let mut settings = serde_json::json!({
+            "hooks": { "SessionStart": [{ "hooks": [{ "type": "command", "command": theirs }] }] }
+        });
+
+        let wanted = hook_command("anamnesis", "claude-code", "http://127.0.0.1:8080");
+        let outcome = merge(&mut settings, &hook_config(&CLAUDE_CODE, &wanted));
+
+        assert_eq!(outcome.replaced, Vec::<String>::new());
+        assert!(outcome.added.contains(&"SessionStart".to_owned()));
+        let commands = commands_in(&settings["hooks"]["SessionStart"]);
+        assert_eq!(commands, vec![theirs.to_owned(), wanted]);
+    }
+
+    /// Rewriting must not cost the matcher whatever else it carried.
+    #[test]
+    fn rewriting_keeps_the_rest_of_the_matcher() {
+        let stale = "anamnesis hook --agent claude-code --server http://old:1";
+        let mut settings = serde_json::json!({
+            "hooks": { "PostToolUse": [{
+                "matcher": "Edit|Write",
+                "hooks": [{ "type": "command", "command": stale, "timeout": 5 }]
+            }] }
+        });
+
+        let wanted = hook_command("anamnesis", "claude-code", "http://new:2");
+        merge(&mut settings, &hook_config(&CLAUDE_CODE, &wanted));
+
+        let matcher = &settings["hooks"]["PostToolUse"][0];
+        assert_eq!(matcher["matcher"], "Edit|Write");
+        assert_eq!(matcher["hooks"][0]["timeout"], 5);
+        assert_eq!(matcher["hooks"][0]["command"], Value::from(wanted));
     }
 }
