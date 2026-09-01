@@ -22,11 +22,17 @@
 //! than starting with none.
 
 use anamnesis_core::observation::EventKind;
-use anamnesis_core::scope::ResolvedScope;
+use anamnesis_core::scope::{ResolvedScope, resolve_scope};
 use anamnesis_core::session::Session;
 use anamnesis_store::{RawRecord, RawSpool, Store};
 use anamnesis_wiki::Wiki;
 use jiff::Timestamp;
+use std::path::PathBuf;
+
+use anamnesis_core::datadir::DataDir;
+
+use crate::format::plural;
+use crate::project::global_scope;
 
 /// What a rebuild put back.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -259,6 +265,81 @@ fn reopened(session: &Session) -> Session {
     session.state = anamnesis_core::session::SessionState::Open;
     session.ended_at = None;
     session
+}
+
+/// Rebuild the index from the wiki and the raw transcripts.
+pub fn cmd_reindex(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    let scope = resolve_scope(&cwd)?;
+    let data = DataDir::resolve(data_dir)?;
+    data.ensure_layout()?;
+
+    // Opening creates the database when it is missing, which is the case
+    // this command exists for.
+    let store = Store::open(data.db_file())?;
+    store.migrate()?;
+    let wiki = Wiki::open(data.wiki())?;
+    let raw = anamnesis_store::RawSpool::new(data.raw());
+
+    println!("♻️  Rebuilding the index for {}", scope.scope);
+    println!(
+        "   wiki:        {}",
+        data.wiki_scope(&scope.scope).display()
+    );
+    println!("   transcripts: {}", raw.root().display());
+    println!();
+
+    let now = Timestamp::now();
+    let embedder = anamnesis_llm::EmbedConfig::from_env().build(&data.models())?;
+    let embed = embedder
+        .as_deref()
+        .map(|embedder| embedder as &dyn anamnesis_core::embedding::Embed);
+    let report = rebuild(&store, &wiki, &raw, &scope, embed, now)?;
+
+    // The shared scope is rebuilt with the project, because a rebuild that
+    // left it out would drop the index rows for pages every project in the
+    // workspace can see — and nothing else would ever put them back.
+    let global = global_scope(&scope, &data);
+    let shared = if data.wiki_global(&scope.scope.workspace).exists() {
+        Some(rebuild(&store, &wiki, &raw, &global, embed, now)?)
+    } else {
+        None
+    };
+
+    println!("  {} page(s) indexed", report.pages);
+    if let Some(shared) = &shared {
+        println!(
+            "  {} page(s) indexed in {}",
+            shared.pages, global.scope.project
+        );
+    }
+    println!(
+        "  {} session(s), {} observation(s) recovered",
+        report.sessions, report.observations
+    );
+    if report.orphaned_files > 0 {
+        println!(
+            "  {} transcript file(s) had no session header and were skipped",
+            report.orphaned_files
+        );
+    }
+    if report.removed > 0 {
+        println!(
+            "  {} forgotten — no longer in the wiki",
+            plural(report.removed as i64, "page")
+        );
+    }
+    if report.skipped_removal {
+        println!();
+        println!("  ⚠ No wiki directory at that path, so nothing was forgotten.");
+        println!("    An index with rows and a scope with no directory usually");
+        println!("    means this ran against the wrong data dir or project.");
+    }
+    println!();
+    println!("  Pending handoffs are not restored: a handoff says what the *next*");
+    println!("  session should know, and reviving a stale one is worse than none.");
+
+    Ok(())
 }
 
 #[cfg(test)]
