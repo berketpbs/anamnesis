@@ -72,6 +72,22 @@ pub enum CoreError {
         reason: &'static str,
     },
 
+    /// A key in the marker file that belongs to no table this build knows.
+    ///
+    /// Separate from [`Self::Config`] because it is the *shape* that decides:
+    /// an unknown table is a feature from a newer anamnesis and is skipped
+    /// with a warning, while a bare key outside every table is what a typo
+    /// looks like — `workspace = "x"` written above `[scope]` rather than
+    /// inside it — and refusing that is what keeps memory from going
+    /// somewhere nobody meant.
+    #[error("unknown setting {key:?} outside any table in {origin}")]
+    UnknownSetting {
+        /// The offending key, as it appears in the file.
+        key: String,
+        /// Where it was read from.
+        origin: String,
+    },
+
     /// A git operation failed while inspecting the repository.
     #[error("git error: {0}")]
     Git(Box<git2::Error>),

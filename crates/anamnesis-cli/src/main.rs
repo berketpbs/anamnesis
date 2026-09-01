@@ -736,6 +736,9 @@ fn cmd_status(
     println!("  Workspace: {}", scope.scope.workspace);
     println!("  Project:   {}", scope.scope.project);
     println!("  Identity:  {}", describe_source(&scope.source));
+    if let Some(line) = describe_unrecognized(&scope.unrecognized) {
+        println!("  Marker:    {line}");
+    }
 
     if verbose {
         println!();
@@ -1053,6 +1056,30 @@ fn describe_auth(state: &AuthState, presented: bool) -> String {
             format!("required — this client has no token; set {token_env}")
         }
     }
+}
+
+/// One line for the parts of the marker file this build did not apply.
+///
+/// Silent when there are none, which is every machine whose binary keeps up
+/// with its marker file. When there are some, this is the only place they are
+/// ever mentioned: the settings are in the file, a person can see them there,
+/// and nothing else would ever say that the build reading them has no code for
+/// them. The line names them and says what to do, because "upgrade" is the
+/// whole fix.
+fn describe_unrecognized(tables: &[String]) -> Option<String> {
+    if tables.is_empty() {
+        return None;
+    }
+    let named = tables
+        .iter()
+        .map(|table| format!("[{table}]"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "{named} {} not understood by this build and had no effect — upgrade anamnesis to apply {}",
+        if tables.len() == 1 { "is" } else { "are" },
+        if tables.len() == 1 { "it" } else { "them" }
+    ))
 }
 
 /// One line for when capture last reached the index.
@@ -4529,6 +4556,24 @@ mod tests {
         assert!(!describe_capture(last, now, 0, 0).contains("waiting"));
         assert!(describe_capture(last, now, 1, 0).contains("1 event waiting"));
         assert!(describe_capture(last, now, 4, 0).contains("4 events waiting"));
+    }
+
+    /// A marker written for a newer anamnesis still works, and the parts that
+    /// did nothing have to be said out loud — a setting that is in the file
+    /// and has no effect is invisible everywhere else.
+    #[test]
+    fn status_names_the_marker_tables_this_build_did_not_apply() {
+        assert_eq!(describe_unrecognized(&[]), None);
+
+        let one = describe_unrecognized(&["sessions".to_owned()]).expect("a line");
+        assert!(one.contains("[sessions]"), "{one}");
+        assert!(one.contains("is not understood"), "{one}");
+        assert!(one.contains("upgrade anamnesis"), "{one}");
+
+        let two = describe_unrecognized(&["sessions".to_owned(), "workstreams".to_owned()])
+            .expect("a line");
+        assert!(two.contains("[sessions], [workstreams]"), "{two}");
+        assert!(two.contains("are not understood"), "{two}");
     }
 
     /// The half of the queue that does not fix itself. Nothing will offer

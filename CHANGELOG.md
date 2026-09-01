@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- A marker file written for a newer anamnesis no longer stops capture on an
+  older one. The rule was that unknown keys are rejected, so that a typo
+  surfaces instead of silently sending memory to the wrong project — and on
+  2026-09-01 this repository paid for the half of that rule nobody had thought
+  about. The marker gained a `[sessions]` table hours before the installed
+  server was rebuilt, and the older server answered `400` to every event of
+  every session for three hours: 173 events queued, nothing recorded, and the
+  only sign was a line in `anamnesis status` nobody was looking at. The events
+  were fine. The configuration was fine. One of them was simply newer than the
+  other. An unknown *table* is now taken as a feature this build does not have:
+  it is skipped, everything else in the file still applies, and `anamnesis
+  status` names it where somebody is already asking whether memory is working.
+  An unknown *scalar* outside every table is still refused, because that is the
+  shape a typo takes — `workspace = "x"` written above `[scope]` rather than
+  inside it — and nothing inside a known table is relaxed at all, so a silently
+  wrong scope remains impossible
 - The same event delivered twice is recorded once. The hook gives up after a
   second, and a server that was in fact recording can take longer than that —
   so the event goes into the queue and is offered again later, and until now
