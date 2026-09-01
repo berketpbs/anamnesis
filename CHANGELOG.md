@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A container image for both architectures, published on a tag to
+  `ghcr.io/berketpbs/anamnesis`. CI has built the image on every pull request
+  since it was written, and that image existed only on the runner that built
+  it — the way to run anamnesis in a container was still to build it. Each
+  architecture is now built on a runner of that architecture rather than under
+  emulation: this workspace compiles a tensor library, and emulating arm64 to
+  do it turns a seven-minute job into most of an hour. The two are pushed by
+  digest and a manifest list is assembled afterwards, because two jobs pushing
+  the same tag leave whichever finished last and the other architecture
+  unreachable. A dispatched run builds both and pushes neither, the same
+  rehearsal the binaries get
 - Embeddings can come from an API instead of from this machine.
   `ANAMNESIS_EMBED_PROVIDER=openai` points the vector stream at any
   OpenAI-compatible `/v1/embeddings` endpoint — one shape rather than one
