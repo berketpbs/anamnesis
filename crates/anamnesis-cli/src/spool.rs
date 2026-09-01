@@ -26,7 +26,12 @@
 //! **Order is kept.** A session is a sequence — it starts, does things, ends —
 //! and replaying its middle before its beginning would produce a session the
 //! index cannot make sense of. Files sort by the instant they were queued, and
-//! a replay that fails stops rather than skipping ahead.
+//! a replay that fails stops rather than skipping ahead. The one event it does
+//! step over is the one the server has already read and refused: waiting
+//! cannot change that answer, and holding it would cost every event behind it
+//! for as long as the queue exists. Stepping over is not throwing away — the
+//! refused event is moved into `pending/refused/`, where `anamnesis status`
+//! counts it and a person can read it.
 
 use std::path::{Path, PathBuf};
 
@@ -36,6 +41,18 @@ use serde::{Deserialize, Serialize};
 
 /// Directory under the data dir where undelivered events wait.
 const DIRECTORY: &str = "pending";
+
+/// Where an event the server refused waits for a person instead of a retry.
+///
+/// A subdirectory of the queue rather than a sibling: it is the same events,
+/// out of the line. Nothing here is ever offered again — that is the point of
+/// moving it — but nothing here is gone either, and the reason it matters was
+/// measured in this repository. On 2026-09-01 a server older than the marker
+/// file it was reading answered every event with 400, and the refusal was not
+/// the payload's fault at all: restarting the server would have accepted every
+/// one of them. An event dropped on that day would have been an afternoon
+/// nobody could get back.
+const REFUSED: &str = "refused";
 
 /// How many events the queue will hold before it stops accepting.
 ///
@@ -53,6 +70,17 @@ pub struct Queued {
     pub agent: String,
     /// The payload, already redacted.
     pub body: serde_json::Value,
+    /// The name this event was offered under the first time.
+    ///
+    /// Carried so the replay can offer it under the same one. A hook that
+    /// gave up after a second may have given up on a server that recorded the
+    /// event anyway, and the copy that goes out later has to be recognisable
+    /// as the same event rather than land as a second prompt in the session.
+    ///
+    /// Optional because a queue written by an earlier version has entries
+    /// without one, and they are still worth delivering.
+    #[serde(default)]
+    pub event: Option<String>,
 }
 
 /// The queue of events waiting to be delivered.
@@ -76,6 +104,39 @@ impl Queue {
         &self.root
     }
 
+    /// Where events the server refused are kept.
+    pub fn refused_root(&self) -> PathBuf {
+        self.root.join(REFUSED)
+    }
+
+    /// Take an event out of the line without throwing it away.
+    ///
+    /// The queue is ordered and a replay stops where it fails, so an event no
+    /// retry can ever deliver is not just one lost event — it is every event
+    /// behind it, for as long as the queue exists. Moving it is what lets the
+    /// rest go. It stays readable, because the server refusing an event is not
+    /// proof the event was bad: a server older than the configuration it reads
+    /// refuses good ones.
+    pub fn set_aside(&self, path: &Path) -> std::io::Result<PathBuf> {
+        let refused = self.refused_root();
+        std::fs::create_dir_all(&refused)?;
+        let name = path.file_name().unwrap_or_else(|| "event.json".as_ref());
+        let moved = refused.join(name);
+        std::fs::rename(path, &moved)?;
+        Ok(moved)
+    }
+
+    /// How many events have been set aside.
+    pub fn set_aside_len(&self) -> usize {
+        let Ok(entries) = std::fs::read_dir(self.refused_root()) else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+            .count()
+    }
+
     /// How many events are waiting.
     pub fn len(&self) -> usize {
         self.files().len()
@@ -92,8 +153,8 @@ impl Queue {
     /// is both safe to keep and certain to be replayable — a queue entry that
     /// turns out not to be JSON when it is read back would be a failure with
     /// no owner left to report it to.
-    pub fn push(&self, agent: &str, payload: &str) -> anyhow::Result<PathBuf> {
-        self.push_within(agent, payload, CAPACITY)
+    pub fn push(&self, agent: &str, event: &str, payload: &str) -> anyhow::Result<PathBuf> {
+        self.push_within(agent, event, payload, CAPACITY)
     }
 
     /// [`Queue::push`], with the ceiling named.
@@ -101,7 +162,13 @@ impl Queue {
     /// Separate only so the full-queue rule can be tested: reaching the real
     /// capacity in a test would mean writing ten thousand files to assert one
     /// sentence.
-    fn push_within(&self, agent: &str, payload: &str, capacity: usize) -> anyhow::Result<PathBuf> {
+    fn push_within(
+        &self,
+        agent: &str,
+        event: &str,
+        payload: &str,
+        capacity: usize,
+    ) -> anyhow::Result<PathBuf> {
         let body: serde_json::Value = serde_json::from_str(payload)?;
         let body = redacted(body);
 
@@ -117,6 +184,7 @@ impl Queue {
         let entry = Queued {
             agent: agent.to_owned(),
             body,
+            event: Some(event.to_owned()),
         };
         let text = serde_json::to_string(&entry)?;
 
@@ -233,7 +301,11 @@ mod tests {
     fn an_event_that_could_not_be_delivered_comes_back_out() {
         let (_dir, queue) = queue();
         queue
-            .push("claude-code", r#"{"hook_event_name":"SessionStart"}"#)
+            .push(
+                "claude-code",
+                "test-event-1",
+                r#"{"hook_event_name":"SessionStart"}"#,
+            )
             .expect("queued");
 
         let waiting = queue.take(10);
@@ -243,6 +315,44 @@ mod tests {
         assert_eq!(waiting[0].1.body["hook_event_name"], "SessionStart");
     }
 
+    /// The name the event was first offered under survives the file, because
+    /// the attempt that failed may not have failed at the server: a hook that
+    /// gave up after a second can have given up on a server that recorded the
+    /// event anyway. Offered again under the same name it is one event; under
+    /// a new one it is a prompt the session never had.
+    #[test]
+    fn a_waiting_event_is_offered_again_under_the_name_it_had() {
+        let (_dir, queue) = queue();
+        queue
+            .push(
+                "claude-code",
+                "01998f3a-0000-7000-8000-00000000c0de",
+                r#"{"hook_event_name":"UserPromptSubmit"}"#,
+            )
+            .expect("queued");
+
+        let waiting = queue.take(10);
+
+        assert_eq!(
+            waiting[0].1.event.as_deref(),
+            Some("01998f3a-0000-7000-8000-00000000c0de")
+        );
+    }
+
+    /// A queue written before events had names still drains. Refusing to
+    /// replay those entries would throw away exactly the events an upgrade
+    /// found waiting.
+    #[test]
+    fn an_entry_from_before_events_had_names_is_still_readable() {
+        let entry: Queued = serde_json::from_str(
+            r#"{"agent":"claude-code","body":{"hook_event_name":"SessionStart"}}"#,
+        )
+        .expect("an older entry is still an entry");
+
+        assert_eq!(entry.agent, "claude-code");
+        assert_eq!(entry.event, None);
+    }
+
     /// A session is a sequence, and replaying its middle before its beginning
     /// would leave the index with a session it cannot make sense of.
     #[test]
@@ -250,7 +360,7 @@ mod tests {
         let (_dir, queue) = queue();
         for n in 0..5 {
             queue
-                .push("claude-code", &format!(r#"{{"n":{n}}}"#))
+                .push("claude-code", "test-event-2", &format!(r#"{{"n":{n}}}"#))
                 .expect("queued");
         }
 
@@ -273,6 +383,7 @@ mod tests {
         let path = queue
             .push(
                 "claude-code",
+                "test-event-6",
                 &serde_json::json!({ "prompt": format!("deploy with {secret}") }).to_string(),
             )
             .expect("queued");
@@ -285,7 +396,9 @@ mod tests {
     #[test]
     fn a_delivered_event_is_forgotten() {
         let (_dir, queue) = queue();
-        queue.push("claude-code", r#"{"a":1}"#).expect("queued");
+        queue
+            .push("claude-code", "test-event-3", r#"{"a":1}"#)
+            .expect("queued");
         let waiting = queue.take(10);
 
         queue.remove(&waiting[0].0);
@@ -297,7 +410,11 @@ mod tests {
     fn a_payload_that_is_not_json_is_refused_rather_than_kept() {
         let (_dir, queue) = queue();
 
-        assert!(queue.push("claude-code", "not json at all").is_err());
+        assert!(
+            queue
+                .push("claude-code", "test-event-4", "not json at all")
+                .is_err()
+        );
         assert!(queue.is_empty());
     }
 
@@ -319,13 +436,13 @@ mod tests {
     fn a_full_queue_refuses_the_new_event_rather_than_dropping_the_old() {
         let (_dir, queue) = queue();
         queue
-            .push_within("claude-code", r#"{"n":0}"#, 2)
+            .push_within("claude-code", "test-event-x", r#"{"n":0}"#, 2)
             .expect("queued");
         queue
-            .push_within("claude-code", r#"{"n":1}"#, 2)
+            .push_within("claude-code", "test-event-x", r#"{"n":1}"#, 2)
             .expect("queued");
 
-        let refused = queue.push_within("claude-code", r#"{"n":2}"#, 2);
+        let refused = queue.push_within("claude-code", "test-event-x", r#"{"n":2}"#, 2);
 
         assert!(refused.is_err());
         let waiting = queue.take(10);
@@ -339,7 +456,9 @@ mod tests {
     #[test]
     fn an_unreadable_entry_is_dropped_so_the_queue_can_empty() {
         let (_dir, queue) = queue();
-        queue.push("claude-code", r#"{"a":1}"#).expect("queued");
+        queue
+            .push("claude-code", "test-event-5", r#"{"a":1}"#)
+            .expect("queued");
         std::fs::create_dir_all(queue.root()).expect("dir");
         std::fs::write(queue.root().join("0000000000-9999.json"), "{ not json").expect("write");
 

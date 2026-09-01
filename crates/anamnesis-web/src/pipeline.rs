@@ -237,20 +237,32 @@ pub fn record(
     // supersedes its handoff, so the only cost is the second pass.
     store.resume_session(session_id)?;
 
-    let observation = new_observation(
+    let mut observation = new_observation(
         session_id,
         hook.kind,
         hook.tool.clone(),
         hook.body.clone(),
         now,
     );
-    store.insert_observation(&observation)?;
+    // The sender's name for this delivery, where it gave one. Minting a fresh
+    // identifier instead would make the same event offered twice into two
+    // events, and a session that counts one prompt twice is summarised wrongly
+    // by every path that reads it.
+    if let Some(delivery) = hook.delivery {
+        observation.id = delivery;
+    }
+    let first_arrival = store.insert_observation(&observation)?;
 
     // The index is the authority for this request; the spool is the durable
     // copy behind it. A spool that cannot be written is logged and stepped
     // over rather than failing the event: losing the durable copy is bad,
     // losing the event itself because a disk filled up is worse.
-    if let Some(raw) = raw
+    //
+    // Skipped outright when this event was already recorded: the spool is
+    // append-only, so a second line for it could never be taken back, and the
+    // transcript is the copy that outlives the index.
+    if first_arrival
+        && let Some(raw) = raw
         && let Err(error) = raw.append(&scope.scope, &session, &observation)
     {
         tracing::error!(%error, %session_id, "could not spool observation");

@@ -144,7 +144,15 @@ follow.
 The HTTP server hooks deliver to.
 
 **Provides:**
-- `POST /hook` — accept one lifecycle event, record it, return 202
+- `POST /hook` — accept one lifecycle event, record it, return 202. `?event=`
+  carries the sender's own name for the delivery: the hook gives up after a
+  second, a server that was recording can take longer, and the event it kept
+  is offered again later — under that name the repeat lands on the
+  observations table's conflict clause instead of becoming a second prompt in
+  the session. Bodies are accepted up to 16 MB, which is larger than the
+  default because one `Read` of a large file exceeds the default, and bounded
+  because the body is buffered whole and scanned for secrets before any of it
+  is kept
 - `GET /handoff` — hand the next session what the last one left
 - `GET /whoami` — what the server makes of the caller's token
 - `GET /health`
