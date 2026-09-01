@@ -1,0 +1,163 @@
+name: release
+
+# A tag publishes; a manual run only builds. The second is not a convenience —
+# it is how this workflow gets tested without inventing a version, which is
+# the reason release workflows are usually first exercised on the day they
+# matter most.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing must not cancel the others: a release that is
+      # missing macOS is a release somebody can still take Linux from, and
+      # knowing which target broke beats knowing that one did.
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # rust-toolchain.toml pins the version, the same way the CI workflow
+      # leaves it alone; only the target has to be added.
+      - name: Add target
+        run: rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked -p anamnesis-cli --target ${{ matrix.target }}
+
+      # The version comes from the tag when there is one, and from the
+      # manifest otherwise, so a dispatched build produces the same names a
+      # tagged one would rather than a special case nobody ever looks at.
+      - name: Name the version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            version="${GITHUB_REF#refs/tags/}"
+          else
+            # From the workspace manifest, with nothing but grep and sed: the
+            # three runners agree on those, and they do not agree on which
+            # Python is on PATH inside bash.
+            version="v$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="anamnesis-${{ steps.version.outputs.version }}-${{ matrix.target }}"
+          staged="dist/$name"
+          mkdir -p "$staged"
+
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            cp "target/${{ matrix.target }}/release/anamnesis.exe" "$staged/"
+          else
+            cp "target/${{ matrix.target }}/release/anamnesis" "$staged/"
+          fi
+          # What somebody needs beside the binary to know what they have.
+          cp README.md LICENSE CHANGELOG.md "$staged/"
+
+          cd dist
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            7z a -tzip "$name.zip" "$name" > /dev/null
+            archive="$name.zip"
+          else
+            tar -czf "$name.tar.gz" "$name"
+            archive="$name.tar.gz"
+          fi
+
+          # A checksum beside every archive, computed where the archive was
+          # made. A release nobody can verify is a release nobody should run.
+          if command -v sha256sum > /dev/null; then
+            sha256sum "$archive" > "$archive.sha256"
+          else
+            shasum -a 256 "$archive" > "$archive.sha256"
+          fi
+
+          echo "archive=dist/$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Check it runs
+        shell: bash
+        run: |
+          # Built for this runner's own target, so it can be asked what it is.
+          # A release binary that does not start is the one failure a release
+          # workflow must never let through.
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            "target/${{ matrix.target }}/release/anamnesis.exe" --version
+          else
+            "target/${{ matrix.target }}/release/anamnesis" --version
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: anamnesis-${{ matrix.target }}
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.archive }}.sha256
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: build
+    # Only a tag publishes. A dispatched run has built everything above and
+    # stops here, which is what makes it safe to use as a rehearsal.
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Collect the checksums into one file
+        run: |
+          cd dist
+          cat *.sha256 > SHA256SUMS
+          rm -f *.sha256
+          ls -la
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF#refs/tags/}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "${GITHUB_REF#refs/tags/}" \
+            --notes "Binaries for Linux, macOS (Intel and Apple silicon) and Windows. Verify with SHA256SUMS. What changed is in CHANGELOG.md." \
+            dist/*
