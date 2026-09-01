@@ -102,6 +102,30 @@ impl Store {
         })
     }
 
+    /// Copy the whole index to `path`, consistently, while it is in use.
+    ///
+    /// Through SQLite's own backup API rather than by copying the file. The
+    /// index is opened in WAL mode, so at any instant the committed database
+    /// is spread across `anamnesis.db` and a `-wal` file beside it; copying
+    /// the first without the second produces a file that opens, reports a
+    /// plausible schema version, and is missing whatever was written most
+    /// recently. A backup that is quietly a few hours stale is worse than no
+    /// backup, because it is only discovered on the day it is needed.
+    ///
+    /// The server may be running and writing throughout. That is the point of
+    /// this API: it copies pages under a read lock it releases between steps,
+    /// and starts over if a writer changes something underneath it.
+    pub fn snapshot_to(&self, path: impl AsRef<Path>) -> Result<()> {
+        let conn = self.conn.lock();
+        let mut destination = Connection::open(path.as_ref())?;
+        let backup = rusqlite::backup::Backup::new(&conn, &mut destination)?;
+        // A large step and no pause between steps: this runs against a local
+        // file for a database measured in megabytes, and pausing would hold
+        // the whole copy open for longer while a hook waits to write.
+        backup.run_to_completion(1_024, std::time::Duration::ZERO, None)?;
+        Ok(())
+    }
+
     /// Bring the schema up to date.
     ///
     /// Safe to call on every startup: refinery records what it has applied and

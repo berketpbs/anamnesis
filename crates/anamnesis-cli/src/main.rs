@@ -7,6 +7,7 @@
 //! — so that reading this file tells you what anamnesis can be asked to do,
 //! and reading one module tells you how one answer is arrived at.
 
+mod archive;
 mod bootstrap;
 mod capture;
 mod cli;
@@ -25,6 +26,7 @@ mod spool;
 mod status;
 mod sweep;
 
+use archive::{cmd_backup, cmd_restore};
 use bootstrap::cmd_bootstrap;
 use capture::{cmd_hook, cmd_probe};
 use cli::{Cli, Commands};
@@ -209,6 +211,16 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::ForgetSession { sessions, apply } => {
             cmd_forget_session(&sessions, apply, cli.data_dir.clone())?;
+        }
+        Commands::Backup { out } => {
+            cmd_backup(out, cli.data_dir.clone())?;
+        }
+        Commands::Restore {
+            archive,
+            apply,
+            force,
+        } => {
+            cmd_restore(&archive, apply, force, cli.data_dir.clone())?;
         }
         Commands::Reindex => {
             cmd_reindex(cli.data_dir.clone())?;
