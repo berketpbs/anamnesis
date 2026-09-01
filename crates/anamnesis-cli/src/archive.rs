@@ -235,6 +235,19 @@ pub fn cmd_restore(
     if index.exists() {
         let store = Store::open(&index)?;
         let schema = store.schema_version()?;
+        // Recorded into the memory that was just restored, which is the only
+        // place it could be recorded: this line is how a reader learns that
+        // everything before it came out of an archive rather than happening.
+        crate::audit::note(
+            &store,
+            None,
+            anamnesis_core::audit::Action::Restored,
+            archive.display().to_string(),
+            Some(format!(
+                "{unpacked} entries, written {}",
+                manifest.written_at
+            )),
+        );
         println!(
             "  index opens, schema {}",
             schema.map_or_else(|| "none".to_owned(), |v| v.to_string())

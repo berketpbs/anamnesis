@@ -30,6 +30,7 @@ mod embedded {
     refinery::embed_migrations!("migrations");
 }
 
+mod audit;
 mod convert;
 mod improve;
 mod ops;
@@ -244,14 +245,14 @@ mod tests {
         assert_eq!(store.schema_version().expect("version"), None);
 
         store.migrate().expect("migrate");
-        assert_eq!(store.schema_version().expect("version"), Some(10));
+        assert_eq!(store.schema_version().expect("version"), Some(11));
     }
 
     #[test]
     fn migrating_twice_is_a_no_op() {
         let store = migrated();
         store.migrate().expect("second migrate");
-        assert_eq!(store.schema_version().expect("version"), Some(10));
+        assert_eq!(store.schema_version().expect("version"), Some(11));
     }
 
     #[test]
@@ -271,6 +272,7 @@ mod tests {
             "page_feedback",
             "page_embeddings",
             "workstreams",
+            "audit_log",
         ] {
             let found: i64 = conn
                 .query_row(

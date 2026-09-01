@@ -11,6 +11,9 @@ use std::path::PathBuf;
 use anamnesis_wiki::Wiki;
 use jiff::Timestamp;
 
+use anamnesis_core::audit::Action;
+
+use crate::audit::note;
 use crate::project::{global_scope, open_project};
 
 /// Search this project's pages, and the workspace's shared ones.
@@ -181,6 +184,13 @@ pub fn cmd_write_page(
         anamnesis_core::page::Page::new(scope.project_id, page_path.clone(), frontmatter, body);
     let commit = wiki.write_page(&scope.scope, &page, &format!("cli: write {page_path}"))?;
     page.git_commit = Some(commit.clone());
+    note(
+        &store,
+        Some(scope.project_id),
+        Action::PageWritten,
+        page_path.to_string(),
+        Some(format!("commit {}", &commit[..commit.len().min(8)])),
+    );
 
     // Entities as well as links, which this command used to skip because it
     // could not set any. A page whose entities never reach the index is one
@@ -358,6 +368,18 @@ pub fn cmd_forget(paths: &[String], data_dir: Option<PathBuf>) -> anyhow::Result
                  Nothing is lost: run `anamnesis reindex` to put the index back."
             )
         })?;
+
+    for (path, _) in &doomed {
+        note(
+            &store,
+            Some(scope.project_id),
+            Action::PageForgotten,
+            path.to_string(),
+            commit
+                .as_ref()
+                .map(|commit| format!("commit {}", &commit[..commit.len().min(8)])),
+        );
+    }
 
     println!("  {} page(s), {rows} index row(s).", doomed.len());
     match commit {

@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- An audit log, and `anamnesis audit` to read it. Capture already records what
+  happened *inside* sessions; nothing recorded who reached in and changed the
+  memory itself. A page rewritten by hand, a session forgotten, a handoff
+  claimed, a proposal carried out, a sweep that dropped a dozen pages — each of
+  those replaces or removes something a later session would otherwise have been
+  told, and until now the only evidence was that memory said something
+  different afterwards. Every deliberate change is now a line: who, through
+  which door (`cli`, `mcp`, `http`), what, and to what. Events arriving from
+  hooks are deliberately not audited — the observations table is that record,
+  and duplicating it would bury the handful of lines that matter. The log
+  outlives what it describes: the project reference is text rather than a
+  foreign key, because a reference that cascaded would delete the record of the
+  deletion, which is the one line somebody goes looking for. Writing a line
+  never fails the change it describes; the failure is said out loud instead.
+  This is the precondition for pointing more than one person at one server — a
+  shared memory whose changes cannot be traced is one nobody can trust an
+  answer from
 - `anamnesis backup` and `anamnesis restore`. The wiki has carried its own git
   history since the beginning, so the compiled half of memory was always
   recoverable; the other half was not. `db/` can be rebuilt from the wiki and

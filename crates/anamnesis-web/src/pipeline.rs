@@ -573,6 +573,6 @@ fn session_page_path(started_at: &Timestamp, id: SessionId) -> Result<PagePath, 
 }
 
 /// Resolve the scope for a working directory reported by a hook.
-fn scope_for(cwd: &Path) -> Result<ResolvedScope, WebError> {
+pub(crate) fn scope_for(cwd: &Path) -> Result<ResolvedScope, WebError> {
     resolve_scope(cwd).map_err(WebError::from)
 }

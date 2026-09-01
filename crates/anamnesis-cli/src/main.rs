@@ -8,6 +8,7 @@
 //! and reading one module tells you how one answer is arrived at.
 
 mod archive;
+mod audit;
 mod bootstrap;
 mod capture;
 mod cli;
@@ -27,6 +28,7 @@ mod status;
 mod sweep;
 
 use archive::{cmd_backup, cmd_restore};
+use audit::cmd_audit;
 use bootstrap::cmd_bootstrap;
 use capture::{cmd_hook, cmd_probe};
 use cli::{Cli, Commands};
@@ -221,6 +223,9 @@ fn main() -> anyhow::Result<()> {
             force,
         } => {
             cmd_restore(&archive, apply, force, cli.data_dir.clone())?;
+        }
+        Commands::Audit { limit, everywhere } => {
+            cmd_audit(limit, everywhere, cli.data_dir.clone())?;
         }
         Commands::Reindex => {
             cmd_reindex(cli.data_dir.clone())?;

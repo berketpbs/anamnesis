@@ -338,6 +338,22 @@ pub fn cmd_sweep(
     // `self::`, because the flag that got us here is also called `apply`.
     let swept = self::apply(&store, &wiki, &scope, &plan, policy, now)?;
 
+    // One line per page rather than one for the sweep: the question somebody
+    // brings to this log is about a page they can no longer find, and a line
+    // saying "12 pages" does not answer it.
+    for judged in &plan.forget {
+        crate::audit::note(
+            &store,
+            Some(scope.project_id),
+            anamnesis_core::audit::Action::PageSwept,
+            judged.row.path.to_string(),
+            swept
+                .commit
+                .as_ref()
+                .map(|commit| format!("commit {}", &commit[..commit.len().min(8)])),
+        );
+    }
+
     println!();
     println!(
         "  {} page(s) forgotten, {} index row(s) dropped",
