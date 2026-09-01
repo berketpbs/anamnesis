@@ -1828,6 +1828,13 @@ fn cmd_hook(agent: &str, server: &str, token: Option<&str>, data_dir: Option<Pat
 
     let starting = is_starting(event.as_deref(), agent);
 
+    // This delivery's name, minted before the first attempt and reused by
+    // every later one. The server records an event once under a name it has
+    // seen, so a hook that gave up after a second on a server that was in fact
+    // recording can offer the same event again without the session gaining a
+    // prompt it never had.
+    let delivery = anamnesis_core::ids::ObservationId::new().to_string();
+
     // Where an event waits when it cannot be delivered. Resolving the data
     // directory is path arithmetic — it opens no database and creates nothing
     // — which is what makes it affordable on a path that runs before every
@@ -1871,7 +1878,7 @@ fn cmd_hook(agent: &str, server: &str, token: Option<&str>, data_dir: Option<Pat
 
     let mut post = client
         .post(format!("{server}/hook"))
-        .query(&[("agent", agent)])
+        .query(&[("agent", agent), ("event", delivery.as_str())])
         .header("content-type", "application/json")
         .body(payload.clone());
     if let Some(token) = token {
@@ -1882,7 +1889,7 @@ fn cmd_hook(agent: &str, server: &str, token: Option<&str>, data_dir: Option<Pat
     match post {
         Err(error) => {
             eprintln!("anamnesis: could not reach {server}: {error}");
-            let kept = keep(queue.as_ref(), agent, &payload);
+            let kept = keep(queue.as_ref(), agent, &delivery, &payload);
             announce(
                 agent,
                 starting,
@@ -1890,22 +1897,27 @@ fn cmd_hook(agent: &str, server: &str, token: Option<&str>, data_dir: Option<Pat
             );
             return;
         }
-        // Kept as well, though it is tempting not to: a refusal is the server
-        // deciding about *this* event, and re-offering one it will always
-        // refuse would leave the queue stuck at its head. The common refusal
-        // is not that, though — it is a token that does not match, which is
+        // Kept, unless the server has judged the payload itself. The common
+        // refusal is not that — it is a token that does not match, which is
         // fixed in a minute and after which everything behind it should still
         // be there. A stuck queue is visible in `anamnesis status`; a dropped
         // event is visible nowhere, and that is the trade this queue exists to
-        // make.
+        // make. The trade only holds while waiting can change the answer:
+        // 400 and 413 are the server saying it read this one and will not
+        // take it, however long it waits.
         Ok(response) if !response.status().is_success() => {
             let status = response.status();
+            let refused = classify(status.as_u16()) == Delivery::Refused;
             let detail = response.text().unwrap_or_default();
             eprintln!(
-                "anamnesis: server rejected event ({status}): {}",
-                detail.trim()
+                "anamnesis: server rejected event ({status}): {}{}",
+                detail.trim(),
+                if refused { " — not keeping it" } else { "" }
             );
-            let kept = keep(queue.as_ref(), agent, &payload);
+            // A verdict on the payload is not worth a place in the queue: it
+            // would be offered again, refused again, and stop everything
+            // behind it in the meantime.
+            let kept = !refused && keep(queue.as_ref(), agent, &delivery, &payload);
             announce(
                 agent,
                 starting,
@@ -1997,40 +2009,116 @@ const REPLAY_BUDGET: std::time::Duration = std::time::Duration::from_millis(2_00
 /// How many waiting events one read of the queue directory looks at.
 const REPLAY_BATCH: usize = 32;
 
-/// Deliver what earlier hooks could not, oldest first, stopping at the first
-/// event that will not go.
+/// What one delivery attempt says about the event it carried.
 ///
-/// Stopping rather than skipping is the whole point: a session is a sequence,
-/// and replaying its middle before its beginning would leave the index with a
+/// The line the queue turns on is not success against failure but *whose*
+/// failure it is. A server that is down, restarting, or holding a token
+/// somebody is about to fix will take this event later, so it waits its turn.
+/// A server that read the payload and judged it — its shape, its size — will
+/// never take it, and one of those at the head of an ordered queue stops
+/// every event behind it for as long as the queue exists. That is capture
+/// ending quietly, which is the failure the queue was written to prevent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Delivery {
+    /// It landed.
+    Accepted,
+    /// It did not land and it never will: the server judged this payload.
+    Refused,
+    /// It did not land this time.
+    Failed,
+}
+
+/// Read a status the way the queue needs it read.
+///
+/// The split is the one `anamnesis-llm` already makes about its own providers:
+/// a 429 or a 500 is a moment, a 400 or a 413 is a verdict. Credentials and
+/// addresses are moments too — a token that does not match yet is fixed in a
+/// minute, and everything queued behind it should still be there afterwards.
+fn classify(status: u16) -> Delivery {
+    match status {
+        200..=299 => Delivery::Accepted,
+        400 | 413 | 415 | 422 => Delivery::Refused,
+        _ => Delivery::Failed,
+    }
+}
+
+/// What one pass over the queue did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Drained {
+    /// Events the server took.
+    delivered: usize,
+    /// Events the server will never take, and which are gone.
+    dropped: usize,
+}
+
+/// Deliver what earlier hooks could not, oldest first, stopping at the first
+/// event the server could not take *yet*.
+///
+/// Stopping rather than skipping is the point: a session is a sequence, and
+/// replaying its middle before its beginning would leave the index with a
 /// session it cannot make sense of. A queue that will not drain shows up in
-/// `anamnesis status`; the alternative — dropping the event at the head to
-/// keep things moving — is invisible, and invisible loss is what this queue
-/// was written to end.
+/// `anamnesis status`; dropping the event at the head to keep things moving
+/// would be invisible, and invisible loss is what this queue was written to
+/// end.
+///
+/// The exception is the event the server has already read and refused, which
+/// waiting cannot help. Holding one of those keeps the position it lost and
+/// costs every event behind it, so it is dropped — out loud, with the status
+/// that judged it.
 fn replay(
     client: &reqwest::blocking::Client,
     server: &str,
     token: Option<&str>,
     queue: &spool::Queue,
 ) {
-    let delivered = drain(queue, REPLAY_BUDGET, |entry| {
+    let outcome = drain(queue, REPLAY_BUDGET, |entry| {
         let Ok(body) = serde_json::to_string(&entry.body) else {
-            return false;
+            // Written as JSON, read back as something else: nothing will ever
+            // deliver this, and holding it would hold the queue.
+            eprintln!("anamnesis: dropping a waiting event that is no longer readable");
+            return Delivery::Refused;
         };
         let mut post = client
             .post(format!("{server}/hook"))
             .query(&[("agent", entry.agent.as_str())])
             .header("content-type", "application/json")
             .body(body);
+        // Under the name it was first offered under, where it has one: this is
+        // the attempt most likely to be a repeat of one that arrived.
+        if let Some(event) = &entry.event {
+            post = post.query(&[("event", event.as_str())]);
+        }
         if let Some(token) = token {
             post = post.bearer_auth(token);
         }
-        matches!(post.send(), Ok(response) if response.status().is_success())
+        let Ok(response) = post.send() else {
+            return Delivery::Failed;
+        };
+        let status = response.status();
+        let verdict = classify(status.as_u16());
+        if verdict == Delivery::Refused {
+            let detail = response.text().unwrap_or_default();
+            eprintln!(
+                "anamnesis: dropping an event the server will not accept ({status}): {}",
+                detail.trim()
+            );
+        }
+        verdict
     });
 
     // stderr, never stdout: stdout is the handoff channel, and one harness
     // parses every byte of it as a single JSON object.
-    if delivered > 0 {
-        eprintln!("anamnesis: delivered {delivered} event(s) that had been waiting");
+    if outcome.delivered > 0 {
+        eprintln!(
+            "anamnesis: delivered {} event(s) that had been waiting",
+            outcome.delivered
+        );
+    }
+    if outcome.dropped > 0 {
+        eprintln!(
+            "anamnesis: dropped {} event(s) no server would have taken",
+            outcome.dropped
+        );
     }
 }
 
@@ -2042,10 +2130,10 @@ fn replay(
 fn drain(
     queue: &spool::Queue,
     budget: std::time::Duration,
-    mut deliver: impl FnMut(&spool::Queued) -> bool,
-) -> usize {
+    mut deliver: impl FnMut(&spool::Queued) -> Delivery,
+) -> Drained {
     let started = std::time::Instant::now();
-    let mut delivered = 0usize;
+    let mut outcome = Drained::default();
 
     'draining: while started.elapsed() < budget {
         let batch = queue.take(REPLAY_BATCH);
@@ -2057,15 +2145,25 @@ fn drain(
             if started.elapsed() >= budget {
                 break 'draining;
             }
-            if !deliver(&entry) {
-                break 'draining;
+            match deliver(&entry) {
+                Delivery::Accepted => {
+                    queue.remove(&path);
+                    outcome.delivered += 1;
+                }
+                // Removed rather than stepped over: skipping it would leave it
+                // at the head to be offered, and refused, by every hook of
+                // every session from now on. Order still holds for everything
+                // that can still be delivered.
+                Delivery::Refused => {
+                    queue.remove(&path);
+                    outcome.dropped += 1;
+                }
+                Delivery::Failed => break 'draining,
             }
-            queue.remove(&path);
-            delivered += 1;
         }
     }
 
-    delivered
+    outcome
 }
 
 /// Keep an event the server did not take, and say whether it was kept.
@@ -2073,11 +2171,11 @@ fn drain(
 /// The answer decides which sentence the session is told, so it has to be what
 /// actually happened rather than what was attempted: a queue that refused the
 /// event because it is full must not produce a notice promising delivery.
-fn keep(queue: Option<&spool::Queue>, agent: &str, payload: &str) -> bool {
+fn keep(queue: Option<&spool::Queue>, agent: &str, event: &str, payload: &str) -> bool {
     let Some(queue) = queue else {
         return false;
     };
-    match queue.push(agent, payload) {
+    match queue.push(agent, event, payload) {
         Ok(_) => true,
         Err(error) => {
             eprintln!("anamnesis: could not keep the event: {error}");
@@ -4174,6 +4272,7 @@ mod tests {
         let kept = keep(
             Some(&queue),
             "claude-code",
+            "01998f3a-0000-7000-8000-00000000feed",
             r#"{"hook_event_name":"UserPromptSubmit"}"#,
         );
 
@@ -4188,7 +4287,12 @@ mod tests {
     fn an_event_the_queue_refused_is_reported_as_lost() {
         let (_dir, queue) = queued();
 
-        let kept = keep(Some(&queue), "claude-code", "not json at all");
+        let kept = keep(
+            Some(&queue),
+            "claude-code",
+            "01998f3a-0000-7000-8000-00000000dead",
+            "not json at all",
+        );
 
         assert!(!kept);
         assert!(queue.is_empty());
@@ -4219,23 +4323,28 @@ mod tests {
         let (_dir, queue) = queued();
         for n in 0..5 {
             queue
-                .push("claude-code", &format!(r#"{{"n":{n}}}"#))
+                .push(
+                    "claude-code",
+                    &format!("event-{n}"),
+                    &format!(r#"{{"n":{n}}}"#),
+                )
                 .expect("queued");
         }
 
         // The third will not go: a server that came back and went away again,
         // which is what a restarting one looks like from here.
         let mut seen = Vec::new();
-        let delivered = drain(&queue, std::time::Duration::from_secs(5), |entry| {
+        let outcome = drain(&queue, std::time::Duration::from_secs(5), |entry| {
             let n = entry.body["n"].as_i64().expect("n");
             if n == 2 {
-                return false;
+                return Delivery::Failed;
             }
             seen.push(n);
-            true
+            Delivery::Accepted
         });
 
-        assert_eq!(delivered, 2);
+        assert_eq!(outcome.delivered, 2);
+        assert_eq!(outcome.dropped, 0);
         assert_eq!(seen, [0, 1], "oldest first");
         let left: Vec<i64> = queue
             .take(10)
@@ -4247,6 +4356,63 @@ mod tests {
             [2, 3, 4],
             "the refused event stays at the head and nothing behind it was skipped"
         );
+    }
+
+    /// The other kind of refusal, and the one that used to end capture without
+    /// saying so: an event the server has read and will never take. Waiting
+    /// cannot change that answer, so holding it would cost every event behind
+    /// it — for as long as the queue exists.
+    #[test]
+    fn an_event_no_server_would_take_is_dropped_and_the_rest_go() {
+        let (_dir, queue) = queued();
+        for n in 0..5 {
+            queue
+                .push(
+                    "claude-code",
+                    &format!("event-{n}"),
+                    &format!(r#"{{"n":{n}}}"#),
+                )
+                .expect("queued");
+        }
+
+        let mut seen = Vec::new();
+        let outcome = drain(&queue, std::time::Duration::from_secs(5), |entry| {
+            let n = entry.body["n"].as_i64().expect("n");
+            if n == 2 {
+                return Delivery::Refused;
+            }
+            seen.push(n);
+            Delivery::Accepted
+        });
+
+        assert_eq!(outcome.delivered, 4);
+        assert_eq!(outcome.dropped, 1);
+        assert_eq!(seen, [0, 1, 3, 4], "order held around the dropped event");
+        assert!(
+            queue.is_empty(),
+            "the refused event was left to block the queue again"
+        );
+    }
+
+    /// Which failures are the server's opinion of this payload, and which are
+    /// the moment. Read wrongly in either direction it costs something: a
+    /// verdict treated as a moment stops the queue forever, and a moment
+    /// treated as a verdict throws away an event a restart would have taken.
+    #[test]
+    fn a_verdict_on_the_payload_is_told_apart_from_a_bad_moment() {
+        assert_eq!(classify(200), Delivery::Accepted);
+        assert_eq!(classify(202), Delivery::Accepted);
+
+        for status in [400, 413, 415, 422] {
+            assert_eq!(classify(status), Delivery::Refused, "{status}");
+        }
+
+        // A token that does not match yet, an address that is wrong yet, a
+        // server that is busy or restarting: all fixed without touching the
+        // event.
+        for status in [401, 403, 404, 405, 429, 500, 502, 503] {
+            assert_eq!(classify(status), Delivery::Failed, "{status}");
+        }
     }
 
     /// Silent when there is nothing waiting, because a line that is always

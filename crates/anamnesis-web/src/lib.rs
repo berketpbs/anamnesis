@@ -19,7 +19,7 @@ use anamnesis_core::session::AgentKind;
 use anamnesis_llm::{Embedder, Provider};
 use anamnesis_store::{RawSpool, Store};
 use anamnesis_wiki::Wiki;
-use axum::extract::{Query, Request, State};
+use axum::extract::{DefaultBodyLimit, Query, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -170,6 +170,21 @@ impl AppState {
     }
 }
 
+/// Largest hook payload the server will read.
+///
+/// Axum's default is two megabytes, which is smaller than a single ordinary
+/// event: one `Read` of a large file, or a search over a big tree, produces a
+/// tool response past it. What the server *keeps* of a body is 16 KB, cut
+/// after parsing, so refusing the request outright rejects an event it was
+/// about to shorten anyway — and leaves the hook holding a payload no retry
+/// can ever deliver, at the head of a queue that stops there.
+///
+/// It cannot be unbounded either. The body is buffered whole and scanned for
+/// secrets before any of it is kept, and both costs are the body's size. This
+/// ceiling is eight times the largest real payload measured here and still
+/// small enough that a request cannot be a memory attack.
+const MAX_HOOK_BODY: usize = 16 * 1024 * 1024;
+
 /// Build the router.
 ///
 /// `/health` is outside the guard on purpose. It says only that an anamnesis
@@ -185,7 +200,10 @@ impl AppState {
 /// being able to switch off on a server other people can reach.
 pub fn router(state: AppState, ui: bool) -> Router {
     let guarded = Router::new()
-        .route("/hook", post(receive_hook))
+        .route(
+            "/hook",
+            post(receive_hook).layer(DefaultBodyLimit::max(MAX_HOOK_BODY)),
+        )
         .route("/handoff", get(deliver_handoff))
         .route("/whoami", get(whoami))
         // `route_layer`, not `layer`: a request for a path this server does not
@@ -616,6 +634,8 @@ struct AgentQuery {
     session_id: Option<String>,
     /// Ask what would be recorded, and record nothing.
     probe: Option<String>,
+    /// The sender's own name for this delivery, so a repeat of it is one event.
+    event: Option<String>,
 }
 
 impl AgentQuery {
@@ -629,6 +649,24 @@ impl AgentQuery {
     /// record the event it was asked to only describe.
     fn probing(&self) -> bool {
         !matches!(self.probe.as_deref(), None | Some("0") | Some("false"))
+    }
+
+    /// The identity the sender gave this delivery.
+    ///
+    /// An unreadable one is dropped rather than refused, and the event is
+    /// recorded under a fresh identifier. The cost of that is a duplicate if
+    /// this delivery is repeated; the cost of the alternative is refusing an
+    /// event outright over a field no harness sends and only this project's
+    /// own hook fills in.
+    fn delivery(&self) -> Option<anamnesis_core::ids::ObservationId> {
+        let raw = self.event.as_deref()?;
+        match raw.parse() {
+            Ok(id) => Some(id),
+            Err(error) => {
+                tracing::warn!(%error, event = raw, "ignoring an unreadable event identifier");
+                None
+            }
+        }
     }
 
     /// The harness, defaulting to Claude Code.
@@ -654,7 +692,8 @@ async fn receive_hook(
     let payload = parse_payload(&body)?;
 
     let hook = anamnesis_hooks::parse(&query.agent(), &payload)
-        .map_err(|error| WebError::BadRequest(error.to_string()))?;
+        .map_err(|error| WebError::BadRequest(error.to_string()))?
+        .sent_as(query.delivery());
 
     if hook.was_redacted() {
         tracing::info!(rules = ?hook.redactions, "redacted secrets from hook payload");
@@ -2484,5 +2523,137 @@ mod tests {
             .expect("load")
             .expect("session exists");
         assert_eq!(session.operator, Some(operator("alice")));
+    }
+    /// A tool output of a few megabytes is an ordinary event: one `Read` of a
+    /// large file makes one. What the server keeps of it is 16 KB, cut after
+    /// parsing — so refusing the request outright would reject an event it was
+    /// about to shorten anyway, and leave the hook holding a payload no retry
+    /// can ever deliver.
+    #[tokio::test]
+    async fn an_oversized_tool_output_is_accepted_rather_than_refused() {
+        let harness = harness();
+        let payload = json!({
+            "session_id": "session-huge",
+            "hook_event_name": "PostToolUse",
+            "cwd": harness.cwd.to_string_lossy(),
+            "tool_name": "Read",
+            "tool_input": {"file_path": "big.txt"},
+            "tool_response": "x".repeat(3 * 1024 * 1024),
+        });
+        let request = HttpRequest::builder()
+            .method("POST")
+            .uri("/hook?agent=claude-code")
+            .header("content-type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .expect("request");
+
+        let response = send(&harness.state, request).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    /// And the ceiling is still a ceiling. Raising the limit to fit a real
+    /// payload is only defensible while there is a size past which the server
+    /// stops reading: the body is buffered whole and scanned for secrets
+    /// before a byte of it is kept.
+    #[tokio::test]
+    async fn a_body_past_the_ceiling_is_still_refused() {
+        let harness = harness();
+        let payload = json!({
+            "session_id": "session-absurd",
+            "hook_event_name": "PostToolUse",
+            "cwd": harness.cwd.to_string_lossy(),
+            "tool_name": "Read",
+            "tool_response": "x".repeat(MAX_HOOK_BODY + 1),
+        });
+        let request = HttpRequest::builder()
+            .method("POST")
+            .uri("/hook?agent=claude-code")
+            .header("content-type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .expect("request");
+
+        let response = send(&harness.state, request).await;
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    /// One event, delivered twice, because that is what the queue does: a
+    /// hook that gave up after a second on a server that was in fact
+    /// recording keeps the event and offers it again later. Both arrivals
+    /// carry the identity the sender minted, and the second one has to change
+    /// nothing — a session that counts the same prompt twice is a session
+    /// summarised wrongly, and nothing downstream can tell the copy apart.
+    #[tokio::test]
+    async fn an_event_delivered_twice_is_recorded_once() {
+        let harness = harness();
+        let event = "01998f3a-0000-7000-8000-00000000abcd";
+        let body = json!({
+            "session_id": "session-twice",
+            "hook_event_name": "UserPromptSubmit",
+            "cwd": harness.cwd.to_string_lossy(),
+            "prompt": "do the thing",
+        })
+        .to_string();
+        let request = || {
+            HttpRequest::builder()
+                .method("POST")
+                .uri(format!("/hook?agent=claude-code&event={event}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.clone()))
+                .expect("request")
+        };
+
+        for _ in 0..2 {
+            let response = send(&harness.state, request()).await;
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+        }
+
+        let session = anamnesis_core::ids::SessionId::derive(project(&harness), "session-twice");
+        let observations = harness
+            .state
+            .store
+            .observations(session)
+            .expect("observations");
+        assert_eq!(
+            observations.len(),
+            1,
+            "the replayed event was recorded a second time"
+        );
+    }
+
+    /// And a sender that names nothing still has every event of its own. Two
+    /// identical prompts in one session are two events, and collapsing them
+    /// would lose one to a de-duplication nobody asked for.
+    #[tokio::test]
+    async fn events_without_an_identity_are_each_recorded() {
+        let harness = harness();
+        let body = json!({
+            "session_id": "session-anon",
+            "hook_event_name": "UserPromptSubmit",
+            "cwd": harness.cwd.to_string_lossy(),
+            "prompt": "again",
+        })
+        .to_string();
+
+        for _ in 0..2 {
+            let request = HttpRequest::builder()
+                .method("POST")
+                .uri("/hook?agent=claude-code")
+                .header("content-type", "application/json")
+                .body(Body::from(body.clone()))
+                .expect("request");
+            let response = send(&harness.state, request).await;
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+        }
+
+        let session = anamnesis_core::ids::SessionId::derive(project(&harness), "session-anon");
+        assert_eq!(
+            harness
+                .state
+                .store
+                .observations(session)
+                .expect("observations")
+                .len(),
+            2
+        );
     }
 }

@@ -194,9 +194,16 @@ impl Store {
     }
 
     /// Append an observation.
-    pub fn insert_observation(&self, observation: &Observation) -> Result<()> {
+    ///
+    /// Returns whether the row was new. An event whose sender named it can
+    /// arrive twice — a hook that timed out on a server that was recording
+    /// keeps it and offers it again — and the second arrival lands on the
+    /// conflict clause. Saying so lets a caller skip the work that would
+    /// double it, which for the capture path is the line it appends to the
+    /// durable transcript.
+    pub fn insert_observation(&self, observation: &Observation) -> Result<bool> {
         let conn = self.connection();
-        conn.execute(
+        let inserted = conn.execute(
             "INSERT INTO observations
                  (id, session_id, kind, tool_name, tool_ok, at, body, truncated, sanitized)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
@@ -213,7 +220,7 @@ impl Store {
                 observation.sanitized,
             ],
         )?;
-        Ok(())
+        Ok(inserted == 1)
     }
 
     /// Every observation in a session, oldest first.

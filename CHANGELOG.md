@@ -8,6 +8,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- The same event delivered twice is recorded once. The hook gives up after a
+  second, and a server that was in fact recording can take longer than that —
+  so the event goes into the queue and is offered again later, and until now
+  the second arrival was a second prompt in the session. Nothing downstream
+  could tell the copy from the original: the summary counted it, the transcript
+  kept it, and the count was simply wrong. The hook now names each delivery
+  before its first attempt and reuses that name for every later one, including
+  the copy the queue carries, so a repeat lands on the conflict clause the
+  observations table already had and changes nothing. A sender that names
+  nothing is recorded exactly as before — two identical prompts in one session
+  are two events, and collapsing them would lose one to a de-duplication
+  nobody asked for
+- An event the server has read and refused no longer stops every event behind
+  it. The queue replays in order and stops at the first failure, which is right
+  for a server that is down, restarting, or holding a token somebody is about
+  to fix — all of those take the event later. It is wrong for a payload the
+  server has judged: a 400 or a 413 is the same answer however long it waits,
+  and one of those at the head of an ordered queue ends capture quietly, which
+  is the failure the queue was written to prevent. Those are now dropped, out
+  loud, with the status that judged them, and the events behind them go
+- A hook payload larger than two megabytes is accepted rather than refused.
+  One `Read` of a large file makes one, so this was an ordinary event, and the
+  server's own limit on what it keeps of a body is 16 KB applied after parsing
+  — it was refusing an event it was about to shorten anyway, and leaving the
+  hook holding a payload no retry could ever deliver. The ceiling is now
+  explicit and 16 MB: the body is buffered whole and scanned for secrets before
+  a byte of it is kept, so it cannot be unbounded either
 - An event the hook cannot deliver is kept and delivered later, rather than
   dropped. The hook's timeouts are a quarter of a second to connect and one to
   answer, because the case that matters is the server being down and a generous

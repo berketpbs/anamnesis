@@ -15,6 +15,7 @@
 
 use std::path::PathBuf;
 
+use anamnesis_core::ids::ObservationId;
 use anamnesis_core::observation::{BoundedBody, EventKind, ToolRef};
 use anamnesis_core::sanitize::Redactor;
 use anamnesis_core::session::AgentKind;
@@ -59,12 +60,30 @@ pub struct ParsedHook {
     pub body: BoundedBody,
     /// Redaction rules that fired, safe to log.
     pub redactions: Vec<&'static str>,
+    /// The identity the sender gave this delivery, when it gave one.
+    ///
+    /// Not from the payload — no harness puts one there. It is the sender's
+    /// own name for *this event*, carried so that offering the same event
+    /// twice is one event. A hook that cannot reach the server keeps what it
+    /// was carrying and offers it again later, and a hook that gave up after a
+    /// second on a server that was in fact recording keeps one the server
+    /// already has. Without a name that survives both attempts, the second
+    /// arrival is a second prompt in the session and every count taken from it
+    /// is wrong.
+    pub delivery: Option<ObservationId>,
 }
 
 impl ParsedHook {
     /// Whether anything was redacted from this payload.
     pub fn was_redacted(&self) -> bool {
         !self.redactions.is_empty()
+    }
+
+    /// Name this delivery, so a repeat of it can be recognised.
+    #[must_use]
+    pub fn sent_as(mut self, delivery: Option<ObservationId>) -> Self {
+        self.delivery = delivery;
+        self
     }
 }
 
@@ -91,6 +110,7 @@ pub fn parse(agent: &AgentKind, raw: &Value) -> Result<ParsedHook> {
         paths,
         body,
         redactions: redacted.hits().to_vec(),
+        delivery: None,
     })
 }
 
