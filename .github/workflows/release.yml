@@ -31,15 +31,26 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             archive: tar.gz
+            native: true
           - os: macos-latest
             target: aarch64-apple-darwin
             archive: tar.gz
-          - os: macos-13
+            native: true
+          # Cross-compiled on the Apple silicon runner rather than built on an
+          # Intel one. `macos-13` is the scarcest runner GitHub has left — the
+          # first rehearsal of this workflow had it queued for over an hour
+          # while the other three finished in minutes — and a release that
+          # waits on a runner class being retired is a release that eventually
+          # does not happen. Apple's toolchain targets both architectures, so
+          # this costs nothing but the check below.
+          - os: macos-latest
             target: x86_64-apple-darwin
             archive: tar.gz
+            native: false
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive: zip
+            native: true
 
     steps:
       - uses: actions/checkout@v5
@@ -113,9 +124,17 @@ jobs:
       - name: Check it runs
         shell: bash
         run: |
-          # Built for this runner's own target, so it can be asked what it is.
           # A release binary that does not start is the one failure a release
-          # workflow must never let through.
+          # workflow must never let through — where the runner can start it.
+          # The Intel macOS build is the exception and it is named rather than
+          # skipped quietly: it is cross-compiled on an Apple silicon runner,
+          # which cannot be relied on to execute it. What stands behind that
+          # one is the compiler and the linker agreeing, and nothing else.
+          if [[ "${{ matrix.native }}" != "true" ]]; then
+            echo "cross-compiled for ${{ matrix.target }}; not executed here"
+            file "target/${{ matrix.target }}/release/anamnesis"
+            exit 0
+          fi
           if [[ "${{ matrix.archive }}" == "zip" ]]; then
             "target/${{ matrix.target }}/release/anamnesis.exe" --version
           else
