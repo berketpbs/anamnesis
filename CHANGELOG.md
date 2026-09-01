@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `anamnesis backup` and `anamnesis restore`. The wiki has carried its own git
+  history since the beginning, so the compiled half of memory was always
+  recoverable; the other half was not. `db/` can be rebuilt from the wiki and
+  the transcripts, but `raw/` can be rebuilt from nothing — the observations a
+  page was compiled from live in exactly one place, on one disk, in a directory
+  that is in no repository. One archive now carries the index, the transcripts
+  and the wiki including its `.git`, because the history *is* the wiki: page
+  restores and checkpoints read it. `models/` and `logs/` are left out, being a
+  download any machine can repeat and a record of one machine's afternoons.
+  The index is copied through SQLite's own backup API rather than by copying
+  the file: it runs in WAL mode, so at any instant the committed database is
+  spread across `anamnesis.db` and a `-wal` file beside it, and copying the
+  first without the second yields a database that opens, reports a plausible
+  schema version, and is missing whatever was written most recently — a backup
+  that is quietly stale, discovered on the day it is needed. The server can be
+  running and writing throughout. Restoring says what it would do and writes
+  nothing until `--apply`, and a data directory that already holds memory is
+  left exactly as it was unless `--force` says otherwise, because restoring is
+  the one operation here that running the other one cannot undo. An archive
+  from a newer format is refused rather than half-read, and an entry whose name
+  would put a file outside the data directory is refused by name — the tar
+  crate skips such an entry and reports success, and a restore that silently
+  dropped part of itself is the failure this whole command exists to prevent
+
 ### Fixed
 - A marker file written for a newer anamnesis no longer stops capture on an
   older one. The rule was that unknown keys are rejected, so that a typo

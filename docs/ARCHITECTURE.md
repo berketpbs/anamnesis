@@ -233,6 +233,11 @@ Command-line interface.
 
 **Provides:**
 - `status`, `init`, `serve`, `mcp`, `hook`, `install-hooks`
+- `backup`, `restore` — one archive holding the index, the transcripts and
+  the wiki with its history. The index goes through SQLite's backup API, not
+  a file copy: in WAL mode the committed database is spread across two files
+  and copying one of them produces a database that opens and is quietly
+  stale. `models/` and `logs/` are left out
 - `search`, `write-page`, `show-page`, `sessions`, `handoff`
 - `reindex` — rebuild the index from `wiki/` and `raw/`
 - `bootstrap` — seed a new project's memory from its git history
