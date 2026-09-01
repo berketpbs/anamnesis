@@ -204,6 +204,15 @@ enum Commands {
         /// into a settings file that the harness reads aloud.
         #[arg(long, env = anamnesis_web::auth::TOKEN_ENV, hide_env_values = true)]
         token: Option<String>,
+
+        /// Ask what would be recorded, and record nothing
+        ///
+        /// The way to check that capture is working without leaving a session
+        /// behind. Reads a payload on stdin if one is piped, and makes one up
+        /// for this directory otherwise. Unlike the hook itself, this exits
+        /// non-zero when memory would not record.
+        #[arg(long)]
+        probe: bool,
     },
 
     /// Wire the agent's lifecycle hooks to anamnesis
@@ -571,8 +580,13 @@ fn main() -> anyhow::Result<()> {
             agent,
             server,
             token,
+            probe,
         } => {
-            cmd_hook(&agent, &server, token.as_deref(), cli.data_dir.clone());
+            if probe {
+                cmd_probe(&agent, &server, token.as_deref())?;
+            } else {
+                cmd_hook(&agent, &server, token.as_deref(), cli.data_dir.clone());
+            }
         }
         Commands::InstallHooks {
             agent,
@@ -1615,6 +1629,177 @@ fn describe_serving_auth(auth: &anamnesis_web::Auth) -> String {
 ///
 /// Never fails loudly. Hooks run inside someone's editing session, so a server
 /// that is not running should cost them nothing more than a line on stderr.
+/// Ask the server what it would record, and let it record nothing.
+///
+/// This exists because the obvious way to check that capture is working is to
+/// fire a hook by hand, and the cost of that is permanent: the event is real,
+/// so the session is real, and it is then counted, listed, and eventually
+/// summarised into a page like anybody's afternoon. Four of the first ten
+/// sessions recorded for this project were diagnostics.
+///
+/// Three differences from [`cmd_hook`], all of them because a person is
+/// waiting on this rather than an editor:
+///
+/// * **It exits non-zero when memory would not record.** The hook's promise
+///   to always exit 0 protects an editing session from a memory system that
+///   is having a bad day; nothing here is inside anybody's editor, and a
+///   diagnostic that cannot fail is not a diagnostic.
+/// * **It never queues.** The queue exists so a real event survives the
+///   server being down. Filling it with probes would mean the next healthy
+///   hook delivers events that never happened, which is the pollution this
+///   command exists to stop.
+/// * **It never asks for the handoff.** A handoff is single-use. Claiming one
+///   to prove memory works would consume the note the next session was owed —
+///   a diagnostic that has already cost this project one.
+fn cmd_probe(agent: &str, server: &str, token: Option<&str>) -> anyhow::Result<()> {
+    let payload = probe_payload(agent)?;
+
+    println!("🔎 Probing memory at {server}");
+    println!();
+
+    // Looser than the hook's budgets, deliberately: those are tight because a
+    // hook runs before every tool call and a stall costs somebody's
+    // afternoon. This runs once, with a person reading the output, where
+    // calling a slow server dead is the more expensive mistake.
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_millis(500))
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
+
+    let mut post = client
+        .post(format!("{server}/hook"))
+        .query(&[("agent", agent), ("probe", "1")])
+        .header("content-type", "application/json")
+        .body(payload);
+    if let Some(token) = token {
+        post = post.bearer_auth(token);
+    }
+
+    let response = match post.send() {
+        Ok(response) => response,
+        Err(error) => {
+            println!("  Server:     unreachable — {error}");
+            println!();
+            anyhow::bail!("memory is not recording: nothing is listening at {server}");
+        }
+    };
+
+    let status = response.status();
+    if !status.is_success() {
+        let detail = response.text().unwrap_or_default();
+        println!("  Server:     reachable, and refused the event ({status})");
+        println!("              {}", detail.trim());
+        println!();
+        anyhow::bail!("memory is not recording: the server refused a probe");
+    }
+
+    // A server older than `--probe` does not know the parameter, ignores it,
+    // and records the event — answering `accepted` where a probe report
+    // belongs. Read as a parse error that would be the least useful sentence
+    // available, so it is named for what it is: the one case where running
+    // this command leaves something behind.
+    let body = response.text()?;
+    let report: anamnesis_web::ProbeReport = serde_json::from_str(&body).map_err(|_| {
+        anyhow::anyhow!(
+            "the server answered {body:?} instead of a probe report, which means it is              older than --probe: it ignored the parameter and recorded the event. Point              the server at a current binary, then remove what this left behind with              `anamnesis forget-session`."
+        )
+    })?;
+    println!("  Server:     reachable");
+    println!("  Scope:      {}/{}", report.workspace, report.project);
+    println!(
+        "  Session:    {} ({})",
+        &report.session[..report.session.len().min(8)],
+        if report.session_known {
+            "already recorded"
+        } else {
+            "new"
+        }
+    );
+    println!("  Event:      {} (read as {})", report.event, report.agent);
+    println!(
+        "  Redacted:   {}",
+        if report.redactions.is_empty() {
+            "nothing".to_owned()
+        } else {
+            report.redactions.join(", ")
+        }
+    );
+    println!(
+        "  Handoff:    {}",
+        if report.handoff_waiting {
+            "one waiting — peeked, not claimed"
+        } else {
+            "none waiting"
+        }
+    );
+    println!(
+        "  Summaries:  {}",
+        match report.consolidation {
+            anamnesis_web::Consolidation::Model => "written by a model",
+            anamnesis_web::Consolidation::Counted => "counted — no model configured",
+        }
+    );
+    println!();
+
+    match &report.excluded {
+        None => {
+            println!("  This event would be recorded. Nothing was.");
+            Ok(())
+        }
+        Some(path) => {
+            println!("  This event would be DROPPED: {path}");
+            println!("  [capture] ignore_paths in the marker file excludes it.");
+            anyhow::bail!("memory would not record this event")
+        }
+    }
+}
+
+/// The payload a probe sends: whatever was piped in, or one made up here.
+///
+/// Reading stdin only when something is piped is what keeps this usable by
+/// hand — a probe that blocked on an empty terminal would be indistinguishable
+/// from a server that never answers, which is the exact confusion it is meant
+/// to resolve.
+fn probe_payload(agent: &str) -> anyhow::Result<String> {
+    use std::io::IsTerminal;
+
+    if !std::io::stdin().is_terminal() {
+        let mut piped = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut piped)?;
+        let piped = piped.trim_start_matches('\u{feff}').trim().to_owned();
+        if !piped.is_empty() {
+            return Ok(piped);
+        }
+    }
+
+    let cwd = std::env::current_dir()?;
+    // Named rather than random: a probe should be recognisable as one in a
+    // log, and deriving the same session identifier every time means repeated
+    // probes describe one hypothetical session rather than a new one each.
+    let payload = serde_json::json!({
+        "hook_event_name": event_name_for(agent),
+        "session_id": "anamnesis-probe",
+        "cwd": cwd.to_string_lossy(),
+        "prompt": "anamnesis probe: what would you do with this",
+    });
+    Ok(payload.to_string())
+}
+
+/// What one harness calls the event a probe imitates.
+///
+/// An ordinary prompt, because it is the event a session produces most and
+/// the one whose path has the most to go wrong on it. Harnesses that spell it
+/// differently get their own spelling: anamnesis classifies the payload
+/// itself, and a name it does not recognise would be read as a notification
+/// and probe a path nobody uses.
+fn event_name_for(agent: &str) -> &'static str {
+    match agent {
+        "codex" => "user_prompt",
+        "gemini-cli" => "UserPrompt",
+        _ => "UserPromptSubmit",
+    }
+}
+
 fn cmd_hook(agent: &str, server: &str, token: Option<&str>, data_dir: Option<PathBuf>) {
     let mut payload = String::new();
     if std::io::Read::read_to_string(&mut std::io::stdin(), &mut payload).is_err() {

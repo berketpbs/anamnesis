@@ -63,6 +63,120 @@ pub fn ingest(
     })
 }
 
+/// What recording this event would do, reported without doing any of it.
+///
+/// Every field here is something the capture path decides on its way to a
+/// write: which project the working directory resolves to, which session the
+/// harness's identifier derives, whether `[capture] ignore_paths` would drop
+/// the event, what redaction caught. A probe that only asked "is the server
+/// up" would answer the easy half of the question — the failures worth
+/// finding are the ones where the server is up and the event still goes
+/// nowhere.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProbeReport {
+    /// Whether this event would be stored, had it not been a probe.
+    pub would_record: bool,
+    /// The harness the payload was read as.
+    pub agent: String,
+    /// The lifecycle event it was classified as.
+    pub event: String,
+    /// Workspace the working directory resolved to.
+    pub workspace: String,
+    /// Project the working directory resolved to.
+    pub project: String,
+    /// The session identifier this payload derives.
+    pub session: String,
+    /// Whether that session is already in the index.
+    pub session_known: bool,
+    /// The first path `[capture] ignore_paths` would drop the event for.
+    pub excluded: Option<String>,
+    /// Redaction rules that fired on the payload.
+    pub redactions: Vec<String>,
+    /// Whether a handoff is waiting in the slot this session would read.
+    ///
+    /// Peeked, never claimed. A handoff is single-use, and a diagnostic that
+    /// consumed the note the next session was owed would be the most
+    /// expensive way to ask whether memory is working.
+    pub handoff_waiting: bool,
+    /// How the server would summarise this session.
+    pub consolidation: Consolidation,
+}
+
+/// What the server would compile a session into.
+///
+/// Reported because it is the difference between memory that holds knowledge
+/// and memory that holds counts, and nothing else a probe can see says which
+/// one is running: capture works identically either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Consolidation {
+    /// A model writes the summary.
+    Model,
+    /// The summary is counted from what the session did.
+    Counted,
+}
+
+/// Answer what [`record`] would do with this event, and write nothing.
+///
+/// Everything up to the first write is real: the payload is parsed and
+/// redacted by the same code, the scope is resolved from the same working
+/// directory, the session identifier is derived by the same rule. What is
+/// skipped is every write — the project row, the session, the observation,
+/// the spool — and the handoff is peeked rather than claimed.
+pub fn probe(
+    store: &Store,
+    hook: &ParsedHook,
+    now: Timestamp,
+    operator: Option<&OperatorName>,
+    model: bool,
+) -> Result<ProbeReport, WebError> {
+    let cwd = hook
+        .cwd
+        .as_deref()
+        .ok_or_else(|| WebError::BadRequest("hook payload has no cwd".to_owned()))?;
+    let scope = scope_for(cwd)?;
+
+    let session_id = SessionId::derive(scope.project_id, &hook.agent_session_id);
+    // Built exactly as `record` builds it, and then not stored. Deriving the
+    // slot from anything else would let the probe report a waiting handoff
+    // that the real path would not find.
+    let session = new_session(
+        session_id,
+        scope.project_id,
+        scope.workspace_id,
+        hook.agent.clone(),
+        cwd.to_path_buf(),
+        now,
+        None,
+    )
+    .with_operator(operator.cloned());
+
+    let excluded = excluded_path(&scope, hook);
+    let slot = slot_for(&scope, &session);
+
+    Ok(ProbeReport {
+        would_record: excluded.is_none(),
+        agent: hook.agent.to_string(),
+        event: hook.kind.as_str().to_owned(),
+        workspace: scope.scope.workspace.to_string(),
+        project: scope.scope.project.to_string(),
+        session: session_id.to_string(),
+        session_known: store.load_session(session_id)?.is_some(),
+        excluded,
+        redactions: hook
+            .redactions
+            .iter()
+            .map(|rule| (*rule).to_owned())
+            .collect(),
+        handoff_waiting: store.peek_handoff(scope.project_id, &slot)?.is_some(),
+        consolidation: if model {
+            Consolidation::Model
+        } else {
+            Consolidation::Counted
+        },
+    })
+}
+
 /// Make one event durable, and stop there.
 ///
 /// Separated from [`ingest`] because consolidation may want to take its time —

@@ -937,13 +937,47 @@ session is worse than one that misses an event — so check in this order:
 ```bash
 anamnesis status --verbose   # is the scope what you expect?
 anamnesis sessions           # did anything arrive at all?
-curl http://127.0.0.1:8080/health
+anamnesis hook --probe       # what would the next event do?
 ```
 
 The `hook` command always exits 0, but it writes the reason to **stderr**: a
-rejected event, an unreachable server, a payload it could not parse. If
-Claude Code hides hook stderr, run the same command by hand with a payload on
-stdin to see it.
+rejected event, an unreachable server, a payload it could not parse. If your
+harness hides hook stderr, `--probe` is the way to see the same answer.
+
+A probe sends a payload the server describes instead of storing. It reports
+the scope the working directory resolves to, the session the identifier would
+derive, whether `[capture] ignore_paths` would drop the event, what redaction
+caught, whether a handoff is waiting, and whether summaries are written by a
+model or counted:
+
+```bash
+$ anamnesis hook --probe
+Probing memory at http://127.0.0.1:8080
+
+  Server:     reachable
+  Scope:      default/anamnesis
+  Session:    fb4d44b0 (new)
+  Event:      user-prompt (read as claude-code)
+  Redacted:   nothing
+  Handoff:    none waiting
+  Summaries:  counted - no model configured
+
+  This event would be recorded. Nothing was.
+```
+
+Use it rather than firing a hook by hand. A hand-fired hook is a real event,
+so it makes a real session that is counted, listed, and eventually summarised
+into a page of its own - and if it is a `SessionStart`, it *claims the waiting
+handoff*, which is single-use. Anything a probe of the older kind already left
+behind comes out with `anamnesis forget-session`.
+
+Unlike the hook, a probe exits non-zero when memory would not record, so it
+works in a script. It reads a payload on stdin when one is piped, which is how
+to ask about a specific event rather than a made-up one:
+
+```bash
+anamnesis hook --probe < the-payload-that-went-missing.json
+```
 
 If the server requires a token, `anamnesis status` says so on its `Auth:` line
 — including when this machine'''s token is the thing being refused. Hooks
