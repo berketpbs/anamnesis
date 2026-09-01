@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A JSON API under `/api/v1`: the scopes this server holds, one scope's pages,
+  one page with the body the wiki holds, the same fused search an agent runs,
+  the sessions recorded, and the audit log. The browser at `/ui` already
+  rendered these facts for a person; nothing served them to a program, and the
+  rest of the HTTP surface answers only two questions — take this event, hand
+  me my handoff — neither of which is "what does memory hold". Read-only on
+  purpose: every write in this system is either capture, which has its own
+  endpoint, or a decision somebody made, and those stay CLI commands so that
+  changing memory takes a machine somebody has rather than a token somebody
+  has. Behind the same header-only guard as the rest of the API, so a
+  credential a browser attaches on its own cannot read the whole of memory from
+  a page on another site. Errors are JSON too — a program should not have to
+  parse an HTML page to find out that a scope does not exist. Versioned from
+  the first line, so a consumer written today keeps working
 - An audit log, and `anamnesis audit` to read it. Capture already records what
   happened *inside* sessions; nothing recorded who reached in and changed the
   memory itself. A page rewritten by hand, a session forgotten, a handoff

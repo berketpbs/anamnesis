@@ -30,6 +30,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio_util::task::TaskTracker;
 
+pub mod api;
 pub mod auth;
 pub mod improve;
 mod pipeline;
@@ -235,10 +236,16 @@ const MAX_HOOK_BODY: usize = 16 * 1024 * 1024;
 /// into one silence is how a person spends an afternoon restarting a server
 /// that was running the whole time.
 ///
-/// `ui` mounts the wiki browser. It is the one part of this surface that can
-/// read the whole of memory — the API delivers a handoff and accepts events,
-/// and neither hands back an arbitrary page — so it is also the one part worth
-/// being able to switch off on a server other people can reach.
+/// `ui` mounts the wiki browser. Together with `/api/v1` it is the part of
+/// this surface that can read the whole of memory — the hook and handoff
+/// endpoints accept an event and deliver one note, and neither hands back an
+/// arbitrary page — which is why both sit behind the same guard, and why the
+/// browser can be switched off on a server other people can reach.
+///
+/// `/api/v1` serves the same facts to a program: scopes, pages, one page,
+/// search, sessions, and the audit log. It keeps the header-only rule, so a
+/// credential a browser attaches on its own cannot read memory from a page on
+/// somebody else's site.
 pub fn router(state: AppState, ui: bool) -> Router {
     let guarded = Router::new()
         .route(
@@ -254,7 +261,10 @@ pub fn router(state: AppState, ui: bool) -> Router {
             require_token,
         ));
 
-    let mut app = Router::new().route("/health", get(health)).merge(guarded);
+    let mut app = Router::new()
+        .route("/health", get(health))
+        .merge(guarded)
+        .merge(api::routes(&state));
     if ui {
         app = app.merge(ui::routes(&state));
     }

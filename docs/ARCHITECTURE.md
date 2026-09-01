@@ -165,6 +165,11 @@ The HTTP server hooks deliver to.
 - `GET /handoff` — hand the next session what the last one left
 - `GET /whoami` — what the server makes of the caller's token
 - `GET /health`
+- `GET /api/v1/...` — the same facts the browser renders, as JSON: `scopes`,
+  a scope's `pages`, one page with its body, `search?q=`, `sessions`, and
+  `audit`. Read-only, because every write here is either capture or a
+  decision a person makes from the CLI. Same header-only guard as the rest
+  of the API; errors are JSON, not HTML
 - `GET /ui` — the wiki browser: scopes, the pages in one, one page
   rendered, and `?q=` to search a scope. Its index also says what this server
   is doing (auth, consolidation, embedding) and when each scope last recorded
