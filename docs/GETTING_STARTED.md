@@ -356,16 +356,28 @@ anamnesis install-hooks --agent claude-code          # .claude/settings.local.js
 anamnesis install-hooks --agent codex --write        # .codex/hooks.json
 anamnesis install-hooks --agent gemini-cli --write   # .gemini/settings.json
 anamnesis install-hooks --agent cursor --write       # .cursor/hooks.json
+anamnesis install-hooks --agent opencode --write     # .opencode/plugins/anamnesis.js
 ```
 
-All four capture the same five moments and one server captures all of them,
+All five capture the same five moments and one server captures all of them,
 though each spells the events its own way, Cursor names its fields its own way,
 and Gemini CLI and Cursor both want their answers as JSON. Hooks are read when a session starts, so the session you run this from
 is not the one that gets captured.
 
-OpenCode is not wired: it extends through a TypeScript plugin API rather than
-a command hook, so there is nothing for `install-hooks` to register. Running
-it against `--agent opencode` says so.
+**OpenCode is the odd one.** It extends through a plugin rather than a command,
+so `--write` puts a module at `.opencode/plugins/anamnesis.js` instead of
+merging JSON into a settings file. The plugin subscribes to `chat.message`,
+`tool.execute.after` and `experimental.session.compacting`, synthesises the
+session's start from the first event that carries a session id, and sends the
+end when OpenCode disposes of it — a session that ends some other way is
+summarised by the server's reaper instead.
+
+The handoff arrives differently too. Every other harness injects a hook's
+stdout; OpenCode has no such channel, so the plugin pushes the waiting note
+into the system prompt (`experimental.chat.system.transform`), labelled as
+coming from anamnesis. A file already at that path that anamnesis did not
+write is left exactly where it is — the command says so rather than replacing
+somebody's own plugin.
 
 **MCP** lets the agent search memory and write pages on purpose. Without it an
 agent is handed one summary at startup and can read nothing else, however much
@@ -395,10 +407,10 @@ touched. Codex is TOML, and its table is `mcp_servers` rather than
 `mcpServers` — merged with `toml_edit`, so the comments and key order in an
 existing `config.toml` come back as they were.
 
-OpenCode is not registered, for the reason its hooks are not: it extends
-through a TypeScript plugin API rather than a configuration file. The server
-itself is harness-agnostic — `anamnesis mcp --repo <dir>` over stdio is all any
-of them need.
+OpenCode's hooks are wired (above), but its MCP registration is not written
+for it: its configuration is its own shape and `install-mcp` has not learned
+it. The server itself is harness-agnostic — `anamnesis mcp --repo <dir>` over
+stdio is all any of them need, including OpenCode.
 
 Hooks need `anamnesis serve` running. MCP does not — it opens the store
 directly.

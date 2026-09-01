@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- OpenCode is wired. It was the one harness anamnesis knew about and could not
+  connect, because it extends through a plugin module rather than a command in
+  a settings file — there is nothing for `install-hooks` to merge, and no
+  stdout for a hook to answer on. `anamnesis install-hooks --agent opencode
+  --write` now writes `.opencode/plugins/anamnesis.js`: it subscribes to
+  `chat.message`, `tool.execute.after` and `experimental.session.compacting`,
+  synthesises the session's start from the first event carrying a session id,
+  and sends the end on `dispose` — a session that ends another way is
+  summarised by the reaper, as one from any harness would be. The handoff is
+  pushed into the system prompt through `experimental.chat.system.transform`,
+  labelled as coming from anamnesis, once per session because claiming one
+  consumes it. The plugin is a checked-in file rather than string fragments
+  assembled at run time, with the binary path and server address baked in
+  through a JSON serialiser: a Windows path in a JavaScript string is a path
+  full of escapes, which is the character class that cost this repository two
+  days of capture once already. A plugin at that path that anamnesis did not
+  write is never overwritten
 - A JSON API under `/api/v1`: the scopes this server holds, one scope's pages,
   one page with the body the wiki holds, the same fused search an agent runs,
   the sessions recorded, and the audit log. The browser at `/ui` already

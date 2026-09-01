@@ -133,23 +133,6 @@ pub fn harness(agent: &str) -> Option<Harness> {
     HARNESSES.into_iter().find(|h| h.agent == agent)
 }
 
-/// Why a harness anamnesis knows about still cannot be wired this way.
-///
-/// Said rather than left as "not yet", because for one of them it is not a
-/// gap that will close: an answer someone can act on beats a promise.
-pub fn cannot_wire(agent: &str) -> Option<&'static str> {
-    match agent {
-        "opencode" => Some(
-            "OpenCode extends through a TypeScript plugin API, not a command hook:\n  \
-             a plugin is a module under .opencode/plugins/ that subscribes to events\n  \
-             like `session.created` and returns context through the SDK client.\n  \
-             There is no command for `install-hooks` to register, and writing the\n  \
-             plugin here would mean guessing at how it hands a handoff back.",
-        ),
-        _ => None,
-    }
-}
-
 /// What a merge did, per event.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Outcome {
@@ -641,18 +624,16 @@ mod tests {
         assert_eq!(second.present.len(), CODEX.events.len());
     }
 
-    /// A harness that extends through something other than a command hook has
-    /// to say so. Left as "not yet", someone waits for a release that is never
-    /// coming.
+    /// OpenCode is not in this table, and that is not an omission: it extends
+    /// through a plugin module rather than a command in a settings file, so
+    /// `install-hooks` writes one (see `crate::opencode`) instead of merging
+    /// JSON. Pinned here so that adding it to `HARNESSES` — which would write
+    /// a command OpenCode never runs — fails a test rather than shipping.
     #[test]
-    fn opencode_is_told_why_rather_than_when() {
-        let reason = cannot_wire("opencode").expect("a reason");
-        assert!(reason.contains("plugin"), "{reason}");
-        assert!(
-            cannot_wire("codex").is_none(),
-            "codex is wired, not refused"
-        );
-        assert!(cannot_wire("claude-code").is_none());
+    fn opencode_is_not_wired_through_a_settings_file() {
+        assert!(harness("opencode").is_none());
+        assert!(harness("codex").is_some());
+        assert!(harness("claude-code").is_some());
     }
 
     /// Cursor refuses a `hooks.json` that does not declare its schema version,

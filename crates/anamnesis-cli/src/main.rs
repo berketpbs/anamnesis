@@ -17,6 +17,7 @@ mod format;
 mod hooks;
 mod improve;
 mod mcp_config;
+mod opencode;
 mod pages;
 mod project;
 mod reindex;
