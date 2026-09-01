@@ -237,6 +237,20 @@ pub fn record(
     // supersedes its handoff, so the only cost is the second pass.
     store.resume_session(session_id)?;
 
+    // The session as it is stored, not as it was just built. They differ for
+    // every event after the first: `new_session` stamps `started_at` with
+    // *now*, and `ensure_session` keeps the row that is already there. Only
+    // the stored one can say when the session began — and the transcript's
+    // path is derived from that, so writing against the fresh one filed a
+    // session that ran past midnight under two dates, with the second file
+    // claiming a start time hours after the truth and unreachable by every
+    // command that looks a transcript up by name.
+    //
+    // One indexed lookup by primary key, on a path that already runs several
+    // statements. It buys a transcript per session rather than per calendar
+    // day it touched.
+    let session = store.load_session(session_id)?.unwrap_or(session);
+
     let mut observation = new_observation(
         session_id,
         hook.kind,
