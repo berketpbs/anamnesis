@@ -1,5 +1,18 @@
 # Docker Deployment Guide
 
+## From the registry
+
+Tagged versions are published to the GitHub container registry for both
+`linux/amd64` and `linux/arm64` — Docker picks the one this machine needs:
+
+```bash
+docker pull ghcr.io/berketpbs/anamnesis:latest
+docker run --rm ghcr.io/berketpbs/anamnesis:latest anamnesis --version
+```
+
+Everything below works the same against a pulled image as against one built
+here; replace `anamnesis:latest` with `ghcr.io/berketpbs/anamnesis:latest`.
+
 Anamnesis includes complete Docker support for local development and production deployment.
 
 ## Quick Start
