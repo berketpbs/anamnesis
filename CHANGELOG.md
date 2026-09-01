@@ -23,11 +23,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An event the server has read and refused no longer stops every event behind
   it. The queue replays in order and stops at the first failure, which is right
   for a server that is down, restarting, or holding a token somebody is about
-  to fix — all of those take the event later. It is wrong for a payload the
-  server has judged: a 400 or a 413 is the same answer however long it waits,
-  and one of those at the head of an ordered queue ends capture quietly, which
-  is the failure the queue was written to prevent. Those are now dropped, out
-  loud, with the status that judged them, and the events behind them go
+  to fix — all of those take the event later. It is wrong for an event the
+  server has already answered about: a 400 or a 413 is the same answer however
+  long it waits, and one of those at the head of an ordered queue ends capture
+  quietly, which is the failure the queue was written to prevent. Those now
+  leave the line and are kept beside it, in `pending/refused/`, where
+  `anamnesis status` counts them and a person can read them. Kept rather than
+  dropped because a refusal is not proof the event was bad: this repository's
+  own server spent 2026-09-01 answering 400 to every event, and the reason was
+  a `[sessions]` table in the marker file that the *server* was too old to
+  know about. Every one of those events was fine, and a restart would have
+  taken them
 - A hook payload larger than two megabytes is accepted rather than refused.
   One `Read` of a large file makes one, so this was an ordinary event, and the
   server's own limit on what it keeps of a body is 16 KB applied after parsing

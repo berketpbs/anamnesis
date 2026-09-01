@@ -29,7 +29,9 @@
 //! a replay that fails stops rather than skipping ahead. The one event it does
 //! step over is the one the server has already read and refused: waiting
 //! cannot change that answer, and holding it would cost every event behind it
-//! for as long as the queue exists.
+//! for as long as the queue exists. Stepping over is not throwing away — the
+//! refused event is moved into `pending/refused/`, where `anamnesis status`
+//! counts it and a person can read it.
 
 use std::path::{Path, PathBuf};
 
@@ -39,6 +41,18 @@ use serde::{Deserialize, Serialize};
 
 /// Directory under the data dir where undelivered events wait.
 const DIRECTORY: &str = "pending";
+
+/// Where an event the server refused waits for a person instead of a retry.
+///
+/// A subdirectory of the queue rather than a sibling: it is the same events,
+/// out of the line. Nothing here is ever offered again — that is the point of
+/// moving it — but nothing here is gone either, and the reason it matters was
+/// measured in this repository. On 2026-09-01 a server older than the marker
+/// file it was reading answered every event with 400, and the refusal was not
+/// the payload's fault at all: restarting the server would have accepted every
+/// one of them. An event dropped on that day would have been an afternoon
+/// nobody could get back.
+const REFUSED: &str = "refused";
 
 /// How many events the queue will hold before it stops accepting.
 ///
@@ -88,6 +102,39 @@ impl Queue {
     /// Where the queue lives, for a report someone reads.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Where events the server refused are kept.
+    pub fn refused_root(&self) -> PathBuf {
+        self.root.join(REFUSED)
+    }
+
+    /// Take an event out of the line without throwing it away.
+    ///
+    /// The queue is ordered and a replay stops where it fails, so an event no
+    /// retry can ever deliver is not just one lost event — it is every event
+    /// behind it, for as long as the queue exists. Moving it is what lets the
+    /// rest go. It stays readable, because the server refusing an event is not
+    /// proof the event was bad: a server older than the configuration it reads
+    /// refuses good ones.
+    pub fn set_aside(&self, path: &Path) -> std::io::Result<PathBuf> {
+        let refused = self.refused_root();
+        std::fs::create_dir_all(&refused)?;
+        let name = path.file_name().unwrap_or_else(|| "event.json".as_ref());
+        let moved = refused.join(name);
+        std::fs::rename(path, &moved)?;
+        Ok(moved)
+    }
+
+    /// How many events have been set aside.
+    pub fn set_aside_len(&self) -> usize {
+        let Ok(entries) = std::fs::read_dir(self.refused_root()) else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+            .count()
     }
 
     /// How many events are waiting.
