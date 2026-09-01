@@ -140,6 +140,15 @@ live in `anamnesis-core::workstream`, their persistence in `anamnesis-store`,
 and their tool surface here — the same split `Page` and `Handoff` already
 follow.
 
+> **Marker files and builds drift apart.** A `.anamnesis.toml` is read by
+> whatever build is installed, and the two are not upgraded together. An
+> unknown *table* is therefore treated as a feature this build does not have
+> yet — skipped, with `anamnesis status` naming it — while an unknown key
+> outside every table, and any unknown key inside a known one, is still an
+> error. The split is what keeps a typo loud without letting a newer marker
+> file end capture on an older server, which it did on 2026-09-01 for three
+> hours.
+
 ### anamnesis-web
 The HTTP server hooks deliver to.
 

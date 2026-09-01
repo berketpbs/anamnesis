@@ -5,7 +5,24 @@
 //! for the server must not be able to re-scope a repository, and unknown keys
 //! are rejected rather than ignored so a typo surfaces instead of silently
 //! sending memory to the wrong project.
+//!
+//! With one exception, and it was bought with an outage. A marker file is read
+//! by whatever build happens to be running, and those two move apart: on
+//! 2026-09-01 this repository's marker gained a `[sessions]` table hours
+//! before the installed server was rebuilt, and the older server — doing
+//! exactly what the paragraph above says — answered `400` to every event of
+//! every session for three hours. The events were fine. The configuration was
+//! fine. The only thing wrong was that one of them was newer.
+//!
+//! So an unknown *table* is a feature this build does not have yet: it is
+//! reported and skipped, and everything else in the file still applies. An
+//! unknown *scalar* at the top level is still an error, because that is the
+//! shape a typo takes — `workspace = "x"` written outside `[scope]` — and
+//! catching those is why the rule exists. Nothing inside a known table is
+//! relaxed at all: `[scope]` still rejects what it does not recognise, and a
+//! silently wrong scope remains impossible.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use figment::Figment;
@@ -18,7 +35,7 @@ use crate::sweep::SweepPolicy;
 
 /// Contents of a `.anamnesis.toml` marker file.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct MarkerConfig {
     /// Explicit workspace and project overrides.
     pub scope: ScopeConfig,
@@ -32,17 +49,74 @@ pub struct MarkerConfig {
     pub sessions: SessionsConfig,
     /// Automatic learning proposals.
     pub auto_improve: AutoImproveConfig,
+
+    /// Everything in the file this build has no name for.
+    ///
+    /// Kept rather than rejected so that a marker written for a newer
+    /// anamnesis still describes the project to an older one. What is in here
+    /// is *not* applied — this build has no code for it — which is why
+    /// [`MarkerConfig::unrecognized`] exists and why `anamnesis status` says
+    /// so where somebody is already asking whether memory is working.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, figment::value::Value>,
 }
 
 impl MarkerConfig {
     /// Load a marker file from disk.
     pub fn load(path: &Path) -> Result<Self> {
-        Ok(Figment::new().merge(Toml::file(path)).extract()?)
+        let config: Self = Figment::new().merge(Toml::file(path)).extract()?;
+        config.audit(&path.display().to_string())?;
+        Ok(config)
     }
 
     /// Parse a marker file from a string, for tests and dry runs.
     pub fn from_toml(source: &str) -> Result<Self> {
-        Ok(Figment::new().merge(Toml::string(source)).extract()?)
+        let config: Self = Figment::new().merge(Toml::string(source)).extract()?;
+        config.audit("marker file")?;
+        Ok(config)
+    }
+
+    /// Tables in the file this build does not understand, in the order a
+    /// person would read them.
+    pub fn unrecognized(&self) -> Vec<&str> {
+        self.extra
+            .iter()
+            .filter(|(_, value)| value.as_dict().is_some())
+            .map(|(name, _)| name.as_str())
+            .collect()
+    }
+
+    /// Decide what to do about everything this build has no name for.
+    ///
+    /// A table is a feature from a newer build: said out loud and skipped, so
+    /// that the rest of the file — the scope, the exclusions, the decay
+    /// settings — goes on working. Anything else is a key in the wrong place,
+    /// which is what a typo looks like, and it is still refused.
+    fn audit(&self, origin: &str) -> Result<()> {
+        for (name, value) in &self.extra {
+            if value.as_dict().is_none() {
+                return Err(CoreError::UnknownSetting {
+                    key: name.clone(),
+                    origin: origin.to_owned(),
+                });
+            }
+        }
+
+        // Debug, not warn, and the level is the whole decision: a marker file
+        // is read once per captured event, so a warning here would be a line
+        // per tool call — hundreds a session, saying the same thing, in the
+        // log somebody reads when they are looking for something else. The
+        // loud place for this is `anamnesis status`, which is where the
+        // question "why did that setting do nothing" is actually asked.
+        let unknown = self.unrecognized();
+        if !unknown.is_empty() {
+            tracing::debug!(
+                tables = unknown.join(", "),
+                marker = origin,
+                "ignoring marker tables this build does not understand"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -411,5 +485,72 @@ access_weight = 0.5
             config.decay.policy().expect("valid"),
             SweepPolicy::default()
         );
+    }
+
+    /// The outage this rule was changed for, in miniature. On 2026-09-01 the
+    /// marker gained `[sessions]` before the installed server was rebuilt, and
+    /// the older server refused every event of every session for three hours —
+    /// not because anything was wrong with the events, but because the file
+    /// was newer than the binary reading it. A table this build has no name
+    /// for must cost that table and nothing else.
+    #[test]
+    fn a_table_from_a_newer_anamnesis_costs_only_that_table() {
+        let config = MarkerConfig::from_toml(
+            r#"
+[scope]
+workspace = "default"
+project = "anamnesis"
+
+[capture]
+ignore_paths = ["target/**"]
+
+[a_feature_from_the_future]
+stale_after_minutes = 720
+"#,
+        )
+        .expect("a marker written for a newer build still describes this project");
+
+        assert_eq!(config.unrecognized(), ["a_feature_from_the_future"]);
+        assert_eq!(config.capture.ignore_paths.len(), 1);
+        assert_eq!(
+            config.scope.project.as_ref().expect("project set").as_str(),
+            "anamnesis",
+            "the scope was lost over a table that has nothing to do with it"
+        );
+    }
+
+    /// And the rule it does not relax. A key outside every table is what a
+    /// typo looks like — `workspace` written above `[scope]` rather than
+    /// inside it — and accepting one would mean a project quietly recording
+    /// into somebody else's memory.
+    #[test]
+    fn a_key_outside_every_table_is_still_refused() {
+        let error = MarkerConfig::from_toml("workspace = \"somewhere-else\"\n")
+            .expect_err("a stray key is a typo, not a feature");
+
+        let message = error.to_string();
+        assert!(message.contains("workspace"), "{message}");
+    }
+
+    /// Nor the rule inside a table. `[scope]` still rejects what it does not
+    /// recognise: this is exactly where a silent mistake would send memory to
+    /// the wrong project, and nothing about forward compatibility needs it
+    /// relaxed.
+    #[test]
+    fn an_unknown_key_inside_a_known_table_is_still_refused() {
+        let error = MarkerConfig::from_toml("[scope]\nprojekt = \"anamnesis\"\n")
+            .expect_err("a typo inside a known table is still a typo");
+
+        let message = error.to_string();
+        assert!(message.contains("projekt"), "{message}");
+    }
+
+    /// A file with nothing unusual in it says so, so that `anamnesis status`
+    /// stays silent on every machine whose binary keeps up with its marker.
+    #[test]
+    fn a_marker_this_build_understands_reports_nothing() {
+        let config = MarkerConfig::from_toml("[scope]\nproject = \"anamnesis\"\n").expect("parses");
+
+        assert!(config.unrecognized().is_empty());
     }
 }
