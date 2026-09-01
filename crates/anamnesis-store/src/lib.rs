@@ -37,6 +37,7 @@ mod ops;
 mod purge;
 mod query;
 mod raw;
+mod rename;
 mod sweep;
 mod workstream;
 
@@ -45,6 +46,7 @@ pub use ops::{OpenSession, SessionSummary, new_handoff, new_observation, new_ses
 pub use purge::Purged;
 pub use query::PageHit;
 pub use raw::{RawError, RawRecord, RawSpool};
+pub use rename::{RenameError, Renamed};
 pub use sweep::SweepRow;
 pub use workstream::{WorkstreamHandoff, WorkstreamSession};
 

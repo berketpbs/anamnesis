@@ -901,6 +901,28 @@ a session that `anamnesis reindex` restores whole — that is where reindex
 rebuilds sessions from. A page the session already produced is not touched;
 `anamnesis forget` is what removes one of those.
 
+### Rename a Project
+
+Identity is derived from the marker file or the git remote, so renaming a
+repository or moving it to a new remote makes the next session resolve a
+different key — and find an empty project, with the old memory still there
+under a name nobody types any more:
+
+```bash
+anamnesis rename new-name              # says exactly what would move
+anamnesis rename new-name --apply
+```
+
+The pages move as one commit git reads as a rename, the index moves in one
+transaction with every derived identifier recomputed, the transcripts follow,
+and the marker file is pinned to the new name — without that last step the
+next event would re-derive the old identity and the rename would read as
+having quietly failed. Comments in the marker are kept.
+
+Renaming into a project that already has memory is refused. Merging two
+memories is a different operation with different answers — which page wins
+where both have `decisions.md` — and a rename is no place to decide them.
+
 ### Take It Back Out
 
 ```bash
