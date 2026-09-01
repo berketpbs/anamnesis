@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `anamnesis purge`: this project's memory, all of it. The end of the family
+  `forget` and `forget-session` start, for the memory that is wrong rather
+  than incomplete — a repository re-scoped by accident, a `bootstrap` run
+  against the wrong directory, a project that was never meant to be
+  remembered. Nothing happens without `--apply`, and the order is chosen by
+  what can be got back: the pages leave first as a git commit, so they stay in
+  the wiki's history; the index second, because it is rebuildable from what is
+  still there; the transcripts last, because when they are gone they are gone,
+  and an interruption anywhere before that leaves the only irreplaceable part
+  standing. The counts are taken before the delete rather than read from it —
+  a cascade reports only the rows the statement touched, and "1 row removed"
+  is not a description of losing a year of sessions. The audit line survives
+  the project it describes, which is the whole reason `audit_log` has no
+  foreign key: after a purge, `anamnesis audit` still answers the question
+  somebody asks next
 - A container image for both architectures, published on a tag to
   `ghcr.io/berketpbs/anamnesis`. CI has built the image on every pull request
   since it was written, and that image existed only on the runner that built

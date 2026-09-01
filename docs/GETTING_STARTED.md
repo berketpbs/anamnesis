@@ -901,6 +901,24 @@ a session that `anamnesis reindex` restores whole — that is where reindex
 rebuilds sessions from. A page the session already produced is not touched;
 `anamnesis forget` is what removes one of those.
 
+### Start a Project Over
+
+When the memory is wrong rather than incomplete — a repository re-scoped by
+accident, a `bootstrap` against the wrong directory — fixing it page by page
+is worse than starting again:
+
+```bash
+anamnesis purge              # says exactly what would go
+anamnesis purge --apply
+```
+
+Pages leave as a git commit and stay in the wiki's history. Transcripts do
+not: `raw/` is not a repository and it is the only copy of what was said in
+those sessions, so take an `anamnesis backup` first if there is any doubt.
+
+The audit line outlives the project. After a purge, `anamnesis audit` still
+says who did it and what went — which is the question somebody asks next.
+
 ### Rebuild the Index
 
 The database is disposable. If it is lost or corrupted, rebuild it from the
