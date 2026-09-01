@@ -15,7 +15,7 @@ use anamnesis_store::Store;
 use jiff::Timestamp;
 
 use crate::format::describe_source;
-use crate::{hooks, mcp_config};
+use crate::{hooks, mcp_config, opencode};
 
 /// Create this project's memory, and say where it went.
 pub fn cmd_init(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
@@ -82,35 +82,106 @@ pub fn cmd_token(operator: Option<&str>) -> anyhow::Result<()> {
 }
 
 /// Register the capture hooks with every harness on this machine.
+/// Wire OpenCode, which takes a plugin rather than a command.
+///
+/// The shape of the report is deliberately the same as the settings path's:
+/// where it went, what changed, and what to do next. What differs is the one
+/// thing that has no equivalent on the other side — a file already at that
+/// path that this command did not write is somebody's own plugin, and it is
+/// left exactly where it is.
+fn install_opencode_plugin(
+    server: &str,
+    write: bool,
+    settings: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    let binary = std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "anamnesis".to_owned());
+    let source = opencode::plugin(&binary, server);
+    let path = match settings {
+        Some(path) => path,
+        None => opencode::plugin_path(&std::env::current_dir()?),
+    };
+
+    if !write {
+        println!("OpenCode extends through a plugin, so this goes in a file of its own:");
+        println!();
+        println!("  {}", path.display());
+        println!();
+        println!("  It forwards the same five lifecycle events every other harness sends,");
+        println!("  and pushes the waiting handoff into the system prompt — OpenCode has no");
+        println!("  stdout channel for a hook to answer on.");
+        println!();
+        println!("Run this again with `--write` to put it there.");
+        return Ok(());
+    }
+
+    match opencode::write(&path, &source)? {
+        opencode::Written::Foreign => {
+            println!("🪝 {}", path.display());
+            println!();
+            println!("  A plugin is already there and anamnesis did not write it.");
+            println!("  Nothing was changed: whatever else that file does is somebody's,");
+            println!("  and this command has no way to keep it.");
+            println!();
+            println!("  Move it aside and run this again, or add the anamnesis hooks to it");
+            println!("  by hand — `--write --settings <path>` writes ours anywhere else.");
+            return Ok(());
+        }
+        opencode::Written::Created => {
+            println!("🪝 {}", path.display());
+            println!();
+            println!("  Written.      the five lifecycle events, and the handoff");
+        }
+        opencode::Written::Rewritten => {
+            println!("🪝 {}", path.display());
+            println!();
+            println!("  Rewritten.    it pointed at a different binary or server");
+        }
+        opencode::Written::Unchanged => {
+            println!("🪝 {}", path.display());
+            println!();
+            println!("  Already this. nothing to do");
+        }
+    }
+
+    println!("  Binary:       {binary}");
+    println!("  Server:       {server}");
+    println!();
+    println!("  OpenCode loads plugins at startup, so this takes effect in the next");
+    println!("  session. Start the server with `anamnesis serve`.");
+    println!();
+    println!(
+        "  If that server requires a token, set {} in the environment OpenCode",
+        anamnesis_web::auth::TOKEN_ENV
+    );
+    println!("  starts from: the plugin passes it on and the secret stays out of the file.");
+    Ok(())
+}
+
 pub fn cmd_install_hooks(
     agent: &str,
     server: &str,
     write: bool,
     settings: Option<PathBuf>,
 ) -> anyhow::Result<()> {
+    // OpenCode is wired by writing a module, not by merging a command into a
+    // settings file, so it comes apart from the rest before anything else does.
+    if agent == "opencode" {
+        return install_opencode_plugin(server, write, settings);
+    }
+
     let Some(harness) = hooks::harness(agent) else {
-        // A harness that cannot be wired this way gets a reason rather than a
-        // "not yet": one of them is a permanent difference in how it extends,
-        // and someone deserves to stop waiting for it.
-        match hooks::cannot_wire(agent) {
-            Some(reason) => {
-                println!("{agent} cannot be wired by install-hooks.");
-                println!();
-                println!("  {reason}");
-            }
-            None => {
-                println!("No hook template for {agent} yet.");
-                println!();
-                println!(
-                    "  Wired today: {}",
-                    hooks::HARNESSES
-                        .iter()
-                        .map(|harness| harness.agent)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-            }
-        }
+        println!("No hook template for {agent} yet.");
+        println!();
+        println!(
+            "  Wired today: {}, opencode",
+            hooks::HARNESSES
+                .iter()
+                .map(|harness| harness.agent)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         return Ok(());
     };
 

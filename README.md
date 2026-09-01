@@ -35,9 +35,10 @@ Anamnesis is organized as a Rust workspace with modular crates:
 - Retrieval over four signals fused with reciprocal rank: FTS5, entity
   matching, link neighbours, and optional local embeddings
   (`ANAMNESIS_EMBED_ENABLED=1`)
-- `anamnesis install-hooks` wires Claude Code, Codex CLI, Gemini CLI, and
-  Cursor — the same five lifecycle events, each in the file, spelling, payload,
-  and reply format that harness uses
+- `anamnesis install-hooks` wires Claude Code, Codex CLI, Gemini CLI, Cursor,
+  and OpenCode — the same five lifecycle events, each in the file, spelling,
+  payload, and reply format that harness uses. OpenCode takes a plugin module
+  rather than a command, and gets its handoff through the system prompt
 - MCP server: `memory_query`, `memory_write_page`, `memory_handoff_accept`,
   `workstream_start`, `workstream_status`
 - Workstreams: parallel threads of work, each keeping its own handoff slot
