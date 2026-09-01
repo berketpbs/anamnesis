@@ -174,6 +174,12 @@ The HTTP server hooks deliver to.
   the command that carries each one out. Read-only, and `serve --no-ui`
   leaves it out
 - The consolidation pipeline, which runs *after* the response is sent
+- Nothing that touches the index, the wiki, or a model runs on a runtime
+  thread. Tokio has one worker per core and all of that work blocks, so a
+  git commit on a worker is slow for every request behind it — `/health`
+  included, which is what tells `status` a server is alive. It goes to the
+  blocking pool instead; only the model call, which is a network wait,
+  stays on the runtime
 
 > There is no search page and no git visualization; the browser lists and
 > renders, and nothing there writes.

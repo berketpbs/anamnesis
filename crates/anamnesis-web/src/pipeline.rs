@@ -6,6 +6,7 @@
 //! that was actually recorded.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use anamnesis_consolidate::{PREFERENCES_PAGE, SessionDigest, consolidate, consolidate_with_llm};
 use anamnesis_core::capture::CaptureFilter;
@@ -17,6 +18,7 @@ use anamnesis_core::page::{Frontmatter, Page, PagePath, Tier};
 use anamnesis_core::scope::{OperatorName, ResolvedScope, resolve_scope};
 use anamnesis_core::session::{AgentKind, Session};
 use anamnesis_hooks::ParsedHook;
+use anamnesis_llm::Embedder;
 use anamnesis_store::{RawSpool, Store, new_handoff, new_observation, new_session};
 use anamnesis_wiki::Wiki;
 use jiff::Timestamp;
@@ -343,21 +345,36 @@ pub fn finalize(
 /// nothing else. Holding the wiki mutex across that await would serialise
 /// every other session ending in the same minute behind it.
 pub async fn finalize_with_llm(
-    store: &Store,
-    wiki: &Mutex<Wiki>,
+    store: &Arc<Store>,
+    wiki: &Arc<Mutex<Wiki>>,
     scope: &ResolvedScope,
     session_id: SessionId,
-    embedder: Option<&dyn Embed>,
+    embedder: Option<Arc<dyn Embedder>>,
     now: Timestamp,
     llm: &LlmSettings,
 ) -> Result<Option<String>, WebError> {
-    let Some((session, observations)) = prepare(store, session_id, now)? else {
-        return Ok(None);
+    // Three phases, and the middle one is the only one that belongs on the
+    // runtime. Reading a session out of SQLite and reading a preferences page
+    // off disk are blocking calls; so is writing the page, committing it to
+    // git, and embedding it. Only the model is a network wait.
+    let loaded = {
+        let store = store.clone();
+        let wiki = wiki.clone();
+        let scope = scope.clone();
+        crate::off_runtime(move || -> Result<_, WebError> {
+            let Some((session, observations)) = prepare(&store, session_id, now)? else {
+                return Ok(None);
+            };
+            let preferences = {
+                let wiki = wiki.lock();
+                read_preferences(&wiki, &scope)
+            };
+            Ok(Some((session, observations, preferences)))
+        })
+        .await?
     };
-
-    let preferences = {
-        let wiki = wiki.lock();
-        read_preferences(&wiki, scope)
+    let Some((session, observations, preferences)) = loaded else {
+        return Ok(None);
     };
 
     let digest = consolidate_with_llm(
@@ -371,12 +388,33 @@ pub async fn finalize_with_llm(
     .await;
 
     let Some(digest) = digest else {
-        store.close_session(session_id, now)?;
-        return Ok(None);
+        let store = store.clone();
+        return crate::off_runtime(move || -> Result<_, WebError> {
+            store.close_session(session_id, now)?;
+            Ok(None)
+        })
+        .await;
     };
 
-    let wiki = wiki.lock();
-    commit(store, &wiki, scope, &session, &digest, embedder, now).map(Some)
+    let store = store.clone();
+    let wiki = wiki.clone();
+    let scope = scope.clone();
+    crate::off_runtime(move || {
+        let held = wiki.lock();
+        commit(
+            &store,
+            &held,
+            &scope,
+            &session,
+            &digest,
+            embedder
+                .as_ref()
+                .map(|embedder| embedder.as_ref() as &dyn Embed),
+            now,
+        )
+        .map(Some)
+    })
+    .await
 }
 
 /// Load what a finished session consists of.

@@ -87,11 +87,6 @@ async fn close(
     session_id: SessionId,
     now: Timestamp,
 ) -> Result<Option<String>, WebError> {
-    let embedder = state
-        .embedder
-        .as_ref()
-        .map(|embedder| embedder.as_ref() as &dyn Embed);
-
     match &state.llm {
         Some(settings) => {
             finalize_with_llm(
@@ -99,15 +94,34 @@ async fn close(
                 &state.wiki,
                 scope,
                 session_id,
-                embedder,
+                state.embedder.clone(),
                 now,
                 settings,
             )
             .await
         }
+        // The same rule the handlers follow: summarising a session writes a
+        // page, commits it, and embeds it, and none of that belongs on a
+        // thread the server also answers requests with.
         None => {
-            let wiki = state.wiki.lock();
-            finalize(&state.store, &wiki, scope, session_id, embedder, now)
+            let store = state.store.clone();
+            let wiki = state.wiki.clone();
+            let embedder = state.embedder.clone();
+            let scope = scope.clone();
+            crate::off_runtime(move || {
+                let held = wiki.lock();
+                finalize(
+                    &store,
+                    &held,
+                    &scope,
+                    session_id,
+                    embedder
+                        .as_ref()
+                        .map(|embedder| embedder.as_ref() as &dyn Embed),
+                    now,
+                )
+            })
+            .await
         }
     }
 }

@@ -61,13 +61,29 @@ pub enum WebError {
     /// A core validation rejected the input.
     #[error("{0}")]
     Core(#[from] anamnesis_core::CoreError),
+
+    /// Work that was moved off the runtime did not come back.
+    ///
+    /// A panic inside the blocking pool, which is where everything that
+    /// touches the index, the wiki, or a model now runs. Before that work
+    /// moved there, a panic in a handler dropped the connection without a
+    /// word — which a hook reads as "the server is unreachable" and queues.
+    /// A 500 with a sentence in it is worse for nobody.
+    #[error("the server failed while handling this: {0}")]
+    Panicked(String),
+}
+
+impl From<tokio::task::JoinError> for WebError {
+    fn from(error: tokio::task::JoinError) -> Self {
+        Self::Panicked(error.to_string())
+    }
 }
 
 impl IntoResponse for WebError {
     fn into_response(self) -> Response {
         let status = match self {
             Self::BadRequest(_) | Self::Core(_) => StatusCode::BAD_REQUEST,
-            Self::Store(_) | Self::Wiki(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Store(_) | Self::Wiki(_) | Self::Panicked(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         // The message goes to the hook's stderr, where it is the only clue
         // anyone gets about why capture stopped working.
@@ -168,6 +184,31 @@ impl AppState {
         self.embedder = embedder;
         self
     }
+}
+
+/// Run work that touches the index, the wiki, or a model somewhere other than
+/// a runtime thread.
+///
+/// Every one of those is a blocking call: SQLite is synchronous, a git commit
+/// writes several files, and an embedding is arithmetic on a CPU. Tokio runs
+/// handlers on a small fixed pool of worker threads — one per core — so doing
+/// any of it there is not slow for that request alone. It is slow for every
+/// request scheduled behind it on the same thread, `/health` included.
+///
+/// `/health` is exactly what `anamnesis status` uses to tell a server that is
+/// down from one that is up and refusing this machine's token. A worker held
+/// by a git commit makes a working server look dead, and this repository has
+/// already spent an afternoon on the other version of that confusion.
+///
+/// The blocking pool is separate and large, and a task that panics there
+/// arrives here as an error rather than as a dropped connection.
+pub(crate) async fn off_runtime<T, E, F>(work: F) -> Result<T, E>
+where
+    F: FnOnce() -> Result<T, E> + Send + 'static,
+    T: Send + 'static,
+    E: Send + 'static + From<tokio::task::JoinError>,
+{
+    tokio::task::spawn_blocking(work).await?
 }
 
 /// Largest hook payload the server will read.
@@ -705,34 +746,38 @@ async fn receive_hook(
     // what the rest of this function would do and leaves the index, the
     // spool, and the waiting handoff exactly as it found them.
     if query.probing() {
-        let report = pipeline::probe(
-            &state.store,
-            &hook,
-            now,
-            identity.operator(),
-            state.llm.is_some(),
-        )?;
+        let store = state.store.clone();
+        let probed = hook.clone();
+        let operator = identity.operator().cloned();
+        let modelled = state.llm.is_some();
+        let report =
+            off_runtime(move || pipeline::probe(&store, &probed, now, operator.as_ref(), modelled))
+                .await?;
         return Ok((StatusCode::OK, Json(report)).into_response());
     }
 
     let Some(settings) = state.llm.clone() else {
         // No model: summarising is counting, which is fast enough to finish
         // while the hook waits.
-        let outcome = {
-            let wiki = state.wiki.lock();
+        let working = state.clone();
+        let recorded = hook.clone();
+        let operator = identity.operator().cloned();
+        let outcome = off_runtime(move || {
+            let wiki = working.wiki.lock();
             ingest(
-                &state.store,
+                &working.store,
                 &wiki,
-                state.raw.as_deref(),
-                &hook,
-                state
+                working.raw.as_deref(),
+                &recorded,
+                working
                     .embedder
                     .as_ref()
                     .map(|embedder| embedder.as_ref() as &dyn anamnesis_core::embedding::Embed),
                 now,
-                identity.operator(),
-            )?
-        };
+                operator.as_ref(),
+            )
+        })
+        .await?;
         if let Some(page) = &outcome.page {
             tracing::info!(%page, "session consolidated");
         }
@@ -747,13 +792,19 @@ async fn receive_hook(
     // it. The cost of that choice is honest: a server killed in the next few
     // seconds loses the page, and the session stays open rather than closing
     // with nothing in it.
-    let (scope, session_id) = record(
-        &state.store,
-        state.raw.as_deref(),
-        &hook,
-        now,
-        identity.operator(),
-    )?;
+    let recording = state.clone();
+    let recorded = hook.clone();
+    let operator = identity.operator().cloned();
+    let (scope, session_id) = off_runtime(move || {
+        record(
+            &recording.store,
+            recording.raw.as_deref(),
+            &recorded,
+            now,
+            operator.as_ref(),
+        )
+    })
+    .await?;
 
     if hook.kind == EventKind::SessionEnd {
         let background = state.clone();
@@ -772,10 +823,7 @@ async fn receive_hook(
                     &background.wiki,
                     &scope,
                     session_id,
-                    background
-                        .embedder
-                        .as_ref()
-                        .map(|embedder| embedder.as_ref() as &dyn anamnesis_core::embedding::Embed),
+                    background.embedder.clone(),
                     now,
                     &settings,
                 )
@@ -822,14 +870,20 @@ async fn deliver_handoff(
         .clone()
         .ok_or_else(|| WebError::BadRequest("session_id is required".to_owned()))?;
 
-    let handoff = claim_handoff(
-        &state.store,
-        &cwd,
-        &query.agent(),
-        &session_id,
-        Timestamp::now(),
-        identity.operator(),
-    )?;
+    let store = state.store.clone();
+    let agent = query.agent();
+    let operator = identity.operator().cloned();
+    let handoff = off_runtime(move || {
+        claim_handoff(
+            &store,
+            &cwd,
+            &agent,
+            &session_id,
+            Timestamp::now(),
+            operator.as_ref(),
+        )
+    })
+    .await?;
 
     Ok(handoff.unwrap_or_default())
 }
@@ -2680,6 +2734,81 @@ mod tests {
         assert_eq!(
             header.started_at, started,
             "the transcript's header rewrote the session's start time"
+        );
+    }
+
+    /// One event must not hold up the rest of the server.
+    ///
+    /// Recording an event is blocking work — SQLite is synchronous, a git
+    /// commit writes several files, an embedding is arithmetic — and Tokio
+    /// runs handlers on one worker thread per core. Doing that work on a
+    /// worker makes it slow for every request scheduled behind it, `/health`
+    /// included, and `/health` is exactly what `anamnesis status` reads to
+    /// tell a server that is down from one that is up and refusing this
+    /// machine's token. A held worker makes a working server look dead.
+    ///
+    /// The runtime here has **one** worker on purpose, so the property is an
+    /// ordering rather than a duration: with the ingest on the blocking pool
+    /// the health check finishes first, and with it on the worker it cannot,
+    /// because the handler runs to completion before anything else is polled.
+    #[tokio::test(flavor = "current_thread")]
+    async fn one_event_does_not_hold_up_the_rest_of_the_server() {
+        let harness = harness();
+        let app = router(harness.state.clone(), false);
+
+        // Big enough that recording it is real work rather than a rounding
+        // error: redaction alone walks every byte.
+        let payload = json!({
+            "session_id": "session-busy",
+            "hook_event_name": "PostToolUse",
+            "cwd": harness.cwd.to_string_lossy(),
+            "tool_name": "Read",
+            "tool_input": {"file_path": "big.txt"},
+            "tool_response": "x".repeat(4 * 1024 * 1024),
+        });
+        let ingest = HttpRequest::builder()
+            .method("POST")
+            .uri("/hook?agent=claude-code")
+            .header("content-type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .expect("request");
+        let health = HttpRequest::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .expect("request");
+
+        let finished = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+
+        let recording = {
+            let app = app.clone();
+            let finished = finished.clone();
+            async move {
+                let response = app.oneshot(ingest).await.expect("routed");
+                finished.lock().push(("hook", response.status()));
+            }
+        };
+        let checking = {
+            let app = app.clone();
+            let finished = finished.clone();
+            async move {
+                let response = app.oneshot(health).await.expect("routed");
+                finished.lock().push(("health", response.status()));
+            }
+        };
+
+        tokio::join!(recording, checking);
+
+        let order = finished.lock().clone();
+        assert_eq!(
+            order.first().map(|(who, _)| *who),
+            Some("health"),
+            "the health check waited for an event to be recorded: {order:?}"
+        );
+        assert!(
+            order
+                .iter()
+                .all(|(_, status)| status.is_success() || *status == StatusCode::ACCEPTED),
+            "{order:?}"
         );
     }
 

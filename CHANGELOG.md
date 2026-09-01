@@ -33,6 +33,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dropped part of itself is the failure this whole command exists to prevent
 
 ### Fixed
+- Recording an event no longer holds up the rest of the server. Everything the
+  capture path does is blocking — SQLite is synchronous, a git commit writes
+  several files, an embedding is arithmetic on a CPU — and all of it ran on a
+  Tokio worker thread, of which there is one per core. That is not slow for
+  the request doing the work; it is slow for every request scheduled behind it
+  on the same thread, `/health` included. `/health` is exactly what `anamnesis
+  status` reads to tell a server that is down from one that is up and refusing
+  this machine's token, so a worker held by a git commit made a working server
+  look dead — the same confusion this repository has already spent an
+  afternoon on, from the other direction. Recording, probing, claiming a
+  handoff, consolidating with a model, the reaper's summaries, and every page
+  the wiki browser renders now run on the blocking pool. The one thing that
+  stays on the runtime is the part that is genuinely a network wait: asking the
+  model. A panic in that work used to drop the connection without a word, which
+  a hook reads as "the server is unreachable" and queues; it is now a 500 with
+  a sentence in it
 - A session that runs past midnight has one transcript again, and forgetting
   it forgets all of it. The capture path built a fresh `Session` for every
   event and stamped it with *now*, and the spool derives a transcript's path
