@@ -9,6 +9,7 @@
 
 mod archive;
 mod audit;
+mod bench;
 mod bootstrap;
 mod capture;
 mod cli;
@@ -31,6 +32,7 @@ mod sweep;
 
 use archive::{cmd_backup, cmd_restore};
 use audit::cmd_audit;
+use bench::cmd_bench;
 use bootstrap::cmd_bootstrap;
 use capture::{cmd_hook, cmd_probe};
 use cli::{Cli, Commands};
@@ -263,6 +265,9 @@ fn main() -> anyhow::Result<()> {
                 anyway,
                 cli.data_dir.clone(),
             )?;
+        }
+        Commands::Bench { events } => {
+            cmd_bench(events)?;
         }
         Commands::Reindex => {
             cmd_reindex(cli.data_dir.clone())?;

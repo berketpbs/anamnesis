@@ -694,6 +694,34 @@ INFO anamnesis_web::improve: auto-improve pass project=default/my-project
      filed=1 refreshed=0 resolved=0 carried=1 open=0
 ```
 
+### Measure What This Machine Can Record
+
+```bash
+anamnesis bench                 # 2000 events
+anamnesis bench --events 10000
+```
+
+```
+                           events/s        p50        p95        p99
+  parse + redact            274 140     0.00ms     0.00ms     0.01ms
+  record (index)              3 708     0.23ms     0.30ms     1.40ms
+  record + transcript         1 866     0.48ms     0.66ms     1.86ms
+```
+
+The path measured is the one an event takes: parsed and redacted as a
+harness's payload is, then recorded as `POST /hook` records it — the marker
+file is read and the body is scanned for secrets on every event, because both
+happen per event in production. It runs against a temporary data directory, so
+nothing reaches this project's memory.
+
+Two things the numbers say. The durable transcript under `raw/` costs about
+2×, which is what the copy that survives losing the index is worth. And
+against the hook's one-second budget there is room for roughly 1 500 events,
+so on a machine like this one recording is not what a session waits on.
+
+A number is only comparable to itself: run it before and after a change to the
+capture path, on the same machine, and the difference is the finding.
+
 ### Score Retrieval
 
 The question this answers is not "is the code correct" but "does memory find

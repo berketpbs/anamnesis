@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `anamnesis bench`: how many events a second this machine can record. A hook
+  runs before every tool call and gives up after a second, and on a shared
+  server every session's events arrive at the same index — "will that hold"
+  had been answered by argument until now. What it measures is the path an
+  event actually takes: parsed and redacted the way a harness's payload is,
+  then recorded the way `POST /hook` records it, marker file and all. Not
+  `INSERT` in a loop, because those costs are paid per event in production
+  too. On the machine this was written on, in release: **1 866 events/s with
+  the durable transcript, 3 708 without, p95 0.66 ms** — and redaction, which
+  looked like the expensive part, runs at 274 000/s. The transcript costs
+  almost exactly 2×, which is the price of the copy that survives losing the
+  index. Against a hook's one-second budget there is room for about 1 500
+  events, so recording is not what a session waits on. It runs against a
+  temporary data directory and writes nothing to this project's memory: a
+  benchmark that filled somebody's wiki with invented sessions would be a
+  strange thing to ship
 - `anamnesis run <harness>` and `anamnesis continue`. Everything else in this
   system is careful about recording a session; this is about the minute before
   one starts, and it exists because of the only failure anamnesis has had
