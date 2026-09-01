@@ -21,6 +21,7 @@ mod opencode;
 mod pages;
 mod project;
 mod reindex;
+mod run;
 mod serve;
 mod sessions;
 mod setup;
@@ -37,6 +38,7 @@ use evals::cmd_eval;
 use improve::cmd_improve;
 use pages::{PageOptions, cmd_forget, cmd_search, cmd_show_page, cmd_write_page};
 use reindex::cmd_reindex;
+use run::{cmd_continue, cmd_run};
 use serve::{cmd_mcp, cmd_serve};
 use sessions::{cmd_forget_session, cmd_handoff, cmd_sessions};
 use setup::{cmd_init, cmd_install_hooks, cmd_install_mcp, cmd_token};
@@ -227,6 +229,40 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Audit { limit, everywhere } => {
             cmd_audit(limit, everywhere, cli.data_dir.clone())?;
+        }
+        Commands::Run {
+            agent,
+            program,
+            server,
+            token,
+            anyway,
+            args,
+        } => {
+            cmd_run(
+                &agent,
+                program,
+                &args,
+                &server,
+                token.as_deref(),
+                anyway,
+                cli.data_dir.clone(),
+            )?;
+        }
+        Commands::Continue {
+            program,
+            server,
+            token,
+            anyway,
+            args,
+        } => {
+            cmd_continue(
+                program,
+                &args,
+                &server,
+                token.as_deref(),
+                anyway,
+                cli.data_dir.clone(),
+            )?;
         }
         Commands::Reindex => {
             cmd_reindex(cli.data_dir.clone())?;

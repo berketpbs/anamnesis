@@ -415,6 +415,35 @@ stdio is all any of them need, including OpenCode.
 Hooks need `anamnesis serve` running. MCP does not — it opens the store
 directly.
 
+### 5. Start Your Agent Through Anamnesis
+
+Once the hooks are wired, the remaining way to lose an afternoon is to start a
+session when the server is not running. `run` checks before it starts:
+
+```bash
+anamnesis run claude-code            # checks, then launches `claude`
+anamnesis run codex -- --model o3    # everything after `--` goes to the harness
+anamnesis continue                   # whichever harness ran the last session here
+```
+
+If the server is not answering, or this harness's hooks do not point at
+anamnesis, nothing is launched and the message carries the command that fixes
+it:
+
+```
+⏸  Not starting claude-code: the memory server at http://127.0.0.1:8080 is not answering.
+
+    anamnesis serve
+
+  Or `--anyway` to start without a memory of it.
+```
+
+`--program` names the executable when a harness is called something else on
+this machine — the launcher tries `claude`, `codex`, `cursor-agent`, `gemini`
+and `opencode`. The server address is passed to the harness in its environment,
+so the hooks inherit it: a project wired to one server can be run against
+another without touching a settings file.
+
 ## Common Commands
 
 ### Seed From Git History
