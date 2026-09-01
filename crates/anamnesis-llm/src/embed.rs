@@ -234,15 +234,53 @@ impl Embed for LocalEmbedder {
 pub struct EmbedConfig {
     /// Whether the vector-cosine stream should run at all.
     pub enabled: bool,
-    /// Hugging Face repo id to load when enabled.
+    /// Which kind of embedder to build.
+    pub provider: EmbedProvider,
+    /// The model: a Hugging Face repo id locally, an API's model name hosted.
     pub model: String,
+    /// Where a hosted endpoint lives.
+    pub url: String,
+    /// The key a hosted endpoint wants, when it wants one.
+    pub key: Option<secrecy::SecretString>,
+}
+
+/// Where the vectors come from.
+///
+/// Local stays the default. It costs a download and a core; what it does not
+/// cost is a key, a network round trip per query, or somebody else knowing
+/// every question this memory is asked — and that last one is not a small
+/// thing to hand over by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EmbedProvider {
+    /// A model on this machine, through candle.
+    #[default]
+    Local,
+    /// An OpenAI-compatible `/v1/embeddings` endpoint.
+    Hosted,
+}
+
+impl EmbedProvider {
+    /// Read the name somebody typed, defaulting to local.
+    ///
+    /// An unrecognised value is local rather than an error: the setting exists
+    /// to opt *into* sending text somewhere, and a typo must not be a way to
+    /// end up doing it.
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "openai" | "hosted" | "api" | "remote" => Self::Hosted,
+            _ => Self::Local,
+        }
+    }
 }
 
 impl Default for EmbedConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            provider: EmbedProvider::Local,
             model: DEFAULT_MODEL.to_owned(),
+            url: crate::hosted::DEFAULT_URL.to_owned(),
+            key: None,
         }
     }
 }
@@ -276,10 +314,36 @@ impl EmbedConfig {
                 )
             })
             .unwrap_or(false);
+        let provider = var("ANAMNESIS_EMBED_PROVIDER")
+            .map(|value| EmbedProvider::parse(&value))
+            .unwrap_or_default();
+        // The default model differs by provider, because they are not names of
+        // the same kind of thing: one is a repo to download, the other is a
+        // model an API knows.
         let model = var("ANAMNESIS_EMBED_MODEL")
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
-        Self { enabled, model }
+            .unwrap_or_else(|| match provider {
+                EmbedProvider::Local => DEFAULT_MODEL.to_owned(),
+                EmbedProvider::Hosted => crate::hosted::DEFAULT_MODEL.to_owned(),
+            });
+        let url = var("ANAMNESIS_EMBED_URL")
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| crate::hosted::DEFAULT_URL.to_owned());
+        // `OPENAI_API_KEY` as a fallback, because a machine that already has
+        // one for completions has one for this, and asking for the same secret
+        // under a second name is how a setup ends up with two of them.
+        let key = var("ANAMNESIS_EMBED_API_KEY")
+            .or_else(|| var("OPENAI_API_KEY"))
+            .filter(|value| !value.trim().is_empty())
+            .map(secrecy::SecretString::from);
+
+        Self {
+            enabled,
+            provider,
+            model,
+            url,
+            key,
+        }
     }
 
     /// Build a local embedder, when embeddings are enabled.
@@ -293,7 +357,14 @@ impl EmbedConfig {
         if !self.enabled {
             return Ok(None);
         }
-        Ok(Some(Arc::new(LocalEmbedder::load(&self.model, cache_dir)?)))
+        Ok(Some(match self.provider {
+            EmbedProvider::Local => Arc::new(LocalEmbedder::load(&self.model, cache_dir)?),
+            EmbedProvider::Hosted => Arc::new(crate::hosted::HostedEmbedder::connect(
+                &self.url,
+                &self.model,
+                self.key.clone(),
+            )?),
+        }))
     }
 }
 
@@ -325,6 +396,73 @@ mod tests {
     fn an_explicit_enable_turns_it_on() {
         let config = EmbedConfig::from_vars(vars(&[("ANAMNESIS_EMBED_ENABLED", "1")]));
         assert!(config.enabled);
+    }
+
+    /// Local unless somebody asks for otherwise, and a typo asks for nothing.
+    /// The setting exists to opt *into* sending every query somewhere else,
+    /// and a misspelling must not be a way to end up doing that.
+    #[test]
+    fn embeddings_stay_on_this_machine_unless_asked_otherwise() {
+        assert_eq!(EmbedConfig::default().provider, EmbedProvider::Local);
+        assert_eq!(EmbedProvider::parse("openai"), EmbedProvider::Hosted);
+        assert_eq!(EmbedProvider::parse("hosted"), EmbedProvider::Hosted);
+        assert_eq!(EmbedProvider::parse("opnai"), EmbedProvider::Local);
+        assert_eq!(EmbedProvider::parse(""), EmbedProvider::Local);
+    }
+
+    /// The two providers do not name the same kind of thing — one is a repo to
+    /// download, the other is a model an API knows — so the default has to
+    /// follow the provider rather than being one string for both.
+    #[test]
+    fn each_provider_has_its_own_default_model() {
+        let local = EmbedConfig::from_vars(vars(&[("ANAMNESIS_EMBED_ENABLED", "1")]));
+        assert_eq!(local.model, DEFAULT_MODEL);
+
+        let hosted = EmbedConfig::from_vars(vars(&[
+            ("ANAMNESIS_EMBED_ENABLED", "1"),
+            ("ANAMNESIS_EMBED_PROVIDER", "openai"),
+        ]));
+        assert_eq!(hosted.model, crate::hosted::DEFAULT_MODEL);
+        assert_eq!(hosted.url, crate::hosted::DEFAULT_URL);
+
+        let named = EmbedConfig::from_vars(vars(&[
+            ("ANAMNESIS_EMBED_PROVIDER", "openai"),
+            ("ANAMNESIS_EMBED_MODEL", "text-embedding-3-large"),
+            (
+                "ANAMNESIS_EMBED_URL",
+                "http://localhost:11434/v1/embeddings",
+            ),
+        ]));
+        assert_eq!(named.model, "text-embedding-3-large");
+        assert_eq!(named.url, "http://localhost:11434/v1/embeddings");
+    }
+
+    /// A machine with a key for completions has one for this. Asking for the
+    /// same secret under a second name is how a setup ends up with two of
+    /// them, one of which is out of date.
+    #[test]
+    fn the_key_falls_back_to_the_one_completions_already_use() {
+        let explicit = EmbedConfig::from_vars(vars(&[
+            ("ANAMNESIS_EMBED_API_KEY", "embed-key"),
+            ("OPENAI_API_KEY", "completions-key"),
+        ]));
+        assert_eq!(
+            explicit
+                .key
+                .map(|key| secrecy::ExposeSecret::expose_secret(&key).to_owned()),
+            Some("embed-key".to_owned())
+        );
+
+        let inherited = EmbedConfig::from_vars(vars(&[("OPENAI_API_KEY", "completions-key")]));
+        assert_eq!(
+            inherited
+                .key
+                .map(|key| secrecy::ExposeSecret::expose_secret(&key).to_owned()),
+            Some("completions-key".to_owned())
+        );
+
+        let none = EmbedConfig::from_vars(vars(&[("OPENAI_API_KEY", "   ")]));
+        assert!(none.key.is_none(), "a blank key was carried as a key");
     }
 
     #[test]
