@@ -455,6 +455,19 @@ pub enum Commands {
         args: Vec<String>,
     },
 
+    /// Measure how many events a second this machine can record
+    ///
+    /// A hook runs before every tool call and gives up after a second, and on
+    /// a shared server every session's events arrive at the same index. This
+    /// answers "will that hold" with a number instead of an argument. It runs
+    /// against a temporary data directory and writes nothing to this
+    /// project's memory.
+    Bench {
+        /// How many events to record
+        #[arg(long, default_value_t = crate::bench::DEFAULT_EVENTS)]
+        events: usize,
+    },
+
     /// Show what has been changed by hand, newest first
     ///
     /// Capture is recorded as sessions, not here. This is the log of
