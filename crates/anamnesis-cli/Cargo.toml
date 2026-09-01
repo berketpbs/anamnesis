@@ -41,6 +41,11 @@ crossterm.workspace = true
 jiff.workspace = true
 reqwest = { workspace = true, features = ["json", "blocking"] }
 uuid = { workspace = true, features = ["v4", "v7"] }
+tar.workspace = true
+flate2.workspace = true
+# A runtime dependency, not only a test one: `backup` stages the index's
+# consistent copy in a temporary file before it goes into the archive.
+tempfile.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

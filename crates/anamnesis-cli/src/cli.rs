@@ -358,6 +358,36 @@ pub enum Commands {
         apply: bool,
     },
 
+    /// Write the whole of memory to one archive
+    ///
+    /// The wiki carries its own git history, but `raw/` does not: the
+    /// observations a page was compiled from live in exactly one place. This
+    /// takes the index, the transcripts and the wiki — `models/` and `logs/`
+    /// are left out, being a download and one machine's afternoons.
+    Backup {
+        /// Where to write the archive (default: ./anamnesis-backup-<stamp>.tar.gz)
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+
+    /// Put an archive back, after saying what that would mean
+    Restore {
+        /// Archive written by `anamnesis backup`
+        archive: PathBuf,
+
+        /// Actually restore, instead of only reporting what would be restored
+        #[arg(long)]
+        apply: bool,
+
+        /// Restore into a data directory that already holds memory
+        ///
+        /// Without this, a directory with an index, a wiki, or transcripts in
+        /// it is left exactly as it was: restoring is the one operation here
+        /// that running the other one cannot undo.
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Rebuild the index from the wiki and the raw transcripts
     ///
     /// Safe to run at any time: every identifier is derived, so a rebuild
