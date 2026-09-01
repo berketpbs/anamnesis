@@ -14,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -23,15 +23,15 @@ authors = ["Berke Topbas <berketopbas126@gmail.com>"]
 
 [workspace.dependencies]
 # Inter-crate dependencies.
-anamnesis-core = { path = "crates/anamnesis-core", version = "0.1.0" }
-anamnesis-store = { path = "crates/anamnesis-store", version = "0.1.0" }
-anamnesis-wiki = { path = "crates/anamnesis-wiki", version = "0.1.0" }
-anamnesis-mcp = { path = "crates/anamnesis-mcp", version = "0.1.0" }
-anamnesis-hooks = { path = "crates/anamnesis-hooks", version = "0.1.0" }
-anamnesis-llm = { path = "crates/anamnesis-llm", version = "0.1.0" }
-anamnesis-consolidate = { path = "crates/anamnesis-consolidate", version = "0.1.0" }
-anamnesis-web = { path = "crates/anamnesis-web", version = "0.1.0" }
-anamnesis-evals = { path = "evals", version = "0.1.0" }
+anamnesis-core = { path = "crates/anamnesis-core", version = "1.0.0" }
+anamnesis-store = { path = "crates/anamnesis-store", version = "1.0.0" }
+anamnesis-wiki = { path = "crates/anamnesis-wiki", version = "1.0.0" }
+anamnesis-mcp = { path = "crates/anamnesis-mcp", version = "1.0.0" }
+anamnesis-hooks = { path = "crates/anamnesis-hooks", version = "1.0.0" }
+anamnesis-llm = { path = "crates/anamnesis-llm", version = "1.0.0" }
+anamnesis-consolidate = { path = "crates/anamnesis-consolidate", version = "1.0.0" }
+anamnesis-web = { path = "crates/anamnesis-web", version = "1.0.0" }
+anamnesis-evals = { path = "evals", version = "1.0.0" }
 
 # Error handling.
 anyhow = "1"
