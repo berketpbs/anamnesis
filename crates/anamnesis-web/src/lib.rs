@@ -2620,6 +2620,69 @@ mod tests {
         );
     }
 
+    /// A session that runs past midnight is still one session, and its
+    /// transcript is still one file. Measured on this repository's own spool:
+    /// a session that started at 17:41 on one day and ended at 00:07 the next
+    /// had two files, and the second one's header said the session had started
+    /// at 00:07 — hours after it did. The path is derived from that field, so
+    /// the stray file was also invisible to every command that looks a
+    /// transcript up by name, `forget-session` included.
+    #[test]
+    fn a_session_that_crosses_midnight_keeps_one_transcript() {
+        let harness = harness();
+        let started: Timestamp = "2026-08-31T17:41:29Z".parse().expect("start");
+        let after_midnight: Timestamp = "2026-09-01T00:07:55Z".parse().expect("later");
+
+        let first = hook(&harness, "SessionStart", json!({"source": "startup"}));
+        let ingested = ingest(
+            &harness.state.store,
+            &harness.state.wiki.lock(),
+            harness.state.raw.as_deref(),
+            &first,
+            None,
+            started,
+            None,
+        )
+        .expect("first event");
+
+        let last = hook(&harness, "SessionEnd", json!({"reason": "other"}));
+        ingest(
+            &harness.state.store,
+            &harness.state.wiki.lock(),
+            harness.state.raw.as_deref(),
+            &last,
+            None,
+            after_midnight,
+            None,
+        )
+        .expect("last event");
+
+        let raw = harness.state.raw.as_deref().expect("spool");
+        let scope = resolve_scope(&harness.cwd).expect("scope");
+        let files = raw.locate_all(&scope.scope, ingested.session_id);
+        assert_eq!(
+            files.len(),
+            1,
+            "one session was filed as {} transcripts: {files:?}",
+            files.len()
+        );
+
+        // And the one file still says when the session began, rather than when
+        // its next event happened to arrive.
+        let records = raw.read_file(&files[0]).expect("read");
+        let header = records
+            .iter()
+            .find_map(|record| match record {
+                anamnesis_store::RawRecord::Session(session) => Some(session.as_ref().clone()),
+                anamnesis_store::RawRecord::Observation(_) => None,
+            })
+            .expect("header");
+        assert_eq!(
+            header.started_at, started,
+            "the transcript's header rewrote the session's start time"
+        );
+    }
+
     /// The outage this server actually had, as an assertion. On 2026-09-01
     /// this repository's marker gained a `[sessions]` table hours before the
     /// installed server was rebuilt, and the older server answered `400` to

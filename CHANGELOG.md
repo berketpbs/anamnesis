@@ -33,6 +33,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dropped part of itself is the failure this whole command exists to prevent
 
 ### Fixed
+- A session that runs past midnight has one transcript again, and forgetting
+  it forgets all of it. The capture path built a fresh `Session` for every
+  event and stamped it with *now*, and the spool derives a transcript's path
+  from that field — so a session that started at 17:41 and ended at 00:07 was
+  filed under two dates, with the second file's header claiming the session had
+  begun hours after it did. Measured on this repository's own spool, where such
+  a session is sitting. The second file was also unreachable: every command
+  that looks a transcript up by name asks for the one the *stored* start date
+  names, so `anamnesis forget-session` removed the file it could name and left
+  the other one on disk, with somebody's prompts in it, after they had asked
+  for it to be gone. The transcript is now written against the session as
+  stored — one indexed lookup per event, on a path that already runs several
+  statements — and `forget-session` removes every file that carries the
+  session, so the ones already filed twice go too
 - A marker file written for a newer anamnesis no longer stops capture on an
   older one. The rule was that unknown keys are rejected, so that a typo
   surfaces instead of silently sending memory to the wrong project — and on

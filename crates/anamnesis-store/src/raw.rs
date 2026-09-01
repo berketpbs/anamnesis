@@ -119,6 +119,36 @@ impl RawSpool {
             .join(format!("{short}.jsonl"))
     }
 
+    /// Every file on disk that belongs to `session_id`, in any date directory.
+    ///
+    /// There should only ever be one, and [`RawSpool::locate`] names it. This
+    /// exists for the ones that are already on disk: until the capture path
+    /// wrote its header from the *stored* session, a session that ran past
+    /// midnight was filed twice — once under the day it started and once under
+    /// the day the next event arrived — and only the first was reachable by
+    /// name. A `forget-session` that removed the file it could name left the
+    /// other one, with somebody's prompts in it, after they had asked for it
+    /// to be gone.
+    pub fn locate_all(&self, scope: &Scope, session_id: SessionId) -> Vec<PathBuf> {
+        let short: String = session_id.to_string().chars().take(8).collect();
+        let name = format!("{short}.jsonl");
+        let project = self
+            .root
+            .join(scope.workspace.as_str())
+            .join(scope.project.as_str());
+
+        let Ok(dates) = std::fs::read_dir(&project) else {
+            return Vec::new();
+        };
+        let mut found: Vec<PathBuf> = dates
+            .flatten()
+            .map(|entry| entry.path().join(&name))
+            .filter(|path| path.is_file())
+            .collect();
+        found.sort();
+        found
+    }
+
     /// Append one observation, writing the session header first if this is
     /// the session's first line.
     ///
@@ -255,6 +285,42 @@ fn collect_jsonl(dir: &Path, found: &mut Vec<PathBuf>) -> Result<(), RawError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Files already on disk from before a session was filed under one date.
+    /// The point is the stray: it is unreachable by name, and something has to
+    /// be able to find it in order to delete it.
+    #[test]
+    fn every_file_belonging_to_a_session_is_found_across_dates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spool = RawSpool::new(dir.path());
+        let scope = Scope {
+            workspace: WorkspaceName::default(),
+            project: ProjectName::sanitized("widget").expect("project"),
+        };
+        let id = SessionId::new();
+        let short: String = id.to_string().chars().take(8).collect();
+
+        for date in ["2026-08-31", "2026-09-01"] {
+            let day = dir
+                .path()
+                .join(scope.workspace.as_str())
+                .join(scope.project.as_str())
+                .join(date);
+            std::fs::create_dir_all(&day).expect("day");
+            std::fs::write(day.join(format!("{short}.jsonl")), "{}\n").expect("file");
+            // A different session on the same day must not be swept up with it.
+            std::fs::write(day.join("deadbeef.jsonl"), "{}\n").expect("other");
+        }
+
+        let found = spool.locate_all(&scope, id);
+
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(
+            found
+                .iter()
+                .all(|path| path.ends_with(format!("{short}.jsonl")))
+        );
+    }
     use anamnesis_core::ids::{ProjectId, SessionId, WorkspaceId};
     use anamnesis_core::observation::{BoundedBody, EventKind};
     use anamnesis_core::scope::{ProjectName, WorkspaceName};

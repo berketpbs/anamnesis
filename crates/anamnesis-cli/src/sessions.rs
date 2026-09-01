@@ -219,7 +219,7 @@ pub fn cmd_forget_session(
     // `forget` resolves every path first: refusing the third name after
     // acting on the first two leaves the caller to work out which was the
     // typo, against a listing that has changed underneath them.
-    let mut doomed: Vec<(SessionSummary, PathBuf)> = Vec::with_capacity(prefixes.len());
+    let mut doomed: Vec<(SessionSummary, Vec<PathBuf>)> = Vec::with_capacity(prefixes.len());
     for prefix in prefixes {
         let session = one_session(&store, &scope, prefix)?;
         // Two prefixes for one session is a typo that costs nothing, so it is
@@ -227,14 +227,19 @@ pub fn cmd_forget_session(
         if doomed.iter().any(|(seen, _)| seen.id == session.id) {
             continue;
         }
-        let transcript = raw.locate_parts(&scope.scope, session.id, session.started_at);
-        doomed.push((session, transcript));
+        // Every file that carries this session, not only the one its start
+        // date names. A session recorded before the capture path wrote its
+        // header from the stored session was filed under two dates when it ran
+        // past midnight, and forgetting only the reachable one would leave the
+        // other on disk after somebody asked for it to be gone.
+        let transcripts = raw.locate_all(&scope.scope, session.id);
+        doomed.push((session, transcripts));
     }
 
     println!("🗑  Forgetting from {}", scope.scope);
     println!();
     let mut observations = 0;
-    for (session, transcript) in &doomed {
+    for (session, transcripts) in &doomed {
         observations += session.observation_count;
         let short: String = session.id.to_string().chars().take(8).collect();
         let when = session.started_at.to_string();
@@ -243,9 +248,16 @@ pub fn cmd_forget_session(
             "  {short}  {when}  {:<12} {:<7} {} obs",
             session.agent, session.state, session.observation_count
         );
-        match lines_in(transcript) {
-            Some(lines) => println!("     transcript  {} ({lines} lines)", transcript.display()),
-            None => println!("     transcript  none on disk"),
+        if transcripts.is_empty() {
+            println!("     transcript  none on disk");
+        }
+        for transcript in transcripts {
+            match lines_in(transcript) {
+                Some(lines) => {
+                    println!("     transcript  {} ({lines} lines)", transcript.display())
+                }
+                None => println!("     transcript  {}", transcript.display()),
+            }
         }
     }
     println!();
@@ -263,18 +275,20 @@ pub fn cmd_forget_session(
     // claims the session, and nothing rebuilds that.
     let mut rows = 0;
     let mut transcripts = 0;
-    for (session, transcript) in &doomed {
+    for (session, files) in &doomed {
         if store.delete_session(session.id)? {
             rows += 1;
         }
-        match std::fs::remove_file(transcript) {
-            Ok(()) => transcripts += 1,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => anyhow::bail!(
-                "{} index row(s) were removed, but the transcript at {} could not be: {error}",
-                rows,
-                transcript.display()
-            ),
+        for transcript in files {
+            match std::fs::remove_file(transcript) {
+                Ok(()) => transcripts += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => anyhow::bail!(
+                    "{} index row(s) were removed, but the transcript at {} could not be: {error}",
+                    rows,
+                    transcript.display()
+                ),
+            }
         }
     }
 
