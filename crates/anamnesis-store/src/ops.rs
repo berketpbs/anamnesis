@@ -5,6 +5,8 @@
 //! agent never notices, and one that takes hundreds is a stutter in someone's
 //! editing session.
 
+use std::path::PathBuf;
+
 use anamnesis_core::embedding::{Embed, page_text};
 use anamnesis_core::handoff::{Handoff, HandoffState, Slot};
 use anamnesis_core::ids::{HandoffId, ObservationId, PageId, ProjectId, SessionId, WorkstreamId};
@@ -16,6 +18,20 @@ use rusqlite::{OptionalExtension, Row, params};
 
 use crate::convert::{parse_id, parse_operator, parse_time};
 use crate::{Result, Store};
+
+/// A session still open, and when it last said anything.
+///
+/// The checkout path rides along because it is what a scope resolves from,
+/// and the reaper has no request to take one from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenSession {
+    /// The session.
+    pub id: SessionId,
+    /// Working copy it was recorded from.
+    pub checkout_path: PathBuf,
+    /// Its newest observation, or its start when it has none.
+    pub last_seen: Timestamp,
+}
 
 /// One row of `anamnesis sessions`: what a session was, without its
 /// observations.
@@ -76,6 +92,88 @@ impl Store {
             params![id.to_string(), ended_at.to_string()],
         )?;
         Ok(())
+    }
+
+    /// Claim an open session for consolidation.
+    ///
+    /// A compare-and-swap, which is the whole point: the reaper wakes on a
+    /// timer and a model call can outlast the gap between two ticks, so the
+    /// second tick must be able to tell "still being summarised" from "still
+    /// open". `Ok(false)` means somebody else got there first.
+    pub fn begin_ending(&self, id: SessionId) -> Result<bool> {
+        let conn = self.connection();
+        let changed = conn.execute(
+            "UPDATE sessions SET state = 'ending' WHERE id = ?1 AND state = 'open'",
+            params![id.to_string()],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Release a claim that came to nothing.
+    ///
+    /// A summary that failed must be retried rather than left in `ending`
+    /// forever, where no later pass would ever see it again. Guarded on the
+    /// state it is undoing, so this can never resurrect a session that was
+    /// properly closed.
+    pub fn reopen_session(&self, id: SessionId) -> Result<()> {
+        let conn = self.connection();
+        conn.execute(
+            "UPDATE sessions SET state = 'open', ended_at = NULL
+             WHERE id = ?1 AND state = 'ending'",
+            params![id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Take a closed session back up, because it just said something.
+    ///
+    /// The other half of summarising a session nobody closed: an agent that
+    /// goes quiet for hours and then keeps working must not have the rest of
+    /// its session dropped on the floor because something already wrote its
+    /// page. Ending it again rewrites that same page and supersedes its
+    /// handoff, so resuming costs a second pass and nothing else.
+    ///
+    /// Deliberately not guarded against `ending`: a session being summarised
+    /// right now is somebody else's, and taking it back mid-flight would race
+    /// them for the page.
+    pub fn resume_session(&self, id: SessionId) -> Result<()> {
+        let conn = self.connection();
+        conn.execute(
+            "UPDATE sessions SET state = 'open', ended_at = NULL
+             WHERE id = ?1 AND state = 'closed'",
+            params![id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Every session still open, with the time it was last heard from.
+    ///
+    /// Whether that is long enough ago to act on is the caller's decision, and
+    /// it is made in Rust: timestamps are stored as text, and text ordering
+    /// disagrees with time ordering when two of them carry a different number
+    /// of fractional digits. Over a threshold measured in hours the difference
+    /// is under a second, but the comparison is cheap to do properly and there
+    /// are only ever a handful of open sessions.
+    pub fn open_sessions(&self) -> Result<Vec<OpenSession>> {
+        let conn = self.connection();
+        let mut statement = conn.prepare(
+            "SELECT s.id, s.checkout_path,
+                    COALESCE(
+                        (SELECT MAX(o.at) FROM observations o WHERE o.session_id = s.id),
+                        s.started_at
+                    )
+             FROM sessions s
+             WHERE s.state = 'open'",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(OpenSession {
+                id: parse_id(row.get::<_, String>(0)?),
+                checkout_path: PathBuf::from(row.get::<_, String>(1)?),
+                last_seen: parse_time(&row.get::<_, String>(2)?),
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// Load one session, with the workspace reached through its project.
@@ -1542,6 +1640,136 @@ mod tests {
             store.ensure_session(&session).expect("session");
         }
         assert_eq!(store.recent_sessions(project, 2).expect("list").len(), 2);
+    }
+
+    #[test]
+    fn an_open_session_reports_its_newest_observation() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+        for minute in ["09:05", "09:20", "09:12"] {
+            let at: Timestamp = format!("2026-08-19T{minute}:00Z").parse().expect("time");
+            store
+                .insert_observation(&new_observation(
+                    session.id,
+                    EventKind::ToolUse,
+                    None,
+                    BoundedBody::truncating("event", 1024),
+                    at,
+                ))
+                .expect("insert");
+        }
+
+        let open = store.open_sessions().expect("list");
+
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].id, session.id);
+        assert_eq!(open[0].checkout_path, PathBuf::from("/repo"));
+        assert_eq!(
+            open[0].last_seen,
+            "2026-08-19T09:20:00Z".parse::<Timestamp>().expect("time"),
+            "the newest observation should win, not the last one inserted"
+        );
+    }
+
+    /// A session that has only been started has no observation to date it by,
+    /// and it is the one most likely to be abandoned.
+    #[test]
+    fn a_session_with_no_observations_is_dated_by_its_start() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+
+        let open = store.open_sessions().expect("list");
+
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].last_seen, session.started_at);
+    }
+
+    #[test]
+    fn a_closed_session_is_not_open() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+        store.close_session(session.id, now()).expect("close");
+
+        assert!(store.open_sessions().expect("list").is_empty());
+    }
+
+    /// The point of the claim: two ticks overlapping must not both summarise
+    /// the same session.
+    #[test]
+    fn only_the_first_claim_on_a_session_succeeds() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+
+        assert!(store.begin_ending(session.id).expect("claim"));
+        assert!(!store.begin_ending(session.id).expect("claim again"));
+        assert!(
+            store.open_sessions().expect("list").is_empty(),
+            "a claimed session is no longer on offer"
+        );
+    }
+
+    /// The claim is released only from `ending`. A session that was properly
+    /// closed must not come back from a stray call.
+    #[test]
+    fn releasing_a_claim_does_not_resurrect_a_closed_session() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+        store.close_session(session.id, now()).expect("close");
+
+        store.reopen_session(session.id).expect("reopen");
+
+        assert!(store.open_sessions().expect("list").is_empty());
+    }
+
+    /// And the converse: resuming is for a session that ended, not for one
+    /// somebody is summarising right now.
+    #[test]
+    fn resuming_leaves_a_session_that_is_being_summarised_alone() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+        store.begin_ending(session.id).expect("claim");
+
+        store.resume_session(session.id).expect("resume");
+
+        assert!(store.open_sessions().expect("list").is_empty());
+    }
+
+    #[test]
+    fn reopening_a_claimed_session_puts_it_back_on_offer() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+        store.begin_ending(session.id).expect("claim");
+
+        store.reopen_session(session.id).expect("reopen");
+
+        assert_eq!(store.open_sessions().expect("list").len(), 1);
+        assert!(store.begin_ending(session.id).expect("claim"));
+    }
+
+    /// An agent that goes quiet for hours and then keeps working: the session
+    /// was summarised in the meantime, and the rest of it must not be lost.
+    #[test]
+    fn resuming_a_closed_session_clears_the_end_it_was_given() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+        store.close_session(session.id, now()).expect("close");
+
+        store.resume_session(session.id).expect("resume");
+
+        let loaded = store
+            .load_session(session.id)
+            .expect("load")
+            .expect("found");
+        assert!(loaded.is_open());
+        assert_eq!(loaded.ended_at, None);
     }
 
     #[test]

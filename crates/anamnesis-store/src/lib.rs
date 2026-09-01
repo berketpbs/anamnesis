@@ -39,7 +39,7 @@ mod sweep;
 mod workstream;
 
 pub use improve::{Filed, ProjectRow, StoredProposal};
-pub use ops::{SessionSummary, new_handoff, new_observation, new_session};
+pub use ops::{OpenSession, SessionSummary, new_handoff, new_observation, new_session};
 pub use query::PageHit;
 pub use raw::{RawError, RawRecord, RawSpool};
 pub use sweep::SweepRow;

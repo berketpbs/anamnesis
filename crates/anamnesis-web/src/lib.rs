@@ -33,6 +33,7 @@ use tokio_util::task::TaskTracker;
 pub mod auth;
 pub mod improve;
 mod pipeline;
+pub mod reap;
 pub mod ui;
 pub mod watch;
 
@@ -338,6 +339,12 @@ pub async fn serve(
     // project turns one on: every tick over a fleet that has not asked for
     // auto-improve is one query and a list of reasons why not.
     tokio::spawn(improve::run_scheduler(state.clone()));
+
+    // Unconditional, unlike the scheduler above: auto-improve is a thing a
+    // project opts into, but a session nobody closed is a fault, and leaving
+    // one unswept because a marker file said nothing would be answering the
+    // wrong question.
+    tokio::spawn(reap::run_reaper(state.clone()));
 
     // On by default, unlike the scheduler, and the difference is what each one
     // does: auto-improve makes decisions about someone's memory, so it waits to
@@ -923,6 +930,51 @@ mod tests {
                 .iter()
                 .any(|o| o.body.as_str().contains(".env")),
             "nothing is excluded until a project asks for it"
+        );
+    }
+
+    /// The safety property behind summarising a session nobody closed: doing
+    /// it early is survivable. An agent that goes quiet long enough to be
+    /// summarised and then carries on gets its session back, so nothing after
+    /// the summary lands in a session that will never be read again.
+    #[test]
+    fn a_session_that_was_already_summarised_carries_on_where_it_left_off() {
+        let harness = harness();
+        run(&harness, "SessionStart", json!({"source": "startup"}));
+        let first = run(
+            &harness,
+            "UserPromptSubmit",
+            json!({"prompt": "wire up the storage layer"}),
+        );
+        let end = run(&harness, "SessionEnd", json!({"reason": "clear"}));
+        assert!(end.consolidated, "the session should have been summarised");
+
+        let resumed = run(
+            &harness,
+            "UserPromptSubmit",
+            json!({"prompt": "and now the retrieval side"}),
+        );
+
+        assert_eq!(
+            resumed.session_id, first.session_id,
+            "it is the same session, not a new one"
+        );
+        let session = harness
+            .state
+            .store
+            .load_session(resumed.session_id)
+            .expect("load")
+            .expect("found");
+        assert!(session.is_open(), "it should be open again");
+        assert!(
+            harness
+                .state
+                .store
+                .observations(resumed.session_id)
+                .expect("observations")
+                .iter()
+                .any(|o| o.body.as_str().contains("retrieval side")),
+            "what it said after the summary has to be kept"
         );
     }
 
