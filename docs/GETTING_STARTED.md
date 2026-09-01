@@ -780,6 +780,37 @@ Set it in the environment the **server** runs in, and in any shell you run
 `anamnesis search` from. Everything that writes a page then embeds it —
 consolidation, the wiki watcher, `write-page`, `bootstrap`, and the MCP tool.
 
+#### Or from an API instead
+
+On a small server the 90 MB download and the CPU that inference wants can be
+the difference between memory being cheap to run and memory being the reason
+the box is busy. Any OpenAI-compatible `/v1/embeddings` endpoint can do it
+instead:
+
+```bash
+export ANAMNESIS_EMBED_ENABLED=1
+export ANAMNESIS_EMBED_PROVIDER=openai
+export ANAMNESIS_EMBED_API_KEY=sk-...        # or OPENAI_API_KEY, which it falls back to
+# Optional, with these defaults:
+# export ANAMNESIS_EMBED_MODEL=text-embedding-3-small
+# export ANAMNESIS_EMBED_URL=https://api.openai.com/v1/embeddings
+```
+
+Local stays the default, and a misspelled provider name is local rather than
+an error: this setting is how you opt *into* sending every page and every
+query to somebody else, and a typo must not be a way to end up doing that.
+
+The server checks the endpoint while it starts, by embedding one short string
+— so a wrong key or a model that does not exist is an error you see at startup
+rather than a log line hours later, after sessions have been summarised
+without a vector each.
+
+**Switching providers does not corrupt anything, and does not migrate
+anything.** Every vector is stored beside the name of the model that produced
+it, because two models put vectors in unrelated spaces and cosine similarity
+between them is a number with no meaning. Pages embedded by the old model are
+simply not consulted until `anamnesis reindex` writes new ones.
+
 **Pages written before you turned it on have no vector**, and nothing
 backfills them on its own. One command does:
 

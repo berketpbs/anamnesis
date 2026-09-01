@@ -33,8 +33,9 @@ Anamnesis is organized as a Rust workspace with modular crates:
 - Session consolidation into a page plus a handoff for the next session —
   by counting when no model is configured, by reading when one is
 - Retrieval over four signals fused with reciprocal rank: FTS5, entity
-  matching, link neighbours, and optional local embeddings
-  (`ANAMNESIS_EMBED_ENABLED=1`)
+  matching, link neighbours, and optional embeddings
+  (`ANAMNESIS_EMBED_ENABLED=1`) — from a local model by default, or from any
+  OpenAI-compatible endpoint with `ANAMNESIS_EMBED_PROVIDER=openai`
 - `anamnesis install-hooks` wires Claude Code, Codex CLI, Gemini CLI, Cursor,
   and OpenCode — the same five lifecycle events, each in the file, spelling,
   payload, and reply format that harness uses. OpenCode takes a plugin module

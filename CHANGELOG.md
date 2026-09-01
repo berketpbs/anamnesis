@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Embeddings can come from an API instead of from this machine.
+  `ANAMNESIS_EMBED_PROVIDER=openai` points the vector stream at any
+  OpenAI-compatible `/v1/embeddings` endpoint — one shape rather than one
+  vendor, the same reason there is an OpenAI-compatible completion provider
+  rather than one per company. The local model stays the default and a
+  misspelled provider name resolves to local rather than erroring: the setting
+  exists to opt *into* sending every page and every query somewhere else, and a
+  typo must not be a way to end up doing that. The endpoint is probed once
+  while the embedder is built, which is how its vector length is learned and
+  also how a wrong key becomes an error somebody sees at startup instead of a
+  log line hours later. The key falls back to `OPENAI_API_KEY`, because a
+  machine that has one for completions has one for this and asking for the same
+  secret twice is how a setup ends up with two of them
 - Release binaries. A tag now builds `anamnesis` for Linux x86-64, macOS on
   both architectures and Windows, checks that each one starts, packages it with
   the README, the licence and the changelog, and attaches the archives and a

@@ -22,6 +22,7 @@ mod anthropic;
 mod budget;
 mod config;
 pub mod embed;
+pub mod hosted;
 mod http;
 mod openai;
 mod provider;
