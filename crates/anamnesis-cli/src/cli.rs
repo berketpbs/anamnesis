@@ -388,6 +388,73 @@ pub enum Commands {
         force: bool,
     },
 
+    /// Start a harness here, with memory wired
+    ///
+    /// Checks before it starts: the server has to be answering and this
+    /// harness's hooks have to point at anamnesis. A session that will not be
+    /// recorded is the session worth not starting — that failure has cost this
+    /// repository two afternoons, both discovered days later.
+    Run {
+        /// Which harness to start
+        #[arg(value_name = "AGENT")]
+        agent: String,
+
+        /// Executable to run, when the harness is called something else here
+        #[arg(long)]
+        program: Option<String>,
+
+        /// Server the harness's hooks should deliver to
+        #[arg(
+            long,
+            env = "ANAMNESIS_SERVER",
+            default_value = "http://127.0.0.1:8080"
+        )]
+        server: String,
+
+        /// Token to pass on, when the server requires one
+        #[arg(long, env = anamnesis_web::auth::TOKEN_ENV, hide_env_values = true)]
+        token: Option<String>,
+
+        /// Start even though nothing will be recorded
+        #[arg(long)]
+        anyway: bool,
+
+        /// Everything after `--`, passed to the harness untouched
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Start whichever harness this project last used
+    ///
+    /// The memory travels either way — the handoff is waiting for whoever
+    /// starts next, and every harness reads the same one — so this is about
+    /// picking a thread back up rather than about moving memory between tools.
+    Continue {
+        /// Executable to run, when the harness is called something else here
+        #[arg(long)]
+        program: Option<String>,
+
+        /// Server the harness's hooks should deliver to
+        #[arg(
+            long,
+            env = "ANAMNESIS_SERVER",
+            default_value = "http://127.0.0.1:8080"
+        )]
+        server: String,
+
+        /// Token to pass on, when the server requires one
+        #[arg(long, env = anamnesis_web::auth::TOKEN_ENV, hide_env_values = true)]
+        token: Option<String>,
+
+        /// Start even though nothing will be recorded
+        #[arg(long)]
+        anyway: bool,
+
+        /// Everything after `--`, passed to the harness untouched
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Show what has been changed by hand, newest first
     ///
     /// Capture is recorded as sessions, not here. This is the log of

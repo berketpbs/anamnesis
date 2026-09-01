@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `anamnesis run <harness>` and `anamnesis continue`. Everything else in this
+  system is careful about recording a session; this is about the minute before
+  one starts, and it exists because of the only failure anamnesis has had
+  twice — an afternoon of work that reached nothing, discovered days later.
+  Both times the cause was ordinary (a server that was not running, then a
+  server too old to read the marker file) and both times the session had
+  already happened by the time anybody looked. `run` checks first: the server
+  has to answer and this harness's hooks have to point at anamnesis, or nothing
+  is launched and the message carries the command that fixes it. `--anyway`
+  starts regardless and says what is being given up, in those words. The server
+  address travels in the environment the harness inherits rather than in the
+  hook command, so a project wired to one server can be run against another
+  without rewriting a settings file, and a token is passed on only when this
+  process has one — an empty variable would make a harness present an empty
+  credential to a server that accepts none. Everything after `--` reaches the
+  harness untouched, and its exit code comes back out. `continue` is the same
+  launch aimed at whichever harness this project last used
 - OpenCode is wired. It was the one harness anamnesis knew about and could not
   connect, because it extends through a plugin module rather than a command in
   a settings file — there is nothing for `install-hooks` to merge, and no
