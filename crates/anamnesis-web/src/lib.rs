@@ -873,15 +873,29 @@ async fn deliver_handoff(
     let store = state.store.clone();
     let agent = query.agent();
     let operator = identity.operator().cloned();
-    let handoff = off_runtime(move || {
-        claim_handoff(
-            &store,
-            &cwd,
-            &agent,
-            &session_id,
-            Timestamp::now(),
-            operator.as_ref(),
-        )
+    let handoff = off_runtime(move || -> Result<_, WebError> {
+        let now = Timestamp::now();
+        let claimed = claim_handoff(&store, &cwd, &agent, &session_id, now, operator.as_ref())?;
+
+        // Only when there was one to take: a session that asked and found
+        // nothing changed nothing, and every session asks.
+        if claimed.is_some()
+            && let Ok(scope) = pipeline::scope_for(&cwd)
+        {
+            let entry = anamnesis_core::audit::AuditEntry::new(
+                anamnesis_core::audit::Action::HandoffClaimed,
+                anamnesis_core::audit::Via::Http,
+                session_id.clone(),
+                now,
+            )
+            .in_project(scope.project_id)
+            .by(operator.clone());
+            if let Err(error) = store.append_audit(&entry) {
+                tracing::warn!(%error, "a handoff was claimed but not recorded in the audit log");
+            }
+        }
+
+        Ok(claimed)
     })
     .await?;
 

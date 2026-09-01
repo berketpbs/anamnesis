@@ -95,6 +95,11 @@ id_newtype! {
 }
 
 id_newtype! {
+    /// Identifies one line of the audit log. Minted, time-ordered.
+    AuditId
+}
+
+id_newtype! {
     /// Identifies a handoff between two sessions. Minted, time-ordered.
     HandoffId
 }
@@ -219,6 +224,19 @@ impl HandoffId {
     /// Mint a new time-ordered handoff identifier.
     pub fn new() -> Self {
         Self(Uuid::now_v7())
+    }
+}
+
+impl AuditId {
+    /// Mint a new time-ordered audit identifier.
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+}
+
+impl Default for AuditId {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

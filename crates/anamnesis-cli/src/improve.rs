@@ -164,6 +164,16 @@ fn decide_by_applying(
         now,
     )? {
         anamnesis_web::improve::Outcome::Promoted { commit } => {
+            crate::audit::note(
+                store,
+                Some(scope.project_id),
+                anamnesis_core::audit::Action::PagePromoted,
+                proposal.subject.clone(),
+                Some(format!(
+                    "to the semantic tier, commit {}",
+                    &commit[..commit.len().min(8)]
+                )),
+            );
             println!("✓ Promoted {} to the semantic tier", proposal.subject);
             println!("  commit {}", &commit[..commit.len().min(8)]);
             println!();
@@ -200,6 +210,14 @@ fn decide_by_dismissing(
         )?,
         "that proposal was already {} — a decision is made once",
         proposal.state.as_str()
+    );
+
+    crate::audit::note(
+        store,
+        Some(scope.project_id),
+        anamnesis_core::audit::Action::ProposalDismissed,
+        proposal.subject.clone(),
+        None,
     );
 
     println!("· Dismissed: {}", proposal.subject);

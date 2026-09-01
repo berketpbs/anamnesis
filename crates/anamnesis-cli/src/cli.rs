@@ -388,6 +388,22 @@ pub enum Commands {
         force: bool,
     },
 
+    /// Show what has been changed by hand, newest first
+    ///
+    /// Capture is recorded as sessions, not here. This is the log of
+    /// deliberate changes — pages written or forgotten, sessions removed,
+    /// handoffs claimed, proposals carried out — and it is what makes "why
+    /// does this page say that now" a question with an answer.
+    Audit {
+        /// How many changes to show
+        #[arg(long, default_value = "20")]
+        limit: usize,
+
+        /// Every project this server holds, not only this one
+        #[arg(long)]
+        everywhere: bool,
+    },
+
     /// Rebuild the index from the wiki and the raw transcripts
     ///
     /// Safe to run at any time: every identifier is derived, so a rebuild

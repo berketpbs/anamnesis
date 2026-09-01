@@ -432,6 +432,35 @@ impl AnamnesisMcp {
         })
     }
 
+    /// Record a change an agent made, so a person can find out later that it
+    /// was an agent that made it.
+    ///
+    /// Never fails the call: the page is already written and committed by the
+    /// time this runs, and refusing the tool call now would tell the model
+    /// something false about what happened.
+    fn note(
+        &self,
+        action: anamnesis_core::audit::Action,
+        subject: impl Into<String>,
+        detail: Option<String>,
+        operator: Option<OperatorName>,
+    ) {
+        let mut entry = anamnesis_core::audit::AuditEntry::new(
+            action,
+            anamnesis_core::audit::Via::Mcp,
+            subject,
+            Timestamp::now(),
+        )
+        .in_project(self.scope.project_id)
+        .by(operator);
+        if let Some(detail) = detail {
+            entry = entry.saying(detail);
+        }
+        if let Err(error) = self.store.append_audit(&entry) {
+            tracing::warn!(%error, "a change was made but not recorded in the audit log");
+        }
+    }
+
     fn write_page(&self, request: WritePageRequest) -> Result<WritePageResponse, McpError> {
         let path = PagePath::parse(&request.path)?;
         let entities = request
@@ -469,6 +498,12 @@ impl AnamnesisMcp {
             wiki.write_page(&self.scope.scope, &page, &format!("mcp: write {path}"))?
         };
         page.git_commit = Some(commit.clone());
+        self.note(
+            anamnesis_core::audit::Action::PageWritten,
+            path.to_string(),
+            Some(format!("commit {}", &commit[..commit.len().min(8)])),
+            None,
+        );
 
         let now = Timestamp::now();
         self.store.upsert_project(&self.scope, now)?;
@@ -553,6 +588,22 @@ impl AnamnesisMcp {
         let handoff = self
             .store
             .claim_handoff(self.scope.project_id, claimant, &slot, now)?;
+
+        // Only when there was one to take. A session that asked and found
+        // nothing changed nothing, and a log full of those is a log nobody
+        // reads on the day one line in it matters.
+        if handoff.is_some() {
+            self.note(
+                anamnesis_core::audit::Action::HandoffClaimed,
+                claimant.to_string(),
+                request
+                    .workstream
+                    .clone()
+                    .map(|slug| format!("workstream {slug}")),
+                slot.operator.clone(),
+            );
+        }
+
         Ok(HandoffAcceptResponse { handoff })
     }
 

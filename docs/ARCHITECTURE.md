@@ -239,6 +239,11 @@ Command-line interface.
 
 **Provides:**
 - `status`, `init`, `serve`, `mcp`, `hook`, `install-hooks`
+- `audit` — who changed memory, and what they changed. Deliberate changes
+  only: capture is recorded as sessions, and duplicating it here would bury
+  the lines that matter. The log outlives what it describes, so the project
+  reference is text rather than a foreign key — one that cascaded would
+  delete the record of the deletion
 - `backup`, `restore` — one archive holding the index, the transcripts and
   the wiki with its history. The index goes through SQLite's backup API, not
   a file copy: in WAL mode the committed database is spread across two files

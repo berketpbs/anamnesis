@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 
 use anamnesis_store::{RawSpool, SessionSummary, Store};
 
+use anamnesis_core::audit::Action;
+
+use crate::audit::note;
 use crate::project::open_project;
 
 /// Show the handoff waiting for the next session, without consuming it.
@@ -64,6 +67,16 @@ pub fn cmd_handoff(
         // it was not the one they meant.
         return match store.discard_handoff(scope.project_id, &slot)? {
             Some(body) => {
+                note(
+                    &store,
+                    Some(scope.project_id),
+                    Action::HandoffDiscarded,
+                    describe_slot(&workstream, &operator)
+                        .trim()
+                        .trim_start_matches("for ")
+                        .to_owned(),
+                    Some(format!("{} character(s) thrown away", body.len())),
+                );
                 println!(
                     "🗑  Discarded the handoff{}:",
                     describe_slot(&workstream, &operator)
@@ -279,6 +292,13 @@ pub fn cmd_forget_session(
         if store.delete_session(session.id)? {
             rows += 1;
         }
+        note(
+            &store,
+            Some(scope.project_id),
+            Action::SessionForgotten,
+            session.id.to_string(),
+            Some(format!("{} observation(s)", session.observation_count)),
+        );
         for transcript in files {
             match std::fs::remove_file(transcript) {
                 Ok(()) => transcripts += 1,
