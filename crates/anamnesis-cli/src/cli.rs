@@ -480,6 +480,18 @@ pub enum Commands {
         apply: bool,
     },
 
+    /// Take anamnesis back out of this project's harnesses
+    ///
+    /// Removes only what `install-hooks` and `install-mcp` wrote: any other
+    /// hook or MCP server in those files stays. Memory is untouched —
+    /// uninstalling stops the recording, it does not remove what was
+    /// recorded.
+    Uninstall {
+        /// Actually remove it, instead of only reporting what would go
+        #[arg(long)]
+        apply: bool,
+    },
+
     /// Show what has been changed by hand, newest first
     ///
     /// Capture is recorded as sessions, not here. This is the log of

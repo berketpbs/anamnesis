@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `anamnesis uninstall`: the counterpart to `install-hooks` and `install-mcp`.
+  Trying something and being unable to remove it cleanly is a reason not to
+  try it, and until now backing out meant editing four settings files by hand
+  and hoping. It takes out the hooks in every harness's file, the MCP
+  registration in JSON and in TOML, and the OpenCode plugin — and only those:
+  a project's own `PostToolUse` hook beside ours stays, and so does a wrapper
+  script somebody wrote that happens to call anamnesis, because what counts as
+  ours is the same narrow predicate the installer uses. A matcher left holding
+  no hooks is removed, and so is an empty `hooks` object or `mcpServers` map: a
+  settings file that reads as configured when nothing is configured is the
+  state at the bottom of every silent failure this project has had. Memory is
+  untouched, and the command says where it is rather than deciding — stopping
+  the recording is not the same as removing what was recorded
 - `anamnesis purge`: this project's memory, all of it. The end of the family
   `forget` and `forget-session` start, for the memory that is wrong rather
   than incomplete — a repository re-scoped by accident, a `bootstrap` run

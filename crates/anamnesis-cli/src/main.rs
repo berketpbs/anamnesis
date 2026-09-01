@@ -30,6 +30,7 @@ mod setup;
 mod spool;
 mod status;
 mod sweep;
+mod uninstall;
 
 use archive::{cmd_backup, cmd_restore};
 use audit::cmd_audit;
@@ -48,6 +49,7 @@ use sessions::{cmd_forget_session, cmd_handoff, cmd_sessions};
 use setup::{cmd_init, cmd_install_hooks, cmd_install_mcp, cmd_token};
 use status::cmd_status;
 use sweep::cmd_sweep;
+use uninstall::cmd_uninstall;
 
 use anamnesis_core::datadir::DataDir;
 use clap::Parser;
@@ -273,6 +275,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Purge { apply } => {
             cmd_purge(apply, cli.data_dir.clone())?;
+        }
+        Commands::Uninstall { apply } => {
+            cmd_uninstall(apply, cli.data_dir.clone())?;
         }
         Commands::Reindex => {
             cmd_reindex(cli.data_dir.clone())?;

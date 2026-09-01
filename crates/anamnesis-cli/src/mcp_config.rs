@@ -184,6 +184,48 @@ pub fn register(config: &mut Value, name: &str, entry: &Value) -> Registration {
     }
 }
 
+/// Take the anamnesis server back out, and nothing else with it.
+///
+/// The inverse of [`register`]. Only the entry under `name` goes; every other
+/// MCP server in the file is somebody's and stays. An `mcpServers` object left
+/// empty is removed too, so the file does not read as configured when nothing
+/// is configured.
+///
+/// Returns whether anything was there.
+pub fn unregister(config: &mut Value, name: &str) -> bool {
+    let Some(root) = config.as_object_mut() else {
+        return false;
+    };
+    let Some(servers) = root.get_mut("mcpServers").and_then(Value::as_object_mut) else {
+        return false;
+    };
+    let removed = servers.remove(name).is_some();
+    if servers.is_empty() {
+        root.remove("mcpServers");
+    }
+    removed
+}
+
+/// The same, for the harness that keeps its servers in TOML.
+///
+/// `toml_edit` rather than a re-serialise, for the reason registration uses
+/// it: the comments and key order in somebody's `config.toml` are theirs, and
+/// an uninstall that reformatted the file would be taking more than it was
+/// asked for.
+pub fn unregister_toml(document: &mut toml_edit::DocumentMut, name: &str) -> bool {
+    let Some(servers) = document
+        .get_mut("mcp_servers")
+        .and_then(|item| item.as_table_mut())
+    else {
+        return false;
+    };
+    let removed = servers.remove(name).is_some();
+    if servers.is_empty() {
+        document.as_table_mut().remove("mcp_servers");
+    }
+    removed
+}
+
 /// How an entry reads in a report: the command and its arguments, as run.
 pub fn describe(entry: &Value) -> String {
     let command = entry
