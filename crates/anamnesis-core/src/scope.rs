@@ -255,6 +255,14 @@ pub struct ResolvedScope {
     pub slots: SlotsConfig,
     /// When this project's abandoned sessions are summarised anyway.
     pub sessions: SessionsConfig,
+    /// Marker tables this build has no name for, and therefore did not apply.
+    ///
+    /// Carried rather than discarded because the file and the binary drift
+    /// apart — a marker written for a newer anamnesis is read by whatever is
+    /// installed — and the only thing worse than a setting that does not take
+    /// effect is one that does not take effect quietly. `anamnesis status`
+    /// names these where somebody is already asking whether memory is working.
+    pub unrecognized: Vec<String>,
 }
 
 /// Location of a discovered marker file.
@@ -320,6 +328,7 @@ impl ResolvedScope {
             auto_improve: AutoImproveConfig::default(),
             slots: SlotsConfig::default(),
             sessions: SessionsConfig::default(),
+            unrecognized: Vec::new(),
         }
     }
 }
@@ -355,15 +364,23 @@ pub fn resolve_scope(cwd: &Path) -> Result<ResolvedScope> {
     // Taken apart here rather than at each use: `config` is consumed by the
     // scope fields above, and a later reader should not have to prove that
     // two `map`s over the same `Option` see the same marker file.
-    let (capture, decay, auto_improve, slots, sessions) = match config {
-        Some(config) => (
-            Some(config.capture),
-            Some(config.decay),
-            Some(config.auto_improve),
-            Some(config.slots),
-            Some(config.sessions),
-        ),
-        None => (None, None, None, None, None),
+    let (capture, decay, auto_improve, slots, sessions, unrecognized) = match config {
+        Some(config) => {
+            let unrecognized = config
+                .unrecognized()
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            (
+                Some(config.capture),
+                Some(config.decay),
+                Some(config.auto_improve),
+                Some(config.slots),
+                Some(config.sessions),
+                unrecognized,
+            )
+        }
+        None => (None, None, None, None, None, Vec::new()),
     };
 
     // Relative patterns belong to whoever wrote them: the marker's directory
@@ -389,6 +406,7 @@ pub fn resolve_scope(cwd: &Path) -> Result<ResolvedScope> {
         auto_improve: auto_improve.unwrap_or_default(),
         slots: slots.unwrap_or_default(),
         sessions: sessions.unwrap_or_default(),
+        unrecognized,
     })
 }
 

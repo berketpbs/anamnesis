@@ -2620,6 +2620,26 @@ mod tests {
         );
     }
 
+    /// The outage this server actually had, as an assertion. On 2026-09-01
+    /// this repository's marker gained a `[sessions]` table hours before the
+    /// installed server was rebuilt, and the older server answered `400` to
+    /// every event of every session for three hours — nothing was wrong with
+    /// the events, the file was simply newer than the binary reading it.
+    /// Capture must survive a marker describing a feature this build does not
+    /// have.
+    #[tokio::test]
+    async fn a_marker_written_for_a_newer_build_still_records() {
+        let harness = harness_with("\n[a_feature_from_the_future]\nstale_after_minutes = 720\n");
+
+        let response = send(&harness.state, hook_request(&harness, "SessionStart", None)).await;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::ACCEPTED,
+            "a table this build has no name for cost the whole session"
+        );
+    }
+
     /// And a sender that names nothing still has every event of its own. Two
     /// identical prompts in one session are two events, and collapsing them
     /// would lose one to a de-duplication nobody asked for.
