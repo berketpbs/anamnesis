@@ -21,6 +21,7 @@ mod mcp_config;
 mod opencode;
 mod pages;
 mod project;
+mod purge;
 mod reindex;
 mod run;
 mod serve;
@@ -39,6 +40,7 @@ use cli::{Cli, Commands};
 use evals::cmd_eval;
 use improve::cmd_improve;
 use pages::{PageOptions, cmd_forget, cmd_search, cmd_show_page, cmd_write_page};
+use purge::cmd_purge;
 use reindex::cmd_reindex;
 use run::{cmd_continue, cmd_run};
 use serve::{cmd_mcp, cmd_serve};
@@ -268,6 +270,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Bench { events } => {
             cmd_bench(events)?;
+        }
+        Commands::Purge { apply } => {
+            cmd_purge(apply, cli.data_dir.clone())?;
         }
         Commands::Reindex => {
             cmd_reindex(cli.data_dir.clone())?;

@@ -468,6 +468,18 @@ pub enum Commands {
         events: usize,
     },
 
+    /// Remove this project's memory entirely
+    ///
+    /// The end of the family `forget` and `forget-session` start, for the
+    /// memory that is wrong rather than incomplete. Pages leave as a git
+    /// commit and stay in the wiki's history; the transcripts do not come
+    /// back at all.
+    Purge {
+        /// Actually remove it, instead of only reporting what would go
+        #[arg(long)]
+        apply: bool,
+    },
+
     /// Show what has been changed by hand, newest first
     ///
     /// Capture is recorded as sessions, not here. This is the log of
