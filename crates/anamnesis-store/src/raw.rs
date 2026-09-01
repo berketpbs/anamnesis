@@ -29,9 +29,11 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use anamnesis_core::ids::SessionId;
 use anamnesis_core::observation::Observation;
 use anamnesis_core::scope::Scope;
 use anamnesis_core::session::Session;
+use jiff::Timestamp;
 
 /// Errors produced while spooling.
 #[derive(Debug, thiserror::Error)]
@@ -91,9 +93,25 @@ impl RawSpool {
 
     /// Where a session's transcript lives.
     pub fn locate(&self, scope: &Scope, session: &Session) -> PathBuf {
-        let stamp = session.started_at.to_string();
+        self.locate_parts(scope, session.id, session.started_at)
+    }
+
+    /// Where a session's transcript lives, for a caller holding the two
+    /// fields the path is built from rather than the whole session.
+    ///
+    /// Split out for the paths that read a session as a summary row — a
+    /// listing, or a command that removes one — so that finding the
+    /// transcript never costs a second query for columns the layout does not
+    /// use.
+    pub fn locate_parts(
+        &self,
+        scope: &Scope,
+        session_id: SessionId,
+        started_at: Timestamp,
+    ) -> PathBuf {
+        let stamp = started_at.to_string();
         let date = stamp.split('T').next().unwrap_or("undated").to_owned();
-        let short: String = session.id.to_string().chars().take(8).collect();
+        let short: String = session_id.to_string().chars().take(8).collect();
         self.root
             .join(scope.workspace.as_str())
             .join(scope.project.as_str())

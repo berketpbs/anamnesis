@@ -9,11 +9,11 @@ mod sweep;
 
 use anamnesis_core::datadir::DataDir;
 use anamnesis_core::scope::{ScopeSource, resolve_scope};
-use anamnesis_store::Store;
+use anamnesis_store::{RawSpool, SessionSummary, Store};
 use anamnesis_wiki::Wiki;
 use clap::{Parser, Subcommand};
 use jiff::Timestamp;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "anamnesis")]
@@ -330,6 +330,22 @@ enum Commands {
         paths: Vec<String>,
     },
 
+    /// Forget a session, its observations, and its transcript
+    ///
+    /// For a session that was never a session: a hook fired by hand to check
+    /// that capture is alive is recorded like any other, and stays. Reports
+    /// what would go and changes nothing unless `--apply` is given, because
+    /// unlike a page a transcript is not in any git history.
+    ForgetSession {
+        /// Session ids, or any unambiguous prefix, as `sessions` prints them
+        #[arg(required = true)]
+        sessions: Vec<String>,
+
+        /// Actually forget them, instead of only reporting them
+        #[arg(long)]
+        apply: bool,
+    },
+
     /// Rebuild the index from the wiki and the raw transcripts
     ///
     /// Safe to run at any time: every identifier is derived, so a rebuild
@@ -597,6 +613,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Forget { paths } => {
             cmd_forget(&paths, cli.data_dir.clone())?;
+        }
+        Commands::ForgetSession { sessions, apply } => {
+            cmd_forget_session(&sessions, apply, cli.data_dir.clone())?;
         }
         Commands::Reindex => {
             cmd_reindex(cli.data_dir.clone())?;
@@ -3402,6 +3421,151 @@ fn forget_commit_message(doomed: &[(anamnesis_core::page::PagePath, String)]) ->
     }
     message.push('\n');
     message
+}
+
+/// Remove a session somebody named, from the index and the raw spool.
+///
+/// The counterpart to `forget` for the other half of what memory holds. What
+/// it exists for is not a session that went badly — once that has become a
+/// page, `forget` and the sweep both reach it — but a session that was never
+/// a session. A hook fired by hand to check whether capture is alive records
+/// a session indistinguishable from somebody's afternoon, and it is
+/// permanent: it is counted in `status`, it is listed by `sessions`, and once
+/// it has been silent long enough it is summarised into a page like any
+/// other.
+///
+/// Gated behind `--apply`, unlike `forget`. The reasoning there rests on the
+/// wiki being a git repository, so a page removed by mistake is still in its
+/// history. Nothing plays that part here: the transcript under `raw/` is the
+/// only copy of what a session observed and it is not versioned. Where there
+/// is no history to fall back on, the report before the fact is the whole
+/// safety net.
+fn cmd_forget_session(
+    prefixes: &[String],
+    apply: bool,
+    data_dir: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    let (scope, data, store) = open_project(data_dir)?;
+    let raw = RawSpool::new(data.raw());
+
+    // Every prefix is resolved before anything is removed, for the reason
+    // `forget` resolves every path first: refusing the third name after
+    // acting on the first two leaves the caller to work out which was the
+    // typo, against a listing that has changed underneath them.
+    let mut doomed: Vec<(SessionSummary, PathBuf)> = Vec::with_capacity(prefixes.len());
+    for prefix in prefixes {
+        let session = one_session(&store, &scope, prefix)?;
+        // Two prefixes for one session is a typo that costs nothing, so it is
+        // absorbed rather than refused.
+        if doomed.iter().any(|(seen, _)| seen.id == session.id) {
+            continue;
+        }
+        let transcript = raw.locate_parts(&scope.scope, session.id, session.started_at);
+        doomed.push((session, transcript));
+    }
+
+    println!("🗑  Forgetting from {}", scope.scope);
+    println!();
+    let mut observations = 0;
+    for (session, transcript) in &doomed {
+        observations += session.observation_count;
+        let short: String = session.id.to_string().chars().take(8).collect();
+        let when = session.started_at.to_string();
+        let when = when.split('.').next().unwrap_or(&when).to_owned();
+        println!(
+            "  {short}  {when}  {:<12} {:<7} {} obs",
+            session.agent, session.state, session.observation_count
+        );
+        match lines_in(transcript) {
+            Some(lines) => println!("     transcript  {} ({lines} lines)", transcript.display()),
+            None => println!("     transcript  none on disk"),
+        }
+    }
+    println!();
+
+    if !apply {
+        println!("  Nothing has been removed. Run again with --apply to carry this out.");
+        return Ok(());
+    }
+
+    // The index first, then the spool — the order `forget` and `sweep` both
+    // chose, and here it is what keeps an interruption harmless: a session
+    // whose row is gone while its transcript remains is restored whole by
+    // `anamnesis reindex`, because that is where reindex rebuilds sessions
+    // from. The reverse order destroys the durable copy while the index still
+    // claims the session, and nothing rebuilds that.
+    let mut rows = 0;
+    let mut transcripts = 0;
+    for (session, transcript) in &doomed {
+        if store.delete_session(session.id)? {
+            rows += 1;
+        }
+        match std::fs::remove_file(transcript) {
+            Ok(()) => transcripts += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => anyhow::bail!(
+                "{} index row(s) were removed, but the transcript at {} could not be: {error}",
+                rows,
+                transcript.display()
+            ),
+        }
+    }
+
+    println!("  {rows} session(s), {observations} observation(s), {transcripts} transcript(s).");
+    println!();
+    println!("  Not recoverable: raw/ is not a git repository.");
+    println!(
+        "  Any page a session already produced stays in the wiki — `anamnesis forget` removes those."
+    );
+    Ok(())
+}
+
+/// How many lines a transcript holds, or `None` if it is not there.
+///
+/// Counted rather than sized because the unit a person can check against is
+/// the one `sessions` already prints: a session header and one line per
+/// observation.
+fn lines_in(path: &Path) -> Option<usize> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|text| text.lines().count())
+}
+
+/// Resolve an id prefix to exactly one session.
+///
+/// Refuses an ambiguous prefix rather than acting on whichever row sorted
+/// first, for the reason `one_proposal` does: what follows cannot be undone,
+/// and "it removed the other one" is not a mistake anybody can walk back.
+fn one_session(
+    store: &Store,
+    scope: &anamnesis_core::scope::ResolvedScope,
+    prefix: &str,
+) -> anyhow::Result<SessionSummary> {
+    // An empty prefix abbreviates every session in the project, which is the
+    // one argument this command must never accept.
+    if prefix.trim().is_empty() {
+        anyhow::bail!("name a session — an empty prefix matches every session in the project");
+    }
+
+    let mut matches = store.sessions_matching(scope.project_id, prefix)?;
+    match matches.len() {
+        0 => anyhow::bail!("no session in {} starts with {prefix:?}", scope.scope),
+        1 => Ok(matches.remove(0)),
+        _ => {
+            let listed: Vec<String> = matches
+                .iter()
+                .map(|session| {
+                    let short: String = session.id.to_string().chars().take(8).collect();
+                    format!("{short} ({} obs)", session.observation_count)
+                })
+                .collect();
+            anyhow::bail!(
+                "{prefix:?} matches {}: {}",
+                matches.len(),
+                listed.join(", ")
+            )
+        }
+    }
 }
 
 fn cmd_show_page(path: &str, data_dir: Option<PathBuf>) -> anyhow::Result<()> {

@@ -537,29 +537,75 @@ impl Store {
         limit: usize,
     ) -> Result<Vec<SessionSummary>> {
         let conn = self.connection();
-        let mut statement = conn.prepare(
-            "SELECT s.id, s.agent, s.state, s.started_at, s.ended_at, w.slug, s.operator,
-                    (SELECT COUNT(*) FROM observations o WHERE o.session_id = s.id)
-             FROM sessions s
-             LEFT JOIN workstreams w ON w.id = s.workstream_id
+        let mut statement = conn.prepare(&format!(
+            "{SESSION_SUMMARY_SELECT}
              WHERE s.project_id = ?1
              ORDER BY s.started_at DESC
-             LIMIT ?2",
+             LIMIT ?2"
+        ))?;
+        let rows = statement.query_map(
+            params![project_id.to_string(), limit as i64],
+            read_session_summary,
         )?;
-        let rows = statement.query_map(params![project_id.to_string(), limit as i64], |row| {
-            Ok(SessionSummary {
-                id: parse_id(row.get::<_, String>(0)?),
-                agent: row.get(1)?,
-                state: row.get(2)?,
-                started_at: parse_time(&row.get::<_, String>(3)?),
-                ended_at: row.get::<_, Option<String>>(4)?.map(|t| parse_time(&t)),
-                workstream: row.get(5)?,
-                operator: row.get(6)?,
-                observation_count: row.get(7)?,
-            })
-        })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    /// A project's sessions whose identifier starts with `prefix`.
+    ///
+    /// Sessions are printed by their first eight characters and that is how
+    /// anyone reading a listing refers to them, so anything that takes a
+    /// session from a human has to accept the same abbreviation. Every match
+    /// comes back rather than the first, because the caller has to be able to
+    /// tell "no such session" from "say which one you meant" — resolving an
+    /// ambiguous prefix to whichever row sorted first would delete the wrong
+    /// session and report success.
+    ///
+    /// The comparison is `substr`, not `LIKE`: the prefix is whatever a
+    /// person typed, and under `LIKE` a stray `%` would match every session
+    /// in the project. A command that removes things must not read a typo as
+    /// "all of them".
+    pub fn sessions_matching(
+        &self,
+        project_id: ProjectId,
+        prefix: &str,
+    ) -> Result<Vec<SessionSummary>> {
+        let conn = self.connection();
+        let mut statement = conn.prepare(&format!(
+            "{SESSION_SUMMARY_SELECT}
+             WHERE s.project_id = ?1 AND substr(s.id, 1, length(?2)) = ?2
+             ORDER BY s.started_at DESC"
+        ))?;
+        // Lowercased to match how identifiers are stored, so a prefix pasted
+        // from somewhere that upper-cased it still finds its session.
+        let rows = statement.query_map(
+            params![project_id.to_string(), prefix.to_lowercase()],
+            read_session_summary,
+        )?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Remove a session, and with it everything the session wrote.
+    ///
+    /// Observations and the handoffs this session *left* go by foreign key. A
+    /// handoff written to it does not: `to_session` is nulled instead, which
+    /// is the truth — that note was somebody else's work, and it was still
+    /// delivered.
+    ///
+    /// This does not touch the transcript under `raw/`, and the caller must,
+    /// because `reindex` rebuilds sessions from those files: a session deleted
+    /// here and left there comes back on the next rebuild, which would make
+    /// this look like it had failed silently.
+    ///
+    /// Returns whether a row was actually removed.
+    pub fn delete_session(&self, session_id: SessionId) -> Result<bool> {
+        let conn = self.connection();
+        let removed = conn.execute(
+            "DELETE FROM sessions WHERE id = ?1",
+            params![session_id.to_string()],
+        )?;
+        Ok(removed > 0)
     }
 
     /// How many sessions a project has recorded.
@@ -754,6 +800,32 @@ fn resolve_supersession(
     )?;
 
     Ok(())
+}
+
+/// The columns behind every [`SessionSummary`].
+///
+/// Shared as a string rather than written out at each call site so that two
+/// ways of selecting sessions cannot drift into reading their columns by
+/// different indexes — the kind of mismatch that compiles, runs, and puts the
+/// agent name in the state column.
+const SESSION_SUMMARY_SELECT: &str =
+    "SELECT s.id, s.agent, s.state, s.started_at, s.ended_at, w.slug, s.operator,
+            (SELECT COUNT(*) FROM observations o WHERE o.session_id = s.id)
+     FROM sessions s
+     LEFT JOIN workstreams w ON w.id = s.workstream_id";
+
+/// Build a [`SessionSummary`] from a [`SESSION_SUMMARY_SELECT`] row.
+fn read_session_summary(row: &Row<'_>) -> rusqlite::Result<SessionSummary> {
+    Ok(SessionSummary {
+        id: parse_id(row.get::<_, String>(0)?),
+        agent: row.get(1)?,
+        state: row.get(2)?,
+        started_at: parse_time(&row.get::<_, String>(3)?),
+        ended_at: row.get::<_, Option<String>>(4)?.map(|t| parse_time(&t)),
+        workstream: row.get(5)?,
+        operator: row.get(6)?,
+        observation_count: row.get(7)?,
+    })
 }
 
 /// Build a [`Session`] from a joined row.
@@ -1770,6 +1842,165 @@ mod tests {
             .expect("found");
         assert!(loaded.is_open());
         assert_eq!(loaded.ended_at, None);
+    }
+
+    #[test]
+    fn forgetting_a_session_takes_its_observations_with_it() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+        store
+            .insert_observation(&new_observation(
+                session.id,
+                EventKind::UserPrompt,
+                None,
+                BoundedBody::truncating("diagnostic probe: is capture alive", 1024),
+                now(),
+            ))
+            .expect("observation");
+
+        assert!(store.delete_session(session.id).expect("delete"));
+
+        assert!(store.recent_sessions(project, 10).expect("list").is_empty());
+        assert_eq!(
+            store.observations(session.id).expect("read").len(),
+            0,
+            "observations should go with the session that held them"
+        );
+    }
+
+    /// A handoff has two ends and only one of them is this session's work.
+    #[test]
+    fn forgetting_a_session_drops_the_note_it_wrote_and_keeps_the_one_it_read() {
+        let (_dir, store, project, workspace) = fixture();
+
+        let mut author = session_for(project, workspace);
+        author.id = SessionId::derive(project, "author");
+        store.ensure_session(&author).expect("author");
+
+        let mut reader = session_for(project, workspace);
+        reader.id = SessionId::derive(project, "reader");
+        store.ensure_session(&reader).expect("reader");
+
+        // A note the author left, which the reader was then handed. Claiming
+        // is what puts a session on the receiving end of a handoff, so it is
+        // how the fixture gets there too.
+        let given = new_handoff(
+            project,
+            author.id,
+            Slot::default(),
+            "here is where I left off",
+            now(),
+        );
+        store.record_handoff(&given).expect("given handoff");
+        store
+            .claim_handoff(project, reader.id, &Slot::default(), now())
+            .expect("claim")
+            .expect("a note was waiting");
+
+        // And the note the reader itself left behind when it finished.
+        store
+            .record_handoff(&new_handoff(
+                project,
+                reader.id,
+                Slot::default(),
+                "what I was in the middle of",
+                now(),
+            ))
+            .expect("own handoff");
+
+        assert!(store.delete_session(reader.id).expect("delete"));
+
+        assert_eq!(
+            store.peek_handoff(project, &Slot::default()).expect("peek"),
+            None,
+            "the note this session left is this session's work, and goes with it"
+        );
+
+        let (surviving, to_session) = {
+            let conn = store.connection();
+            conn.query_row(
+                "SELECT COUNT(*), MAX(to_session) FROM handoffs WHERE id = ?1",
+                params![given.id.to_string()],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .expect("read")
+        };
+        assert_eq!(
+            surviving, 1,
+            "a note written by another session is that session's work and survives"
+        );
+        assert_eq!(
+            to_session, None,
+            "the reader it was handed to is gone, and the row should say so"
+        );
+    }
+
+    #[test]
+    fn forgetting_a_session_that_was_never_there_says_so() {
+        let (_dir, store, project, _workspace) = fixture();
+        assert!(
+            !store
+                .delete_session(SessionId::derive(project, "never-happened"))
+                .expect("delete")
+        );
+    }
+
+    #[test]
+    fn a_prefix_finds_the_session_it_abbreviates() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+
+        let short: String = session.id.to_string().chars().take(8).collect();
+        let found = store.sessions_matching(project, &short).expect("match");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, session.id);
+
+        assert_eq!(
+            store
+                .sessions_matching(project, &short.to_uppercase())
+                .expect("match")
+                .len(),
+            1,
+            "a prefix pasted in upper case names the same session"
+        );
+        assert!(
+            store
+                .sessions_matching(project, "ffffffff")
+                .expect("match")
+                .is_empty()
+        );
+    }
+
+    /// Both come back, so the caller can refuse rather than guess.
+    #[test]
+    fn an_ambiguous_prefix_comes_back_ambiguous() {
+        let (_dir, store, project, workspace) = fixture();
+        for name in ["one", "two"] {
+            let mut session = session_for(project, workspace);
+            session.id = SessionId::derive(project, name);
+            store.ensure_session(&session).expect("session");
+        }
+
+        let found = store.sessions_matching(project, "").expect("match");
+        assert_eq!(found.len(), 2, "an empty prefix abbreviates every session");
+    }
+
+    /// The reason this matches on `substr` rather than `LIKE`.
+    #[test]
+    fn a_wildcard_in_the_prefix_is_not_a_wildcard() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+
+        assert!(
+            store
+                .sessions_matching(project, "%")
+                .expect("match")
+                .is_empty(),
+            "a typed % should match nothing, not every session in the project"
+        );
     }
 
     #[test]
