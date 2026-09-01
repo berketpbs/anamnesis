@@ -89,6 +89,16 @@ pub(crate) enum UiError {
     /// The URL named something that is not a page path.
     #[error("{0}")]
     Core(#[from] anamnesis_core::CoreError),
+
+    /// Rendering panicked on the blocking pool, where it runs.
+    #[error("the server failed while rendering this: {0}")]
+    Panicked(String),
+}
+
+impl From<tokio::task::JoinError> for UiError {
+    fn from(error: tokio::task::JoinError) -> Self {
+        Self::Panicked(error.to_string())
+    }
 }
 
 impl IntoResponse for UiError {
@@ -96,7 +106,7 @@ impl IntoResponse for UiError {
         let status = match self {
             Self::Missing(_) => StatusCode::NOT_FOUND,
             Self::Core(_) => StatusCode::BAD_REQUEST,
-            Self::Store(_) | Self::Wiki(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Store(_) | Self::Wiki(_) | Self::Panicked(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let body = shell(
             "Not here",
@@ -151,6 +161,16 @@ pub(crate) fn challenge(reason: &str) -> Response {
 /// scope whose last observation is a week old on a machine somebody worked in
 /// yesterday is that failure, visible.
 async fn index(State(state): State<AppState>) -> Result<Html<String>, UiError> {
+    crate::off_runtime(move || render_index(&state)).await
+}
+
+/// The listing itself, on a thread the server does not answer requests with.
+///
+/// Every line of it is a query, and the browser is the one surface here that
+/// can read the whole of memory: a scope list on a busy server is dozens of
+/// them. See [`crate::off_runtime`] for why none of that belongs on a runtime
+/// worker.
+fn render_index(state: &AppState) -> Result<Html<String>, UiError> {
     let projects = state.store.projects()?;
     let now = Timestamp::now();
 
@@ -183,7 +203,7 @@ async fn index(State(state): State<AppState>) -> Result<Html<String>, UiError> {
             "<h1>anamnesis</h1>{}<p class=\"muted\">No project has been registered here yet. \
              A scope appears once a session is captured for it, or once \
              <code>anamnesis init</code> runs inside a repository.</p>",
-            server_facts(&state)
+            server_facts(state)
         )
     } else {
         format!(
@@ -191,7 +211,7 @@ async fn index(State(state): State<AppState>) -> Result<Html<String>, UiError> {
              <table><thead><tr><th>Scope</th><th class=\"num\">Pages</th>\
              <th class=\"num\">Sessions</th><th class=\"num\">Last recorded</th></tr></thead>\
              <tbody>{rows}</tbody></table>",
-            facts = server_facts(&state)
+            facts = server_facts(state)
         )
     };
 
@@ -271,7 +291,17 @@ async fn scope(
     Path((workspace, project)): Path<(String, String)>,
     Query(search): Query<Search>,
 ) -> Result<Html<String>, UiError> {
-    let found = find_scope(&state, &workspace, &project)?;
+    crate::off_runtime(move || render_scope(&state, &workspace, &project, search)).await
+}
+
+/// One scope's pages, or the answer to a question asked of them.
+fn render_scope(
+    state: &AppState,
+    workspace: &str,
+    project: &str,
+    search: Search,
+) -> Result<Html<String>, UiError> {
+    let found = find_scope(state, workspace, project)?;
     let query = search.q.unwrap_or_default();
     let asked = query.trim();
 
@@ -282,9 +312,9 @@ async fn scope(
     );
     let form = search_form(&scope_href(&found.scope), asked);
     let body = if asked.is_empty() {
-        listing(&state, &found)?
+        listing(state, &found)?
     } else {
-        results(&state, &found, asked)?
+        results(state, &found, asked)?
     };
 
     let page = format!("{}{heading}{form}{body}", crumbs(&[("anamnesis", PREFIX)]));
@@ -626,8 +656,18 @@ async fn page(
     State(state): State<AppState>,
     Path((workspace, project, path)): Path<(String, String, String)>,
 ) -> Result<Html<String>, UiError> {
-    let found = find_scope(&state, &workspace, &project)?;
-    let page_path = PagePath::parse(&path)?;
+    crate::off_runtime(move || render_page(&state, &workspace, &project, &path)).await
+}
+
+/// One page, read from the wiki and rendered.
+fn render_page(
+    state: &AppState,
+    workspace: &str,
+    project: &str,
+    path: &str,
+) -> Result<Html<String>, UiError> {
+    let found = find_scope(state, workspace, project)?;
+    let page_path = PagePath::parse(path)?;
 
     // Read from the wiki rather than from the index's copy of the body. The
     // file is what a person edits and what git holds; the index is a
@@ -656,7 +696,7 @@ async fn page(
     // retrieval stopped offering this page the moment something replaced it,
     // so a reader who arrived here by name has no other way to learn that.
     let replaced = state.store.superseded_by(found.project_id, &page_path)?;
-    let retention = retention(&state, &found, &page_path)?;
+    let retention = retention(state, &found, &page_path)?;
 
     let base = scope_href(&found.scope);
     let body = format!(
