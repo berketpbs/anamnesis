@@ -36,20 +36,46 @@ pub fn mentioned_files(observations: &[Observation]) -> Vec<String> {
 }
 
 /// The compiled path pattern.
+///
+/// Two things here are about Windows, and both were losing most of a path.
+///
+/// The drive prefix is optional and spelled out. Without it an absolute path
+/// loses its head: `C:` is not a path character, so no match can start at the
+/// drive letter and one starts at the component after it instead.
+/// `C:\Berke\anamnesis\src\lib.rs` was recorded as `Berke/anamnesis/src/lib.rs`,
+/// which names a directory that does not exist.
+///
+/// Separators repeat, because a tool body is usually JSON and a backslash in
+/// JSON is written twice. Matching exactly one separator meant that the moment
+/// a path arrived through the field it most often arrives through, every
+/// component but the last fell off: the same path above came back as
+/// `lib.rs`. That one is worse than the drive, because a bare filename still
+/// looks like a plausible answer.
 fn pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
         Regex::new(&format!(
-            r"(?i)\b[\w.\-]+(?:[/\\][\w.\-]+)*\.(?:{EXTENSIONS})\b"
+            r"(?i)\b(?:[A-Za-z]:[/\\]+)?[\w.\-]+(?:[/\\]+[\w.\-]+)*\.(?:{EXTENSIONS})\b"
         ))
         .expect("file pattern is valid")
     })
 }
 
 /// Normalise separators and strip surrounding punctuation.
+///
+/// Runs of separators collapse to one: the pattern accepts them because JSON
+/// doubles a backslash, and `C://Berke//src//lib.rs` is not a path anybody
+/// wants to read back.
 fn normalize(raw: &str) -> String {
-    raw.replace('\\', "/")
-        .trim_matches(|c: char| c == '"' || c == '\'' || c == ',')
+    let mut out = String::with_capacity(raw.len());
+    for character in raw.chars() {
+        match character {
+            '\\' | '/' if out.ends_with('/') => {}
+            '\\' => out.push('/'),
+            other => out.push(other),
+        }
+    }
+    out.trim_matches(|c: char| c == '"' || c == '\'' || c == ',')
         .to_owned()
 }
 
@@ -100,6 +126,62 @@ mod tests {
     fn normalises_windows_separators() {
         let files = mentioned_files(&[observation(r"edited crates\store\src\lib.rs")]);
         assert_eq!(files, vec!["crates/store/src/lib.rs".to_owned()]);
+    }
+
+    /// A path with a drive on it is the ordinary shape on Windows, and it used
+    /// to arrive with its head missing: the drive letter cannot start a match,
+    /// so the match started one component in and named a directory that is not
+    /// there. Sessions recorded on this machine are full of the evidence.
+    #[test]
+    fn an_absolute_windows_path_keeps_its_drive() {
+        let files = mentioned_files(&[observation(
+            r"edited C:\Berke\anamnesis\crates\anamnesis-cli\src\hooks.rs today",
+        )]);
+
+        assert_eq!(
+            files,
+            vec!["C:/Berke/anamnesis/crates/anamnesis-cli/src/hooks.rs".to_owned()]
+        );
+    }
+
+    /// The shape a path actually arrives in. A tool body is JSON, and JSON
+    /// writes a backslash twice — so this is the common case on Windows, not
+    /// the exotic one. Matching a single separator left only `reap.rs`, which
+    /// is worse than losing the drive: a bare filename still reads like an
+    /// answer. Caught by running the thing and reading what it wrote.
+    #[test]
+    fn a_path_escaped_for_json_keeps_all_of_its_components() {
+        let files = mentioned_files(&[observation(
+            r#"{"file_path":"C:\\Berke\\anamnesis\\crates\\anamnesis-web\\src\\reap.rs"}"#,
+        )]);
+
+        assert_eq!(
+            files,
+            vec!["C:/Berke/anamnesis/crates/anamnesis-web/src/reap.rs".to_owned()]
+        );
+    }
+
+    /// Doubling is not the only run: a path pasted from a shell that already
+    /// escaped it once can arrive with more.
+    #[test]
+    fn a_run_of_separators_collapses_to_one() {
+        let files = mentioned_files(&[observation(r"crates\\\\store///src\\lib.rs")]);
+
+        assert_eq!(files, vec!["crates/store/src/lib.rs".to_owned()]);
+    }
+
+    /// The drive is a letter, not the letter `C`, and the shell writes it in
+    /// either case.
+    #[test]
+    fn any_drive_letter_in_either_case_is_kept() {
+        for raw in [r"D:\work\main.rs", r"d:/work/main.rs"] {
+            let files = mentioned_files(&[observation(raw)]);
+            assert_eq!(files.len(), 1, "{raw}: {files:?}");
+            assert!(
+                files[0].to_lowercase().starts_with("d:/work/"),
+                "{raw}: {files:?}"
+            );
+        }
     }
 
     #[test]
