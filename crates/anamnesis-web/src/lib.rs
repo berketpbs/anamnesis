@@ -278,21 +278,35 @@ async fn require_browser_token(
     }
 }
 
-/// What the server makes of the caller's token.
+/// What the server makes of the caller's token, and how it compiles memory.
 #[derive(Debug, Serialize)]
 struct WhoAmI {
     /// `open` when no token is required, `token` when one was accepted.
     auth: &'static str,
     /// The operator the token belongs to, when it names one.
     operator: Option<String>,
+    /// The model sessions are summarised with. `null` means they are counted.
+    consolidation: Option<String>,
+    /// The model pages are embedded with. `null` means vector search is off.
+    embedding: Option<String>,
 }
 
-/// Report the caller's identity back to them.
+/// Report the caller's identity back to them, and what this server does.
 ///
 /// The endpoint exists for the question `status` has to answer — "does this
 /// machine's token work?" — which no other route can answer without side
 /// effects: `/handoff` consumes a handoff, and `/hook` records an event.
-async fn whoami(Extension(identity): Extension<Identity>) -> Json<WhoAmI> {
+///
+/// The two model fields ride along because the server is the only thing that
+/// knows them. Consolidation happens here, from this process's environment,
+/// and a client reading its *own* environment would confidently report a model
+/// the server does not have — or none when the server has one. That is not a
+/// hypothetical: this system spent a week writing counted summaries while the
+/// only line that said so was a startup banner printed to a hidden console.
+async fn whoami(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+) -> Json<WhoAmI> {
     Json(WhoAmI {
         auth: if identity.is_anonymous() {
             "open"
@@ -300,6 +314,14 @@ async fn whoami(Extension(identity): Extension<Identity>) -> Json<WhoAmI> {
             "token"
         },
         operator: identity.operator().map(ToString::to_string),
+        consolidation: state
+            .llm
+            .as_ref()
+            .map(|settings| settings.provider.model().to_owned()),
+        embedding: state
+            .embedder
+            .as_ref()
+            .map(|embedder| embedder.model().to_owned()),
     })
 }
 
@@ -2102,6 +2124,28 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(&body_of(response).await).expect("json");
         assert_eq!(body["auth"], "open");
         assert_eq!(body["operator"], serde_json::Value::Null);
+    }
+
+    /// The report `anamnesis status` prints comes from here, because here is
+    /// the only place that knows. A client reading its own environment would
+    /// confidently name a model this process was never started with.
+    #[tokio::test]
+    async fn whoami_says_how_this_server_compiles_memory() {
+        let harness = harness();
+
+        let response = send(
+            &harness.state,
+            with_token(HttpRequest::builder().uri("/whoami"), None),
+        )
+        .await;
+
+        let body: serde_json::Value = serde_json::from_str(&body_of(response).await).expect("json");
+        assert!(
+            body.get("consolidation").is_some(),
+            "the field has to be present even when there is no model, or a              client cannot tell 'counted' from 'an older server'"
+        );
+        assert_eq!(body["consolidation"], serde_json::Value::Null);
+        assert_eq!(body["embedding"], serde_json::Value::Null);
     }
 
     /// A handoff is single-use, so a refused request must not be a use. The
