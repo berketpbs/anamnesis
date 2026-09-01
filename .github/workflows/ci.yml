@@ -124,10 +124,46 @@ jobs:
       # it is the path nobody takes by hand — Ctrl-C in a terminal is the one
       # people try. A container is the only place in this project's CI where
       # the unattended stop can actually be exercised.
+      #
+      # What is asserted is that the process left, not that it said it was
+      # leaving. The hang this step exists to catch happened *after* the last
+      # line was logged: the server announced it had stopped and then parked on
+      # a blocking task that never returned. `docker stop` covered for it —
+      # SIGKILL once the timeout ran out, exit code 0 from `docker stop`
+      # itself, and a green step. So the container's own exit code is the
+      # assertion, and how long it took is the second one, because a stop that
+      # finishes at nineteen seconds is the same hang arriving just before the
+      # axe.
       - name: The server stops when it is asked to
         run: |
+          started=$(date +%s)
           docker stop --timeout 20 anamnesis-ci
+          elapsed=$(( $(date +%s) - started ))
+          code=$(docker inspect -f '{{.State.ExitCode}}' anamnesis-ci)
+
+          # Printed either way: on a failure this is the whole diagnosis, and
+          # on a pass it is the number to compare against when it changes.
+          echo "stopped after ${elapsed}s, exit code ${code}"
           docker logs anamnesis-ci 2>&1 | tail -5
+
+          if [ "$code" != 0 ]; then
+            echo "::error::the container did not stop on its own: exit ${code} (137 is SIGKILL, which is \`docker stop\` giving up and killing it)"
+            exit 1
+          fi
+
+          # Ten seconds is half the SIGKILL deadline above, so that "it exited"
+          # and "it was killed just in time" cannot come back as the same
+          # measurement. There is nothing for this container to wait for: the
+          # grace period covers summaries still being written, and no session
+          # was ever opened against it.
+          if [ "$elapsed" -ge 10 ]; then
+            echo "::error::the container took ${elapsed}s to stop with nothing in flight; it should be immediate"
+            exit 1
+          fi
+
+          # It exited on its own and it exited quickly. This last line says the
+          # shutdown path is what it left through, rather than some other exit
+          # that also happens to be quick and zero.
           docker logs anamnesis-ci 2>&1 | grep -q "anamnesis stopped"
 
       - name: Stop it
