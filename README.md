@@ -57,6 +57,9 @@ Anamnesis is organized as a Rust workspace with modular crates:
 - `anamnesis eval` scores retrieval against a checked-in corpus and its
   questions, so a change to ranking can be judged by what it does to recall
   rather than by argument. The suite runs in CI as an ordinary test
+- `anamnesis purge` removes one project's memory in the order things can be
+  got back, and `anamnesis uninstall` takes the hooks and registrations back
+  out without touching anybody else's settings
 - `anamnesis bench` measures the capture path rather than arguing about it:
   on the machine this was written on, 1 866 events/s with the durable
   transcript and 3 708 without, p95 0.66 ms

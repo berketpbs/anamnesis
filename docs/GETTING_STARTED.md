@@ -901,6 +901,22 @@ a session that `anamnesis reindex` restores whole — that is where reindex
 rebuilds sessions from. A page the session already produced is not touched;
 `anamnesis forget` is what removes one of those.
 
+### Take It Back Out
+
+```bash
+anamnesis uninstall              # says exactly what would go
+anamnesis uninstall --apply
+```
+
+Removes the hooks from every harness's settings file, the MCP registration,
+and the OpenCode plugin. **Only what anamnesis wrote**: a project's own hook
+beside ours stays, and so does a wrapper script that happens to call
+anamnesis.
+
+Memory is untouched. Uninstalling stops the recording; it does not remove what
+was recorded. `anamnesis purge --apply` removes this project's memory, and
+deleting the data directory removes all of it.
+
 ### Start a Project Over
 
 When the memory is wrong rather than incomplete — a repository re-scoped by

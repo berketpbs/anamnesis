@@ -327,6 +327,79 @@ fn rewrite_ours(matchers: &mut Value, wanted: &str) -> bool {
     rewrote
 }
 
+/// Take anamnesis back out of a settings file, and nothing else with it.
+///
+/// The inverse of [`merge`], and it has the same obligation from the other
+/// direction: a project with its own `PostToolUse` hook beside ours keeps it.
+/// Only hook entries whose command is [`is_ours`] are removed — a wrapper
+/// script somebody wrote that happens to call anamnesis is theirs, and
+/// uninstalling must not take it.
+///
+/// Matchers left holding no hooks are removed, events left holding no matchers
+/// are removed, and a `hooks` object left empty is removed: a settings file
+/// that reads as configured when nothing is configured is the state this
+/// codebase keeps finding at the bottom of a silent failure.
+///
+/// Returns the events it took something out of.
+pub fn remove_ours(settings: &mut Value) -> Vec<String> {
+    let mut cleaned = Vec::new();
+
+    let Some(root) = settings.as_object_mut() else {
+        return cleaned;
+    };
+    let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) else {
+        return cleaned;
+    };
+
+    for (event, matchers) in hooks.iter_mut() {
+        let Some(matchers) = matchers.as_array_mut() else {
+            continue;
+        };
+        let mut removed = false;
+
+        for matcher in matchers.iter_mut() {
+            let Some(entries) = matcher.get_mut("hooks").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            let before = entries.len();
+            entries.retain(|hook| {
+                !hook
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_ours)
+            });
+            removed |= entries.len() != before;
+        }
+
+        // A matcher that held only our hook is now an empty shell. Left
+        // behind it would be a `PostToolUse` entry that matches everything
+        // and runs nothing.
+        matchers.retain(|matcher| {
+            matcher
+                .get("hooks")
+                .and_then(Value::as_array)
+                .is_none_or(|entries| !entries.is_empty())
+        });
+
+        if removed {
+            cleaned.push(event.clone());
+        }
+    }
+
+    hooks.retain(|_, matchers| {
+        matchers
+            .as_array()
+            .is_none_or(|matchers| !matchers.is_empty())
+    });
+    let empty = hooks.is_empty();
+    if empty {
+        root.remove("hooks");
+    }
+
+    cleaned.sort();
+    cleaned
+}
+
 /// Every `command` string reachable inside a settings file's matcher list.
 fn commands_in(matchers: &Value) -> Vec<String> {
     matchers
