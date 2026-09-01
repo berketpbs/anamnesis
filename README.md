@@ -55,6 +55,15 @@ Anamnesis is organized as a Rust workspace with modular crates:
 - `anamnesis eval` scores retrieval against a checked-in corpus and its
   questions, so a change to ranking can be judged by what it does to recall
   rather than by argument. The suite runs in CI as an ordinary test
+- `anamnesis backup` / `restore`: one archive holding the index, the
+  transcripts, and the wiki with its history — safe to take while the server
+  is recording, because the index goes through SQLite's backup API
+- `anamnesis audit`: who changed memory and what they changed, for the
+  changes people make deliberately
+- A JSON API under `/api/v1` — scopes, pages, one page, search, sessions,
+  audit — behind the same tokens, read-only on purpose
+- [Running a server other machines reach](docs/REMOTE.md): tokens, TLS,
+  per-operator handoffs, and a checklist
 
 ## Not Built Yet
 

@@ -531,6 +531,12 @@ before launching the agent.
 `/health` stays answerable without a token, on purpose: it is what tells a
 server that is down apart from one that is refusing this machine.
 
+Before actually opening a port to other machines, read
+[REMOTE.md](REMOTE.md): TLS, the proxy body limit that would otherwise refuse
+ordinary events, per-operator handoff slots, the audit log, and a checklist
+that ends with the two-line test for whether the thing is readable by everyone
+who can reach it.
+
 ### Read What the Last Session Left
 
 ```bash
@@ -794,8 +800,36 @@ reproduces the same rows rather than duplicating them.
 
 ### Back Up
 
-There is no `backup` command. The data directory is the backup — copy it, or
-push `<data_dir>/wiki` somewhere, since it is an ordinary git repository:
+```bash
+anamnesis backup                                   # ./anamnesis-backup-<stamp>.tar.gz
+anamnesis backup --out /backups/memory.tar.gz
+```
+
+One archive: the index, the transcripts, and the wiki including its `.git`.
+`models/` and `logs/` are left out — a download any machine can repeat, and one
+machine's afternoons.
+
+Safe to run while the server is recording. The index is copied through SQLite's
+own backup API rather than by copying the file: in WAL mode the committed
+database is spread across `anamnesis.db` and a `-wal` beside it, and copying
+the first without the second gives a database that opens, reports a plausible
+schema version, and is missing whatever was written most recently — a backup
+that is quietly stale, discovered on the day it is needed.
+
+Putting one back says what it would do before it does anything:
+
+```bash
+anamnesis restore /backups/memory.tar.gz           # reports, writes nothing
+anamnesis restore /backups/memory.tar.gz --apply
+```
+
+A data directory that already holds memory is left exactly as it was unless
+`--force` says otherwise: restoring is the one operation here that running the
+other one cannot undo.
+
+The wiki is also an ordinary git repository, so it can be pushed on its own —
+useful for reading memory from somewhere else, though it carries only the
+compiled half:
 
 ```bash
 git -C <data_dir>/wiki remote add origin git@example.com:me/memory.git
