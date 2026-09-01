@@ -23,6 +23,7 @@ mod pages;
 mod project;
 mod purge;
 mod reindex;
+mod rename;
 mod run;
 mod serve;
 mod sessions;
@@ -43,6 +44,7 @@ use improve::cmd_improve;
 use pages::{PageOptions, cmd_forget, cmd_search, cmd_show_page, cmd_write_page};
 use purge::cmd_purge;
 use reindex::cmd_reindex;
+use rename::cmd_rename;
 use run::{cmd_continue, cmd_run};
 use serve::{cmd_mcp, cmd_serve};
 use sessions::{cmd_forget_session, cmd_handoff, cmd_sessions};
@@ -278,6 +280,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Uninstall { apply } => {
             cmd_uninstall(apply, cli.data_dir.clone())?;
+        }
+        Commands::Rename { name, apply } => {
+            cmd_rename(&name, apply, cli.data_dir.clone())?;
         }
         Commands::Reindex => {
             cmd_reindex(cli.data_dir.clone())?;

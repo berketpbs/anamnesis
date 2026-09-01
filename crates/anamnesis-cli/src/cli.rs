@@ -492,6 +492,24 @@ pub enum Commands {
         apply: bool,
     },
 
+    /// Move this project's memory to a new name
+    ///
+    /// For the day a repository is renamed or moved to a new remote: the next
+    /// session resolves a different key, finds an empty project, and nothing
+    /// says the old memory is still there. Every page's identifier is derived
+    /// from the project's, so this is a migration rather than a rename — the
+    /// index moves in one transaction, and either all of it arrives or none
+    /// of it does.
+    Rename {
+        /// What the project should be called from now on
+        #[arg(value_name = "NAME")]
+        name: String,
+
+        /// Actually move it, instead of only reporting what would move
+        #[arg(long)]
+        apply: bool,
+    },
+
     /// Show what has been changed by hand, newest first
     ///
     /// Capture is recorded as sessions, not here. This is the log of

@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `anamnesis rename`: the same memory, under a name that resolves. A project's
+  identity is derived, and so is every page's identity from it — which is what
+  lets two clones of one repository share one memory without configuring
+  anything, and what makes renaming a repository look like losing everything:
+  the next session resolves a different key, finds an empty project, and
+  nothing says the old memory is still there under a name nobody types any
+  more. Four things now move together: the wiki's pages as one commit git
+  reads as a move, the index in one transaction with every derived identifier
+  recomputed, the transcripts, and the marker file — that last one because
+  without it the very next event re-derives the old identity and the rename
+  reads as having quietly failed. The index migration defers its foreign keys
+  to the commit, since the parent row has to move before its children can
+  point at it and no ordering satisfies an immediate check; half a rename is
+  worse than none, because a page whose links were left behind is a page
+  retrieval ranks wrongly and nothing reports. Renaming into a project that
+  already has memory is refused: merging two memories is a different operation
+  with different answers, and deciding them silently inside a rename would be
+  the worst way to decide them
 - `anamnesis uninstall`: the counterpart to `install-hooks` and `install-mcp`.
   Trying something and being unable to remove it cleanly is a reason not to
   try it, and until now backing out meant editing four settings files by hand

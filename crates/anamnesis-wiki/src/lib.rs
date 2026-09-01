@@ -196,6 +196,84 @@ impl Wiki {
         self.commit_removals(&relatives, message)
     }
 
+    /// Move every page from one scope's directory to another's, in one commit.
+    ///
+    /// A rename, and git is told it is one: the removals and the additions are
+    /// staged together, so the history shows a move rather than a deletion
+    /// followed by an unrelated arrival. That matters because the wiki's
+    /// history is the only thing standing behind a page after it is gone from
+    /// HEAD, and `git log --follow` is how somebody finds it.
+    ///
+    /// The pages themselves are byte-for-byte what they were. Only the
+    /// directory they live in changes — which is exactly what a project being
+    /// renamed means on disk.
+    pub fn move_scope(&self, from: &Scope, to: &Scope, message: &str) -> Result<Option<String>> {
+        let source = self.scope_root(from);
+        let destination = self.scope_root(to);
+        if !source.exists() {
+            return Ok(None);
+        }
+        if destination.exists() {
+            return Err(WikiError::Io {
+                path: destination,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "the destination scope already has a directory",
+                ),
+            });
+        }
+
+        let paths = self.pages(from)?;
+        let removals: Vec<PathBuf> = paths.iter().map(|path| self.relative(from, path)).collect();
+
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| WikiError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        std::fs::rename(&source, &destination).map_err(|source_error| WikiError::Io {
+            path: source.clone(),
+            source: source_error,
+        })?;
+
+        let mut index = self.repo.index()?;
+        for relative in &removals {
+            let _ = index.remove_path(relative);
+        }
+        for path in &paths {
+            index.add_path(&self.relative(to, path))?;
+        }
+        index.write()?;
+        let tree_id = index.write_tree()?;
+
+        let parents = match self.repo.head() {
+            Ok(head) => vec![head.peel_to_commit()?],
+            Err(_) => Vec::new(),
+        };
+        // Nothing moved that git was tracking — a scope whose pages were never
+        // committed. The files are where they should be either way, and an
+        // empty commit would claim otherwise.
+        if let Some(parent) = parents.first()
+            && parent.tree_id() == tree_id
+        {
+            return Ok(None);
+        }
+
+        let tree = self.repo.find_tree(tree_id)?;
+        let signature = git2::Signature::now(COMMIT_NAME, COMMIT_EMAIL)?;
+        let parent_refs: Vec<&git2::Commit<'_>> = parents.iter().collect();
+        let id = self.repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            message,
+            &tree,
+            &parent_refs,
+        )?;
+        Ok(Some(id.to_string()))
+    }
+
     /// Read a page back from disk.
     pub fn read_page(&self, scope: &Scope, path: &PagePath) -> Result<ParsedPage> {
         let absolute = self.locate(scope, path);

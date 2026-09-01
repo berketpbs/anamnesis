@@ -52,6 +52,8 @@ pub enum Action {
     Restored,
     /// A project's memory was removed in its entirety.
     Purged,
+    /// A project's memory was moved to a new identity.
+    Renamed,
 }
 
 impl Action {
@@ -68,6 +70,7 @@ impl Action {
             Self::ProposalDismissed => "proposal.dismissed",
             Self::Restored => "memory.restored",
             Self::Purged => "memory.purged",
+            Self::Renamed => "memory.renamed",
         }
     }
 
@@ -88,6 +91,7 @@ impl Action {
             "proposal.dismissed" => Self::ProposalDismissed,
             "memory.restored" => Self::Restored,
             "memory.purged" => Self::Purged,
+            "memory.renamed" => Self::Renamed,
             other => return Err(other.to_owned()),
         })
     }
@@ -105,6 +109,7 @@ impl Action {
             Self::ProposalDismissed => "dismissed proposal",
             Self::Restored => "restored memory",
             Self::Purged => "purged the memory of",
+            Self::Renamed => "renamed",
         }
     }
 }
@@ -249,6 +254,7 @@ mod tests {
             Action::ProposalDismissed,
             Action::Restored,
             Action::Purged,
+            Action::Renamed,
         ] {
             assert_eq!(
                 Action::from_storage(action.as_str()),
