@@ -63,6 +63,36 @@ cargo run -p anamnesis-cli -- eval --verbose
 RUST_LOG=debug cargo run -p anamnesis-cli -- status
 ```
 
+## Releasing
+
+A tag publishes; nothing else does.
+
+```bash
+# 1. The version lives in one place.
+#    Cargo.toml -> [workspace.package] version = "0.2.0"
+# 2. Move what is under Unreleased in CHANGELOG.md to a heading of its own.
+# 3. Tag it.
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+The `release` workflow builds `anamnesis` for four targets — Linux x86-64,
+macOS on Intel and on Apple silicon, and Windows — checks that each binary
+starts, packages it with the README, the licence and the changelog, and
+attaches the archives and a `SHA256SUMS` file to a GitHub release named after
+the tag.
+
+To rehearse without publishing anything, run the same workflow by hand:
+
+```bash
+gh workflow run release.yml
+```
+
+That builds and uploads the archives as workflow artifacts and stops before
+the publish step, which is guarded on the ref being a tag. It is worth doing
+after any change to the workflow: a release workflow that is first exercised
+on release day is exercised on the worst possible day.
+
 ## Architecture Guidelines
 
 - Keep crates focused and independent

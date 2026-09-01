@@ -8,6 +8,21 @@
 
 ## Installation
 
+### From a Release
+
+Every tagged version has binaries attached to it on the
+[releases page](https://github.com/berketpbs/anamnesis/releases): Linux
+(x86-64), macOS (Intel and Apple silicon) and Windows. Each archive holds the
+binary, the README, the licence and the changelog, and every release carries a
+`SHA256SUMS` file — a release nobody can verify is a release nobody should run.
+
+```bash
+tar -xzf anamnesis-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+./anamnesis-v0.1.0-x86_64-unknown-linux-gnu/anamnesis --version
+```
+
+Put the binary somewhere on `PATH`, then `anamnesis init`.
+
 ### From Source
 
 ```bash

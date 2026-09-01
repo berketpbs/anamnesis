@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Release binaries. A tag now builds `anamnesis` for Linux x86-64, macOS on
+  both architectures and Windows, checks that each one starts, packages it with
+  the README, the licence and the changelog, and attaches the archives and a
+  `SHA256SUMS` to a GitHub release — a release nobody can verify is a release
+  nobody should run. Until now the only way to have anamnesis was to build it,
+  which is a Rust toolchain and several minutes before the first useful thing
+  happens. The workflow also runs on demand and stops before publishing, which
+  is not a convenience: it is how the thing gets exercised without inventing a
+  version, and a release workflow first exercised on release day is exercised
+  on the worst possible day
 - `anamnesis bench`: how many events a second this machine can record. A hook
   runs before every tool call and gives up after a second, and on a shared
   server every session's events arrive at the same index — "will that hold"
