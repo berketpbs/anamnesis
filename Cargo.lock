@@ -37,7 +37,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "anamnesis-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anamnesis-consolidate",
  "anamnesis-core",
@@ -75,7 +75,7 @@ dependencies = [
 
 [[package]]
 name = "anamnesis-consolidate"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anamnesis-core",
  "anamnesis-llm",
@@ -95,7 +95,7 @@ dependencies = [
 
 [[package]]
 name = "anamnesis-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "dirs",
  "figment",
@@ -113,7 +113,7 @@ dependencies = [
 
 [[package]]
 name = "anamnesis-evals"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anamnesis-core",
  "anamnesis-store",
@@ -127,7 +127,7 @@ dependencies = [
 
 [[package]]
 name = "anamnesis-hooks"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anamnesis-core",
  "anyhow",
@@ -142,7 +142,7 @@ dependencies = [
 
 [[package]]
 name = "anamnesis-llm"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anamnesis-core",
  "anyhow",
@@ -164,7 +164,7 @@ dependencies = [
 
 [[package]]
 name = "anamnesis-mcp"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anamnesis-core",
  "anamnesis-llm",
@@ -185,7 +185,7 @@ dependencies = [
 
 [[package]]
 name = "anamnesis-store"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anamnesis-core",
  "anyhow",
@@ -205,7 +205,7 @@ dependencies = [
 
 [[package]]
 name = "anamnesis-web"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anamnesis-consolidate",
  "anamnesis-core",
@@ -239,7 +239,7 @@ dependencies = [
 
 [[package]]
 name = "anamnesis-wiki"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anamnesis-core",
  "anamnesis-store",

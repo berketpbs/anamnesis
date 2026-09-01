@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-02
+
+What 1.0 commits to: the command line and the shapes on disk. A wiki, a raw
+spool and an index written by this version are read by every version after it,
+and the index migrates itself forward on startup — it has crossed eleven
+schema versions that way already. The commands and their flags are settled;
+anything that would break one becomes a new flag or a new command beside it.
+
+What it does not claim: that a shared server has been run by a team. Everything
+that needs is here — tokens, per-operator handoffs, an audit log, a JSON API,
+and a guide for running a server other machines can reach — and nobody has run
+it that way yet. `USE_CASES.md` leaves that box empty on purpose.
+
 ### Added
 - `anamnesis rename`: the same memory, under a name that resolves. A project's
   identity is derived, and so is every page's identity from it — which is what
