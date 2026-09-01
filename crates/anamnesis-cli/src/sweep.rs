@@ -28,6 +28,9 @@ use anamnesis_core::sweep::{Exemption, SweepPolicy, Verdict, judge};
 use anamnesis_store::{Store, SweepRow};
 use anamnesis_wiki::Wiki;
 use jiff::Timestamp;
+use std::path::PathBuf;
+
+use crate::project::open_project;
 
 /// One page and what the policy decided about it.
 #[derive(Debug, Clone, PartialEq)]
@@ -226,6 +229,159 @@ fn order_by_score(a: &Judged, b: &Judged, unscored: f64) -> std::cmp::Ordering {
         .partial_cmp(&key(b))
         .unwrap_or(std::cmp::Ordering::Equal)
         .then_with(|| a.row.path.as_str().cmp(b.row.path.as_str()))
+}
+
+/// Report what decay would forget, and carry it out when asked.
+/// Report what a project's memory would forget, and forget it when asked.
+///
+/// Reporting is the default because the threshold is a guess until someone
+/// has seen it applied to a real wiki, and because the alternative — a
+/// command that deletes pages the first time it is run out of curiosity — is
+/// not a memory system anyone should trust.
+pub fn cmd_sweep(
+    apply: bool,
+    threshold: Option<f64>,
+    verbose: bool,
+    data_dir: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    let (scope, data, store) = open_project(data_dir)?;
+
+    let mut policy = scope.decay.policy()?;
+    if let Some(threshold) = threshold {
+        anyhow::ensure!(
+            threshold.is_finite() && threshold >= 0.0,
+            "--threshold {threshold} is not a finite number of zero or more"
+        );
+        policy.threshold = threshold;
+    }
+
+    let now = Timestamp::now();
+    let plan = plan(&store, scope.project_id, policy, now)?;
+
+    println!("🧹 Sweeping {}", scope.scope);
+    println!("   threshold {:.3}", policy.threshold);
+    println!();
+
+    if plan.scanned() == 0 {
+        // A sweep judges what the index knows, so an index that knows nothing
+        // is indistinguishable from a project with no memory — and the two
+        // want opposite things done about them.
+        println!("  No pages indexed for this project — nothing to sweep.");
+        println!("  If its wiki does hold pages, run `anamnesis reindex` first.");
+        return Ok(());
+    }
+
+    if plan.forget.is_empty() {
+        println!("  Nothing has decayed past the threshold.");
+    } else {
+        let verb = if apply { "Forgetting" } else { "Would forget" };
+        println!(
+            "  {verb} {} of {} page(s):",
+            plan.forget.len(),
+            plan.scanned()
+        );
+        print_judged(&plan.forget, now);
+    }
+
+    println!();
+    println!(
+        "  {} kept, {} exempt{}",
+        plan.keep.len(),
+        plan.exempt.len(),
+        describe_exemptions(&plan)
+    );
+
+    if verbose {
+        if !plan.keep.is_empty() {
+            println!();
+            println!("  Kept:");
+            print_judged(&plan.keep, now);
+        }
+        if !plan.exempt.is_empty() {
+            println!();
+            println!("  Exempt:");
+            print_judged(&plan.exempt, now);
+        }
+    }
+
+    // A contradiction between two things the same author wrote. Reported
+    // whether or not anything was swept, because the pin is the only reason
+    // the page is still here.
+    for judged in plan.conflicts() {
+        let deadline = judged
+            .row
+            .facts
+            .expires_at
+            .map(|at| at.strftime("%Y-%m-%d").to_string())
+            .unwrap_or_else(|| "an earlier date".to_owned());
+        println!();
+        println!(
+            "  ⚠ {} expired {deadline} but is exempt ({}) — the exemption won.",
+            judged.row.path,
+            judged.reason(now)
+        );
+    }
+
+    if !apply {
+        if !plan.forget.is_empty() {
+            println!();
+            println!("  Nothing was deleted. Re-run with --apply to forget these pages.");
+        }
+        return Ok(());
+    }
+
+    if plan.forget.is_empty() {
+        return Ok(());
+    }
+
+    let wiki = Wiki::open(data.wiki())?;
+    // `self::`, because the flag that got us here is also called `apply`.
+    let swept = self::apply(&store, &wiki, &scope, &plan, policy, now)?;
+
+    println!();
+    println!(
+        "  {} page(s) forgotten, {} index row(s) dropped",
+        swept.pages, swept.rows
+    );
+    match &swept.commit {
+        Some(commit) => println!("  commit {}", &commit[..commit.len().min(8)]),
+        None => println!("  the wiki had nothing to record"),
+    }
+    println!();
+    println!("  Every page removed is still in the wiki's git history:");
+    println!("  git -C {} show HEAD", wiki.root().display());
+
+    Ok(())
+}
+
+/// Print one judged page per line, path first, reason aligned after it.
+fn print_judged(judged: &[Judged], now: Timestamp) {
+    let width = judged
+        .iter()
+        .map(|item| item.row.path.as_str().len())
+        .max()
+        .unwrap_or(0)
+        .min(60);
+    for item in judged {
+        println!(
+            "    {:width$}  {}",
+            item.row.path.as_str(),
+            item.reason(now)
+        );
+    }
+}
+
+/// Spell out which rules spared pages, for the summary line.
+fn describe_exemptions(plan: &Plan) -> String {
+    let counts = plan.exemptions();
+    if counts.is_empty() {
+        return ".".to_owned();
+    }
+    let described: Vec<String> = counts
+        .iter()
+        .map(|(exemption, count)| format!("{count} {}", exemption.as_str()))
+        .collect();
+    format!(" ({}).", described.join(", "))
 }
 
 #[cfg(test)]

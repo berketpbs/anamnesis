@@ -30,12 +30,14 @@
 //! summaries; names identify a contributor for every purpose this serves.
 
 use anamnesis_core::page::{Entity, Frontmatter, Page, PagePath, Tier};
-use anamnesis_core::scope::ResolvedScope;
+use anamnesis_core::scope::{ResolvedScope, resolve_scope};
 use anamnesis_store::Store;
 use anamnesis_wiki::Wiki;
 use jiff::Timestamp;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use anamnesis_core::datadir::DataDir;
 
 /// How many commits a survey walks before it stops and says it stopped.
 pub const DEFAULT_MAX_COMMITS: usize = 1_000;
@@ -714,6 +716,126 @@ fn truncated_cell(value: &str) -> String {
     }
     let head: String = clean.chars().take(MAX_SUMMARY).collect();
     format!("{head}...")
+}
+
+/// Seed a project's memory from what its repository already says.
+/// Seed the wiki from the repository's git history.
+///
+/// The scope is resolved from the repository being surveyed rather than the
+/// current directory: `anamnesis bootstrap --repo ../other-project` must seed
+/// that project's memory, not this one's.
+pub fn cmd_bootstrap(
+    repo: &std::path::Path,
+    force: bool,
+    max_commits: usize,
+    dry_run: bool,
+    data_dir: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    let repo = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    let scope = resolve_scope(&repo)?;
+    let data = DataDir::resolve(data_dir)?;
+
+    println!("📖 Bootstrapping {} from git history", scope.scope);
+    println!("   repo: {}", display_path(&repo));
+    println!();
+
+    let survey = survey(&repo, max_commits)?;
+    if survey.is_empty() {
+        println!("  No commits yet - nothing to seed.");
+        println!("  Memory fills itself in from sessions as work happens.");
+        return Ok(());
+    }
+
+    let now = Timestamp::now();
+    let drafts = draft(&survey, now)?;
+
+    let bound = if survey.truncated {
+        format!(" (stopped at --max-commits {max_commits})")
+    } else {
+        String::new()
+    };
+    println!(
+        "  {} commit(s) walked{bound}, {} contributor(s), {} hotspot(s) listed",
+        survey.commits,
+        survey.authors.len(),
+        survey.hotspots.len()
+    );
+    println!();
+
+    if dry_run {
+        for item in &drafts {
+            let state = if wiki_has(&data, &scope, &item.path) {
+                if force { "overwrite" } else { "skip (exists)" }
+            } else {
+                "write"
+            };
+            println!("  {state:<14} {}", item.path);
+        }
+        println!();
+        println!("  Dry run - nothing written.");
+        return Ok(());
+    }
+
+    data.ensure_layout()?;
+    let store = Store::open(data.db_file())?;
+    store.migrate()?;
+    let wiki = Wiki::open(data.wiki())?;
+
+    let embedder = anamnesis_llm::EmbedConfig::from_env().build(&data.models())?;
+    let report = seed(
+        &store,
+        &wiki,
+        &scope,
+        &drafts,
+        force,
+        embedder
+            .as_deref()
+            .map(|embedder| embedder as &dyn anamnesis_core::embedding::Embed),
+        now,
+    )?;
+
+    for path in &report.written {
+        println!("  wrote   {path}");
+    }
+    for path in &report.skipped {
+        println!("  skipped {path} (already exists)");
+    }
+    println!();
+    if !report.skipped.is_empty() {
+        println!("  Skipped pages were left alone: bootstrap seeds a memory, it does not");
+        println!("  maintain one. Pass --force to rewrite them from git.");
+    }
+    if !report.written.is_empty() {
+        println!("  These pages are derived from commits, not decided by anyone - they rank");
+        println!("  below what a session actually learned.");
+    }
+
+    Ok(())
+}
+
+/// A path as someone would type it, rather than as Windows canonicalizes it.
+///
+/// `canonicalize` returns the verbatim form — `\\?\C:\repo` — which is correct
+/// and unreadable. Only the printed form is trimmed; the path actually used
+/// keeps the prefix.
+fn display_path(path: &std::path::Path) -> String {
+    let shown = path.display().to_string();
+    match shown.strip_prefix(r"\\?\") {
+        Some(trimmed) => trimmed.to_owned(),
+        None => shown,
+    }
+}
+
+/// Whether a page already exists, for the dry run's benefit.
+///
+/// Reads the filesystem rather than opening the wiki: a dry run must not
+/// create a git repository as a side effect of being asked what it would do.
+fn wiki_has(
+    data: &DataDir,
+    scope: &anamnesis_core::scope::ResolvedScope,
+    path: &anamnesis_core::page::PagePath,
+) -> bool {
+    data.wiki_scope(&scope.scope).join(path.as_str()).is_file()
 }
 
 #[cfg(test)]
