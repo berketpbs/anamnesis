@@ -2172,6 +2172,12 @@ fn cmd_install_hooks(
     if !outcome.added.is_empty() {
         println!("  Wired:        {}", outcome.added.join(", "));
     }
+    // Named separately from "wired", because the file already looked wired and
+    // was not: an anamnesis command that needed rewriting is the shape a
+    // silently broken capture takes, and it is worth seeing that it was there.
+    if !outcome.replaced.is_empty() {
+        println!("  Rewritten:    {}", outcome.replaced.join(", "));
+    }
     if !outcome.present.is_empty() {
         println!("  Already there: {}", outcome.present.join(", "));
     }
