@@ -73,6 +73,12 @@ file, a command, a decision, or an outcome that is not there.
 - Failed tool calls are the most useful thing in a transcript. Say what \
 failed and, if it is visible, why.
 - Name files and identifiers exactly as they appear.
+- The title names this session, not its genre. Every page here is a session \
+report, so `Session Summary`, `Session Handoff` and `Session Report` pick out \
+none of them, and neither does an identifier copied out of a path. Do not \
+begin the title with the word `Session`, and do not label it before saying \
+it: write what this session was about, the way somebody scanning a directory \
+listing would want it named.
 - Write in the language the person wrote their prompts in.
 - The handoff is read by an agent that has no other context and a limited \
 budget for it. It is prose, not headings, and it says what to know and what \
@@ -96,7 +102,7 @@ pub fn schema() -> Value {
         "properties": {
             "title": {
                 "type": "string",
-                "description": "What the session was about, in under 72 characters. No date — one is added.",
+                "description": "What this session was about, in under 72 characters. Name the session, not the genre: every page here is a session report, so do not begin with \"Session\". No date — one is added.",
             },
             "body": {
                 "type": "string",
