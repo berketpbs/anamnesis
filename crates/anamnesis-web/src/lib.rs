@@ -41,7 +41,7 @@ pub mod watch;
 pub use auth::{Auth, Identity};
 pub use pipeline::{
     Consolidation, Ingested, ProbeReport, claim_handoff, finalize, finalize_with_llm, ingest,
-    probe, record,
+    probe, read_preferences, recompile, record, session_page_path,
 };
 
 /// Errors surfaced over HTTP.
@@ -1877,6 +1877,240 @@ mod tests {
         .expect("claim")
         .expect("a handoff");
         assert!(handoff.contains("The provider is wired"));
+    }
+
+    /// Recompiling rewrites the page and leaves the session row alone.
+    ///
+    /// Both halves are the test. The page is the point; the session row is
+    /// what a careless rewrite damages, because `commit` closes the session it
+    /// writes for, and closing an already-closed session moves its end to
+    /// today. A page describing an afternoon in August, under a row saying the
+    /// session ended in December, is a memory that contradicts itself.
+    #[tokio::test]
+    async fn recompiling_rewrites_the_page_and_leaves_the_session_as_it_was() {
+        let harness = harness();
+        let (scope, session_id) = recorded(&harness);
+
+        let first = finalize_with_llm(
+            &harness.state.store,
+            &harness.state.wiki,
+            &scope,
+            session_id,
+            None,
+            now(),
+            &settings(Arc::new(Fake::answering(json!({
+                "title": "Counted",
+                "body": "## What. The zeppelin was counted, and nothing was read.",
+                "handoff": "Nothing was decided.",
+            })))),
+        )
+        .await
+        .expect("finalized")
+        .expect("a page");
+
+        let closed = harness
+            .state
+            .store
+            .load_session(session_id)
+            .expect("load")
+            .expect("a session");
+        let ended_at = closed.ended_at.expect("a closed session has an end");
+
+        // A month on, which is when somebody turns a model on and asks for the
+        // old summaries again.
+        let later = now() + jiff::Span::new().hours(24 * 30);
+        let digest = anamnesis_consolidate::SessionDigest {
+            title: "The provider was wired in".to_owned(),
+            body: "## Why. The backslash was eaten by the shell.".to_owned(),
+            handoff: "Never write a Windows path into a shell command.".to_owned(),
+            entities: Vec::new(),
+        };
+
+        let second = recompile(
+            &harness.state.store,
+            &harness.state.wiki.lock(),
+            &scope,
+            &closed,
+            &digest,
+            None,
+            later,
+        )
+        .expect("recompiled");
+
+        // The same page, not a second one: the path comes from when the
+        // session started, and recompiling does not touch that.
+        assert_eq!(first, second);
+
+        let path = anamnesis_core::page::PagePath::parse(&second).expect("path");
+        let read = harness
+            .state
+            .wiki
+            .lock()
+            .read_page(&scope.scope, &path)
+            .expect("page readable");
+        assert!(read.body.contains("The backslash was eaten by the shell"));
+        assert!(!read.body.contains("The zeppelin was counted"));
+
+        let after = harness
+            .state
+            .store
+            .load_session(session_id)
+            .expect("load")
+            .expect("a session");
+        assert_eq!(
+            after.ended_at,
+            Some(ended_at),
+            "recompiling moved the time the session ended"
+        );
+    }
+
+    /// Recompiling leaves nothing waiting for the next session to read.
+    ///
+    /// A handoff says what the *next* session should know, and for a session
+    /// that ended weeks ago the next session has already been and gone. Were
+    /// one written now, the next agent to start would be briefed on finished
+    /// work by a note nobody wrote today — the same reason `reindex` does not
+    /// revive pending handoffs.
+    #[tokio::test]
+    async fn recompiling_leaves_no_handoff_waiting() {
+        let harness = harness();
+        let (scope, session_id) = recorded(&harness);
+
+        finalize_with_llm(
+            &harness.state.store,
+            &harness.state.wiki,
+            &scope,
+            session_id,
+            None,
+            now(),
+            &settings(Arc::new(Fake::answering(json!({
+                "title": "Counted",
+                "body": "## What. Tools ran.",
+                "handoff": "Nothing was decided.",
+            })))),
+        )
+        .await
+        .expect("finalized")
+        .expect("a page");
+
+        // The session that followed took the note, as one did at the time.
+        claim_handoff(
+            &harness.state.store,
+            &harness.cwd,
+            &AgentKind::ClaudeCode,
+            "session-next",
+            now(),
+            None,
+        )
+        .expect("claim")
+        .expect("a handoff");
+
+        let closed = harness
+            .state
+            .store
+            .load_session(session_id)
+            .expect("load")
+            .expect("a session");
+
+        recompile(
+            &harness.state.store,
+            &harness.state.wiki.lock(),
+            &scope,
+            &closed,
+            &anamnesis_consolidate::SessionDigest {
+                title: "Recompiled".to_owned(),
+                body: "## Why. It was worth saying properly.".to_owned(),
+                handoff: "This sentence must not reach anybody.".to_owned(),
+                entities: Vec::new(),
+            },
+            None,
+            now(),
+        )
+        .expect("recompiled");
+
+        let waiting = claim_handoff(
+            &harness.state.store,
+            &harness.cwd,
+            &AgentKind::ClaudeCode,
+            "session-after-that",
+            now(),
+            None,
+        )
+        .expect("claim");
+        assert!(
+            waiting.is_none(),
+            "recompiling left a handoff for somebody to read: {waiting:?}"
+        );
+    }
+
+    /// The index follows the rewrite, rather than answering from the old body.
+    ///
+    /// Indexing is the half of writing a page that nothing on screen reports,
+    /// and it has been wrong twice here — both times because a second writer
+    /// built a subset of what the live path builds. A page rewritten but not
+    /// re-indexed is worse than one never rewritten: search would go on
+    /// offering words that are no longer on it.
+    #[tokio::test]
+    async fn recompiling_makes_the_new_words_the_findable_ones() {
+        let harness = harness();
+        let (scope, session_id) = recorded(&harness);
+
+        finalize_with_llm(
+            &harness.state.store,
+            &harness.state.wiki,
+            &scope,
+            session_id,
+            None,
+            now(),
+            &settings(Arc::new(Fake::answering(json!({
+                "title": "Counted",
+                "body": "## What. The zeppelin was counted, and nothing was read.",
+                "handoff": "Nothing was decided.",
+            })))),
+        )
+        .await
+        .expect("finalized")
+        .expect("a page");
+
+        let closed = harness
+            .state
+            .store
+            .load_session(session_id)
+            .expect("load")
+            .expect("a session");
+
+        recompile(
+            &harness.state.store,
+            &harness.state.wiki.lock(),
+            &scope,
+            &closed,
+            &anamnesis_consolidate::SessionDigest {
+                title: "The provider was wired in".to_owned(),
+                body: "## Why. The backslash was eaten by the shell.".to_owned(),
+                handoff: "Never write a Windows path into a shell command.".to_owned(),
+                entities: Vec::new(),
+            },
+            None,
+            now(),
+        )
+        .expect("recompiled");
+
+        let found = harness
+            .state
+            .store
+            .query_pages(scope.project_id, "backslash", 5, now(), None)
+            .expect("query");
+        assert_eq!(found.len(), 1, "the new body is not findable");
+
+        let stale = harness
+            .state
+            .store
+            .query_pages(scope.project_id, "zeppelin", 5, now(), None)
+            .expect("query");
+        assert!(
+            stale.is_empty(),
+            "search still answers from a body that is no longer on the page"
+        );
     }
 
     #[tokio::test]

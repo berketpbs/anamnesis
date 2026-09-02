@@ -22,6 +22,7 @@ mod opencode;
 mod pages;
 mod project;
 mod purge;
+mod reconsolidate;
 mod reindex;
 mod rename;
 mod run;
@@ -43,6 +44,7 @@ use evals::cmd_eval;
 use improve::cmd_improve;
 use pages::{PageOptions, cmd_forget, cmd_search, cmd_show_page, cmd_write_page};
 use purge::cmd_purge;
+use reconsolidate::cmd_reconsolidate;
 use reindex::cmd_reindex;
 use rename::cmd_rename;
 use run::{cmd_continue, cmd_run};
@@ -224,6 +226,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::ForgetSession { sessions, apply } => {
             cmd_forget_session(&sessions, apply, cli.data_dir.clone())?;
+        }
+        Commands::Reconsolidate { sessions, apply } => {
+            cmd_reconsolidate(&sessions, apply, cli.data_dir.clone())?;
         }
         Commands::Backup { out } => {
             cmd_backup(out, cli.data_dir.clone())?;

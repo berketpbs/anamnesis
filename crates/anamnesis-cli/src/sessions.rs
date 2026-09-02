@@ -170,7 +170,7 @@ pub fn cmd_sessions(limit: Option<usize>, data_dir: Option<PathBuf>) -> anyhow::
 /// Refuses an ambiguous prefix rather than acting on whichever row sorted
 /// first, for the reason `one_proposal` does: what follows cannot be undone,
 /// and "it removed the other one" is not a mistake anybody can walk back.
-fn one_session(
+pub(crate) fn one_session(
     store: &Store,
     scope: &anamnesis_core::scope::ResolvedScope,
     prefix: &str,

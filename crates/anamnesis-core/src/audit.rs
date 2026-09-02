@@ -42,6 +42,8 @@ pub enum Action {
     PagePromoted,
     /// A session, its observations, and its transcript were removed.
     SessionForgotten,
+    /// A finished session was summarised again, and its page rewritten.
+    SessionRecompiled,
     /// A waiting handoff was taken by a session.
     HandoffClaimed,
     /// A waiting handoff was thrown away unread.
@@ -65,6 +67,7 @@ impl Action {
             Self::PageSwept => "page.swept",
             Self::PagePromoted => "page.promoted",
             Self::SessionForgotten => "session.forgotten",
+            Self::SessionRecompiled => "session.recompiled",
             Self::HandoffClaimed => "handoff.claimed",
             Self::HandoffDiscarded => "handoff.discarded",
             Self::ProposalDismissed => "proposal.dismissed",
@@ -86,6 +89,7 @@ impl Action {
             "page.swept" => Self::PageSwept,
             "page.promoted" => Self::PagePromoted,
             "session.forgotten" => Self::SessionForgotten,
+            "session.recompiled" => Self::SessionRecompiled,
             "handoff.claimed" => Self::HandoffClaimed,
             "handoff.discarded" => Self::HandoffDiscarded,
             "proposal.dismissed" => Self::ProposalDismissed,
@@ -104,6 +108,7 @@ impl Action {
             Self::PageSwept => "swept",
             Self::PagePromoted => "promoted",
             Self::SessionForgotten => "forgot session",
+            Self::SessionRecompiled => "recompiled session",
             Self::HandoffClaimed => "claimed handoff",
             Self::HandoffDiscarded => "discarded handoff",
             Self::ProposalDismissed => "dismissed proposal",
@@ -249,6 +254,7 @@ mod tests {
             Action::PageSwept,
             Action::PagePromoted,
             Action::SessionForgotten,
+            Action::SessionRecompiled,
             Action::HandoffClaimed,
             Action::HandoffDiscarded,
             Action::ProposalDismissed,

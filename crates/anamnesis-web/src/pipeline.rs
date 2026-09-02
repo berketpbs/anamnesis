@@ -445,6 +445,84 @@ fn commit(
     embedder: Option<&dyn Embed>,
     now: Timestamp,
 ) -> Result<String, WebError> {
+    let path = write_session_page(
+        store,
+        wiki,
+        scope,
+        session,
+        digest,
+        embedder,
+        now,
+        &format!("session: {}", digest.title),
+    )?;
+
+    store.record_handoff(&new_handoff(
+        scope.project_id,
+        session.id,
+        slot_for(scope, session),
+        &digest.handoff,
+        now,
+    ))?;
+    store.close_session(session.id, now)?;
+
+    Ok(path)
+}
+
+/// Summarise a finished session again, and write its page over the old one.
+///
+/// Everything `commit` does about the page, and nothing it does about the
+/// session. Both omissions are the point:
+///
+/// * **No handoff.** A handoff says what the *next* session should know, and
+///   for a session that ended weeks ago the next session has already been and
+///   gone. Leaving one in the waiting slot would hand somebody a briefing on
+///   finished work — which is why `reindex` does not revive pending handoffs
+///   either.
+/// * **No close.** The session is closed already, at a time that is a fact
+///   about it. Closing it again would stamp today on an afternoon in August,
+///   and the page would then contradict the row it was rendered from.
+///
+/// The page path comes from `started_at`, which recompiling does not touch, so
+/// the page is rewritten in place rather than joined by a second copy of the
+/// same session.
+pub fn recompile(
+    store: &Store,
+    wiki: &Wiki,
+    scope: &ResolvedScope,
+    session: &Session,
+    digest: &SessionDigest,
+    embedder: Option<&dyn Embed>,
+    now: Timestamp,
+) -> Result<String, WebError> {
+    write_session_page(
+        store,
+        wiki,
+        scope,
+        session,
+        digest,
+        embedder,
+        now,
+        &format!("recompile: {}", digest.title),
+    )
+}
+
+/// Render a digest to a session's page, and put that page in the index.
+///
+/// Shared by the live path and by `recompile` deliberately. What belongs in
+/// the index when a page is written has been wrong twice here, both times
+/// because a second writer built a subset of it; a page written by one path
+/// and the same page written by the other have to end up indexed the same way.
+#[allow(clippy::too_many_arguments)]
+fn write_session_page(
+    store: &Store,
+    wiki: &Wiki,
+    scope: &ResolvedScope,
+    session: &Session,
+    digest: &SessionDigest,
+    embedder: Option<&dyn Embed>,
+    now: Timestamp,
+    message: &str,
+) -> Result<String, WebError> {
     let path = session_page_path(&session.started_at, session.id)?;
     let mut frontmatter = Frontmatter::new(&digest.title, digest.entities.clone())?;
     frontmatter.tier = Tier::Episodic;
@@ -455,7 +533,7 @@ fn commit(
         frontmatter,
         attributed(&digest.body, session),
     );
-    let commit = wiki.write_page(&scope.scope, &page, &format!("session: {}", digest.title))?;
+    let commit = wiki.write_page(&scope.scope, &page, message)?;
     page.git_commit = Some(commit);
 
     // Everything a rebuild would put in the index, in one call. Leaving any of
@@ -468,15 +546,6 @@ fn commit(
         embedder,
         now,
     )?;
-
-    store.record_handoff(&new_handoff(
-        scope.project_id,
-        session.id,
-        slot_for(scope, session),
-        &digest.handoff,
-        now,
-    ))?;
-    store.close_session(session.id, now)?;
 
     Ok(path.as_str().to_owned())
 }
@@ -507,7 +576,7 @@ fn attributed(body: &str, session: &Session) -> String {
 /// the same way: a preferences page is a nicety, and failing a session's
 /// consolidation because someone left a directory where a file was expected
 /// would trade something valuable for something optional.
-fn read_preferences(wiki: &Wiki, scope: &ResolvedScope) -> Option<String> {
+pub fn read_preferences(wiki: &Wiki, scope: &ResolvedScope) -> Option<String> {
     let path = PagePath::parse(PREFERENCES_PAGE).ok()?;
     std::fs::read_to_string(wiki.locate(&scope.scope, &path)).ok()
 }
@@ -565,7 +634,7 @@ fn slot_for(scope: &ResolvedScope, session: &Session) -> Slot {
 ///
 /// The identifier is part of the filename because two sessions on one day are
 /// ordinary, and the date is first because sorting by name should sort by time.
-fn session_page_path(started_at: &Timestamp, id: SessionId) -> Result<PagePath, WebError> {
+pub fn session_page_path(started_at: &Timestamp, id: SessionId) -> Result<PagePath, WebError> {
     let stamp = started_at.to_string();
     let date = stamp.split('T').next().unwrap_or("undated");
     let short: String = id.to_string().chars().take(8).collect();
