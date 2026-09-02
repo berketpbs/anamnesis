@@ -358,6 +358,23 @@ pub enum Commands {
         apply: bool,
     },
 
+    /// Summarise finished sessions again, with a model
+    ///
+    /// A session is summarised once, by whatever the server had when it ended.
+    /// A server with no model writes counts — which prompts arrived, which
+    /// files were named, how many times each tool ran — and turning a model on
+    /// later improves only the sessions that come after it. This asks for the
+    /// old summaries again, from the observations that are still in the index.
+    /// Pages somebody pinned, made canonical, or promoted are left alone.
+    Reconsolidate {
+        /// Session ids, or any unambiguous prefix; omitted means all of them
+        sessions: Vec<String>,
+
+        /// Actually rewrite the pages, instead of only reporting them
+        #[arg(long)]
+        apply: bool,
+    },
+
     /// Write the whole of memory to one archive
     ///
     /// The wiki carries its own git history, but `raw/` does not: the
