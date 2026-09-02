@@ -314,6 +314,42 @@ fn fit_lines(lines: Vec<String>, budget: usize) -> Vec<String> {
     out
 }
 
+/// Drop a genre label the model wrote in front of the title.
+///
+/// The prompt tells it not to, and on a short session it complies. On a long
+/// one — the sessions actually worth finding again — a small local model
+/// reaches for `Session Report: …` anyway, and a directory listing where every
+/// third entry opens with the same two words is the thing that rule exists to
+/// prevent. Stripping it is cheaper than a retry, exactly as with the date.
+///
+/// Only a label *followed by a separator* goes. `Session to Address the Model
+/// Lock` is a sentence about this session rather than a heading over it, and a
+/// rule that cannot tell those apart would eat the title.
+fn strip_genre_label(title: &str) -> &str {
+    const LABELS: [&str; 9] = [
+        "session",
+        "session report",
+        "session summary",
+        "session handoff",
+        "session notes",
+        "session log",
+        "summary",
+        "handoff",
+        "report",
+    ];
+
+    // ':' and the dashes only. A hyphen belongs to `anamnesis-llm` far more
+    // often than it separates a label from a title.
+    let Some((head, rest)) = title.split_once([':', '—', '–']) else {
+        return title;
+    };
+    let rest = rest.trim();
+    if rest.is_empty() || !LABELS.contains(&head.trim().to_ascii_lowercase().as_str()) {
+        return title;
+    }
+    rest
+}
+
 /// Validate a model reply and shape it into a digest.
 ///
 /// The error type is a plain string because it has exactly one consumer: a log
@@ -347,6 +383,7 @@ fn digest_from_json(value: &Value, session: &Session) -> Result<SessionDigest, S
         .map(|rest| rest.trim_start_matches([':', '-', ' ']))
         .unwrap_or(&title)
         .trim();
+    let title = strip_genre_label(title);
     let title = if title.is_empty() {
         format!("{date}: {} session", session.agent)
     } else {
@@ -594,6 +631,44 @@ mod tests {
         });
         let digest = digest_from_json(&reply, &session()).expect("a digest");
         assert_eq!(digest.title, "2026-08-20: LLM provider added");
+    }
+
+    /// The prompt forbids the label and a small model writes it anyway once
+    /// the session is long enough. What must survive is the other shape: a
+    /// title that opens with the same word as part of a sentence.
+    #[test]
+    fn a_genre_label_goes_but_a_title_that_merely_starts_with_the_word_stays() {
+        let labelled = [
+            ("Session Report: Memory analysis", "Memory analysis"),
+            (
+                "Session: Transitioning to info logs",
+                "Transitioning to info logs",
+            ),
+            ("session summary — Ollama fallback", "Ollama fallback"),
+            ("Handoff: what to do next", "what to do next"),
+        ];
+        for (written, wanted) in labelled {
+            let reply = json!({"title": written, "body": "b", "handoff": "h"});
+            let digest = digest_from_json(&reply, &session()).expect("a digest");
+            assert_eq!(digest.title, format!("2026-08-20: {wanted}"), "{written}");
+        }
+
+        let kept = [
+            // A sentence about the session, not a heading over it.
+            "Session to address the model lock",
+            // The label is where it belongs — at the end, saying what kind of
+            // thing this was rather than announcing it.
+            "Project hardening session",
+            // A colon that separates a subject from its detail, not a label.
+            "anamnesis-llm: the effort setting",
+            // Nothing after the separator to promote.
+            "Session Report:",
+        ];
+        for written in kept {
+            let reply = json!({"title": written, "body": "b", "handoff": "h"});
+            let digest = digest_from_json(&reply, &session()).expect("a digest");
+            assert_eq!(digest.title, format!("2026-08-20: {written}"), "{written}");
+        }
     }
 
     #[test]
