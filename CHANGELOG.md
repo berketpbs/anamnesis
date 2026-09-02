@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Ollama, with any model that has no thinking mode — which is most of the ones
+  anyone runs locally. `reasoning_effort` goes out on every chat-completions
+  request, and the client was written against Ollama 0.32, which dropped fields
+  it did not recognise; its comments said as much, and said it had been checked
+  rather than assumed. Ollama 0.33 reads that field, and answers `400 "<model>"
+  does not support thinking`. Nothing looked broken from outside: consolidation
+  treats a failed request as a model being unavailable and writes the counted
+  summary instead, so a local setup came up, ran, logged one warning per
+  session, and gave every session the page it would have got with no model
+  configured at all. The refusal is now told apart by its message — the 400 and
+  the `invalid_request_error` it arrives with cover a dozen faults that must
+  still be reported — and the request is sent again without the field. Once,
+  and not counted against the retry budget, because the same request would be
+  refused the same way.
+
 ## [1.0.0] - 2026-09-02
 
 What 1.0 commits to: the command line and the shapes on disk. A wiki, a raw
