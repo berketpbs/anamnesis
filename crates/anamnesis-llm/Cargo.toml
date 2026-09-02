@@ -26,6 +26,9 @@ tokenizers.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# The live Ollama test posts one request of its own, to prove the refusal it
+# is checking the recovery from is still a refusal.
+reqwest.workspace = true
 
 [lints]
 workspace = true

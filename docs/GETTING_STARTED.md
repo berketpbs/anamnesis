@@ -112,8 +112,30 @@ export ANAMNESIS_LLM_PROVIDER=ollama
 export ANAMNESIS_LLM_MODEL=llama3.2          # whatever `ollama list` shows
 ```
 
-Two things learned pointing this at a real Ollama, both worth knowing before
+Three things learned pointing this at a real Ollama, all worth knowing before
 you conclude the setup is broken:
+
+**Ollama's default context is smaller than the prompt anamnesis sends.** A
+session goes out at up to `ANAMNESIS_LLM_MAX_INPUT_TOKENS` (6500) and the reply
+budget is 2000 on top; Ollama serves 4096 unless the model says otherwise, and
+what does not fit is dropped rather than refused. The page comes back valid,
+readable, and quietly missing the middle of the session. Give the model a
+window that holds both — a `Modelfile` is the durable way, since it travels
+with the model instead of with whoever remembers to set an environment
+variable:
+
+```
+FROM qwen2.5:7b-instruct
+PARAMETER num_ctx 12288
+```
+
+```bash
+ollama create anamnesis-qwen -f Modelfile
+export ANAMNESIS_LLM_MODEL=anamnesis-qwen
+```
+
+Measured rather than assumed: a 123-observation session reported 7394 input
+tokens, comfortably past both 4096 and the 6500 the budget estimated.
 
 **A reasoning model can spend the whole reply budget thinking.** It comes back
 as HTTP 200 with a full `reasoning` field and an empty answer, and anamnesis

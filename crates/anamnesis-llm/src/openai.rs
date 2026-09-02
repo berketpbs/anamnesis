@@ -16,9 +16,12 @@
 //! rediscovered. A reasoning model puts its thinking in a **separate**
 //! `reasoning` field and leaves `content` empty until it has finished, so a
 //! budget that runs out mid-thought yields a perfectly valid response carrying
-//! nothing at all — `finish_reason: "length"`, `content: ""`. And unknown
-//! request fields are ignored rather than refused, which is what lets the same
-//! body carry `reasoning_effort` to a backend that has never heard of it.
+//! nothing at all — `finish_reason: "length"`, `content: ""`. And `reasoning_effort`
+//! is not a field a backend can be relied on to ignore: Ollama 0.32 dropped
+//! what it did not recognise, and 0.33 reads that one, answering `400
+//! "<model>" does not support thinking` for every model with no thinking mode
+//! — which is most of the ones anyone runs locally. It is still sent, and
+//! dropped on exactly that refusal; see `complete` below.
 
 use async_trait::async_trait;
 use secrecy::ExposeSecret;
@@ -113,12 +116,29 @@ impl Provider for OpenAiCompatible {
     }
 
     async fn complete(&self, request: &Completion) -> Result<CompletionOutput, LlmError> {
-        let body = build_body(&self.model, self.effort, request);
+        let mut body = build_body(&self.model, self.effort, request);
+        let mut asked_to_think = true;
 
         let mut attempt = 0;
         loop {
             match self.attempt(&body).await {
                 Ok(output) => return Ok(output),
+                // Not a retry, and deliberately not counted as one: the same
+                // request again would be refused the same way. The effort was
+                // never the point of the call, so it goes and the call stands
+                // — the alternative is a session losing its page over a
+                // setting that means nothing to the model answering it.
+                Err(error) if asked_to_think && refuses_thinking(&error) => {
+                    tracing::debug!(
+                        provider = self.name,
+                        model = %self.model,
+                        "model has no thinking to configure; asking again without reasoning_effort"
+                    );
+                    if let Some(object) = body.as_object_mut() {
+                        object.remove("reasoning_effort");
+                    }
+                    asked_to_think = false;
+                }
                 Err(error) if attempt < self.max_retries && error.is_retryable() => {
                     let delay = http::retry_delay(&error, attempt);
                     tracing::warn!(
@@ -137,6 +157,19 @@ impl Provider for OpenAiCompatible {
     }
 }
 
+/// Whether a refusal is the backend saying this model has no thinking to
+/// configure, rather than anything about the request a caller could fix.
+///
+/// Matched on the message because the message is where it is said: the status
+/// is a plain 400 and the type a plain `invalid_request_error`, and both of
+/// those cover a dozen other faults that must not quietly lose a setting.
+fn refuses_thinking(error: &LlmError) -> bool {
+    matches!(
+        error,
+        LlmError::Api { status: 400, message, .. } if message.contains("does not support thinking")
+    )
+}
+
 /// Assemble the request body.
 ///
 /// `strict` is set because the point of naming a schema is not having to parse
@@ -145,10 +178,11 @@ impl Provider for OpenAiCompatible {
 /// caller whose schema says otherwise has said something deliberate that this
 /// is not the place to overrule.
 ///
-/// `reasoning_effort` is sent to every backend. OpenAI reads it; Ollama
-/// ignores unknown fields, which was checked rather than hoped — so the
-/// setting keeps meaning something instead of joining the list of options this
-/// project has had to go back and actually implement.
+/// `reasoning_effort` is sent to every backend, because the backends that read
+/// it are the ones the setting exists for. A backend that refuses it says so in
+/// a 400 that names thinking, and `complete` sends the request again without
+/// the field — so the setting keeps meaning something on OpenAI without costing
+/// every non-thinking local model its page.
 fn build_body(model: &str, effort: crate::config::Effort, request: &Completion) -> Value {
     json!({
         "model": model,
@@ -272,6 +306,54 @@ mod tests {
             body["response_format"]["json_schema"]["schema"]["properties"]["title"]["type"],
             "string"
         );
+    }
+
+    /// Ollama 0.33 refuses `reasoning_effort` outright for a model with no
+    /// thinking mode, and the refusal is a plain 400 of the same type and
+    /// status as a malformed schema or an unknown model. Only the message
+    /// tells them apart, so only the message may be allowed to.
+    #[test]
+    fn a_model_with_no_thinking_mode_is_told_apart_from_other_refusals() {
+        let no_thinking = LlmError::Api {
+            status: 400,
+            kind: "invalid_request_error".to_owned(),
+            message: "\"qwen2.5:7b-instruct\" does not support thinking".to_owned(),
+        };
+        assert!(refuses_thinking(&no_thinking));
+
+        let other_400 = LlmError::Api {
+            status: 400,
+            kind: "invalid_request_error".to_owned(),
+            message: "model \"gpt-5\" not found".to_owned(),
+        };
+        assert!(!refuses_thinking(&other_400));
+
+        // The same sentence from a failing server is a fault to retry, not a
+        // setting to drop.
+        let server_fault = LlmError::Api {
+            status: 500,
+            kind: "server_error".to_owned(),
+            message: "\"qwen\" does not support thinking".to_owned(),
+        };
+        assert!(!refuses_thinking(&server_fault));
+    }
+
+    /// What `complete` sends on the second try. Everything the page depends on
+    /// has to survive dropping the effort — the schema above all, since a
+    /// request that lost it would come back as prose and be blamed on the
+    /// model.
+    #[test]
+    fn dropping_the_effort_leaves_the_rest_of_the_request_intact() {
+        let mut body = build_body("qwen2.5:7b-instruct", Effort::High, &request());
+        body.as_object_mut()
+            .expect("object")
+            .remove("reasoning_effort");
+
+        assert!(body.get("reasoning_effort").is_none());
+        assert_eq!(body["model"], "qwen2.5:7b-instruct");
+        assert_eq!(body["max_tokens"], 2_000);
+        assert_eq!(body["response_format"]["json_schema"]["strict"], true);
+        assert_eq!(body["messages"][0]["role"], "system");
     }
 
     /// The system prompt is a separate message here, unlike Anthropic's
