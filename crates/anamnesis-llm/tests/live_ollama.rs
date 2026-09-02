@@ -23,7 +23,8 @@ use serde_json::json;
 /// because the point is the *class* of model, not this one — anything without
 /// a thinking capability exercises the same path.
 fn model() -> String {
-    std::env::var("ANAMNESIS_TEST_OLLAMA_MODEL").unwrap_or_else(|_| "qwen2.5:7b-instruct".to_owned())
+    std::env::var("ANAMNESIS_TEST_OLLAMA_MODEL")
+        .unwrap_or_else(|_| "qwen2.5:7b-instruct".to_owned())
 }
 
 /// The provider as configuration actually builds it, rather than a client
@@ -113,7 +114,10 @@ async fn a_model_with_no_thinking_mode_still_answers_with_effort_set() {
         "reply lost its schema on the second attempt: {}",
         output.json
     );
-    assert!(output.output_tokens > 0, "no tokens were billed for a reply");
+    assert!(
+        output.output_tokens > 0,
+        "no tokens were billed for a reply"
+    );
 
     println!("{model} answered: {}", output.json);
 }
