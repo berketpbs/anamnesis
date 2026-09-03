@@ -123,6 +123,23 @@ pub fn schema() -> Value {
     })
 }
 
+/// Which path produced a digest.
+///
+/// Capture does not need to ask: there is no page yet, and a counted one is
+/// better than none. Recompiling an existing page is the opposite case — the
+/// summary already there may have been written by a model, and replacing it
+/// with counts is a loss no git history makes good in the moment somebody
+/// reads it. So the two outcomes stop being interchangeable at the boundary
+/// where a caller can act on the difference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DigestSource {
+    /// A model read the session and wrote the page.
+    Model,
+    /// Counted, because the model was unavailable, refused, or answered with
+    /// something that was not a page.
+    Counted,
+}
+
 /// Consolidate a session, preferring the model and falling back to counting.
 ///
 /// Returns `None` only when there was nothing to record — the same condition
@@ -135,6 +152,30 @@ pub async fn consolidate_with_llm(
     max_input_tokens: usize,
     max_output_tokens: u32,
 ) -> Option<SessionDigest> {
+    consolidate_with_source(
+        provider,
+        session,
+        observations,
+        preferences,
+        max_input_tokens,
+        max_output_tokens,
+    )
+    .await
+    .map(|(digest, _)| digest)
+}
+
+/// The same, saying which path produced the digest.
+///
+/// For callers that are replacing something rather than writing the first
+/// thing there.
+pub async fn consolidate_with_source(
+    provider: &dyn Provider,
+    session: &Session,
+    observations: &[Observation],
+    preferences: Option<&str>,
+    max_input_tokens: usize,
+    max_output_tokens: u32,
+) -> Option<(SessionDigest, DigestSource)> {
     // The deterministic digest is computed first and unconditionally. It costs
     // microseconds, it decides whether this session is worth a page at all,
     // and holding it means the fallback below is a value rather than another
@@ -158,16 +199,16 @@ pub async fn consolidate_with_llm(
                     output_tokens = output.output_tokens,
                     "session consolidated by model"
                 );
-                Some(digest)
+                Some((digest, DigestSource::Model))
             }
             Err(reason) => {
                 tracing::warn!(%reason, "model reply was not a page; using the counted summary");
-                Some(fallback)
+                Some((fallback, DigestSource::Counted))
             }
         },
         Err(error) => {
             tracing::warn!(%error, "model unavailable; using the counted summary");
-            Some(fallback)
+            Some((fallback, DigestSource::Counted))
         }
     }
 }
@@ -583,6 +624,55 @@ mod tests {
         .expect("a digest");
 
         // The counted page, verbatim — including the footer that says so.
+        assert!(digest.body.contains("Compiled without a model"));
+    }
+
+    /// The distinction a caller replacing an existing page has to be able to
+    /// make. Both of these return a digest; only one of them read the session.
+    #[tokio::test]
+    async fn a_digest_says_whether_a_model_wrote_it() {
+        let (_, from_model) = consolidate_with_source(
+            &Fake(Ok(good_reply())),
+            &session(),
+            &working_session(),
+            None,
+            6_500,
+            2_000,
+        )
+        .await
+        .expect("a digest");
+        assert_eq!(from_model, DigestSource::Model);
+
+        let (_, from_counting) = consolidate_with_source(
+            &Fake(Err(())),
+            &session(),
+            &working_session(),
+            None,
+            6_500,
+            2_000,
+        )
+        .await
+        .expect("a digest");
+        assert_eq!(from_counting, DigestSource::Counted);
+    }
+
+    /// A reply the model did send but that could not be read as a page counts
+    /// as counted too. It is the same loss to a page already written: prose
+    /// replaced by tool tallies, with a commit to say it was deliberate.
+    #[tokio::test]
+    async fn a_reply_that_was_not_a_page_is_counted_rather_than_model() {
+        let (digest, source) = consolidate_with_source(
+            &Fake(Ok(json!({"title": "t", "body": "b"}))),
+            &session(),
+            &working_session(),
+            None,
+            6_500,
+            2_000,
+        )
+        .await
+        .expect("a digest");
+
+        assert_eq!(source, DigestSource::Counted);
         assert!(digest.body.contains("Compiled without a model"));
     }
 

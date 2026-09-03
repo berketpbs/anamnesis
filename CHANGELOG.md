@@ -27,6 +27,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   where it is known, rather than a guess made from an error message.
 
 ### Fixed
+- `reconsolidate --apply` could replace a summary a model wrote with one
+  produced by counting. Found by running it: eight sessions went out to Google,
+  every request came back `429` against a free-tier daily quota, and the
+  command reported "8 page(s) rewritten" — having turned eight pages of prose
+  into eight pages of tool tallies. The guard was there and could not fire.
+  `consolidate_with_llm` never fails by design, because capture must always end
+  with a page; it answers a refused request with the counted summary, so a
+  caller asking only *whether* a digest came back cannot tell "the model wrote
+  this" from "the model was unreachable". `consolidate_with_source` now says
+  which, `reconsolidate` skips the counted ones and names them, and the
+  distinction is a type rather than a footer somebody greps for. The pages this
+  found were restored from the wiki's git history — which is the argument for
+  the wiki being a git repository, and not a reason the command may overwrite
+  them
 - Ollama, with any model that has no thinking mode — which is most of the ones
   anyone runs locally. `reasoning_effort` goes out on every chat-completions
   request, and the client was written against Ollama 0.32, which dropped fields

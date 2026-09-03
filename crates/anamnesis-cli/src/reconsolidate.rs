@@ -19,7 +19,7 @@
 
 use std::path::PathBuf;
 
-use anamnesis_consolidate::consolidate_with_llm;
+use anamnesis_consolidate::{DigestSource, consolidate_with_source};
 use anamnesis_core::audit::Action;
 use anamnesis_core::embedding::Embed;
 use anamnesis_core::page::{PagePath, Tier};
@@ -149,7 +149,7 @@ pub fn cmd_reconsolidate(
         };
         let observations = store.observations(item.session.id)?;
 
-        let digest = runtime.block_on(consolidate_with_llm(
+        let compiled = runtime.block_on(consolidate_with_source(
             provider.as_ref(),
             &session,
             &observations,
@@ -162,11 +162,25 @@ pub fn cmd_reconsolidate(
         // not a digest is not an error here, for the reason it is not one
         // during capture: the page that already exists is still true. One
         // session keeps the summary it had and the rest carry on.
-        let Some(digest) = digest else {
+        //
+        // The counted summary is refused for the same reason — and it is the
+        // one that actually happened. `consolidate_with_llm` never fails, so
+        // asking only whether it returned something let a run where *every*
+        // request was refused rewrite eight pages a model had written into
+        // eight pages of counts, and report it as eight pages rewritten.
+        let Some((digest, source)) = compiled else {
             println!("  ✗ {}  the model gave nothing back", item.path.as_str());
             refused += 1;
             continue;
         };
+        if source == DigestSource::Counted {
+            println!(
+                "  ✗ {}  the model gave nothing back; left as it was",
+                item.path.as_str()
+            );
+            refused += 1;
+            continue;
+        }
 
         let path = anamnesis_web::recompile(
             &store,
