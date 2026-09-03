@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-03
+
+What 1.0 commits to: the command line and the shapes on disk. A wiki, a raw
+spool and an index written by this version are read by every version after it,
+and the index migrates itself forward on startup — it has crossed eleven
+schema versions that way already. The commands and their flags are settled;
+anything that would break one becomes a new flag or a new command beside it.
+
+What it does not claim: that a shared server has been run by a team. Everything
+that needs is here — tokens, per-operator handoffs, an audit log, a JSON API,
+and a guide for running a server other machines can reach — and nobody has run
+it that way yet. `USE_CASES.md` leaves that box empty on purpose.
+
 ### Added
 - Google AI Studio as a provider: `ANAMNESIS_LLM_PROVIDER=google`, with the key
   read from `GEMINI_API_KEY` or `GOOGLE_API_KEY`. Gemini publishes an
@@ -103,19 +116,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still be reported — and the request is sent again without the field. Once,
   and not counted against the retry budget, because the same request would be
   refused the same way.
-
-## [1.0.0] - 2026-09-02
-
-What 1.0 commits to: the command line and the shapes on disk. A wiki, a raw
-spool and an index written by this version are read by every version after it,
-and the index migrates itself forward on startup — it has crossed eleven
-schema versions that way already. The commands and their flags are settled;
-anything that would break one becomes a new flag or a new command beside it.
-
-What it does not claim: that a shared server has been run by a team. Everything
-that needs is here — tokens, per-operator handoffs, an audit log, a JSON API,
-and a guide for running a server other machines can reach — and nobody has run
-it that way yet. `USE_CASES.md` leaves that box empty on purpose.
 
 ### Added
 - `anamnesis rename`: the same memory, under a name that resolves. A project's

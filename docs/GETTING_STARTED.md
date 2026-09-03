@@ -17,8 +17,8 @@ binary, the README, the licence and the changelog, and every release carries a
 `SHA256SUMS` file — a release nobody can verify is a release nobody should run.
 
 ```bash
-tar -xzf anamnesis-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
-./anamnesis-v0.1.0-x86_64-unknown-linux-gnu/anamnesis --version
+tar -xzf anamnesis-v1.0.0-x86_64-unknown-linux-gnu.tar.gz
+./anamnesis-v1.0.0-x86_64-unknown-linux-gnu/anamnesis --version
 ```
 
 Put the binary somewhere on `PATH`, then `anamnesis init`.
