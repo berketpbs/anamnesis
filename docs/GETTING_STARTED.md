@@ -84,10 +84,10 @@ else has a default.
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `ANTHROPIC_API_KEY` | — | Credential. `ANAMNESIS_LLM_API_KEY` overrides it. |
-| `ANAMNESIS_LLM_PROVIDER` | `anthropic` when a key is set | `anthropic`, `openai`, `ollama`, or `none`. Set `none` to turn the model off without unsetting the key. |
-| `ANAMNESIS_LLM_MODEL` | `claude-opus-5`, or `llama3.2` for `ollama` | Model id. |
-| `ANAMNESIS_LLM_BASE_URL` | per provider | `https://api.anthropic.com`, `https://api.openai.com/v1`, or `http://127.0.0.1:11434/v1`. Point at a gateway, a second Ollama, or vLLM. |
-| `ANAMNESIS_LLM_EFFORT` | `high` | `low`, `medium`, `high`, `xhigh`, or `max`. |
+| `ANAMNESIS_LLM_PROVIDER` | `anthropic` when a key is set | `anthropic`, `openai`, `google`, `ollama`, or `none`. Set `none` to turn the model off without unsetting the key. |
+| `ANAMNESIS_LLM_MODEL` | `claude-opus-5`; `llama3.2` for `ollama`; `gemini-2.5-flash` for `google` | Model id. |
+| `ANAMNESIS_LLM_BASE_URL` | per provider | `https://api.anthropic.com`, `https://api.openai.com/v1`, `https://generativelanguage.googleapis.com/v1beta/openai`, or `http://127.0.0.1:11434/v1`. Point at a gateway, a second Ollama, or vLLM. |
+| `ANAMNESIS_LLM_EFFORT` | `high` | `low`, `medium`, `high`, `xhigh`, or `max`. `google` has no word above `high` and is sent `high` for the two above it. |
 | `ANAMNESIS_LLM_MAX_INPUT_TOKENS` | `6500` | Prompt budget. Long sessions are trimmed from the middle to fit. |
 | `ANAMNESIS_LLM_MAX_OUTPUT_TOKENS` | `2000` | Reply budget, floored at 1000. |
 | `ANAMNESIS_LLM_TIMEOUT_SECS` | `90` | Per-request timeout. |
@@ -99,12 +99,45 @@ A typo is reported at startup rather than at the end of the first session:
 which model it will consolidate with when they do. `anamnesis status
 --verbose` reports the same thing.
 
+#### Google AI Studio
+
+Gemini publishes an OpenAI-compatible surface, so it is the same client again —
+only its address and model differ:
+
+```bash
+export ANAMNESIS_LLM_PROVIDER=google
+export GEMINI_API_KEY=AQ....                 # or GOOGLE_API_KEY
+export ANAMNESIS_LLM_MODEL=gemini-2.5-flash  # whatever your account lists
+```
+
+Three things worth knowing, all of which show up as something other than what
+they are:
+
+**The provider has to be named.** A `GEMINI_API_KEY` sitting in the environment
+selects nothing on its own, unlike `ANTHROPIC_API_KEY`. A key that could select
+a provider is a key that could redirect one — every session transcript would
+start going somewhere nobody chose, on the strength of a variable exported for
+something else.
+
+**Keys now start with `AQ.`, not `AIza`.** Google is retiring the older
+standard keys, and the new ones authenticate the same way here: one
+`Authorization: Bearer` header. Sending a second credential alongside it — the
+`x-goog-api-key` header, or `?key=` on the URL — is refused with `400 Multiple
+authentication credentials received`, which reads like a bad key rather than
+like two of them. Anamnesis sends exactly one, and a test holds it there.
+
+**`xhigh` and `max` are not words here.** Google's vocabulary stops at `high`,
+and it refuses the two above it with a plain 400 that names neither thinking
+nor the field — so the recovery that saves a non-thinking Ollama model (below)
+cannot fire, and the session would lose its page over a setting the model never
+needed. Anything above `high` is therefore sent as `high`.
+
 #### A model on this machine
 
-`openai` and `ollama` are the same client — one wire format, several backends:
-OpenAI itself, Ollama, vLLM, LM Studio, and any gateway presenting
-`/chat/completions`. The difference between the two names is the default
-address and that `ollama` expects no credential, because a model running here
+`openai`, `google` and `ollama` are the same client — one wire format, several
+backends: OpenAI itself, Ollama, Gemini, vLLM, LM Studio, and any gateway
+presenting `/chat/completions`. The difference between the names is the default
+address, and that `ollama` expects no credential, because a model running here
 has none to present.
 
 ```bash

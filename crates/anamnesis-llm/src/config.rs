@@ -32,6 +32,10 @@ pub enum ProviderKind {
     /// separate so that "consolidation ran locally" is a thing the logs can
     /// say.
     Ollama,
+    /// Google AI Studio, through the OpenAI-compatible surface Gemini
+    /// publishes. Again the same wire format, again separate for the same two
+    /// reasons: its own address and model, and a name the logs can print.
+    Google,
     /// No model. Consolidation stays deterministic.
     None,
 }
@@ -44,9 +48,10 @@ impl FromStr for ProviderKind {
             "anthropic" | "claude" => Ok(Self::Anthropic),
             "openai" | "openai-compatible" | "oai" => Ok(Self::OpenAi),
             "ollama" | "local" => Ok(Self::Ollama),
+            "google" | "gemini" | "aistudio" | "google-ai-studio" => Ok(Self::Google),
             "none" | "off" | "disabled" => Ok(Self::None),
             other => Err(LlmError::Config(format!(
-                "unknown provider {other:?}; expected \"anthropic\", \"openai\", \"ollama\" or \"none\""
+                "unknown provider {other:?}; expected \"anthropic\", \"openai\", \"google\", \"ollama\" or \"none\""
             ))),
         }
     }
@@ -58,7 +63,11 @@ impl FromStr for ProviderKind {
 /// deciding which of forty tool calls mattered is exactly the part the
 /// deterministic path cannot do. The default matches the API's own default
 /// rather than trying to be clever about it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// Ordered from cheapest to most thorough, and the order is load-bearing:
+/// a backend whose vocabulary stops short of the top can say so with a
+/// ceiling rather than with a special case per level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum Effort {
     /// Cheapest.
     Low,
@@ -128,6 +137,31 @@ const DEFAULT_OLLAMA_BASE_URL: &str = "http://127.0.0.1:11434/v1";
 /// provider is a first run most people abandon. Wrong for anyone who pulled
 /// something else, and `ANAMNESIS_LLM_MODEL` is one variable.
 const DEFAULT_OLLAMA_MODEL: &str = "llama3.2";
+
+/// Default API root for Google AI Studio.
+///
+/// The OpenAI-compatible surface rather than Gemini's own `generateContent`,
+/// because the compatible one is the same wire format every other backend here
+/// already speaks: one non-streaming POST and a reply constrained by a JSON
+/// schema. Writing a second client for a second shape of the same request is
+/// how the two drift.
+const DEFAULT_GOOGLE_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai";
+
+/// Default model for Google AI Studio.
+///
+/// Named for the same reason Ollama's is: a first run that has to be told the
+/// model as well as the provider is a first run most people abandon.
+const DEFAULT_GOOGLE_MODEL: &str = "gemini-2.5-flash";
+
+/// The most effort Google's compatible surface has a word for.
+///
+/// It takes `minimal`, `low`, `medium`, `high` and `none`; `xhigh` and `max`
+/// are ours and mean nothing there. The refusal is a plain 400 that says
+/// nothing about thinking, so the fallback in `openai.rs` — which drops the
+/// field when a backend names thinking — cannot catch it, and a session would
+/// lose its page over a setting the model never needed. Clamped here instead,
+/// where the answer is known rather than guessed from an error message.
+const GOOGLE_MAX_EFFORT: Effort = Effort::High;
 
 /// Default ceiling on prompt size, in estimated tokens.
 ///
@@ -226,12 +260,37 @@ impl LlmConfig {
                 config.base_url = DEFAULT_OLLAMA_BASE_URL.to_owned();
                 config.model = DEFAULT_OLLAMA_MODEL.to_owned();
             }
+            ProviderKind::Google => {
+                config.base_url = DEFAULT_GOOGLE_BASE_URL.to_owned();
+                config.model = DEFAULT_GOOGLE_MODEL.to_owned();
+            }
             ProviderKind::Anthropic | ProviderKind::None => {}
+        }
+
+        // Google's own variable names, read only once Google has been asked
+        // for by name. Deliberately not part of the chain above: a Gemini key
+        // left in the environment by some other tool must never become the
+        // reason consolidation stopped talking to whatever it was configured
+        // to talk to. A key that selects a provider is a key that can redirect
+        // one.
+        if config.provider == ProviderKind::Google && config.api_key.is_none() {
+            config.api_key = var("GEMINI_API_KEY")
+                .or_else(|| var("GOOGLE_API_KEY"))
+                .filter(|value| !value.trim().is_empty())
+                .map(SecretString::from);
         }
 
         if config.provider == ProviderKind::Anthropic && config.api_key.is_none() {
             return Err(LlmError::Config(
                 "provider is anthropic but no ANTHROPIC_API_KEY (or ANAMNESIS_LLM_API_KEY) is set"
+                    .to_owned(),
+            ));
+        }
+
+        if config.provider == ProviderKind::Google && config.api_key.is_none() {
+            return Err(LlmError::Config(
+                "provider is google but no GEMINI_API_KEY (or GOOGLE_API_KEY, \
+                 or ANAMNESIS_LLM_API_KEY) is set"
                     .to_owned(),
             ));
         }
@@ -281,6 +340,9 @@ impl LlmConfig {
             ProviderKind::Anthropic => Ok(Some(Arc::new(Anthropic::new(self)?))),
             ProviderKind::OpenAi => Ok(Some(Arc::new(OpenAiCompatible::new(self, "openai")?))),
             ProviderKind::Ollama => Ok(Some(Arc::new(OpenAiCompatible::new(self, "ollama")?))),
+            ProviderKind::Google => Ok(Some(Arc::new(
+                OpenAiCompatible::new(self, "google")?.with_effort_ceiling(GOOGLE_MAX_EFFORT),
+            ))),
         }
     }
 }
@@ -346,6 +408,68 @@ mod tests {
         assert_eq!(config.base_url, "https://api.openai.com/v1");
     }
 
+    /// Google publishes its compatible surface at its own address, under a
+    /// path that already contains the API version — so inheriting OpenAI's
+    /// would fail in a way that names neither.
+    #[test]
+    fn google_brings_its_own_address_and_model() {
+        let config = LlmConfig::from_vars(vars(&[
+            ("ANAMNESIS_LLM_PROVIDER", "google"),
+            ("GEMINI_API_KEY", "AQ.test-key"),
+        ]))
+        .expect("config");
+
+        assert_eq!(config.provider, ProviderKind::Google);
+        assert_eq!(
+            config.base_url,
+            "https://generativelanguage.googleapis.com/v1beta/openai"
+        );
+        assert!(config.model.starts_with("gemini"), "{}", config.model);
+        assert!(config.build().expect("builds").is_some());
+    }
+
+    /// Four spellings, because this one backend is called three things by the
+    /// people configuring it — the company, the product, and the console.
+    #[test]
+    fn google_answers_to_the_names_people_type() {
+        for spelling in ["google", "gemini", "aistudio", "google-ai-studio", "GEMINI"] {
+            let config = LlmConfig::from_vars(vars(&[
+                ("ANAMNESIS_LLM_PROVIDER", spelling),
+                ("GEMINI_API_KEY", "AQ.test-key"),
+            ]))
+            .unwrap_or_else(|error| panic!("{spelling} should configure: {error}"));
+
+            assert_eq!(config.provider, ProviderKind::Google, "{spelling}");
+        }
+    }
+
+    /// The rule that keeps a key from being a decision. Someone with a Gemini
+    /// key exported for another tool has not asked this to summarise their
+    /// sessions with it, and a provider that selected itself would send every
+    /// transcript somewhere nobody chose.
+    #[test]
+    fn a_gemini_key_on_its_own_selects_nothing() {
+        let config =
+            LlmConfig::from_vars(vars(&[("GEMINI_API_KEY", "AQ.test-key")])).expect("config");
+
+        assert_eq!(config.provider, ProviderKind::None);
+        assert!(config.build().expect("builds").is_none());
+    }
+
+    /// Google asked for by name with nothing to authenticate with: the error
+    /// names every variable that would have worked, because the one thing a
+    /// person cannot guess is which spelling this reads.
+    #[test]
+    fn google_without_a_key_names_the_variables_it_looked_at() {
+        let error = LlmConfig::from_vars(vars(&[("ANAMNESIS_LLM_PROVIDER", "google")]))
+            .expect_err("should not configure");
+
+        let message = error.to_string();
+        for expected in ["GEMINI_API_KEY", "GOOGLE_API_KEY", "ANAMNESIS_LLM_API_KEY"] {
+            assert!(message.contains(expected), "{message}");
+        }
+    }
+
     /// The per-provider default is a default, not a decision. Someone pointing
     /// at a gateway, a second Ollama on another port, or vLLM says so once.
     #[test]
@@ -368,7 +492,7 @@ mod tests {
         let error = LlmConfig::from_vars(vars(&[("ANAMNESIS_LLM_PROVIDER", "openia")]))
             .expect_err("should refuse");
         let message = error.to_string();
-        for expected in ["anthropic", "openai", "ollama", "none"] {
+        for expected in ["anthropic", "openai", "google", "ollama", "none"] {
             assert!(message.contains(expected), "{message}");
         }
     }
