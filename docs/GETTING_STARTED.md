@@ -822,7 +822,7 @@ anamnesis eval --streams   # what each stream contributes on its own
          The page says opt-in, not off by default. Different words, same question.
 ```
 
-The corpus is checked in at `evals/suites/`, and a run builds it in a
+The corpus is checked in at `crates/anamnesis-evals/suites/`, and a run builds it in a
 throwaway directory — it never touches your own memory, because every query
 would otherwise count as a read and the decay sweep believes those. Write your
 own with `--suite path/to/suite.toml`; the format is the shipped file.

@@ -10,7 +10,7 @@ members = [
     "crates/anamnesis-consolidate",
     "crates/anamnesis-web",
     "crates/anamnesis-cli",
-    "evals",
+    "crates/anamnesis-evals",
 ]
 
 [workspace.package]
@@ -31,7 +31,7 @@ anamnesis-hooks = { path = "crates/anamnesis-hooks", version = "1.0.0" }
 anamnesis-llm = { path = "crates/anamnesis-llm", version = "1.0.0" }
 anamnesis-consolidate = { path = "crates/anamnesis-consolidate", version = "1.0.0" }
 anamnesis-web = { path = "crates/anamnesis-web", version = "1.0.0" }
-anamnesis-evals = { path = "evals", version = "1.0.0" }
+anamnesis-evals = { path = "crates/anamnesis-evals", version = "1.0.0" }
 
 # Error handling.
 anyhow = "1"
