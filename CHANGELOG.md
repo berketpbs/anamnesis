@@ -27,6 +27,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   where it is known, rather than a guess made from an error message.
 
 ### Fixed
+- A file named as an entity by a model was named in a way no search could
+  match. Entity matching asks for *every* token of a name to be in the query,
+  so `crates/anamnesis-core/src/sanitize.rs` wants six of them and gets none,
+  while `sanitize.rs` wants the two somebody would type. The counted path has
+  filed basenames since entities existed; a model asked for names "spelled as
+  they appear" hands back the path it saw, so the two writers were building
+  different indexes out of the same session — the failure this repository has
+  already had twice, in #30 and #32. Measured, not guessed: Gemini answered
+  with the full path on the first live session it summarised. The prompt now
+  asks for the short name and the reply is normalised as well, because a
+  prompt is guidance and an index is not the place to find out which one the
+  model followed. Only paths are shortened: a branch name or a host path keeps
+  every word, since there the leading segments are the name rather than a
+  place to find it
 - `reconsolidate --apply` could replace a summary a model wrote with one
   produced by counting. Found by running it: eight sessions went out to Google,
   every request came back `429` against a free-tier daily quota, and the
