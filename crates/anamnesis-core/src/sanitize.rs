@@ -139,10 +139,13 @@ fn builtin_rules() -> &'static [Rule] {
                 "[redacted:openai-key]",
             ),
             rule(
-                // Google's shape is fixed at 39 characters and the prefix is
-                // theirs alone, so this cannot fire on anything else. It
-                // belongs here because this project already speaks to Gemini
-                // through a harness and a provider.
+                // Google's older API key: fixed at 39 characters, and the
+                // prefix is theirs alone, so this cannot fire on anything
+                // else. Still matched although Google has stopped issuing it
+                // to new keys — the ones already in circulation authorise the
+                // same APIs, and a rule that stops recognising a credential
+                // the day it stops being handed out protects nobody who has
+                // one. The replacement is `google-auth-key`, two rules down.
                 "google-api-key",
                 r"\bAIza[0-9A-Za-z_\-]{35}\b",
                 "[redacted:google-api-key]",
@@ -165,16 +168,29 @@ fn builtin_rules() -> &'static [Rule] {
                 "[redacted:google-oauth-token]",
             ),
             rule(
-                // The shape the leak actually had. Google does not document
-                // it the way `ya29.` is documented, so the floor is higher
-                // here on purpose: the prefix is two letters and a dot, and a
-                // short match would start redacting ordinary prose. Thirty
-                // trailing characters is longer than anything that reaches
-                // `AQ.` by accident and shorter than any credential of this
-                // shape observed.
-                "google-oauth-token",
+                // The shape the leak actually had, and *not* an OAuth token —
+                // this rule was filed beside `ya29.` when it was written, on a
+                // guess that has since been checked against the thing itself.
+                // `AQ.` is Google's newer API key: AI Studio issues it in
+                // place of `AIza`, which is being retired for new keys, and it
+                // is what a `GEMINI_API_KEY` now looks like. Long-lived, no
+                // OAuth flow anywhere near it.
+                //
+                // The distinction is not pedantry. This name is the only thing
+                // a person sees in place of their secret — in a wiki page, in
+                // the raw spool, in the log line saying which rule fired — and
+                // `oauth-token` sends somebody looking for a flow their setup
+                // does not have.
+                //
+                // Google does not document this shape the way `ya29.` is
+                // documented, so the floor is higher here on purpose: the
+                // prefix is two letters and a dot, and a short match would
+                // start redacting ordinary prose. Thirty trailing characters
+                // is longer than anything that reaches `AQ.` by accident and
+                // shorter than any credential of this shape observed.
+                "google-auth-key",
                 r"\bAQ\.[0-9A-Za-z_\-]{30,}",
-                "[redacted:google-oauth-token]",
+                "[redacted:google-auth-key]",
             ),
             rule(
                 "stripe-key",
@@ -328,10 +344,7 @@ mod tests {
         let cases = [
             ("AIzaSyA0123456789abcdefghijklmnopqrstuv", "google-api-key"),
             ("ya29.a0Ae4lvC0123456789abcdefghij", "google-oauth-token"),
-            (
-                "AQ.Ab0123456789abcdefghijklmnopqrstuvwx",
-                "google-oauth-token",
-            ),
+            ("AQ.Ab0123456789abcdefghijklmnopqrstuvwx", "google-auth-key"),
             ("sk_live_0123456789abcdefghij", "stripe-key"),
             ("npm_0123456789abcdefghijklmnopqrstuvwxyz", "npm-token"),
             (webhook.as_str(), "slack-webhook"),
@@ -360,9 +373,28 @@ mod tests {
         let taken = redact(&format!("ticket {over} was filed"));
         assert!(!taken.text().contains(&over), "{}", taken.text());
         assert!(
-            taken.hits().contains(&"google-oauth-token"),
+            taken.hits().contains(&"google-auth-key"),
             "{:?}",
             taken.hits()
+        );
+    }
+
+    /// The two Google prefixes are two credentials, and the name is the only
+    /// thing a person sees in place of the secret. Calling an AI Studio key an
+    /// OAuth token sends them looking for a flow their setup does not have, so
+    /// the names are asserted rather than left to whoever edits the table
+    /// above.
+    #[test]
+    fn each_google_credential_is_named_for_what_it_is() {
+        let oauth = redact("token ya29.a0Ae4lvC0123456789abcdefghij here");
+        assert_eq!(oauth.hits(), ["google-oauth-token"]);
+
+        let key = redact("key AQ.Ab0123456789abcdefghijklmnopqrstuvwx here");
+        assert_eq!(key.hits(), ["google-auth-key"]);
+        assert!(
+            key.text().contains("[redacted:google-auth-key]"),
+            "{}",
+            key.text()
         );
     }
 

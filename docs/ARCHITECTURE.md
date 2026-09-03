@@ -657,7 +657,10 @@ data directory.
 
 - **Redaction** — observations are scrubbed of secret-shaped text before they
   reach either the index or the spool, and the spool rejects anything that
-  arrives unredacted.
+  arrives unredacted. What replaces a secret names the rule that took it
+  (`[redacted:google-auth-key]`), because that placeholder is the only account
+  of the removal a person ever reads — so the rules are named for what the
+  credential is, not for what it was first assumed to be.
 - **Capture exclusions** — `[capture] ignore_paths` drops events naming the
   paths a project has excluded, before an observation is built. Nothing about
   them reaches the index, the spool, or a later summary. Patterns are
