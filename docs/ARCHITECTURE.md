@@ -285,6 +285,37 @@ the durable copy is bad, losing the event because a disk filled up is worse.
 The spool refuses an observation that has not been redacted, since it is the
 longest-lived copy in the system.
 
+### Event vocabulary
+
+Five harnesses name the same moments differently, and every one of those names
+is normalised to a closed set before anything is stored. The set is closed on
+purpose: a wider one would push the question "is this the same moment?" out of
+`anamnesis-hooks`, where it can be answered once, into consolidation and
+retrieval, where it would be answered differently each time.
+
+| Stored kind | The moment | Some of the names harnesses use |
+| --- | --- | --- |
+| `session-start` | A session opened | `SessionStart` |
+| `user-prompt` | The operator submitted a prompt | `UserPromptSubmit`, `BeforeAgent`, `BeforeSubmitPrompt` |
+| `tool-use` | A tool ran, and whether it succeeded | `PreToolUse`, `PostToolUse`, `BeforeTool`, `AfterTool` |
+| `pre-compact` | The model is about to compact its context | `PreCompact`, `PreCompress` |
+| `post-compact` | Compaction produced a summary | `PostCompact` |
+| `session-end` | The session closed | `SessionEnd` |
+| `notification` | Anything else the harness said | — |
+
+Two consequences worth stating rather than discovering.
+
+**A name this table does not list becomes `notification`**, not an error and
+not a new variant. A harness that adds an event keeps being captured, and what
+it added is visible as an observation rather than dropped — at the cost that
+`notification` is where unrecognised things accumulate, so it is the kind to
+look at when a harness seems to be reporting less than it should.
+
+**Only `session-start` and `session-end` are boundaries.** Consolidation asks
+whether a session carried anything else before writing a page, and a session
+that opened and closed with nothing between them leaves none: a wiki full of
+empty session stubs makes every later search worse.
+
 ### Consolidation
 
 ```
@@ -585,6 +616,87 @@ only be found by a query that tokenized to exactly it — never, for anything
 containing a space, a dash, or a dot. An entity matches when every one of its
 tokens is present in the query.
 
+## Surfaces
+
+Three ways in, and they are not interchangeable: hooks write without being
+asked, MCP is what an agent can reach mid-session, and the command line is what
+a person uses when something looks wrong.
+
+### MCP tools
+
+Five, and the count is deliberate rather than settled — an agent that has to
+choose between eighteen tools spends its attention choosing.
+
+| Tool | What it is for |
+| --- | --- |
+| `memory_query` | The fused search, as the CLI and the browser run it |
+| `memory_write_page` | Write durable knowledge on purpose: a decision, a gotcha, a procedure |
+| `memory_handoff_accept` | Claim the waiting handoff, which is single-use |
+| `workstream_start` | Name a thread of work so it keeps its own resume point |
+| `workstream_status` | What happened in one, as a ledger |
+
+`memory_query` returns snippets rather than whole pages. Nothing yet asks for
+a full body — see *Future work*.
+
+### Command surface
+
+Thirty subcommands, which is a lot until they are grouped by the question
+they answer.
+
+| Group | Commands |
+| --- | --- |
+| Set up | `init`, `install-hooks`, `install-mcp`, `run`, `continue`, `uninstall` |
+| Run | `serve`, `hook`, `mcp`, `token` |
+| Read | `status`, `search`, `show-page`, `sessions`, `handoff`, `audit` |
+| Write | `write-page`, `bootstrap`, `reconsolidate`, `reindex` |
+| Forget | `forget`, `forget-session`, `sweep`, `purge` |
+| Maintain | `improve`, `rename`, `backup`, `restore` |
+| Measure | `eval`, `bench` |
+
+Two rules run through all of them. **Nothing destructive happens without
+`--apply`**, except where a person named the thing themselves — `forget <path>`
+takes a page somebody chose, so there is no judgement to review. And **every
+destructive command removes the index row before the file**: interrupted, the
+page is briefly unfindable and `reindex` restores it exactly; the other order
+leaves the index pointing at markdown that is gone, which no rebuild repairs.
+
+## Invariants
+
+Each of these is here because breaking it cost this project something
+specific, and each is enforced by a test that names the failure rather than
+the rule.
+
+1. **A model may improve a page; it may never be the reason there is not
+   one.** `consolidate_with_llm` cannot fail. A timeout, a refusal, or a reply
+   that is not a page all yield the counted summary.
+2. **"There is a digest" and "a model wrote it" are different questions.**
+   The first invariant makes the second one necessary: a caller *replacing* a
+   page has to know which it got, or a quota-exhausted run rewrites good prose
+   as tool tallies and reports success. `DigestSource` is that answer.
+3. **Capture never blocks a session.** The hook's budget is a second and a
+   model call is seconds, so the server records the event, answers `202`, and
+   consolidates afterwards. `anamnesis hook` exits `0` whatever happened.
+4. **The wiki is the source; the index is derived.** Deleting the database
+   costs search until `reindex`, and costs nothing else. This has been tested
+   by deleting it.
+5. **Nothing unredacted reaches the spool.** It outlives the index, so a
+   secret written there would be the most durable copy of itself in the
+   system. The spool rejects an observation that has not been through
+   `sanitize`.
+6. **Rebuilding an unchanged wiki changes nothing.** Not even a timestamp:
+   `updated_at` is what decay reads, so a watcher that reindexed its own
+   writes would keep every page permanently young and nothing would ever
+   decay.
+7. **Derived identity, everywhere.** Workspace, project and page identifiers
+   are computed from the scope, so two clones of one repository share one
+   memory without configuring anything — and renaming a project is a migration
+   rather than an edit, because every derived id moves with it.
+8. **Two writers of the same index build the same index.** The live path and
+   `reindex` fill the same columns from the same session; where they have
+   drifted, retrieval went quietly blind to something. It has happened three
+   times, and each time the fix was to share the writer rather than to patch
+   the second one.
+
 ## Configuration
 
 Projects use `.anamnesis.toml` for configuration. The file is optional: without
@@ -684,15 +796,54 @@ data directory.
   pages between scopes changes that identity, taking their access statistics,
   resolved links, and supersession chains with it.
 
-## Future Enhancements
+## Future work
 
-Shipped since this list was written: vector embeddings (local candle
-embedder, opt-in), the raw spool, `reindex`, `bootstrap`, the decay sweep, and
-auto-improve with its scheduler.
+Shipped since this list was first written: vector embeddings, the raw spool,
+`reindex`, `bootstrap`, the decay sweep, auto-improve and its scheduler, the
+audit log, and hosted providers for both completion and embeddings.
 
-Still ahead:
+What is still missing is listed by what it costs, measured against a working
+memory rather than guessed at.
 
-1. **Graph Database** - Entity relationship tracking
-2. **Multi-Agent Coordination** - Shared context between agents
-3. **Policy Engine** - Fine-grained access control
-4. **Audit Trail** - Complete action logging
+1. **Consolidation writes one page per session.** A session that made a
+   decision, hit a gotcha and established a procedure leaves all three inside
+   one `sessions/` page, so retrieval can only ever return the whole session.
+   This is why `notes/` is empty in every memory this has been run against,
+   and it is the largest single gap.
+2. **`memory_query` returns snippets, not pages.** An agent that finds the
+   right page has no tool to read the rest of it, and works from three
+   sentences.
+3. **Auto-improve is rule-based.** It notices what the index can prove — a
+   page fetched often enough to promote, a link with no target — and nothing
+   that requires reading the pages.
+4. **Links stop at the project boundary.** A page cannot point at one in
+   another project, so knowledge that spans two repositories is duplicated or
+   lost.
+5. **One writer, no backpressure.** SQLite is written from whatever task holds
+   it; a saturated server has no way to say "later" other than by being slow.
+6. **Five harnesses.** The pattern is proven and each new one is small — but
+   each also needs its event names and file format checked against that
+   harness's own documentation before anything is written, which is the part
+   that takes the time.
+7. **A page written in one language answers questions asked in that
+   language.** Full text is language-bound by nature and the default embedding
+   model is English-centric, so the vector stream is what carries a query
+   across the gap — measured here, and the reason a registration that omits it
+   costs more than it looks like it should.
+
+## Reading order
+
+* **This file** — what the pieces are and why they are shaped that way.
+* [`GETTING_STARTED.md`](GETTING_STARTED.md) — installing it, wiring a
+  harness, choosing a model, and keeping the server running. Every setting has
+  its reason next to it.
+* [`USE_CASES.md`](USE_CASES.md) — what it is for, including a section on what
+  it is deliberately not for.
+* [`REMOTE.md`](REMOTE.md) and [`DOCKER.md`](DOCKER.md) — running a server
+  other machines reach, and running it in a container.
+* [`../CHANGELOG.md`](../CHANGELOG.md) — the longest-form record. Most entries
+  say what broke, how it was found, and what was decided; several of the
+  invariants above are easier to understand from the entry that produced them.
+* The code, in the order the data moves: `anamnesis-hooks` (what arrives),
+  `anamnesis-store` (what is kept), `anamnesis-consolidate` (what is made of
+  it), `anamnesis-core::retrieval` (how it is found again).
