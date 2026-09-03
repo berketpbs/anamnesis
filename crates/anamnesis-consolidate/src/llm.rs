@@ -87,9 +87,11 @@ to do next — not what happened, except where that changes what to do.
 briefly rather than inflating it.
 - The entities are what a later search would type to find this page: the \
 files, crates, tools, systems, and error names this session was actually \
-about, spelled as they appear. At most ten, fewer when fewer are warranted, \
-and nothing generic — `code`, `bug`, and `session` find everything and \
-therefore nothing.";
+about, spelled as they appear. Name a file the way somebody would type it — \
+`sanitize.rs`, not `crates/anamnesis-core/src/sanitize.rs` — because a search \
+has to contain every word of the name. At most ten, fewer when fewer are \
+warranted, and nothing generic — `code`, `bug`, and `session` find everything \
+and therefore nothing.";
 
 /// The reply shape.
 ///
@@ -115,7 +117,7 @@ pub fn schema() -> Value {
             "entities": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Up to 10 canonical names this session was about, spelled as they appear: files, crates, tools, systems, error names. Nothing generic.",
+                "description": "Up to 10 canonical names this session was about, spelled as they appear: files, crates, tools, systems, error names. A file is named without its directories — `sanitize.rs`, not `crates/anamnesis-core/src/sanitize.rs`. Nothing generic.",
             },
         },
         "required": ["title", "body", "handoff", "entities"],
@@ -480,6 +482,28 @@ fn unescape_newlines(text: &str) -> String {
     text.replace(ESCAPED_CRLF, "\n").replace(ESCAPED, "\n")
 }
 
+/// A file entity, named the way a search would type it.
+///
+/// Entity matching wants *every* token of a name to appear in the query, so
+/// `crates/anamnesis-core/src/sanitize.rs` asks a searcher for six tokens and
+/// is therefore matched by nobody — while `sanitize.rs` asks for the two
+/// somebody would actually write. The counted path has always known this and
+/// files entities by basename; a model asked for names "spelled as they
+/// appear" hands back the path it saw, and the two writers then build
+/// different indexes from the same session.
+///
+/// Only a path is shortened, and only when its last segment looks like a
+/// filename. A branch (`fix/redact-the-other-google-credential`) or a host
+/// path (`github.com/berketpbs/anamnesis`) keeps every word, because there the
+/// leading segments are the name rather than a place to find it.
+fn shorten_path(name: &str) -> &str {
+    let last = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    if last.len() < name.len() && last.contains('.') && !last.starts_with('.') {
+        return last;
+    }
+    name
+}
+
 /// Entity names from a model reply, validated and bounded.
 fn read_entities(value: &Value) -> Vec<Entity> {
     let mut entities: Vec<Entity> = Vec::new();
@@ -487,7 +511,7 @@ fn read_entities(value: &Value) -> Vec<Entity> {
         return entities;
     };
 
-    for name in named.iter().filter_map(Value::as_str) {
+    for name in named.iter().filter_map(Value::as_str).map(shorten_path) {
         let Ok(entity) = Entity::parse(name) else {
             continue;
         };
@@ -794,6 +818,69 @@ mod tests {
         let digest = digest_from_json(&reply, &session()).expect("a digest");
         let named: Vec<&str> = digest.entities.iter().map(Entity::as_str).collect();
         assert_eq!(named, vec!["Windows BOM", "anamnesis-llm", "tini"]);
+    }
+
+    /// Measured against a real model before this was written: Gemini answered
+    /// with `crates/anamnesis-core/src/sanitize.rs`, which the entity stream
+    /// can never match — it would want all six tokens in the query. The
+    /// counted path has always filed the basename, so without this the two
+    /// writers build different indexes out of the same session.
+    #[test]
+    fn a_file_entity_is_named_the_way_a_search_would_type_it() {
+        let reply = json!({
+            "title": "t",
+            "body": "b",
+            "handoff": "h",
+            "entities": [
+                "crates/anamnesis-core/src/sanitize.rs",
+                "crates\\anamnesis-llm\\src\\openai.rs",
+            ],
+        });
+        let digest = digest_from_json(&reply, &session()).expect("a digest");
+        let named: Vec<&str> = digest.entities.iter().map(Entity::as_str).collect();
+        assert_eq!(named, vec!["sanitize.rs", "openai.rs"]);
+    }
+
+    /// And only a path is shortened. These carry their leading segments as
+    /// part of the name, so cutting them would leave a term nobody types
+    /// either — the opposite mistake, made silently.
+    #[test]
+    fn a_name_that_only_looks_like_a_path_is_left_whole() {
+        let reply = json!({
+            "title": "t",
+            "body": "b",
+            "handoff": "h",
+            "entities": [
+                "fix/redact-the-other-google-credential",
+                "github.com/berketpbs/anamnesis",
+                "sanitize.rs",
+            ],
+        });
+        let digest = digest_from_json(&reply, &session()).expect("a digest");
+        let named: Vec<&str> = digest.entities.iter().map(Entity::as_str).collect();
+        assert_eq!(
+            named,
+            vec![
+                "fix/redact-the-other-google-credential",
+                "github.com/berketpbs/anamnesis",
+                "sanitize.rs",
+            ]
+        );
+    }
+
+    /// Two paths under one basename are one entity, not two — the same
+    /// deduplication every other source of names goes through.
+    #[test]
+    fn two_paths_with_one_basename_are_one_entity() {
+        let reply = json!({
+            "title": "t",
+            "body": "b",
+            "handoff": "h",
+            "entities": ["crates/anamnesis-llm/src/lib.rs", "crates/anamnesis-web/src/lib.rs"],
+        });
+        let digest = digest_from_json(&reply, &session()).expect("a digest");
+        let named: Vec<&str> = digest.entities.iter().map(Entity::as_str).collect();
+        assert_eq!(named, vec!["lib.rs"]);
     }
 
     #[test]
