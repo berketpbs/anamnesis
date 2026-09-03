@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Google AI Studio as a provider: `ANAMNESIS_LLM_PROVIDER=google`, with the key
+  read from `GEMINI_API_KEY` or `GOOGLE_API_KEY`. Gemini publishes an
+  OpenAI-compatible surface, so this is the client that already existed, given
+  its own address and model — no second request shape to drift from the first.
+  Three decisions are worth naming. The provider has to be asked for: a Gemini
+  key alone selects nothing, unlike `ANTHROPIC_API_KEY`, because a key that
+  could select a provider is a key that could redirect one, and every session
+  transcript would start going somewhere nobody chose. The key is presented
+  once, as a bearer token: Google refuses a request carrying a second
+  credential with `400 Multiple authentication credentials received`, a message
+  that reads like a bad key rather than like two of them, and a socket test now
+  proves the request carries no `x-goog-api-key` and no `?key=`. And efforts
+  above `high` are sent as `high`: Google's vocabulary stops there, its refusal
+  of `xhigh` and `max` names neither thinking nor the field, so the recovery
+  below could not catch it and a session would have lost its page to a setting
+  the model never needed. That clamp is a property of the backend, declared
+  where it is known, rather than a guess made from an error message.
+
 ### Fixed
 - Ollama, with any model that has no thinking mode — which is most of the ones
   anyone runs locally. `reasoning_effort` goes out on every chat-completions

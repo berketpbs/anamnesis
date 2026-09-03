@@ -1,9 +1,9 @@
 //! The OpenAI chat-completions API, and everything that speaks it.
 //!
 //! One client, several backends, because they are one wire format: OpenAI
-//! itself, Ollama, vLLM, LM Studio, OpenRouter, and any gateway that presents
-//! `/chat/completions`. Writing an "Ollama provider" and an "OpenAI provider"
-//! separately would be writing the same bug twice.
+//! itself, Ollama, Google AI Studio, vLLM, LM Studio, OpenRouter, and any
+//! gateway that presents `/chat/completions`. Writing an "Ollama provider" and
+//! an "OpenAI provider" separately would be writing the same bug twice.
 //!
 //! What it needs from a backend is narrow — one non-streaming POST, a reply
 //! constrained by a JSON schema — and that is the whole reason a local model
@@ -39,6 +39,14 @@ pub struct OpenAiCompatible {
     api_key: Option<secrecy::SecretString>,
     model: String,
     effort: crate::config::Effort,
+    /// The highest effort this backend has a word for.
+    ///
+    /// Every level below it is sent unchanged; anything above is sent as this.
+    /// Only backends that are known to refuse the top levels set it, and they
+    /// set it because the refusal is indistinguishable from the other 400s —
+    /// see `refuses_thinking` for the case where a backend does say what it
+    /// means, and `GOOGLE_MAX_EFFORT` for the case where it does not.
+    effort_ceiling: crate::config::Effort,
     max_retries: u32,
     /// What to call this backend in a log line. Not cosmetic: "the model
     /// refused" reads very differently depending on whether it is a hosted
@@ -73,9 +81,20 @@ impl OpenAiCompatible {
             api_key: config.api_key.clone(),
             model: config.model.clone(),
             effort: config.effort,
+            effort_ceiling: crate::config::Effort::Max,
             max_retries: config.max_retries,
             name,
         })
+    }
+
+    /// Cap the effort this backend is asked for.
+    ///
+    /// Additive on purpose: a backend that understands the whole vocabulary
+    /// says nothing, so adding one that does not cannot change what the others
+    /// send.
+    pub fn with_effort_ceiling(mut self, ceiling: crate::config::Effort) -> Self {
+        self.effort_ceiling = ceiling;
+        self
     }
 
     /// One attempt, no retry logic.
@@ -116,7 +135,7 @@ impl Provider for OpenAiCompatible {
     }
 
     async fn complete(&self, request: &Completion) -> Result<CompletionOutput, LlmError> {
-        let mut body = build_body(&self.model, self.effort, request);
+        let mut body = build_body(&self.model, self.effort.min(self.effort_ceiling), request);
         let mut asked_to_think = true;
 
         let mut attempt = 0;
@@ -183,6 +202,9 @@ fn refuses_thinking(error: &LlmError) -> bool {
 /// a 400 that names thinking, and `complete` sends the request again without
 /// the field — so the setting keeps meaning something on OpenAI without costing
 /// every non-thinking local model its page.
+///
+/// The effort arriving here has already passed the caller's ceiling, for the
+/// backends whose refusal names nothing at all.
 fn build_body(model: &str, effort: crate::config::Effort, request: &Completion) -> Value {
     json!({
         "model": model,
@@ -356,6 +378,46 @@ mod tests {
         assert_eq!(body["messages"][0]["role"], "system");
     }
 
+    /// The ceiling is the whole of Google's support: it takes `high` but has
+    /// never heard of `xhigh` or `max`, and says so in a 400 that names
+    /// neither thinking nor the field. Nothing downstream could tell that
+    /// refusal from an unknown model, so the clamp has to happen before the
+    /// request leaves.
+    #[test]
+    fn an_effort_above_what_a_backend_knows_is_sent_as_the_most_it_knows() {
+        for asked in [Effort::XHigh, Effort::Max] {
+            assert_eq!(
+                asked.min(Effort::High).as_str(),
+                "high",
+                "{asked:?} should arrive as high"
+            );
+        }
+    }
+
+    /// And the clamp only clamps: a backend with a ceiling still hears every
+    /// level below it, or the setting would mean one thing on OpenAI and
+    /// nothing at all here.
+    #[test]
+    fn a_ceiling_leaves_the_levels_under_it_alone() {
+        for asked in [Effort::Low, Effort::Medium, Effort::High] {
+            assert_eq!(asked.min(Effort::High), asked, "{asked:?} should pass");
+        }
+    }
+
+    /// The default is no ceiling at all, so adding one backend that needs it
+    /// cannot quietly lower what every other backend is asked for.
+    #[test]
+    fn a_backend_that_sets_no_ceiling_is_asked_for_everything() {
+        let config = LlmConfig {
+            provider: crate::config::ProviderKind::OpenAi,
+            effort: Effort::Max,
+            ..LlmConfig::default()
+        };
+        let client = OpenAiCompatible::new(&config, "openai").expect("builds");
+
+        assert_eq!(client.effort.min(client.effort_ceiling), Effort::Max);
+    }
+
     /// The system prompt is a separate message here, unlike Anthropic's
     /// top-level field. Sending it as one user turn would work and would also
     /// quietly give up prompt caching on every backend that keys on the system
@@ -366,6 +428,95 @@ mod tests {
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][0]["content"], "you summarise sessions");
         assert_eq!(body["messages"][1]["role"], "user");
+    }
+
+    /// Google's compatible surface authenticates with a bearer token and
+    /// refuses a request that also carries `x-goog-api-key` or a `?key=`
+    /// parameter — `400 Multiple authentication credentials received`, which
+    /// reads like a bad key rather than like two of them. This client has only
+    /// ever sent one, and this is the test that keeps it that way.
+    #[tokio::test]
+    async fn a_request_carries_exactly_one_credential() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+
+        let server = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+
+            let (mut socket, _) = listener.accept().expect("accept");
+            let mut buffer = [0_u8; 8192];
+            let read = socket.read(&mut buffer).expect("read");
+            let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
+
+            let answer = json!({
+                "model": "gemini-2.5-flash",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "{\"title\": \"done\"}"},
+                    "finish_reason": "stop",
+                }],
+            })
+            .to_string();
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                )
+                .expect("write");
+            request
+        });
+
+        // Built the way configuration builds it, pointed at the socket. A
+        // client assembled by hand here would prove nothing about what the
+        // google provider actually sends.
+        let vars: Vec<(&str, String)> = vec![
+            ("ANAMNESIS_LLM_PROVIDER", "google".to_owned()),
+            ("GEMINI_API_KEY", "AQ.test-key-not-a-real-one".to_owned()),
+            ("ANAMNESIS_LLM_BASE_URL", format!("http://{address}/v1beta")),
+            ("ANAMNESIS_LLM_EFFORT", "max".to_owned()),
+        ];
+        let provider = LlmConfig::from_vars(|key| {
+            vars.iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.clone())
+        })
+        .expect("configures")
+        .build()
+        .expect("builds")
+        .expect("google is a provider");
+
+        let output = provider.complete(&request()).await.expect("completes");
+        assert_eq!(output.json["title"], "done");
+
+        let sent = server.join().expect("server thread");
+        let lowered = sent.to_ascii_lowercase();
+
+        assert!(
+            sent.starts_with("POST /v1beta/chat/completions"),
+            "wrong path: {sent}"
+        );
+        assert!(
+            lowered.contains("authorization: bearer aq.test-key-not-a-real-one"),
+            "the key was not presented: {sent}"
+        );
+        assert!(
+            !lowered.contains("x-goog-api-key"),
+            "a second credential rode along: {sent}"
+        );
+        assert!(
+            !sent.contains("key="),
+            "the key leaked into the URL: {sent}"
+        );
+        // And the ceiling held on the way out, which is the other half of
+        // being able to talk to this backend at all.
+        assert!(
+            sent.contains("\"reasoning_effort\":\"high\""),
+            "effort was not clamped: {sent}"
+        );
     }
 
     fn reply(message: Value, finish: &str) -> Value {
