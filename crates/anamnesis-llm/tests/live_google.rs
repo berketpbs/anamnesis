@@ -30,7 +30,7 @@ use serde_json::json;
 /// not about one model on it: any Gemini the account can reach exercises the
 /// same schema, the same auth, and the same effort vocabulary.
 fn model() -> String {
-    std::env::var("ANAMNESIS_TEST_GOOGLE_MODEL").unwrap_or_else(|_| "gemini-2.5-flash".to_owned())
+    std::env::var("ANAMNESIS_TEST_GOOGLE_MODEL").unwrap_or_else(|_| "gemini-3.6-flash".to_owned())
 }
 
 /// The key, from the environment this test was given.

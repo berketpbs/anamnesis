@@ -85,7 +85,7 @@ else has a default.
 | --- | --- | --- |
 | `ANTHROPIC_API_KEY` | — | Credential. `ANAMNESIS_LLM_API_KEY` overrides it. |
 | `ANAMNESIS_LLM_PROVIDER` | `anthropic` when a key is set | `anthropic`, `openai`, `google`, `ollama`, or `none`. Set `none` to turn the model off without unsetting the key. |
-| `ANAMNESIS_LLM_MODEL` | `claude-opus-5`; `llama3.2` for `ollama`; `gemini-2.5-flash` for `google` | Model id. |
+| `ANAMNESIS_LLM_MODEL` | `claude-opus-5`; `llama3.2` for `ollama`; `gemini-3.6-flash` for `google` | Model id. |
 | `ANAMNESIS_LLM_BASE_URL` | per provider | `https://api.anthropic.com`, `https://api.openai.com/v1`, `https://generativelanguage.googleapis.com/v1beta/openai`, or `http://127.0.0.1:11434/v1`. Point at a gateway, a second Ollama, or vLLM. |
 | `ANAMNESIS_LLM_EFFORT` | `high` | `low`, `medium`, `high`, `xhigh`, or `max`. `google` has no word above `high` and is sent `high` for the two above it. |
 | `ANAMNESIS_LLM_MAX_INPUT_TOKENS` | `6500` | Prompt budget. Long sessions are trimmed from the middle to fit. |
@@ -107,7 +107,7 @@ only its address and model differ:
 ```bash
 export ANAMNESIS_LLM_PROVIDER=google
 export GEMINI_API_KEY=AQ....                 # or GOOGLE_API_KEY
-export ANAMNESIS_LLM_MODEL=gemini-2.5-flash  # whatever your account lists
+export ANAMNESIS_LLM_MODEL=gemini-3.6-flash  # whatever your account lists
 ```
 
 Three things worth knowing, all of which show up as something other than what
@@ -125,6 +125,12 @@ standard keys, and the new ones authenticate the same way here: one
 `x-goog-api-key` header, or `?key=` on the URL — is refused with `400 Multiple
 authentication credentials received`, which reads like a bad key rather than
 like two of them. Anamnesis sends exactly one, and a test holds it there.
+
+**The models endpoint lists models your key cannot call.** `gemini-2.5-flash`
+is returned by `GET /v1beta/openai/models` and answers a completion with `404 …
+no longer available to new users`, naming its replacement. Pick the model by
+calling it, not by reading the listing — and if a name that used to work starts
+404ing, read the message: it says which one to move to.
 
 **`xhigh` and `max` are not words here.** Google's vocabulary stops at `high`,
 and it refuses the two above it with a plain 400 that names neither thinking
