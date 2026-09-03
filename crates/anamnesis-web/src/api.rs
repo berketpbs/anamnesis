@@ -19,7 +19,7 @@
 //! written today keeps working; anything that would break it becomes `/api/v2`
 //! beside it rather than a surprise on somebody's dashboard.
 //!
-//! Everything here goes through [`crate::off_runtime`] for the reason
+//! Everything here goes through `crate::off_runtime` for the reason
 //! everything else does: these are SQLite queries and file reads, and a
 //! listing of a large wiki must not hold the thread `/health` is answered on.
 

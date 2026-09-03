@@ -75,7 +75,7 @@ pub fn plugin_path(root: &Path) -> PathBuf {
 
 /// Whether the plugin at `path` is one this command wrote.
 ///
-/// The same marker [`write`] checks, asked from the other side: uninstalling
+/// The same marker [`write()`] checks, asked from the other side: uninstalling
 /// may remove our file and must not remove somebody else's.
 pub fn is_ours(path: &Path) -> bool {
     std::fs::read_to_string(path).is_ok_and(|text| text.starts_with(MARKER))

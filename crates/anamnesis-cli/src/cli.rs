@@ -382,7 +382,7 @@ pub enum Commands {
     /// takes the index, the transcripts and the wiki — `models/` and `logs/`
     /// are left out, being a download and one machine's afternoons.
     Backup {
-        /// Where to write the archive (default: ./anamnesis-backup-<stamp>.tar.gz)
+        /// Where to write the archive (default: `./anamnesis-backup-<stamp>.tar.gz`)
         #[arg(long)]
         out: Option<PathBuf>,
     },
