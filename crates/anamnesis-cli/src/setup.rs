@@ -287,6 +287,48 @@ pub fn cmd_install_hooks(
 /// never run at all: hooks recorded four months of sessions the agent could not
 /// search.
 /// Register the MCP server with every harness on this machine.
+/// What a registered MCP server should be started with, and what to say about
+/// it.
+///
+/// The vector stream is the one part of retrieval that lives in the process
+/// asking the question rather than in the index. A registration that does not
+/// carry it produces a server that answers every `memory_query` with three of
+/// the four streams — over pages whose vectors are sitting in the index,
+/// written by a server that *was* configured for it. Measured here before this
+/// was written: an English question about a Turkish page came back without the
+/// page, and came back with it at rank three the moment the same query ran
+/// with the stream on.
+///
+/// The key of a hosted embedder is deliberately not carried. A secret in a
+/// settings file is a different decision from a setting in one, and this
+/// command is not the place to make it on somebody's behalf.
+fn mcp_environment() -> (Vec<(String, String)>, Option<String>) {
+    let config = anamnesis_llm::EmbedConfig::from_env();
+    if !config.enabled {
+        return (Vec::new(), None);
+    }
+
+    if config.provider == anamnesis_llm::embed::EmbedProvider::Hosted {
+        return (
+            Vec::new(),
+            Some(format!(
+                "Embeddings are hosted ({}), so the registration carries none of it:\n  \
+                 the endpoint wants a key, and a key belongs in the environment the\n  \
+                 harness starts in, not in a settings file. Without it the agent's\n  \
+                 queries run without the vector stream.",
+                config.model
+            )),
+        );
+    }
+
+    let mut env = vec![("ANAMNESIS_EMBED_ENABLED".to_owned(), "1".to_owned())];
+    if config.model != anamnesis_llm::embed::DEFAULT_MODEL {
+        env.push(("ANAMNESIS_EMBED_MODEL".to_owned(), config.model.clone()));
+    }
+    let said = format!("Vectors: {} — carried into the registration", config.model);
+    (env, Some(said))
+}
+
 pub fn cmd_install_mcp(
     agent: &str,
     write: bool,
@@ -326,7 +368,8 @@ pub fn cmd_install_mcp(
         Some(repo) => repo,
         None => std::env::current_dir()?,
     };
-    let entry = mcp_config::server_entry(&binary, &repo);
+    let (env, embedding) = mcp_environment();
+    let entry = mcp_config::server_entry(&binary, &repo, &env);
 
     if !write {
         println!(
@@ -378,6 +421,10 @@ pub fn cmd_install_mcp(
             println!("  Nothing to do.");
             return Ok(());
         }
+    }
+
+    if let Some(embedding) = &embedding {
+        println!("  {embedding}");
     }
 
     println!();
