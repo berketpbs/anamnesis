@@ -148,6 +148,35 @@ fn builtin_rules() -> &'static [Rule] {
                 "[redacted:google-api-key]",
             ),
             rule(
+                // The API key above is not the only Google credential that
+                // reaches a prompt, and the other one is the one people hold
+                // in a terminal: an OAuth access token, handed out by a
+                // `gcloud` command, an AI Studio page, or a curl somebody
+                // pasted. It authorises the same APIs and it does not begin
+                // with `AIza`, so the rule above matched none of it.
+                //
+                // This was found the way these are always found. A real token
+                // arrived in a prompt, went through the sanitizer untouched,
+                // and was written to `raw/` in full — the append-only copy
+                // that outlives the index, where redaction is the only
+                // defence there is.
+                "google-oauth-token",
+                r"\bya29\.[0-9A-Za-z_\-]{20,}",
+                "[redacted:google-oauth-token]",
+            ),
+            rule(
+                // The shape the leak actually had. Google does not document
+                // it the way `ya29.` is documented, so the floor is higher
+                // here on purpose: the prefix is two letters and a dot, and a
+                // short match would start redacting ordinary prose. Thirty
+                // trailing characters is longer than anything that reaches
+                // `AQ.` by accident and shorter than any credential of this
+                // shape observed.
+                "google-oauth-token",
+                r"\bAQ\.[0-9A-Za-z_\-]{30,}",
+                "[redacted:google-oauth-token]",
+            ),
+            rule(
                 "stripe-key",
                 r"\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}\b",
                 "[redacted:stripe-key]",
@@ -298,6 +327,11 @@ mod tests {
         );
         let cases = [
             ("AIzaSyA0123456789abcdefghijklmnopqrstuv", "google-api-key"),
+            ("ya29.a0Ae4lvC0123456789abcdefghij", "google-oauth-token"),
+            (
+                "AQ.Ab0123456789abcdefghijklmnopqrstuvwx",
+                "google-oauth-token",
+            ),
             ("sk_live_0123456789abcdefghij", "stripe-key"),
             ("npm_0123456789abcdefghijklmnopqrstuvwxyz", "npm-token"),
             (webhook.as_str(), "slack-webhook"),
@@ -308,6 +342,28 @@ mod tests {
             assert!(!found.text().contains(secret), "{name}: {}", found.text());
             assert!(found.hits().contains(&name), "{name}: {:?}", found.hits());
         }
+    }
+
+    /// `AQ.` is the loosest prefix in the set — two letters and a dot — so
+    /// the only thing keeping it from eating prose is the length floor. A
+    /// floor is a claim until both sides of it are shown, which is why this
+    /// asserts the character below it as well as the one above.
+    #[test]
+    fn the_floor_under_that_prefix_is_where_it_says_it_is() {
+        let under = format!("AQ.{}", "a".repeat(29));
+        let over = format!("AQ.{}", "a".repeat(30));
+
+        let kept = redact(&format!("ticket {under} was filed"));
+        assert!(kept.text().contains(&under), "{}", kept.text());
+        assert!(kept.is_clean(), "{:?}", kept.hits());
+
+        let taken = redact(&format!("ticket {over} was filed"));
+        assert!(!taken.text().contains(&over), "{}", taken.text());
+        assert!(
+            taken.hits().contains(&"google-oauth-token"),
+            "{:?}",
+            taken.hits()
+        );
     }
 
     /// The key to this memory is the one secret guaranteed to be in reach of
