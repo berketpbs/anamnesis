@@ -1,6 +1,6 @@
 //! What each retrieval stream contributes, and what would be lost without it.
 //!
-//! The fused score in [`crate::run`] says how good retrieval is. It cannot say
+//! The fused score in [`crate::run()`] says how good retrieval is. It cannot say
 //! *why*, and the questions worth asking are all why-questions: does the
 //! entity stream earn its place, do link neighbours help or merely add noise,
 //! what does the opt-in embedder buy. In a fused ranking a page three streams

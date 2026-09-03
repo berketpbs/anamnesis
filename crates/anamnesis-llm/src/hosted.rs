@@ -10,7 +10,7 @@
 //! One shape, not one vendor. `/v1/embeddings` with `{model, input}` and
 //! `{data: [{embedding: [...]}]}` back is what OpenAI defined and what
 //! everything compatible with it accepts, which is the same reason
-//! [`crate::openai`] exists rather than a provider per company.
+//! `crate::openai` exists rather than a provider per company.
 //!
 //! **The model name is not decoration.** Two embedding models put vectors in
 //! unrelated spaces, and cosine similarity between them is a number with no
