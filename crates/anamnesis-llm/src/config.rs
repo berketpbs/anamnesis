@@ -151,7 +151,15 @@ const DEFAULT_GOOGLE_BASE_URL: &str = "https://generativelanguage.googleapis.com
 ///
 /// Named for the same reason Ollama's is: a first run that has to be told the
 /// model as well as the provider is a first run most people abandon.
-const DEFAULT_GOOGLE_MODEL: &str = "gemini-2.5-flash";
+///
+/// This one was picked by asking rather than by reading a table, and the
+/// asking is the point: `gemini-2.5-flash` is **listed** by the models
+/// endpoint and answers a completion with `404 ... no longer available to new
+/// users`. A listing is not a list of what a key may call. The name here is
+/// the one Google's own retirement notice sends people to, so it is the one a
+/// new key is most likely to reach; newer flashes exist and are one variable
+/// away.
+const DEFAULT_GOOGLE_MODEL: &str = "gemini-3.6-flash";
 
 /// The most effort Google's compatible surface has a word for.
 ///
