@@ -27,6 +27,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   where it is known, rather than a guess made from an error message.
 
 ### Fixed
+- `install-mcp` registered a server that reads memory with three of its four
+  retrieval streams. The vector stream is the one part of retrieval that lives
+  in the process asking the question rather than in the index, and it is opt-in
+  — so a registration that carried no environment produced an MCP server
+  answering every `memory_query` without it, over pages whose vectors were
+  sitting in the index, written by a server that *was* configured for it. The
+  two halves of one memory disagreed, and nothing said so.
+  Measured here rather than reasoned about: an English question about a page
+  written in Turkish came back without the page, and came back with it at rank
+  three the moment the same query ran with the stream on — and the registered
+  server's answers matched the stream-off run exactly. The registration now
+  carries `ANAMNESIS_EMBED_ENABLED` (and the model, when it is not the default)
+  from the environment `install-mcp` runs in. A hosted embedder's key is
+  deliberately not carried: a secret in a settings file is a different decision
+  from a setting in one, and the report says the queries will run without
+  vectors rather than making that decision for somebody. The environment also
+  counts as part of what an entry *is* now — a registration that gains the
+  vector stream is replaced rather than reported as unchanged, on the JSON side
+  and the TOML one
 - The `AQ.` credential was redacted under the wrong name. It was filed beside
   `ya29.` as `google-oauth-token` when the rule was written, on the reasoning
   that the credential a person holds in a terminal is an access token. Half of

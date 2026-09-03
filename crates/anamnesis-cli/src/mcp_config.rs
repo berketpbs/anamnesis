@@ -138,11 +138,24 @@ pub fn config_path(target: &Target, root: &Path) -> PathBuf {
 /// scope resolved from the wrong directory is the one failure this crate can
 /// neither detect nor repair — it would answer, fluently, out of another
 /// project's memory.
-pub fn server_entry(binary: &Path, repo: &Path) -> Value {
-    serde_json::json!({
+pub fn server_entry(binary: &Path, repo: &Path, env: &[(String, String)]) -> Value {
+    let mut entry = serde_json::json!({
         "command": binary.display().to_string(),
         "args": ["mcp", "--repo", repo.display().to_string()],
-    })
+    });
+
+    // Written only when there is something to write. An empty `env` object in
+    // somebody's settings file says "configured" about nothing, which is the
+    // state at the bottom of most of the silent failures this project has had.
+    if !env.is_empty() {
+        let map: serde_json::Map<String, Value> = env
+            .iter()
+            .map(|(key, value)| (key.clone(), Value::from(value.as_str())))
+            .collect();
+        entry["env"] = Value::Object(map);
+    }
+
+    entry
 }
 
 /// Put `entry` into `config` under `name`, leaving every other server alone.
@@ -242,11 +255,26 @@ pub fn describe(entry: &Value) -> String {
                 .join(" ")
         })
         .unwrap_or_default();
-    if args.is_empty() {
-        command.to_owned()
-    } else {
-        format!("{command} {args}")
-    }
+    // The environment is part of what an entry *is*, not decoration on it: a
+    // server launched without `ANAMNESIS_EMBED_ENABLED` answers every query
+    // with three of the four retrieval streams. Leaving it out here would make
+    // a registration that gained one read as unchanged.
+    let env = entry
+        .get("env")
+        .and_then(Value::as_object)
+        .map(|env| {
+            env.iter()
+                .filter_map(|(key, value)| value.as_str().map(|value| format!("{key}={value}")))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default();
+
+    [command, args.as_str(), env.as_str()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Put the server into a TOML configuration, leaving everything else alone.
@@ -287,6 +315,16 @@ pub fn register_toml(
     }
     table["args"] = toml_edit::value(list);
 
+    if let Some(env) = entry.get("env").and_then(Value::as_object) {
+        let mut vars = toml_edit::InlineTable::new();
+        for (key, value) in env {
+            if let Some(value) = value.as_str() {
+                vars.insert(key, value.into());
+            }
+        }
+        table["env"] = toml_edit::value(vars);
+    }
+
     match previous {
         Some(previous) if previous == describe(entry) => Registration::Unchanged,
         Some(previous) => {
@@ -311,11 +349,22 @@ fn describe_toml(item: &toml_edit::Item) -> String {
         .and_then(|value| value.as_array())
         .map(|args| args.iter().filter_map(|arg| arg.as_str()).collect())
         .unwrap_or_default();
-    if args.is_empty() {
-        command.to_owned()
-    } else {
-        format!("{command} {}", args.join(" "))
-    }
+    let env = item
+        .get("env")
+        .and_then(|value| value.as_inline_table())
+        .map(|env| {
+            env.iter()
+                .filter_map(|(key, value)| value.as_str().map(|value| format!("{key}={value}")))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default();
+
+    [command.to_owned(), args.join(" "), env]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Read a TOML configuration, or start an empty one.
@@ -396,7 +445,15 @@ mod tests {
     use super::*;
 
     fn entry() -> Value {
-        server_entry(Path::new("/opt/anamnesis"), Path::new("/work/project"))
+        server_entry(Path::new("/opt/anamnesis"), Path::new("/work/project"), &[])
+    }
+
+    fn entry_with_vectors() -> Value {
+        server_entry(
+            Path::new("/opt/anamnesis"),
+            Path::new("/work/project"),
+            &[("ANAMNESIS_EMBED_ENABLED".to_owned(), "1".to_owned())],
+        )
     }
 
     #[test]
@@ -406,6 +463,52 @@ mod tests {
         assert_eq!(entry["args"][0], "mcp");
         assert_eq!(entry["args"][1], "--repo");
         assert_eq!(entry["args"][2], "/work/project");
+    }
+
+    /// An empty `env` is not written. A settings file that reads as
+    /// configured when nothing is configured is the state at the bottom of
+    /// most of the silent failures this project has had.
+    #[test]
+    fn an_entry_with_nothing_to_set_carries_no_environment() {
+        assert!(entry().get("env").is_none());
+    }
+
+    #[test]
+    fn an_entry_carries_the_environment_it_was_given() {
+        assert_eq!(entry_with_vectors()["env"]["ANAMNESIS_EMBED_ENABLED"], "1");
+    }
+
+    /// The environment is part of what an entry *is*. A registration that
+    /// gained the vector stream must not read as unchanged — that would leave
+    /// the agent querying with three of the four streams and report success.
+    #[test]
+    fn adding_the_vector_stream_replaces_the_registration_rather_than_passing() {
+        let mut config = serde_json::json!({});
+        assert_eq!(
+            register(&mut config, "anamnesis", &entry()),
+            Registration::Added
+        );
+
+        let outcome = register(&mut config, "anamnesis", &entry_with_vectors());
+        assert!(matches!(outcome, Registration::Replaced(_)), "{outcome:?}");
+        assert_eq!(
+            config["mcpServers"]["anamnesis"]["env"]["ANAMNESIS_EMBED_ENABLED"],
+            "1"
+        );
+    }
+
+    /// And the same on the TOML side, which compares descriptions rather than
+    /// whole values — so the description has to carry it too.
+    #[test]
+    fn the_toml_side_sees_the_environment_change_as_well() {
+        let mut document = toml_edit::DocumentMut::new();
+        register_toml(&mut document, "anamnesis", &entry());
+
+        let outcome = register_toml(&mut document, "anamnesis", &entry_with_vectors());
+        assert!(matches!(outcome, Registration::Replaced(_)), "{outcome:?}");
+
+        let written = document.to_string();
+        assert!(written.contains("ANAMNESIS_EMBED_ENABLED"), "{written}");
     }
 
     #[test]
