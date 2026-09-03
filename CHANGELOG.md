@@ -27,6 +27,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   where it is known, rather than a guess made from an error message.
 
 ### Fixed
+- The `AQ.` credential was redacted under the wrong name. It was filed beside
+  `ya29.` as `google-oauth-token` when the rule was written, on the reasoning
+  that the credential a person holds in a terminal is an access token. Half of
+  that is right — `ya29.` is exactly that — and the other half has since been
+  checked against the thing itself: `AQ.` is Google's newer **API key**, which
+  AI Studio now issues in place of `AIza`, long-lived, with no OAuth flow
+  anywhere near it. Nothing about what is removed changes; both shapes were
+  matched before and are matched now, at the same floors. What changes is the
+  only part a person ever sees. `[redacted:google-oauth-token]` is what stands
+  in the wiki page, in the raw spool and in the log line naming the rule, and
+  somebody reading it beside their AI Studio key goes looking for a flow their
+  setup does not have. The two shapes now carry the two names they have:
+  `ya29.` stays `google-oauth-token`, `AQ.` becomes `google-auth-key`. Older
+  redactions keep the label they were written with, which is correct — those
+  strings record what the rules said at the time
 - A file named as an entity by a model was named in a way no search could
   match. Entity matching asks for *every* token of a name to be in the query,
   so `crates/anamnesis-core/src/sanitize.rs` wants six of them and gets none,
