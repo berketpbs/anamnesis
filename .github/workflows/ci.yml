@@ -33,6 +33,15 @@ jobs:
             command: cargo clippy --workspace --all-targets -- -D warnings
           - name: test
             command: cargo test --workspace
+          # A doc warning fails nothing and the page still renders, which is
+          # how five of them accumulated unnoticed: two links to items too
+          # private for a reader to follow, two rustdoc refused to guess at,
+          # and a `<stamp>` placeholder it read as an HTML tag and dropped —
+          # from a line that is also `--help` text, so the default path a
+          # user was shown had a hole in it. Warnings are errors here for the
+          # same reason they are for clippy.
+          - name: docs
+            command: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
     steps:
       - uses: actions/checkout@v5
 
@@ -43,7 +52,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # Otherwise all three jobs share one cache key and race to write it.
+          # Otherwise all four jobs share one cache key and race to write it.
           key: ${{ matrix.name }}
 
       - run: ${{ matrix.command }}
