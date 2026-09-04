@@ -24,7 +24,6 @@ RUN apt-get update && apt-get install -y \
 # Copy workspace and source
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
-COPY evals ./evals
 
 # Build the CLI binary
 # `--locked`: the lock file is copied in on purpose, and a build that quietly

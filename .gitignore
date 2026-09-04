@@ -33,7 +33,7 @@ perf.data*
 .ai-jail
 .claude/
 .slim/deepwork/
-evals/runs/
+crates/anamnesis-evals/runs/
 
 # ai-memory atomic-write backups (apply_atomic in apply_shared.rs)
 *.bak-*
