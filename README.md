@@ -65,7 +65,7 @@ Anamnesis is organized as a Rust workspace with modular crates:
   transcript and 3 708 without, p95 0.66 ms
 - `anamnesis run <harness>` and `anamnesis continue`: start an agent with
   memory wired, and refuse to start one that would not be recorded — the
-  failure that has cost this project two afternoons
+  failure that has cost this project two afternoons.
 - `anamnesis backup` / `restore`: one archive holding the index, the
   transcripts, and the wiki with its history — safe to take while the server
   is recording, because the index goes through SQLite's backup API
