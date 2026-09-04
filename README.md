@@ -74,7 +74,7 @@ Anamnesis is organized as a Rust workspace with modular crates:
 - A JSON API under `/api/v1` — scopes, pages, one page, search, sessions,
   audit — behind the same tokens, read-only on purpose
 - [Running a server other machines reach](docs/REMOTE.md): tokens, TLS,
-  per-operator handoffs, and a checklist
+  per-operator handoffs, and a checklist.
 
 ## Not Built Yet
 
