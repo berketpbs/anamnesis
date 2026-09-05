@@ -262,7 +262,7 @@ jobs:
     steps:
       # Only the release archives. This run also carries image digests and a
       # build record per image job, and asking for all of them made publishing
-      # depend on artifacts it never opens: v1.0.0 built six binaries and two
+      # depend on artifacts it never opens: v1.0.0 built four binaries and two
       # images, then failed here because two buildx build records would not
       # come down.
       - uses: actions/download-artifact@v4
