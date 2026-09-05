@@ -60,7 +60,7 @@ Anamnesis is organized as a Rust workspace with modular crates:
 - `anamnesis purge` removes one project's memory in the order things can be
   got back, and `anamnesis uninstall` takes the hooks and registrations back
   out without touching anybody else's settings
-- `anamnesis bench` measures the capture path rather than arguing about it:
+- `anamnesis bench` measures the capture path of rather than arguing about it:
   on the machine this was written on, 1 866 events/s with the durable
   transcript and 3 708 without, p95 0.66 ms
 - `anamnesis run <harness>` and `anamnesis continue`: start an agent with
