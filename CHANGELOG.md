@@ -7,13 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-09-03
+## [1.0.0] - 2026-09-06
 
 What 1.0 commits to: the command line and the shapes on disk. A wiki, a raw
 spool and an index written by this version are read by every version after it,
 and the index migrates itself forward on startup — it has crossed eleven
 schema versions that way already. The commands and their flags are settled;
 anything that would break one becomes a new flag or a new command beside it.
+
+Part of what that promise costs is spelled out in
+`crates/anamnesis-store/src/migrations.rs`: a migration is identified by its
+text with line endings normalised, so a database records something about this
+repository rather than about the machine that compiled the binary reading it.
+The first attempt at this release proved why. Built from one tag, the Windows
+artifact hashed its migrations from a CRLF checkout and the Linux and macOS
+ones from an LF checkout, and none of them would open a database created by
+another. A database written before that was settled is corrected once, on the
+first open, and says so in the log.
 
 What it does not claim: that a shared server has been run by a team. Everything
 that needs is here — tokens, per-operator handoffs, an audit log, a JSON API,
