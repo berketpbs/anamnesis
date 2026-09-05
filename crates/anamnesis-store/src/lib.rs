@@ -26,13 +26,10 @@ use jiff::Timestamp;
 use parking_lot::{Mutex, MutexGuard};
 use rusqlite::Connection;
 
-mod embedded {
-    refinery::embed_migrations!("migrations");
-}
-
 mod audit;
 mod convert;
 mod improve;
+mod migrations;
 mod ops;
 mod purge;
 mod query;
@@ -135,9 +132,21 @@ impl Store {
     ///
     /// Safe to call on every startup: refinery records what it has applied and
     /// skips it next time.
+    ///
+    /// The repair ahead of the runner is the one-time correction described at the
+    /// top of `migrations.rs`: a database whose checksums were recorded from a CRLF
+    /// checkout of these same migrations is brought to the spelling this build
+    /// hashes by, and anything else is left for the runner to refuse.
     pub fn migrate(&self) -> Result<()> {
         let mut conn = self.conn.lock();
-        embedded::migrations::runner().run(&mut *conn)?;
+        let repaired = migrations::repair_line_endings(&conn)?;
+        if !repaired.is_empty() {
+            tracing::info!(
+                versions = ?repaired,
+                "migration checksums rewritten: recorded by a build whose checkout spelled these same migrations with CRLF"
+            );
+        }
+        migrations::runner().run(&mut *conn)?;
         Ok(())
     }
 

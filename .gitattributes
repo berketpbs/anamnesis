@@ -1,0 +1,35 @@
+# Without this file, what lands in a working tree is whatever the machine's
+# `core.autocrlf` says, and this project is developed on Windows and built in
+# CI on three platforms. For most files that difference is invisible. For two
+# kinds it is not, and both were live faults before this file existed.
+
+* text=auto
+
+# refinery hashes the migration text a binary embeds at compile time, and
+# refuses a database whose recorded hash no longer matches. With the text
+# coming out of the checkout, the same commit produced binaries that hashed
+# differently: the 1.0.0 Windows release, built on a runner that checked out
+# CRLF, could not open a database created by the 1.0.0 Linux release or by any
+# local build, and said so as `applied migration V1__projects_and_sessions is
+# different than filesystem one`. The code normalises this now too — see
+# `crates/anamnesis-store/src/migrations.rs` — because a file cannot reach
+# every copy of these bytes. This line is the half that keeps them from
+# diverging in the first place.
+*.sql text eol=lf
+
+# A CRLF shebang is not a shebang: the kernel reads `/bin/sh\r` as the
+# interpreter's name and reports the script as missing.
+*.sh text eol=lf
+
+# Windows tooling and the MSVC linker are what these are for, and a CRLF
+# batch file is the format they expect.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary, so that Git never rewrites a byte of them.
+*.png binary
+*.jpg binary
+*.ico binary
+*.gz binary
+*.zip binary
+*.onnx binary
