@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `bootstrap` filed the branch somebody happened to be standing on as the
+  repository's own. `Identity` on `bootstrap/repository.md` read `Branch:` and
+  the value was `HEAD`'s shorthand, so seeding a memory from a feature branch
+  wrote `Branch: fix/...` into a page whose tier is `semantic` — one that does
+  not decay, and that search hands back as the answer to what branch a project
+  is on. It happened to this repository's own memory. The row now names the
+  branch the remote calls default, read from `origin/HEAD`, which is a fact
+  about the repository rather than about a checkout. A repository nobody cloned
+  has no such ref and therefore no default to read; there the page says
+  `Surveyed from:` and claims nothing more. That row also appears beside the
+  default when the two differ, because the history counted further down the
+  page is the history reachable from the checkout, and a reader needs to know
+  which one that was
 - `serve` announced itself before it had the address. The banner — the server
   is serving here, this is the wiki browser's URL, this is the model writing
   the summaries — was printed, and only then was the port asked for. When

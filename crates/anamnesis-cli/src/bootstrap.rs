@@ -98,7 +98,17 @@ pub struct Commit {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Survey {
     /// Branch `HEAD` points at, if it is not detached.
+    ///
+    /// A property of the checkout, not of the repository: it is whichever
+    /// branch the person running `bootstrap` happened to be on.
     pub branch: Option<String>,
+    /// Branch the remote calls its default, if it says.
+    ///
+    /// This is the one that belongs to the repository, which is why the page
+    /// prefers it. `origin/HEAD` is what a clone writes down; a repository
+    /// that was `git init`-ed and given a remote by hand has no such ref and
+    /// no opinion to read.
+    pub default_branch: Option<String>,
     /// Abbreviated `HEAD` object id.
     pub head: Option<String>,
     /// URL of the `origin` remote, if there is one.
@@ -185,6 +195,15 @@ pub fn survey(repo_path: &Path, max_commits: usize) -> anyhow::Result<Survey> {
         return Ok(survey);
     };
     survey.branch = head.shorthand().ok().map(sanitize_cell);
+    survey.default_branch = repo
+        .find_reference("refs/remotes/origin/HEAD")
+        .ok()
+        .and_then(|origin| origin.symbolic_target().ok().flatten().map(str::to_owned))
+        .and_then(|target| {
+            target
+                .strip_prefix("refs/remotes/origin/")
+                .map(sanitize_cell)
+        });
     let head_commit = head.peel_to_commit()?;
     survey.head = Some(short_id(head_commit.id()));
     let files = tree_files(&head_commit)?;
@@ -412,11 +431,25 @@ fn render_repository(survey: &Survey, now: Timestamp) -> String {
         "Remote",
         survey.remote.as_deref().unwrap_or("(none)"),
     );
-    row(
-        &mut out,
-        "Branch",
-        survey.branch.as_deref().unwrap_or("(detached)"),
-    );
+    // Two different facts, under labels that say which is which. The row used
+    // to be "Branch" and to hold whatever the checkout was on, so `bootstrap`
+    // run from a feature branch filed "Branch: fix/..." into a page whose tier
+    // is `semantic` — where it does not decay, and where search returns it as
+    // the answer to what branch this project is on. The checkout is still
+    // worth naming when it is not the default, because the history counted
+    // below is the history reachable from it.
+    match (&survey.default_branch, &survey.branch) {
+        (Some(default), checked_out) => {
+            row(&mut out, "Default branch", default);
+            if let Some(checked_out) = checked_out
+                && checked_out != default
+            {
+                row(&mut out, "Surveyed from", checked_out);
+            }
+        }
+        (None, Some(checked_out)) => row(&mut out, "Surveyed from", checked_out),
+        (None, None) => row(&mut out, "Surveyed from", "(detached)"),
+    }
     row(&mut out, "HEAD", survey.head.as_deref().unwrap_or("(none)"));
 
     out.push_str("\n## History\n\n");
@@ -896,6 +929,36 @@ mod tests {
                 .expect("commit")
         }
 
+        /// What a clone writes down and a `git init` does not: `origin/HEAD`,
+        /// the symbolic ref naming the branch the remote calls default.
+        fn set_default_branch(&self, name: &str) {
+            let head = self
+                .repo
+                .head()
+                .and_then(|head| head.peel_to_commit())
+                .expect("head commit");
+            let remote = format!("refs/remotes/origin/{name}");
+            self.repo
+                .reference(&remote, head.id(), true, "test")
+                .expect("remote branch");
+            self.repo
+                .reference_symbolic("refs/remotes/origin/HEAD", &remote, true, "test")
+                .expect("origin/HEAD");
+        }
+
+        /// Move to a branch, the way somebody in the middle of work has.
+        fn checkout(&self, name: &str) {
+            let head = self
+                .repo
+                .head()
+                .and_then(|head| head.peel_to_commit())
+                .expect("head commit");
+            self.repo.branch(name, &head, true).expect("branch");
+            self.repo
+                .set_head(&format!("refs/heads/{name}"))
+                .expect("set head");
+        }
+
         /// Record a two-parent commit, the shape churn has to ignore.
         fn merge(&self, files: &[(&str, &str)], message: &str, when: i64) -> git2::Oid {
             for (name, body) in files {
@@ -1012,6 +1075,66 @@ mod tests {
             "a merge must not create churn: {:?}",
             survey.hotspots
         );
+    }
+
+    /// The failure this is for. `bootstrap` read the branch `HEAD` pointed at
+    /// and filed it under `Identity`, so running it from a feature branch put
+    /// "Branch: fix/..." into a page whose tier is `semantic` — one that does
+    /// not decay, and that search hands back as the answer to what branch this
+    /// project is on.
+    #[test]
+    fn the_branch_named_is_the_repositorys_not_the_checkouts() {
+        let fixture = Fixture::new();
+        fixture.commit(&[("a.txt", "a")], "feat: a", "Ada", at(0));
+        fixture.set_default_branch("main");
+        fixture.checkout("fix/something-in-progress");
+
+        let survey = survey(fixture.path(), DEFAULT_MAX_COMMITS).expect("survey");
+        let page = render_repository(&survey, now());
+
+        assert!(page.contains("**Default branch:** main"), "{page}");
+        assert!(
+            !page.contains("**Branch:** fix/something-in-progress"),
+            "the checkout must not be filed as the repository's branch: {page}"
+        );
+        // Still named, under a label that says what it is: the history counted
+        // further down the page is the history reachable from this checkout.
+        assert!(
+            page.contains("**Surveyed from:** fix/something-in-progress"),
+            "{page}"
+        );
+    }
+
+    /// On the default branch there is one fact, not two.
+    #[test]
+    fn a_checkout_on_the_default_branch_is_stated_once() {
+        let fixture = Fixture::new();
+        fixture.commit(&[("a.txt", "a")], "feat: a", "Ada", at(0));
+        fixture.set_default_branch("main");
+        fixture.checkout("main");
+
+        let survey = survey(fixture.path(), DEFAULT_MAX_COMMITS).expect("survey");
+        let page = render_repository(&survey, now());
+
+        assert!(page.contains("**Default branch:** main"), "{page}");
+        assert!(!page.contains("Surveyed from"), "{page}");
+    }
+
+    /// A repository nobody cloned has no `origin/HEAD`, so there is no default
+    /// to read. What is true then is where the survey was taken, and the page
+    /// claims that and nothing more.
+    #[test]
+    fn without_a_remotes_opinion_only_the_checkout_is_claimed() {
+        let fixture = Fixture::new();
+        fixture.commit(&[("a.txt", "a")], "feat: a", "Ada", at(0));
+        fixture.checkout("work");
+
+        let survey = survey(fixture.path(), DEFAULT_MAX_COMMITS).expect("survey");
+        let page = render_repository(&survey, now());
+
+        assert_eq!(survey.default_branch, None);
+        assert!(!page.contains("Default branch"), "{page}");
+        assert!(page.contains("**Surveyed from:** work"), "{page}");
     }
 
     #[test]
