@@ -412,8 +412,11 @@ fn digest_from_json(value: &Value, session: &Session) -> Result<SessionDigest, S
     };
 
     let title = field("title")?;
-    let body = unescape_newlines(&field("body")?);
-    let handoff = unescape_newlines(&field("handoff")?);
+    // Newlines first: `unescape_quotes` decides what is code by looking for
+    // fences at the start of a line, and a reply whose every break is still
+    // the two characters `\` and `n` has no lines to look at.
+    let body = unescape_quotes(&unescape_newlines(&field("body")?));
+    let handoff = unescape_quotes(&unescape_newlines(&field("handoff")?));
 
     // Titles carry the date so that a directory listing sorts by time and so
     // that model-written and counted pages look alike. The model is told not
@@ -480,6 +483,90 @@ fn unescape_newlines(text: &str) -> String {
         return text.to_owned();
     }
     text.replace(ESCAPED_CRLF, "\n").replace(ESCAPED, "\n")
+}
+
+/// Undo the quote escaping a model applied to prose it had already put in a
+/// string.
+///
+/// The sibling of [`unescape_newlines`], found the same way — by reading the
+/// pages this project has written about itself. Three of twenty session pages
+/// carry `\"` where a quotation mark belongs:
+///
+/// ```text
+/// Kullanicinin \"kur su scheduled task'i\" talebi uzerine
+/// generic titles such as \"Session Summary\", \"Session Handoff\"
+/// ```
+///
+/// Sixteen occurrences, every one of them prose, not one inside code.
+///
+/// `unescape_newlines` ruled this out on the grounds that quotes were "rarer,
+/// more ambiguous, and were not the failure". Rarer is still true; the last
+/// has stopped being true. The ambiguity is real but it has a shape: an
+/// escaped quote in prose is a mistake, and an escaped quote inside code is
+/// usually the point — so only what is outside a fence or an inline span is
+/// repaired.
+///
+/// What is deliberately *not* carried over is the other guard. Newlines are
+/// only unescaped in a string that has none of the real thing, because a wall
+/// of text is the whole symptom there. Quotes have no such tell: all sixteen
+/// are on pages whose paragraphs are perfectly intact, and that guard would
+/// have skipped every one.
+fn unescape_quotes(text: &str) -> String {
+    if !text.contains(ESCAPED_QUOTE) {
+        return text.to_owned();
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let mut fenced = false;
+
+    for line in text.split_inclusive('\n') {
+        let opener = line.trim_start();
+        if opener.starts_with("```") || opener.starts_with("~~~") {
+            fenced = !fenced;
+            out.push_str(line);
+        } else if fenced {
+            out.push_str(line);
+        } else {
+            push_outside_code_spans(line, &mut out);
+        }
+    }
+
+    out
+}
+
+/// The escape as it arrives: a backslash the model wrote itself, and the
+/// quote it thought it was protecting.
+const ESCAPED_QUOTE: &str = r#"\""#;
+
+/// Copy one line, repairing quotes everywhere except inside inline code.
+///
+/// A span is a run of backticks closed by a run of the same length, which is
+/// what makes ``a `` b`` work; an unclosed run is not a span, and the rest of
+/// the line is prose.
+fn push_outside_code_spans(line: &str, out: &mut String) {
+    let mut rest = line;
+
+    while let Some(at) = rest.find('`') {
+        let (prose, from_tick) = rest.split_at(at);
+        out.push_str(&prose.replace(ESCAPED_QUOTE, "\""));
+
+        let ticks = from_tick.len() - from_tick.trim_start_matches('`').len();
+        let (run, after) = from_tick.split_at(ticks);
+
+        match after.find(run) {
+            Some(end) => {
+                let span = ticks + end + ticks;
+                out.push_str(&from_tick[..span]);
+                rest = &from_tick[span..];
+            }
+            None => {
+                out.push_str(run);
+                rest = after;
+            }
+        }
+    }
+
+    out.push_str(&rest.replace(ESCAPED_QUOTE, "\""));
 }
 
 /// A file entity, named the way a search would type it.
@@ -954,6 +1041,96 @@ mod tests {
         let digest = digest_from_json(&reply, &session()).expect("a digest");
 
         assert_eq!(digest.body, body, "an explanation of an escape survives it");
+    }
+
+    /// The failure as the wiki actually holds it. Three of this project's
+    /// twenty session pages carry an escaped quote; this is one of them,
+    /// copied out of `sessions/2026-08-31-823399e0.md`.
+    #[test]
+    fn a_quote_the_model_escaped_is_given_back() {
+        let body = r#"Kullanicinin \"kur su scheduled task'i\" talebi uzerine baslandi."#;
+        let reply = json!({"title": "t", "body": body, "handoff": "h", "entities": []});
+        let digest = digest_from_json(&reply, &session()).expect("a digest");
+
+        assert_eq!(
+            digest.body,
+            "Kullanicinin \"kur su scheduled task'i\" talebi uzerine baslandi."
+        );
+    }
+
+    /// The guard from `unescape_newlines` that must *not* be carried over.
+    /// All sixteen occurrences in the wiki sit on pages whose paragraphs are
+    /// perfectly intact, so refusing to touch text that already has line
+    /// breaks would have repaired none of them.
+    #[test]
+    fn a_page_with_real_line_breaks_still_gets_its_quotes_back() {
+        let body = concat!(
+            "## Ozet\n\n",
+            r#"Local models generated generic titles such as \"Session Summary\"."#,
+            "\n\nFixed.",
+        );
+        let reply = json!({"title": "t", "body": body, "handoff": "h", "entities": []});
+        let digest = digest_from_json(&reply, &session()).expect("a digest");
+
+        assert!(
+            digest.body.contains(r#"such as "Session Summary"."#),
+            "{:?}",
+            digest.body
+        );
+        assert!(!digest.body.contains('\\'), "{:?}", digest.body);
+    }
+
+    /// Where an escaped quote is the point rather than a mistake. A page
+    /// showing the assertion it just wrote would be corrupted by the repair.
+    #[test]
+    fn an_escaped_quote_inside_a_fence_is_left_alone() {
+        let body = concat!(
+            "The test reads:\n\n```rust\n",
+            r#"assert_eq!(page, "a \"quoted\" name");"#,
+            "\n```\n\nand it passes.",
+        );
+        let reply = json!({"title": "t", "body": body, "handoff": "h", "entities": []});
+        let digest = digest_from_json(&reply, &session()).expect("a digest");
+
+        assert_eq!(digest.body, body, "code explaining an escape survives it");
+    }
+
+    /// The same line can hold both: an inline span that means it, and prose
+    /// that does not.
+    #[test]
+    fn an_inline_span_keeps_its_escapes_and_the_prose_beside_it_does_not() {
+        let body = concat!(
+            r#"Redaction leaves `\"key\": \"[redacted]\"` where the secret was, "#,
+            r#"so the page can be called \"safe\"."#,
+        );
+        let reply = json!({"title": "t", "body": body, "handoff": "h", "entities": []});
+        let digest = digest_from_json(&reply, &session()).expect("a digest");
+
+        assert!(
+            digest.body.contains(r#"`\"key\": \"[redacted]\"`"#),
+            "the span was rewritten: {:?}",
+            digest.body
+        );
+        assert!(
+            digest.body.contains(r#"called "safe"."#),
+            "the prose was not: {:?}",
+            digest.body
+        );
+    }
+
+    /// A backtick with nothing closing it opens no span, and the prose after
+    /// it is still prose. Left unhandled this either loops or swallows the
+    /// rest of the line.
+    #[test]
+    fn an_unclosed_backtick_does_not_protect_the_rest_of_the_line() {
+        let body = r#"The flag is `--apply and the answer was \"no\"."#;
+        let reply = json!({"title": "t", "body": body, "handoff": "h", "entities": []});
+        let digest = digest_from_json(&reply, &session()).expect("a digest");
+
+        assert_eq!(
+            digest.body,
+            r#"The flag is `--apply and the answer was "no"."#
+        );
     }
 
     #[test]
