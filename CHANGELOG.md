@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `bootstrap` filed file extensions as things a page is about. The repository
+  overview declared the four commonest extensions in the tree — `rs`, `toml`,
+  `sql`, `md` in this one — as its entities, and an entity is a claim that the
+  page is about that name, matched when the query names every token of it. One
+  generic token is every token, so a question naming any `.rs` file at all
+  pulled back the page describing the shape of the whole repository. That is
+  the failure fixed in 1.0 for names that were too *long* to match, arriving
+  from the other side. The page now declares the repository's own name, read
+  from the remote it answers to; a repository with no remote declares nothing,
+  because the directory it happens to sit in is a fact about one machine. The
+  extensions are still in the table on the page, where full text finds them at
+  the strength a mention deserves
 - `bootstrap` filed the branch somebody happened to be standing on as the
   repository's own. `Identity` on `bootstrap/repository.md` read `Branch:` and
   the value was `HEAD`'s shorthand, so seeding a memory from a feature branch

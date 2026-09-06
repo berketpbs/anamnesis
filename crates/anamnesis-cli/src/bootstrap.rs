@@ -308,7 +308,14 @@ pub fn draft(survey: &Survey, now: Timestamp) -> anyhow::Result<Vec<Draft>> {
             "Repository overview",
             Tier::Semantic,
             1.0,
-            entities(survey.extensions.iter().take(4).map(|(ext, _)| ext.clone())),
+            // The repository's name, and not the four commonest file
+            // extensions this page used to declare. An entity says "this page
+            // is about that name", and the match wants every token of it in
+            // the query — so `rs`, one token and a generic one, made this page
+            // a hit for every question that named any `.rs` file. The
+            // extensions are still in the table below, where full text finds
+            // them at the strength a mention deserves.
+            entities(survey.remote.as_deref().and_then(repository_name)),
             render_repository(survey, now),
         )?,
         page(
@@ -704,9 +711,26 @@ where
     items
 }
 
+/// The repository's own name, taken from the remote it answers to.
+///
+/// `https://host/owner/anamnesis.git` and `git@host:owner/anamnesis.git` both
+/// give `anamnesis`. A repository with no remote has no name to take this way:
+/// the directory it sits in is a fact about one machine, and filing that as
+/// what the page is about would be inventing an entity rather than reading
+/// one. The page carries none instead, and the other three streams still
+/// find it.
+fn repository_name(remote: &str) -> Option<String> {
+    let trimmed = remote.trim().trim_end_matches('/');
+    let trimmed = trimmed.strip_suffix(".git").unwrap_or(trimmed);
+    let last = trimmed.rsplit(['/', ':']).next()?.trim();
+
+    (!last.is_empty()).then(|| last.to_owned())
+}
+
 /// Turn names into entities, dropping any the core rejects.
-fn entities(names: impl Iterator<Item = String>) -> Vec<Entity> {
+fn entities(names: impl IntoIterator<Item = String>) -> Vec<Entity> {
     names
+        .into_iter()
         .filter_map(|name| Entity::parse(&name).ok())
         .take(ENTITY_CANDIDATES)
         .collect()
@@ -929,6 +953,11 @@ mod tests {
                 .expect("commit")
         }
 
+        /// The remote a clone would have, given by hand.
+        fn set_remote(&self, url: &str) {
+            self.repo.remote("origin", url).expect("remote");
+        }
+
         /// What a clone writes down and a `git init` does not: `origin/HEAD`,
         /// the symbolic ref naming the branch the remote calls default.
         fn set_default_branch(&self, name: &str) {
@@ -1102,6 +1131,77 @@ mod tests {
         assert!(
             page.contains("**Surveyed from:** fix/something-in-progress"),
             "{page}"
+        );
+    }
+
+    /// An entity says the page is *about* that name, and the match wants every
+    /// token of it in the query. A file extension is one generic token, so
+    /// declaring `rs` made the repository overview a hit for every question
+    /// naming any `.rs` file — the mirror of the failure fixed in #124, where
+    /// names were too long to ever match.
+    #[test]
+    fn a_file_extension_is_not_something_a_page_is_about() {
+        let fixture = Fixture::new();
+        fixture.set_remote("https://github.com/owner/anamnesis.git");
+        fixture.commit(&[("src/lib.rs", "fn main() {}")], "feat: a", "Ada", at(0));
+        fixture.commit(&[("Cargo.toml", "[package]")], "chore: b", "Ada", at(1));
+
+        let survey = survey(fixture.path(), DEFAULT_MAX_COMMITS).expect("survey");
+        let drafts = draft(&survey, now()).expect("drafts");
+        let overview = drafts
+            .iter()
+            .find(|draft| draft.path.as_str() == "bootstrap/repository.md")
+            .expect("the overview");
+        let declared: Vec<&str> = overview
+            .frontmatter
+            .entities
+            .iter()
+            .map(|entity| entity.as_str())
+            .collect();
+
+        assert!(
+            !declared.iter().any(|name| *name == "rs" || *name == "toml"),
+            "extensions were filed as entities: {declared:?}"
+        );
+        assert_eq!(declared, ["anamnesis"]);
+    }
+
+    /// The two shapes a remote comes in, and the one case with no name to take.
+    #[test]
+    fn a_repositorys_name_is_read_from_the_remote_it_answers_to() {
+        assert_eq!(
+            repository_name("https://github.com/owner/anamnesis.git").as_deref(),
+            Some("anamnesis")
+        );
+        assert_eq!(
+            repository_name("git@github.com:owner/anamnesis.git").as_deref(),
+            Some("anamnesis")
+        );
+        assert_eq!(
+            repository_name("https://host/owner/anamnesis/").as_deref(),
+            Some("anamnesis")
+        );
+        assert_eq!(repository_name(""), None);
+    }
+
+    /// A repository nobody gave a remote has no name to read, and the page
+    /// says nothing rather than inventing one from the directory it sits in.
+    #[test]
+    fn without_a_remote_the_overview_claims_no_entity() {
+        let fixture = Fixture::new();
+        fixture.commit(&[("src/lib.rs", "fn main() {}")], "feat: a", "Ada", at(0));
+
+        let survey = survey(fixture.path(), DEFAULT_MAX_COMMITS).expect("survey");
+        let drafts = draft(&survey, now()).expect("drafts");
+        let overview = drafts
+            .iter()
+            .find(|draft| draft.path.as_str() == "bootstrap/repository.md")
+            .expect("the overview");
+
+        assert!(
+            overview.frontmatter.entities.is_empty(),
+            "{:?}",
+            overview.frontmatter.entities
         );
     }
 
