@@ -269,7 +269,15 @@ impl LlmConfig {
     /// caller holding a connection open. `ANAMNESIS_LLM_MAX_RETRIES` still
     /// wins over both, so an operator who has chosen a number keeps it.
     pub fn from_env_unhurried() -> Result<Self, LlmError> {
-        Self::from_vars_starting_at(BACKGROUND_MAX_RETRIES, |key| std::env::var(key).ok())
+        Self::from_vars_unhurried(|key| std::env::var(key).ok())
+    }
+
+    /// [`LlmConfig::from_env_unhurried`], reading from an arbitrary lookup.
+    ///
+    /// So that a caller which chooses the unhurried budget can be held to that
+    /// choice by a test, without mutating the environment of a parallel run.
+    pub fn from_vars_unhurried(var: impl Fn(&str) -> Option<String>) -> Result<Self, LlmError> {
+        Self::from_vars_starting_at(BACKGROUND_MAX_RETRIES, var)
     }
 
     /// Read settings from an arbitrary lookup, so this is testable without
