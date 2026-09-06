@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The handoff's `Last request` line could name a background task rather than
+  something somebody asked for. A harness submits through the same door it
+  gives a person, so a task completing arrives as `UserPromptSubmit` like any
+  other prompt, and `render_handoff` took `prompts.last()`. In this project's
+  own index 18 of 71 recorded prompts open with `<task-notification>` — one in
+  four, and a session is most likely to end on one precisely when it ended by
+  being reaped rather than by somebody typing. The line now names the last
+  prompt a person wrote, and is left out entirely when a person wrote none: a
+  handoff that says nothing about the last request beats one that invents it.
+  Two things kept narrow — the match is against the start of the prompt only,
+  so somebody asking *about* a notification is still asking something, and
+  `HARNESS_PROMPT_OPENERS` lists only the openers this index has actually seen,
+  rather than the ones a harness might one day inject. The session page keeps
+  every prompt; notifications are part of what happened, they are just not what
+  was asked for
+- Background consolidation gave up on the model in about three seconds. Two
+  retries is the right budget for a person at a terminal, or for a request
+  holding a connection open, and `serve` is neither: its consolidation is
+  spawned and detached, and the reap pass runs at startup, on the machine's
+  least reliable few seconds. On 2026-09-05 three transport errors 28 ms after
+  the server started wrote the largest session in this index — 119
+  observations, the one that tagged v1.0.0 — as tool counts, and the network
+  was answering a moment later. `serve` now reads its model settings with the
+  unhurried budget — `LlmConfig::from_vars_unhurried`, behind a seam a test can
+  call, since the one line this turns on is otherwise the one line nothing
+  asserts — which starts at eight retries instead of two: against the existing
+  backoff, about two and a half minutes. The only cost of waiting longer is a
+  page arriving later, and the cost of giving up is permanent, because
+  `reconsolidate` can rewrite the page but deliberately leaves no handoff —
+  the next session has already read the counted one.
+  `ANAMNESIS_LLM_MAX_RETRIES` still wins over either default, the CLI keeps
+  the hurried budget because somebody is waiting on it,
+  and a summary that cannot be had is still counts rather than nothing
+- A model escaping the quotation marks in its own prose left the backslashes on
+  the page: sixteen of them across three of this wiki's twenty session pages,
+  every one in prose and not one inside code. `unescape_newlines` already
+  repairs the same mistake made with line breaks, and had ruled this one out in
+  a comment — quotes were "rarer, more ambiguous, and were not the failure".
+  Rarer is still true; the last has stopped being. The ambiguity has a shape:
+  an escaped quote in prose is a mistake, and inside code it is usually the
+  point, so the repair skips fenced blocks and inline spans and touches the
+  rest. What is deliberately not carried over is the newline guard, which only
+  unescapes a string with none of the real thing — all sixteen sat on pages
+  whose paragraphs were perfectly intact, and that guard would have repaired
+  none of them
+
 ## [1.0.0] - 2026-09-06
 
 What 1.0 commits to: the command line and the shapes on disk. A wiki, a raw
