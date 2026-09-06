@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `serve` announced itself before it had the address. The banner — the server
+  is serving here, this is the wiki browser's URL, this is the model writing
+  the summaries — was printed, and only then was the port asked for. When
+  something already held it, the record of a start that never happened was
+  fifteen lines saying it had, followed by the operating system's own sentence
+  about sockets, in whatever language the machine was installed in. Found on a
+  machine where a scheduled task relaunches the server every minute: every one
+  of those minutes wrote the whole banner into the log and then failed. Binding
+  now comes first, and the banner describes the address actually taken, which
+  is also the fix for `--port 0` printing `http://127.0.0.1:0` instead of the
+  port it got. A refused bind says which address, and what to do about it —
+  `anamnesis status` for the one already listening, `--port` and `--bind` for
+  the other two — with the operating system's text kept at the end, since the
+  error number is what somebody will search for. The attempt is still logged
+  before the bind, so a start that fails leaves a record of having been tried
 - The handoff's `Last request` line could name a background task rather than
   something somebody asked for. A harness submits through the same door it
   gives a person, so a task completing arrives as `UserPromptSubmit` like any

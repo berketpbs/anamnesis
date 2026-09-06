@@ -422,13 +422,34 @@ impl Default for ServeOptions {
     }
 }
 
-/// Serve until the process ends.
+/// Take the address, before anything is announced about it.
+///
+/// Split out of [`serve`] so a caller can bind first and describe the server
+/// afterwards. The order matters more than it looks: binding is the step that
+/// fails when something is already listening, and a caller that announces
+/// itself first announces a server that never started. What this hands back
+/// also *is* the address in use, which the requested one is not when the
+/// request was port 0.
+pub async fn bind(address: SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
+    tokio::net::TcpListener::bind(address).await
+}
+
+/// Serve on an address, until the process ends.
 pub async fn serve(
-    bind: SocketAddr,
+    address: SocketAddr,
     state: AppState,
     options: ServeOptions,
 ) -> std::io::Result<()> {
-    let listener = tokio::net::TcpListener::bind(bind).await?;
+    serve_on(bind(address).await?, state, options).await
+}
+
+/// Serve on a listener somebody else took, until the process ends.
+pub async fn serve_on(
+    listener: tokio::net::TcpListener,
+    state: AppState,
+    options: ServeOptions,
+) -> std::io::Result<()> {
+    let bind = listener.local_addr()?;
     tracing::info!(%bind, "anamnesis listening");
 
     // The server is the only part of the system that runs for longer than one

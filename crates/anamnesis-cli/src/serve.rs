@@ -62,6 +62,35 @@ pub fn cmd_serve(
         max_output_tokens: llm.max_output_tokens,
     });
 
+    let runtime = tokio::runtime::Runtime::new()?;
+
+    // This line goes to the log file, which is the thing that outlives the
+    // terminal: "when did memory stop" needs a first half to compare against.
+    // It is written before the bind rather than after it so that a start that
+    // fails leaves a record of having been attempted, which is the case where
+    // the file is the only place anybody will look.
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        %address,
+        data_dir = %data.root().display(),
+        "anamnesis server starting"
+    );
+
+    // Bound before a word is printed about it. Everything below announces a
+    // server that is serving, and until the listener exists that is a guess —
+    // one this machine got wrong every minute for a while, printing the whole
+    // banner and then failing on the address a healthy server already held.
+    let listener = runtime
+        .block_on(anamnesis_web::bind(address))
+        .map_err(|error| {
+            tracing::error!(%address, %error, "could not take the address");
+            explain_bind(address, &error)
+        })?;
+
+    // The address in hand, rather than the one asked for: they differ when the
+    // request was port 0, and every line below is read as a place to go.
+    let address = listener.local_addr()?;
+
     println!("🌐 anamnesis serving on http://{address}");
     println!("   data dir: {}", data.root().display());
     println!("   POST /hook   GET /handoff   GET /whoami   GET /health");
@@ -96,19 +125,8 @@ pub fn cmd_serve(
         None => println!("   embedding:     off (set ANAMNESIS_EMBED_ENABLED=1)"),
     }
 
-    // The banner above goes to the terminal this was started from, which is
-    // exactly the thing that will not exist later. This line goes to the file,
-    // so that "when did memory stop" has a first half to compare against.
-    tracing::info!(
-        version = env!("CARGO_PKG_VERSION"),
-        %address,
-        data_dir = %data.root().display(),
-        "anamnesis server starting"
-    );
-
-    let runtime = tokio::runtime::Runtime::new()?;
-    let served = runtime.block_on(anamnesis_web::serve(
-        address,
+    let served = runtime.block_on(anamnesis_web::serve_on(
+        listener,
         anamnesis_web::AppState::new(store, wiki)
             .with_raw(Some(raw))
             .with_llm(settings)
@@ -146,6 +164,36 @@ fn llm_config(
     var: impl Fn(&str) -> Option<String>,
 ) -> Result<anamnesis_llm::LlmConfig, anamnesis_llm::LlmError> {
     anamnesis_llm::LlmConfig::from_vars_unhurried(var)
+}
+
+/// What to say when the address will not be taken.
+///
+/// The operating system's own sentence is the entire message today, and it is
+/// written in the language the machine was installed in. On the machine this
+/// was found on it reads `Normal olarak her yuva adresi ... icin yalnizca bir
+/// kullanima izin veriliyor. (os error 10048)` — which names neither anamnesis
+/// nor the address, says nothing about what to do, and cannot be searched for
+/// by anybody whose machine speaks differently.
+///
+/// So each of these says what happened in terms of the thing every one of them
+/// is about: the address. The operating system's text is kept, at the end,
+/// because it is still the ground truth and an error number is what somebody
+/// will paste into a search.
+fn explain_bind(address: std::net::SocketAddr, error: &std::io::Error) -> anyhow::Error {
+    use std::io::ErrorKind;
+
+    match error.kind() {
+        ErrorKind::AddrInUse => anyhow::anyhow!(
+            "{address} is already taken — something is listening there. If that is anamnesis, this one was not needed: `anamnesis status` says whether a server is up. If it is not, `--port` takes another. ({error})"
+        ),
+        ErrorKind::AddrNotAvailable => anyhow::anyhow!(
+            "{address} is not an address this machine answers on. `--bind` wants one that is; the default, 127.0.0.1, always is. ({error})"
+        ),
+        ErrorKind::PermissionDenied => anyhow::anyhow!(
+            "not allowed to listen on {address}. Ports below 1024 belong to privileged processes on most systems, so `--port` above them is the usual answer. ({error})"
+        ),
+        _ => anyhow::anyhow!("could not listen on {address}: {error}"),
+    }
 }
 
 /// Refuse to serve a network address with nothing guarding it.
@@ -318,5 +366,79 @@ mod tests {
         let shared = anamnesis_web::Auth::parse(Some("alpha"), None).expect("parse");
         assert_eq!(describe_serving_auth(&shared), "token required");
         assert!(describe_serving_auth(&anamnesis_web::Auth::open()).contains("open"));
+    }
+
+    /// The failure this change is for, against the real operating system error
+    /// rather than one made up to match the branch. A listener is held, the
+    /// same address is asked for again, and what a person would read is
+    /// checked for the two things the bare OS text has never had: which
+    /// address, and what to do next.
+    #[test]
+    fn an_address_already_held_is_refused_with_something_to_act_on() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let held = runtime
+            .block_on(anamnesis_web::bind(address("127.0.0.1:0")))
+            .expect("first bind");
+        let taken = held.local_addr().expect("local address");
+
+        let error = runtime
+            .block_on(anamnesis_web::bind(taken))
+            .expect_err("the address is held");
+        let message = explain_bind(taken, &error).to_string();
+
+        assert!(message.contains(&taken.to_string()), "{message}");
+        assert!(message.contains("anamnesis status"), "{message}");
+    }
+
+    /// Port 0 means "whichever is free", and the banner is a list of places to
+    /// go. Printing the request rather than the result would send somebody to
+    /// port 0, which is not an address at all.
+    #[test]
+    fn the_address_in_hand_is_the_one_worth_printing() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let listener = runtime
+            .block_on(anamnesis_web::bind(address("127.0.0.1:0")))
+            .expect("bind");
+
+        let taken = listener.local_addr().expect("local address");
+        assert_ne!(taken.port(), 0, "the banner would have said http://{taken}");
+    }
+
+    /// The other two failures a bind has, which cannot be provoked from a test
+    /// on every machine: a bind address belonging to somewhere else, and a
+    /// port this process is not allowed to have. Each names the flag that
+    /// changes it, because that is the whole difference from the OS text.
+    #[test]
+    fn the_other_refusals_name_the_flag_that_answers_them() {
+        use std::io::{Error, ErrorKind};
+
+        let elsewhere = explain_bind(
+            address("10.1.2.3:8080"),
+            &Error::from(ErrorKind::AddrNotAvailable),
+        )
+        .to_string();
+        assert!(elsewhere.contains("10.1.2.3:8080"), "{elsewhere}");
+        assert!(elsewhere.contains("--bind"), "{elsewhere}");
+
+        let privileged = explain_bind(
+            address("127.0.0.1:80"),
+            &Error::from(ErrorKind::PermissionDenied),
+        )
+        .to_string();
+        assert!(privileged.contains("127.0.0.1:80"), "{privileged}");
+        assert!(privileged.contains("--port"), "{privileged}");
+    }
+
+    /// Anything else still names the address, which is the part the operating
+    /// system leaves out of every one of these.
+    #[test]
+    fn an_unrecognised_failure_still_says_where() {
+        let message = explain_bind(
+            address("127.0.0.1:8080"),
+            &std::io::Error::from(std::io::ErrorKind::Other),
+        )
+        .to_string();
+
+        assert!(message.contains("127.0.0.1:8080"), "{message}");
     }
 }
