@@ -191,6 +191,29 @@ const MIN_MAX_OUTPUT_TOKENS: u32 = 1_000;
 /// felt immediately.
 const DEFAULT_TIMEOUT_SECS: u64 = 90;
 
+/// Retries for a caller that is waiting: a person at a terminal, or a request
+/// holding a connection open. Two spends itself in about three seconds.
+const DEFAULT_MAX_RETRIES: u32 = 2;
+
+/// Retries for work nobody is waiting on.
+///
+/// The server's consolidation is spawned and detached — no request, no person,
+/// nothing that times out — so the only cost of trying again is a page
+/// arriving later, and the cost of giving up is a session summarised as counts
+/// forever, since `reconsolidate` can rewrite the page but deliberately leaves
+/// no handoff.
+///
+/// The failure this is sized for happened on 2026-09-05. The reap pass runs
+/// when the server starts, and it asked the model 28 ms after the process
+/// began, before this machine's network was up. Three attempts inside three
+/// seconds all returned a transport error, the fallback wrote counts, and the
+/// largest session in the index lost both its summary and its handoff to a
+/// network that answered a moment later.
+///
+/// Against the backoff in `http::retry_delay` — 2, 4, 8, 16 seconds, then 30
+/// apiece — eight retries is about two and a half minutes.
+const BACKGROUND_MAX_RETRIES: u32 = 8;
+
 /// Everything needed to build a provider.
 #[derive(Debug, Clone)]
 pub struct LlmConfig {
@@ -227,7 +250,7 @@ impl Default for LlmConfig {
             max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
             effort: Effort::default(),
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
-            max_retries: 2,
+            max_retries: DEFAULT_MAX_RETRIES,
             server_side_fallbacks: true,
         }
     }
@@ -239,10 +262,32 @@ impl LlmConfig {
         Self::from_vars(|key| std::env::var(key).ok())
     }
 
+    /// Read settings for a process whose model calls nobody waits on.
+    ///
+    /// Identical to [`LlmConfig::from_env`] but for where the retry budget
+    /// starts: `BACKGROUND_MAX_RETRIES` rather than the budget sized for a
+    /// caller holding a connection open. `ANAMNESIS_LLM_MAX_RETRIES` still
+    /// wins over both, so an operator who has chosen a number keeps it.
+    pub fn from_env_unhurried() -> Result<Self, LlmError> {
+        Self::from_vars_starting_at(BACKGROUND_MAX_RETRIES, |key| std::env::var(key).ok())
+    }
+
     /// Read settings from an arbitrary lookup, so this is testable without
     /// mutating the environment of a parallel test run.
     pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Self, LlmError> {
-        let mut config = Self::default();
+        Self::from_vars_starting_at(DEFAULT_MAX_RETRIES, var)
+    }
+
+    /// `from_vars`, with the retry budget to fall back on when
+    /// the environment does not name one.
+    fn from_vars_starting_at(
+        default_retries: u32,
+        var: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self, LlmError> {
+        let mut config = Self {
+            max_retries: default_retries,
+            ..Self::default()
+        };
 
         let key = var("ANAMNESIS_LLM_API_KEY")
             .or_else(|| var("ANTHROPIC_API_KEY"))
@@ -614,5 +659,55 @@ mod tests {
         ]))
         .expect("no error");
         assert!(!off.server_side_fallbacks);
+    }
+
+    #[test]
+    fn a_waiting_caller_gets_the_short_retry_budget() {
+        let config = LlmConfig::from_vars(|_| None).expect("defaults");
+
+        assert_eq!(config.max_retries, DEFAULT_MAX_RETRIES);
+    }
+
+    #[test]
+    fn work_nobody_waits_on_gets_a_longer_one() {
+        let config =
+            LlmConfig::from_vars_starting_at(BACKGROUND_MAX_RETRIES, |_| None).expect("defaults");
+
+        assert!(
+            config.max_retries > DEFAULT_MAX_RETRIES,
+            "a summary nobody is waiting for should outlast a network coming up"
+        );
+        assert_eq!(config.max_retries, BACKGROUND_MAX_RETRIES);
+    }
+
+    /// An operator who has chosen a number keeps it, whichever budget the
+    /// caller started from. Otherwise the setting would silently mean
+    /// different things in `serve` and in `reconsolidate`.
+    #[test]
+    fn an_explicit_setting_wins_over_either_default() {
+        for start in [DEFAULT_MAX_RETRIES, BACKGROUND_MAX_RETRIES] {
+            let config = LlmConfig::from_vars_starting_at(start, |key| {
+                (key == "ANAMNESIS_LLM_MAX_RETRIES").then(|| "1".to_owned())
+            })
+            .expect("explicit retries");
+
+            assert_eq!(config.max_retries, 1, "starting from {start}");
+        }
+    }
+
+    /// Nothing else about the two paths differs. If a later edit gives them
+    /// separate defaults for anything, this says so.
+    #[test]
+    fn the_two_budgets_differ_in_nothing_but_the_budget() {
+        let waiting = LlmConfig::from_vars(|_| None).expect("defaults");
+        let unhurried =
+            LlmConfig::from_vars_starting_at(BACKGROUND_MAX_RETRIES, |_| None).expect("defaults");
+
+        assert_eq!(waiting.provider, unhurried.provider);
+        assert_eq!(waiting.model, unhurried.model);
+        assert_eq!(waiting.base_url, unhurried.base_url);
+        assert_eq!(waiting.timeout, unhurried.timeout);
+        assert_eq!(waiting.max_input_tokens, unhurried.max_input_tokens);
+        assert_eq!(waiting.max_output_tokens, unhurried.max_output_tokens);
     }
 }

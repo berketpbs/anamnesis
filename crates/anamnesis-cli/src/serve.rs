@@ -48,7 +48,10 @@ pub fn cmd_serve(
     // Built before the listener binds, so a misconfigured model is a startup
     // error someone sees rather than a warning that only surfaces hours later,
     // after sessions have already been summarised without one.
-    let llm = anamnesis_llm::LlmConfig::from_env()?;
+    // Unhurried on purpose: every model call this process makes is a session
+    // summary, spawned and detached, with nothing holding a connection open
+    // behind it. See `BACKGROUND_MAX_RETRIES`.
+    let llm = anamnesis_llm::LlmConfig::from_env_unhurried()?;
     // The same opt-in embedder the MCP server builds. Without one here, the
     // vector stream covered only the pages an agent wrote through MCP — not a
     // single session summary, and nothing anybody edited by hand.
