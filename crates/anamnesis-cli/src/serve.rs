@@ -48,7 +48,10 @@ pub fn cmd_serve(
     // Built before the listener binds, so a misconfigured model is a startup
     // error someone sees rather than a warning that only surfaces hours later,
     // after sessions have already been summarised without one.
-    let llm = anamnesis_llm::LlmConfig::from_env()?;
+    // Unhurried on purpose: every model call this process makes is a session
+    // summary, spawned and detached, with nothing holding a connection open
+    // behind it. See `BACKGROUND_MAX_RETRIES`.
+    let llm = llm_config(|key| std::env::var(key).ok())?;
     // The same opt-in embedder the MCP server builds. Without one here, the
     // vector stream covered only the pages an agent wrote through MCP — not a
     // single session summary, and nothing anybody edited by hand.
@@ -130,6 +133,19 @@ pub fn cmd_serve(
     runtime.shutdown_background();
     served?;
     Ok(())
+}
+
+/// The model settings this process runs on.
+///
+/// A named seam rather than a call inline in `cmd_serve`, which binds a
+/// listener and so cannot be reached from a test. What is worth holding still
+/// is the budget: every model call this process makes is a session summary,
+/// spawned and detached, and a revert to the hurried default here would leave
+/// all of `config.rs`'s tests passing.
+fn llm_config(
+    var: impl Fn(&str) -> Option<String>,
+) -> Result<anamnesis_llm::LlmConfig, anamnesis_llm::LlmError> {
+    anamnesis_llm::LlmConfig::from_vars_unhurried(var)
 }
 
 /// Refuse to serve a network address with nothing guarding it.
@@ -265,6 +281,31 @@ mod tests {
     #[test]
     fn the_refusal_can_be_overridden_deliberately() {
         assert!(refuse_anonymous_exposure(&address("0.0.0.0:8080"), true, true).is_none());
+    }
+
+    /// The reason this change exists, asserted where the choice is made: the
+    /// server waits longer than a caller holding a connection open would.
+    /// `config.rs` proves the two budgets differ; only this proves `serve`
+    /// takes the one nobody is waiting on.
+    #[test]
+    fn the_server_does_not_hurry_a_summary_nobody_waits_for() {
+        let waiting = anamnesis_llm::LlmConfig::from_vars(|_| None).expect("defaults");
+        let ours = llm_config(|_| None).expect("defaults");
+
+        assert!(
+            ours.max_retries > waiting.max_retries,
+            "serve retried {} times, no better than a caller who is waiting",
+            ours.max_retries
+        );
+    }
+
+    /// And an operator who has chosen a number still keeps it here.
+    #[test]
+    fn an_explicit_retry_setting_still_wins_in_the_server() {
+        let config = llm_config(|key| (key == "ANAMNESIS_LLM_MAX_RETRIES").then(|| "1".to_owned()))
+            .expect("explicit retries");
+
+        assert_eq!(config.max_retries, 1);
     }
 
     #[test]
