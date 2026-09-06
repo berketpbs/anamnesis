@@ -246,6 +246,38 @@ fn render_body(
     out
 }
 
+/// Openers that mark a prompt as the harness talking, not a person.
+///
+/// A hook records `UserPromptSubmit` as it arrives, and a harness submits
+/// through the same door it gives a person: a background task finishing
+/// reaches the session as a prompt like any other. In this project's own
+/// index that is 18 of 71 recorded prompts, one in four.
+///
+/// They belong on the session page — they are part of what happened. They do
+/// not belong on the one line of the handoff that says what was last asked
+/// for, which is how a session that ended on `doğrulayalım` handed the next
+/// one `Last request: <task-notification> <task-id>b1yxanpb2</task-id>`.
+///
+/// Only what has actually been seen is listed. A harness that injects
+/// something else adds a line here, after somebody has looked at a real one.
+const HARNESS_PROMPT_OPENERS: &[&str] = &["<task-notification>"];
+
+/// Whether the harness generated this prompt rather than a person.
+///
+/// Matched at the start only. A person quoting a notification in the middle
+/// of a question is asking a question.
+fn is_harness_generated(prompt: &str) -> bool {
+    let start = prompt.trim_start();
+    HARNESS_PROMPT_OPENERS
+        .iter()
+        .any(|opener| start.starts_with(opener))
+}
+
+/// The last thing a person asked for, if a person asked for anything.
+fn last_human_prompt(prompts: &[String]) -> Option<&String> {
+    prompts.iter().rev().find(|p| !is_harness_generated(p))
+}
+
 /// The bounded note handed to the next session.
 fn render_handoff(
     session: &Session,
@@ -260,7 +292,7 @@ fn render_handoff(
         session.agent, session.started_at
     ));
 
-    if let Some(last) = prompts.last() {
+    if let Some(last) = last_human_prompt(prompts) {
         out.push_str(&format!(
             "Last request: {}\n",
             clip(&last.replace('\n', " "), 240)
@@ -559,5 +591,61 @@ mod tests {
         let digest = consolidate(&session(), &observations).expect("digest");
         assert!(digest.title.contains("2026-08-19"));
         assert!(digest.title.contains("claude-code"));
+    }
+
+    /// The failure this exists for, as it actually arrived: a session that
+    /// ended on a real question, handed on as a background-task notice.
+    #[test]
+    fn a_task_notification_is_not_the_last_request() {
+        let prompts = vec![
+            "nerede kalmıştık".to_owned(),
+            "doğrulayalım".to_owned(),
+            "<task-notification> <task-id>b1yxanpb2</task-id> <status>completed</status>"
+                .to_owned(),
+        ];
+
+        let chosen = last_human_prompt(&prompts).expect("a person asked something");
+
+        assert_eq!(chosen, "doğrulayalım");
+    }
+
+    #[test]
+    fn a_session_of_nothing_but_notifications_claims_no_request() {
+        let prompts = vec![
+            "<task-notification> one".to_owned(),
+            "   <task-notification> two".to_owned(),
+        ];
+
+        assert!(last_human_prompt(&prompts).is_none());
+    }
+
+    /// Matched at the start only. Somebody asking about a notification is
+    /// asking, and their question is the last request.
+    #[test]
+    fn quoting_a_notification_is_still_a_question() {
+        let prompts = vec!["what does <task-notification> mean when the id is missing".to_owned()];
+
+        assert_eq!(
+            last_human_prompt(&prompts).map(String::as_str),
+            Some("what does <task-notification> mean when the id is missing")
+        );
+    }
+
+    #[test]
+    fn the_handoff_line_names_the_person_not_the_harness() {
+        let session = session();
+        let prompts = vec![
+            "fix the release".to_owned(),
+            "<task-notification> done".to_owned(),
+        ];
+        let tools = BTreeMap::new();
+
+        let handoff = render_handoff(&session, &prompts, &tools, 0, &[]);
+
+        assert!(
+            handoff.contains("Last request: fix the release"),
+            "{handoff}"
+        );
+        assert!(!handoff.contains("task-notification"), "{handoff}");
     }
 }
