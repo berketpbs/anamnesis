@@ -8,6 +8,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `status` reported the model the server was configured with, and nothing
+  reported whether it had written anything. Those are different claims, and
+  they came apart for an afternoon: the provider answered `503` to every real
+  consolidation request, the documented fall back to counted summaries worked
+  exactly as designed, and every diagnostic stayed green — `/health` said `ok`,
+  capture said "last event just now", and the `Summaries:` line went on naming
+  a model that had not written a word. The only trace was a warning in a log
+  file nobody opens. The outcome was already being computed —
+  `consolidate_with_source` has always returned whether a model produced the
+  page — and the server was calling `consolidate_with_llm`, which drops it. It
+  is now recorded on the session (V12, `summary_source` and `summary_model`)
+  and read back on the same line: `written by gemini-3.8-flash — the last 2
+  were counted, the model is not answering`. Two columns rather than one,
+  because counted *with* a model configured and counted with *no* model are
+  different faults with different fixes. Read from the sessions rather than
+  held in the server, so it survives the restart that an in-memory tally would
+  not — and restarting is the first thing anyone does to a server they suspect.
+  Three things it deliberately does not say: a database from before the
+  migration has no provenance and reads as no evidence, never as no model; a
+  server with no model configured gets no outage line at all, since counted
+  pages are that configuration working; and a server too old to name its model
+  gets the counts without the diagnosis. `recompile` records provenance too —
+  it is what runs once a model works again, and leaving the old value would
+  report an outage that is over
 - `bootstrap` filed file extensions as things a page is about. The repository
   overview declared the four commonest extensions in the tree — `rs`, `toml`,
   `sql`, `md` in this one — as its entities, and an entity is a claim that the
