@@ -27,6 +27,77 @@ pub const AUTHORITY_NAMESPACES: [&str; 4] = ["_rules", "decisions", "procedures"
 pub struct PagePath(String);
 
 impl PagePath {
+    /// Build a path for a page in `namespace` from the title it was given.
+    ///
+    /// A consolidation that decides a session left a decision behind has a
+    /// title and no path, and the path is not the model's to choose: a name it
+    /// invents can collide with a real page, land in `_rules/`, or simply be
+    /// unusable. So the caller names the namespace, the model names the page,
+    /// and this joins them.
+    ///
+    /// Letters and digits survive, everything else becomes a single `-`.
+    /// **Not** reduced to ASCII: the titles here are written in the language
+    /// the work was done in, and folding "Sunucunun Zamanlanmış Görevi" onto
+    /// the Latin alphabet leaves `sunucunun-zamanlanm-g-revi`, which names
+    /// nothing to the person scanning a directory listing. Unicode paths are
+    /// what every filesystem this runs on, and git itself, already handle.
+    ///
+    /// The slug is cut to fit [`MAX_PATH_LEN`] with room for the namespace and
+    /// the extension, on a character boundary and preferring a word boundary.
+    /// A title that leaves nothing behind — punctuation only — is an error
+    /// rather than a page called `-.md`.
+    pub fn derive(namespace: &str, title: &str) -> Result<Self> {
+        let invalid = |reason: &'static str| CoreError::InvalidPagePath {
+            path: format!("{namespace}/{title}"),
+            reason,
+        };
+
+        let mut slug = String::new();
+        let mut pending_dash = false;
+        for ch in title.trim().chars() {
+            if ch.is_alphanumeric() {
+                if pending_dash && !slug.is_empty() {
+                    slug.push('-');
+                }
+                pending_dash = false;
+                slug.extend(ch.to_lowercase());
+            } else {
+                pending_dash = true;
+            }
+        }
+
+        if slug.is_empty() {
+            return Err(invalid("the title has nothing a name can be made from"));
+        }
+
+        // What is left for the slug once the namespace, the separator and the
+        // extension are paid for.
+        let room = MAX_PATH_LEN.saturating_sub(namespace.len() + "/.md".len());
+        if room == 0 {
+            return Err(invalid("the namespace leaves no room for a name"));
+        }
+        if slug.len() > room {
+            let mut cut = room;
+            while cut > 0 && !slug.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            slug.truncate(cut);
+            // Prefer the last whole word over a severed one, when there is a
+            // word boundary close enough to be worth taking.
+            if let Some(dash) = slug.rfind('-')
+                && dash > cut * 3 / 4
+            {
+                slug.truncate(dash);
+            }
+            slug = slug.trim_end_matches('-').to_owned();
+            if slug.is_empty() {
+                return Err(invalid("no room for a name after the namespace"));
+            }
+        }
+
+        Self::parse(&format!("{namespace}/{slug}.md"))
+    }
+
     /// Validate a project-relative path.
     pub fn parse(value: &str) -> Result<Self> {
         let trimmed = value.trim();
@@ -418,6 +489,53 @@ impl Page {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_title_becomes_a_path_in_the_namespace_it_was_given() {
+        let path = PagePath::derive("gotchas", "A checkout decided what a database could open")
+            .expect("path");
+        assert_eq!(
+            path.as_str(),
+            "gotchas/a-checkout-decided-what-a-database-could-open.md"
+        );
+        assert!(path.is_authoritative());
+    }
+
+    /// The titles here are written in the language the work was done in.
+    /// Folding them onto ASCII would leave `sunucunun-zamanlanm-g-revi`, which
+    /// names nothing to somebody scanning a directory listing.
+    #[test]
+    fn a_title_keeps_the_letters_it_was_written_with() {
+        let path = PagePath::derive("gotchas", "Sunucunun Zamanlanmış Görevi").expect("path");
+        assert_eq!(path.as_str(), "gotchas/sunucunun-zamanlanmış-görevi.md");
+    }
+
+    #[test]
+    fn punctuation_collapses_rather_than_repeating() {
+        let path = PagePath::derive("notes", "  Why — really! — it broke??  ").expect("path");
+        assert_eq!(path.as_str(), "notes/why-really-it-broke.md");
+    }
+
+    /// A page called `-.md` would be worse than an error, because it would be
+    /// silently written and then collide with the next one.
+    #[test]
+    fn a_title_with_nothing_in_it_is_refused() {
+        assert!(PagePath::derive("notes", "  —!?  ").is_err());
+        assert!(PagePath::derive("notes", "").is_err());
+    }
+
+    #[test]
+    fn a_very_long_title_is_cut_to_fit_and_stays_a_valid_path() {
+        let title = "a word ".repeat(200);
+        let path = PagePath::derive("decisions", &title).expect("path");
+        assert!(path.as_str().len() <= MAX_PATH_LEN);
+        assert!(path.as_str().starts_with("decisions/"));
+        assert!(path.as_str().ends_with(".md"));
+        assert!(
+            !path.as_str().contains("--"),
+            "and it is not cut in a way that leaves a doubled separator"
+        );
+    }
 
     #[test]
     fn accepts_ordinary_paths() {

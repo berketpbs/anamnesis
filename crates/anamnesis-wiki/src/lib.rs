@@ -141,7 +141,56 @@ impl Wiki {
         write_atomically(&absolute, document.as_bytes())?;
 
         let relative = self.relative(scope, &page.path);
-        self.commit(&relative, message)
+        self.commit(&[relative], message)
+    }
+
+    /// Write several pages and record them in one commit.
+    ///
+    /// The same reasoning `delete_pages` gives, from the other side: when one
+    /// consolidation decides that a session left a decision, a gotcha and a
+    /// procedure behind, that is a single decision about a project's memory,
+    /// and a history that shows it as three unrelated commits hides the shape
+    /// of what happened. It also makes the pages arrive together for anything
+    /// watching, which is what lets them link to each other.
+    ///
+    /// What this buys is *commit* atomicity, and it is worth being exact about
+    /// the limit: the files are still written one at a time, so a crash
+    /// between the second and the third leaves two files on disk and no commit
+    /// recording them. Git has no facility for the other kind, and the
+    /// half-written state is recoverable — the pages are regenerable and the
+    /// next write stages whatever is there. What this does rule out is a
+    /// history in which half a batch is committed and the rest is not.
+    ///
+    /// Returns the commit id. An empty list writes nothing and commits
+    /// nothing.
+    pub fn write_pages(
+        &self,
+        scope: &Scope,
+        pages: &[Page],
+        message: &str,
+    ) -> Result<Option<String>> {
+        if pages.is_empty() {
+            return Ok(None);
+        }
+
+        let mut relatives = Vec::with_capacity(pages.len());
+        for page in pages {
+            let absolute = self.locate(scope, &page.path);
+            let parent = absolute
+                .parent()
+                .expect("a page path always has a parent directory")
+                .to_path_buf();
+            std::fs::create_dir_all(&parent).map_err(|source| WikiError::Io {
+                path: parent.clone(),
+                source,
+            })?;
+
+            let document = render_document(&page.frontmatter, &page.body)?;
+            write_atomically(&absolute, document.as_bytes())?;
+            relatives.push(self.relative(scope, &page.path));
+        }
+
+        self.commit(&relatives, message).map(Some)
     }
 
     /// Delete pages and record their removal in one commit.
@@ -334,9 +383,11 @@ impl Wiki {
     }
 
     /// Stage one path and commit it onto HEAD.
-    fn commit(&self, relative: &Path, message: &str) -> Result<String> {
+    fn commit(&self, relatives: &[PathBuf], message: &str) -> Result<String> {
         let mut index = self.repo.index()?;
-        index.add_path(relative)?;
+        for relative in relatives {
+            index.add_path(relative)?;
+        }
         index.write()?;
         let tree = self.repo.find_tree(index.write_tree()?)?;
 
@@ -596,6 +647,47 @@ mod tests {
         page.body = "second".to_owned();
         wiki.write_page(&scope(), &page, "second").unwrap();
         assert_eq!(wiki.commit_count().unwrap(), 2);
+    }
+
+    /// One consolidation deciding a session left three things behind is one
+    /// decision about a project's memory. A history that shows it as three
+    /// unrelated commits hides the shape of what happened — the same argument
+    /// `delete_pages` makes from the other side.
+    #[test]
+    fn a_batch_of_pages_is_one_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let wiki = Wiki::open(dir.path()).unwrap();
+
+        let mut decision = sample("A decision.");
+        decision.path = PagePath::parse("decisions/0002-batching.md").unwrap();
+        let mut gotcha = sample("A gotcha.");
+        gotcha.path = PagePath::parse("gotchas/it-bites.md").unwrap();
+        let mut note = sample("A note.");
+        note.path = PagePath::parse("notes/loose-end.md").unwrap();
+
+        let commit = wiki
+            .write_pages(&scope(), &[decision, gotcha, note], "session: three things")
+            .unwrap();
+
+        assert!(commit.is_some());
+        assert_eq!(wiki.commit_count().unwrap(), 1, "three pages, one commit");
+        assert_eq!(wiki.pages(&scope()).unwrap().len(), 3);
+        assert_eq!(
+            wiki.read_page(&scope(), &PagePath::parse("gotchas/it-bites.md").unwrap())
+                .unwrap()
+                .body
+                .trim(),
+            "A gotcha."
+        );
+    }
+
+    /// Nothing to write is not an error and is not an empty commit either.
+    #[test]
+    fn an_empty_batch_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let wiki = Wiki::open(dir.path()).unwrap();
+        assert_eq!(wiki.write_pages(&scope(), &[], "nothing").unwrap(), None);
+        assert_eq!(wiki.commit_count().unwrap(), 0);
     }
 
     #[test]
