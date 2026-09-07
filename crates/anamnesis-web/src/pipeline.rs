@@ -584,6 +584,10 @@ fn write_session_page(
     let path = session_page_path(&session.started_at, session.id)?;
     let mut frontmatter = Frontmatter::new(&digest.title, digest.entities.clone())?;
     frontmatter.tier = Tier::Episodic;
+    // Written into the markdown rather than only into the index, because the
+    // index is rebuilt from the markdown: a page that did not say which session
+    // wrote it would forget on the next `reindex`.
+    frontmatter.session = Some(session.id);
 
     let mut page = Page::new(
         scope.project_id,

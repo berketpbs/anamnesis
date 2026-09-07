@@ -236,4 +236,32 @@ mod tests {
             Some("decisions/0001-old.md".to_owned())
         );
     }
+
+    /// The reason the session lives in the markdown at all. The index is
+    /// rebuilt from these files, so anything that does not survive this
+    /// function pair is a fact `reindex` forgets.
+    #[test]
+    fn the_session_that_wrote_a_page_survives_the_round_trip() {
+        let id = anamnesis_core::ids::SessionId::new();
+        let mut fm = frontmatter();
+        fm.session = Some(id);
+        let text = render_document(&fm, "Body").unwrap();
+
+        assert!(
+            text.contains(&id.to_string()),
+            "it has to be in the file, not only in the struct"
+        );
+        let parsed = parse_document("x.md", &text).unwrap();
+        assert_eq!(parsed.frontmatter.session, Some(id));
+    }
+
+    /// A page written before this field existed, and every page a person types
+    /// by hand, reads as "no session wrote this" rather than failing to parse.
+    #[test]
+    fn a_page_that_names_no_session_still_reads() {
+        let text = "---\ntitle: Typed by a person\n---\n\nBody\n";
+        let parsed = parse_document("x.md", text).unwrap();
+        assert_eq!(parsed.frontmatter.session, None);
+        assert_eq!(parsed.frontmatter.title, "Typed by a person");
+    }
 }
