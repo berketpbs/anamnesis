@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use anamnesis_core::datadir::DataDir;
 use anamnesis_core::scope::resolve_scope;
-use anamnesis_store::Store;
+use anamnesis_store::{SessionSummary, Store, SummarySource};
 use jiff::Timestamp;
 
 use crate::format::{describe_age, describe_source, plural};
@@ -93,12 +93,25 @@ pub fn cmd_status(
         "  Auth:      {}",
         describe_auth(&facts.auth, token.is_some())
     );
-    // Asked of the server rather than of this shell, and printed here rather
-    // than behind `--verbose`, because "every summary is a word count" is not
-    // a detail — it is the difference between a memory and a log, and the only
-    // other place that said so was a banner nobody sees.
-    if let Some(line) = describe_consolidation(&facts.consolidation) {
-        println!("  Summaries: {line}");
+    // Printed here rather than behind `--verbose`, because "every summary is a
+    // word count" is not a detail — it is the difference between a memory and a
+    // log, and the only other place that said so was a banner nobody sees.
+    //
+    // Two claims on one line, because keeping them apart is what let them
+    // disagree unnoticed. The first is the server's configuration, asked of the
+    // server rather than of this shell; the second is what that configuration
+    // has actually produced, read from the sessions themselves. A model that is
+    // set and a model that answers are different facts, and only the second one
+    // is memory.
+    let configured = describe_consolidation(&facts.consolidation);
+    let observed = describe_recent_summaries(
+        &store.recent_sessions(scope.project_id, SUMMARY_WINDOW)?,
+        &facts.consolidation,
+    );
+    match (configured, observed) {
+        (Some(configured), Some(observed)) => println!("  Summaries: {configured} — {observed}"),
+        (Some(line), None) | (None, Some(line)) => println!("  Summaries: {line}"),
+        (None, None) => {}
     }
     if let Some(line) = describe_embedding(&facts.embedding) {
         println!("  Vectors:   {line}");
@@ -309,6 +322,76 @@ impl From<AuthState> for ServerFacts {
     }
 }
 
+/// How many recent sessions [`describe_recent_summaries`] judges by.
+///
+/// Small enough that a fault shows up within an afternoon's work, large enough
+/// that one counted page — a session a model legitimately had nothing to say
+/// about — does not read as an outage.
+const SUMMARY_WINDOW: usize = 10;
+
+/// What the configured model has actually been producing.
+///
+/// The line above this one reports the model the server would use. That is not
+/// the same claim, and the gap between them is where this system spent an
+/// afternoon writing tallies while every diagnostic said it was healthy: the
+/// provider answered `503` for every real request, consolidation fell back to
+/// counting exactly as designed, and `status` went on naming the model.
+///
+/// Read from the sessions rather than from the server so it survives the
+/// server restarting, which is the moment an in-memory tally of the same thing
+/// would forget the outage it exists to report.
+///
+/// `None` when nothing in the window has a recorded provenance — every session
+/// that ended before this was tracked, which must read as "no evidence" and
+/// never as "no model" — and `None` for a server with no model at all, where
+/// counted pages are the configuration working rather than a fault. Reporting
+/// an outage there would be the same sin the line is here to fix, told the
+/// other way round.
+fn describe_recent_summaries(
+    recent: &[SessionSummary],
+    configured: &ServerModel,
+) -> Option<String> {
+    if matches!(configured, ServerModel::Absent) {
+        return None;
+    }
+
+    let judged: Vec<SummarySource> = recent
+        .iter()
+        .filter_map(|session| session.summary_source)
+        .collect();
+    if judged.is_empty() {
+        return None;
+    }
+
+    let counted = judged
+        .iter()
+        .filter(|source| **source == SummarySource::Counted)
+        .count();
+    // Counted from the newest backwards, because that is the shape an outage
+    // has. Five counted pages with a model-written one on top is a fault that
+    // ended; five counted pages and nothing since is a fault that is still
+    // running, and the two deserve different sentences.
+    let run = judged
+        .iter()
+        .take_while(|source| **source == SummarySource::Counted)
+        .count();
+
+    // Only a server that named a model can be said to have one that is not
+    // answering. Asked of a server too old to say, the counts are still true
+    // and the diagnosis is not ours to make.
+    let diagnosis = match configured {
+        ServerModel::Named(_) => ", the model is not answering",
+        _ => "",
+    };
+
+    Some(match (counted, run) {
+        (0, _) => format!("last {}: all by the model", judged.len()),
+        (_, 0) => format!("last {}: {counted} counted", judged.len()),
+        (_, 1) => format!("the last session was counted{diagnosis}"),
+        _ => format!("the last {run} were counted{diagnosis}"),
+    })
+}
+
 /// How the server turns sessions into pages.
 fn describe_consolidation(model: &ServerModel) -> Option<String> {
     match model {
@@ -461,6 +544,107 @@ mod tests {
 
     fn at(raw: &str) -> Timestamp {
         raw.parse().expect("timestamp")
+    }
+
+    /// One session as `recent_sessions` hands it over, newest first.
+    fn summarised(source: Option<SummarySource>) -> SessionSummary {
+        SessionSummary {
+            id: anamnesis_core::ids::SessionId::new(),
+            agent: "claude-code".to_owned(),
+            state: "closed".to_owned(),
+            started_at: at("2026-09-07T12:00:00Z"),
+            ended_at: Some(at("2026-09-07T13:00:00Z")),
+            workstream: None,
+            operator: None,
+            observation_count: 42,
+            summary_source: source,
+            summary_model: source.map(|_| "gemini-3.5-flash".to_owned()),
+        }
+    }
+
+    /// The server that named a model, which is when the evidence matters.
+    fn named() -> ServerModel {
+        ServerModel::Named("gemini-3.5-flash".to_owned())
+    }
+
+    /// A database from before provenance was tracked has to read as no
+    /// evidence. Reporting "0 counted" for it would be a health claim made out
+    /// of rows that say nothing at all.
+    #[test]
+    fn sessions_with_no_recorded_provenance_say_nothing() {
+        let recent = vec![summarised(None), summarised(None)];
+        assert_eq!(describe_recent_summaries(&recent, &named()), None);
+        assert_eq!(describe_recent_summaries(&[], &named()), None);
+    }
+
+    /// A server with no model writes counts because that is what it is for.
+    /// The configured half of the line already says so, and adding "the model
+    /// is not answering" would name a fault that does not exist — the same
+    /// confusion of two different problems, told backwards.
+    #[test]
+    fn a_server_with_no_model_is_not_having_an_outage() {
+        let recent = vec![summarised(Some(SummarySource::Counted)); 2];
+        assert_eq!(
+            describe_recent_summaries(&recent, &ServerModel::Absent),
+            None
+        );
+    }
+
+    /// A server too old to say what it uses still has countable evidence, but
+    /// the diagnosis is not ours to make on its behalf.
+    #[test]
+    fn an_unstated_model_gets_the_counts_without_the_diagnosis() {
+        let recent = vec![summarised(Some(SummarySource::Counted)); 2];
+        let line = describe_recent_summaries(&recent, &ServerModel::Unstated).expect("a line");
+        assert_eq!(line, "the last 2 were counted");
+    }
+
+    /// The quiet case, and worth a line: "configured" and "working" look
+    /// identical without it.
+    #[test]
+    fn a_model_that_is_writing_says_so() {
+        let recent = vec![summarised(Some(SummarySource::Model)); 3];
+        let line = describe_recent_summaries(&recent, &named()).expect("a line");
+        assert_eq!(line, "last 3: all by the model");
+    }
+
+    /// The line this whole change exists for. A run of counted pages at the
+    /// newest end is an outage that is still running.
+    #[test]
+    fn a_run_of_counted_pages_is_reported_as_an_outage() {
+        let recent = vec![
+            summarised(Some(SummarySource::Counted)),
+            summarised(Some(SummarySource::Counted)),
+            summarised(Some(SummarySource::Model)),
+        ];
+        let line = describe_recent_summaries(&recent, &named()).expect("a line");
+        assert_eq!(line, "the last 2 were counted, the model is not answering");
+    }
+
+    /// One counted page under a model-written one is a session the model had
+    /// nothing to say about, not a provider that is down. Saying "not
+    /// answering" there would train everyone to ignore the line.
+    #[test]
+    fn counted_pages_under_a_working_model_are_not_an_outage() {
+        let recent = vec![
+            summarised(Some(SummarySource::Model)),
+            summarised(Some(SummarySource::Counted)),
+            summarised(Some(SummarySource::Model)),
+        ];
+        let line = describe_recent_summaries(&recent, &named()).expect("a line");
+        assert_eq!(line, "last 3: 1 counted");
+    }
+
+    /// Singular, because a line that says "the last 1 were counted" is a line
+    /// nobody trusts the rest of.
+    #[test]
+    fn one_counted_session_reads_as_one() {
+        let recent = vec![summarised(Some(SummarySource::Counted))];
+        let line = describe_recent_summaries(&recent, &named()).expect("a line");
+        assert_eq!(
+            line,
+            "the last session was counted, the model is not answering"
+        );
     }
 
     /// The whole point of the line: an unreachable server means events are

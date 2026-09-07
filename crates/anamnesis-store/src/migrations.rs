@@ -89,6 +89,10 @@ const SOURCES: &[(&str, &str)] = &[
         "V11__audit_log",
         include_str!("../migrations/V11__audit_log.sql"),
     ),
+    (
+        "V12__summary_provenance",
+        include_str!("../migrations/V12__summary_provenance.sql"),
+    ),
 ];
 
 /// The name refinery gives its own bookkeeping table.

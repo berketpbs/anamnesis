@@ -39,7 +39,9 @@ mod sweep;
 mod workstream;
 
 pub use improve::{Filed, ProjectRow, StoredProposal};
-pub use ops::{OpenSession, SessionSummary, new_handoff, new_observation, new_session};
+pub use ops::{
+    OpenSession, SessionSummary, SummarySource, new_handoff, new_observation, new_session,
+};
 pub use purge::Purged;
 pub use query::PageHit;
 pub use raw::{RawError, RawRecord, RawSpool};
@@ -258,14 +260,14 @@ mod tests {
         assert_eq!(store.schema_version().expect("version"), None);
 
         store.migrate().expect("migrate");
-        assert_eq!(store.schema_version().expect("version"), Some(11));
+        assert_eq!(store.schema_version().expect("version"), Some(12));
     }
 
     #[test]
     fn migrating_twice_is_a_no_op() {
         let store = migrated();
         store.migrate().expect("second migrate");
-        assert_eq!(store.schema_version().expect("version"), Some(11));
+        assert_eq!(store.schema_version().expect("version"), Some(12));
     }
 
     #[test]
