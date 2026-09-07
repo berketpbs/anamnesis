@@ -1123,6 +1123,84 @@ mod tests {
         assert_eq!(indexed, 1);
     }
 
+    /// The model had never been told wiki links exist, so every page it wrote
+    /// arrived with no outgoing edges — and since a model writes most of the
+    /// pages here, the link stream was ranking over a graph the system had
+    /// starved itself. This asserts both halves: the prompt names what can be
+    /// linked, and a link the model writes resolves.
+    #[tokio::test]
+    async fn a_model_is_shown_what_it_may_link_to_and_its_links_resolve() {
+        let harness = harness();
+        let scope = resolve_scope(&harness.cwd).expect("scope");
+
+        let target =
+            anamnesis_core::page::PagePath::parse("decisions/0001-storage.md").expect("path");
+        let page = anamnesis_core::page::Page::new(
+            scope.project_id,
+            target.clone(),
+            anamnesis_core::page::Frontmatter::new("Storage engine", Vec::new())
+                .expect("frontmatter"),
+            "SQLite, because the index is disposable.",
+        );
+        harness
+            .state
+            .wiki
+            .lock()
+            .write_page(&scope.scope, &page, "write")
+            .expect("write");
+        harness
+            .state
+            .store
+            .upsert_project(&scope, now())
+            .expect("project");
+        harness.state.store.upsert_page(&page, now()).expect("page");
+
+        let (scope, session_id) = recorded(&harness);
+        let provider = Arc::new(Fake::answering(json!({
+            "title": "t",
+            "body": "## Why\n\nIt follows [[decisions/0001-storage.md]].",
+            "handoff": "h",
+        })));
+
+        let written = finalize_and_enrich(
+            &harness.state.store,
+            &harness.state.wiki,
+            &scope,
+            session_id,
+            None,
+            now(),
+            &settings(provider.clone()),
+        )
+        .await
+        .expect("finalized")
+        .expect("a page");
+
+        assert!(
+            provider.prompt().contains("- decisions/0001-storage.md"),
+            "the model cannot link to what it was never shown"
+        );
+
+        let from = anamnesis_core::ids::PageId::derive(
+            scope.project_id,
+            &anamnesis_core::page::PagePath::parse(&written).expect("path"),
+        );
+        let resolved: Option<String> = harness
+            .state
+            .store
+            .connection()
+            .query_row(
+                "SELECT to_page_id FROM page_links WHERE from_page_id = ?1",
+                [from.to_string()],
+                |row| row.get(0),
+            )
+            .expect("a link row");
+        assert_eq!(
+            resolved,
+            Some(anamnesis_core::ids::PageId::derive(scope.project_id, &target).to_string()),
+            "and the link it wrote points at a page, not at nothing"
+        );
+    }
+
     #[test]
     fn a_link_in_a_session_page_reaches_the_index_without_a_rebuild() {
         // The live path and a rebuild have to produce the same index. They

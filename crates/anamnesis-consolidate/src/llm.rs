@@ -45,6 +45,31 @@ const PREFERENCES_SHARE: usize = 5;
 /// Longest single observation body included in the prompt, in characters.
 const MAX_BODY_CHARS: usize = 600;
 
+/// Share of the prompt the list of existing pages may take, as a divisor.
+///
+/// Smaller than the preferences share because paths are short and a project
+/// with a thousand of them must not crowd out the session being summarised.
+/// A truncated list is a page the model cannot link to, which costs one edge;
+/// a truncated transcript is a session it cannot describe.
+const PAGES_SHARE: usize = 8;
+
+/// What the model is told about the memory this session is joining.
+///
+/// Bundled rather than passed one by one because both halves answer the same
+/// question — what is already here — and because the caller that has one
+/// almost always has the other.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Surroundings<'a> {
+    /// The project's consolidation preferences, if it has written any.
+    pub preferences: Option<&'a str>,
+    /// Paths of pages already in this project's memory.
+    ///
+    /// The model is asked to link only to these. It cannot see the wiki, so a
+    /// prompt that invites linking without saying what exists invites invented
+    /// paths — links that resolve to nothing and mean nothing.
+    pub pages: &'a [String],
+}
+
 /// What the model is being asked to do.
 ///
 /// Written as a job description rather than a list of prohibitions. The two
@@ -91,7 +116,15 @@ about, spelled as they appear. Name a file the way somebody would type it — \
 `sanitize.rs`, not `crates/anamnesis-core/src/sanitize.rs` — because a search \
 has to contain every word of the name. At most ten, fewer when fewer are \
 warranted, and nothing generic — `code`, `bug`, and `session` find everything \
-and therefore nothing.";
+and therefore nothing.
+- This memory already holds pages, and the ones it holds are listed for you. \
+Where the session genuinely bears on one — it caused what that page describes, \
+or fixed it, or contradicts it, or is the reason it was written — say so in \
+the body and link the page by its path: `[[gotchas/a-page-name.md]]`. Link \
+only to a path that appears in that list, exactly as it is written there. A \
+link to a page that does not exist points nowhere, and a page that links to \
+everything distinguishes nothing; when nothing is genuinely related, link \
+nothing.";
 
 /// The reply shape.
 ///
@@ -108,7 +141,7 @@ pub fn schema() -> Value {
             },
             "body": {
                 "type": "string",
-                "description": "The session page, in markdown. Use ## for sections; no level-1 heading.",
+                "description": "The session page, in markdown. Use ## for sections; no level-1 heading. A page already in this memory may be linked by its path, written exactly as the prompt lists it: `[[gotchas/a-page-name.md]]`. Only paths from that list.",
             },
             "handoff": {
                 "type": "string",
@@ -150,7 +183,7 @@ pub async fn consolidate_with_llm(
     provider: &dyn Provider,
     session: &Session,
     observations: &[Observation],
-    preferences: Option<&str>,
+    surroundings: Surroundings<'_>,
     max_input_tokens: usize,
     max_output_tokens: u32,
 ) -> Option<SessionDigest> {
@@ -158,7 +191,7 @@ pub async fn consolidate_with_llm(
         provider,
         session,
         observations,
-        preferences,
+        surroundings,
         max_input_tokens,
         max_output_tokens,
     )
@@ -174,7 +207,7 @@ pub async fn consolidate_with_source(
     provider: &dyn Provider,
     session: &Session,
     observations: &[Observation],
-    preferences: Option<&str>,
+    surroundings: Surroundings<'_>,
     max_input_tokens: usize,
     max_output_tokens: u32,
 ) -> Option<(SessionDigest, DigestSource)> {
@@ -186,7 +219,7 @@ pub async fn consolidate_with_source(
 
     let request = Completion {
         system: SYSTEM.to_owned(),
-        user: render_prompt(session, observations, preferences, max_input_tokens),
+        user: render_prompt(session, observations, surroundings, max_input_tokens),
         schema: schema(),
         max_output_tokens,
     };
@@ -219,9 +252,10 @@ pub async fn consolidate_with_source(
 pub fn render_prompt(
     session: &Session,
     observations: &[Observation],
-    preferences: Option<&str>,
+    surroundings: Surroundings<'_>,
     max_tokens: usize,
 ) -> String {
+    let preferences = surroundings.preferences;
     let mut out = String::new();
 
     out.push_str("# Session\n\n");
@@ -243,6 +277,14 @@ pub fn render_prompt(
         out.push('\n');
     }
 
+    if !surroundings.pages.is_empty() {
+        out.push_str("\n# Pages already in this memory\n\n");
+        out.push_str(&render_known_pages(
+            surroundings.pages,
+            max_tokens / PAGES_SHARE,
+        ));
+    }
+
     out.push_str("\n# Transcript\n\n");
 
     // Whatever the header and preferences took is gone; the transcript gets
@@ -257,6 +299,42 @@ pub fn render_prompt(
         out.push('\n');
     }
 
+    out
+}
+
+/// The paths a model may link to, as many as the budget holds.
+///
+/// Whole paths only. A clipped path is not a shorter path, it is a link that
+/// resolves to nothing — so the budget is spent in path-sized units and the
+/// remainder is reported rather than sliced. Saying how many were left out
+/// matters: a model told to link only to what it can see should know that what
+/// it can see is not everything.
+fn render_known_pages(pages: &[String], max_tokens: usize) -> String {
+    // Reserved for the line that says what was dropped, so adding it can never
+    // be what pushes the section over.
+    const MARKER_TOKENS: usize = 16;
+    let budget = max_tokens.saturating_sub(MARKER_TOKENS);
+
+    let mut out = String::new();
+    let mut spent = 0;
+    let mut shown = 0;
+    for path in pages {
+        let line = format!("- {path}\n");
+        let cost = estimate_tokens(&line);
+        if spent + cost > budget {
+            break;
+        }
+        out.push_str(&line);
+        spent += cost;
+        shown += 1;
+    }
+
+    if shown < pages.len() {
+        out.push_str(&format!(
+            "[… {} more pages, not listed …]\n",
+            pages.len() - shown
+        ));
+    }
     out
 }
 
@@ -709,7 +787,7 @@ mod tests {
             &Fake(Ok(good_reply())),
             &session(),
             &working_session(),
-            None,
+            Surroundings::default(),
             6_500,
             2_000,
         )
@@ -727,7 +805,7 @@ mod tests {
             &Fake(Err(())),
             &session(),
             &working_session(),
-            None,
+            Surroundings::default(),
             6_500,
             2_000,
         )
@@ -746,7 +824,7 @@ mod tests {
             &Fake(Ok(good_reply())),
             &session(),
             &working_session(),
-            None,
+            Surroundings::default(),
             6_500,
             2_000,
         )
@@ -758,7 +836,7 @@ mod tests {
             &Fake(Err(())),
             &session(),
             &working_session(),
-            None,
+            Surroundings::default(),
             6_500,
             2_000,
         )
@@ -776,7 +854,7 @@ mod tests {
             &Fake(Ok(json!({"title": "t", "body": "b"}))),
             &session(),
             &working_session(),
-            None,
+            Surroundings::default(),
             6_500,
             2_000,
         )
@@ -793,7 +871,7 @@ mod tests {
             &Fake(Ok(json!({"title": "t", "body": "b"}))),
             &session(),
             &working_session(),
-            None,
+            Surroundings::default(),
             6_500,
             2_000,
         )
@@ -814,7 +892,7 @@ mod tests {
                 &Fake(Ok(good_reply())),
                 &session(),
                 &boundaries,
-                None,
+                Surroundings::default(),
                 6_500,
                 2_000,
             )
@@ -1162,7 +1240,12 @@ mod tests {
 
     #[test]
     fn the_prompt_names_the_files_and_failures_the_model_needs() {
-        let prompt = render_prompt(&session(), &working_session(), None, 6_500);
+        let prompt = render_prompt(
+            &session(),
+            &working_session(),
+            Surroundings::default(),
+            6_500,
+        );
         assert!(prompt.contains("add the llm provider"));
         assert!(prompt.contains("crates/anamnesis-llm/src/lib.rs"));
         assert!(prompt.contains("(FAILED)"));
@@ -1172,7 +1255,15 @@ mod tests {
     #[test]
     fn preferences_are_included_but_cannot_take_the_whole_budget() {
         let preferences = "ticket numbers matter. ".repeat(2_000);
-        let prompt = render_prompt(&session(), &working_session(), Some(&preferences), 1_000);
+        let prompt = render_prompt(
+            &session(),
+            &working_session(),
+            Surroundings {
+                preferences: Some(&preferences),
+                ..Surroundings::default()
+            },
+            1_000,
+        );
         assert!(prompt.contains("Project preferences"));
         assert!(prompt.contains("ticket numbers matter"));
         assert!(
@@ -1180,6 +1271,74 @@ mod tests {
             "transcript survived"
         );
         assert!(estimate_tokens(&prompt) <= 1_100, "prompt stayed bounded");
+    }
+
+    /// The model cannot see the wiki, so the prompt is the only place a real
+    /// path can come from. Without this the linking rule invites invention.
+    #[test]
+    fn the_pages_a_model_may_link_to_are_named_in_the_prompt() {
+        let pages = vec![
+            "gotchas/a-checkout-decided-what-a-database-could-open.md".to_owned(),
+            "decisions/0001-storage.md".to_owned(),
+        ];
+        let prompt = render_prompt(
+            &session(),
+            &working_session(),
+            Surroundings {
+                pages: &pages,
+                ..Surroundings::default()
+            },
+            6_500,
+        );
+        assert!(prompt.contains("Pages already in this memory"));
+        assert!(prompt.contains("- decisions/0001-storage.md"));
+        assert!(
+            prompt.contains("add the llm provider"),
+            "the transcript still gets the rest"
+        );
+    }
+
+    /// A project with a thousand pages must not spend the session's budget on
+    /// a directory listing — and what is left out is said, because a model told
+    /// to link only to what it can see should know it is not seeing everything.
+    #[test]
+    fn a_long_list_of_pages_is_cut_to_whole_paths_and_says_so() {
+        let pages: Vec<String> = (0..500).map(|i| format!("notes/page-{i:03}.md")).collect();
+        let prompt = render_prompt(
+            &session(),
+            &working_session(),
+            Surroundings {
+                pages: &pages,
+                ..Surroundings::default()
+            },
+            1_000,
+        );
+
+        assert!(prompt.contains("more pages, not listed"));
+        assert!(estimate_tokens(&prompt) <= 1_100, "prompt stayed bounded");
+        for line in prompt.lines().filter(|line| line.starts_with("- notes/")) {
+            assert!(
+                line.ends_with(".md"),
+                "a clipped path is not a shorter path, it is a broken link: {line}"
+            );
+        }
+        assert!(
+            prompt.contains("add the llm provider"),
+            "and the transcript is still there"
+        );
+    }
+
+    /// A project whose wiki is empty gets no section at all, rather than an
+    /// empty heading inviting links to nothing.
+    #[test]
+    fn an_empty_memory_is_not_offered_as_a_list() {
+        let prompt = render_prompt(
+            &session(),
+            &working_session(),
+            Surroundings::default(),
+            6_500,
+        );
+        assert!(!prompt.contains("Pages already in this memory"));
     }
 
     #[test]
@@ -1197,7 +1356,7 @@ mod tests {
         }
         observations.push(observation(EventKind::UserPrompt, "LAST PROMPT", None));
 
-        let prompt = render_prompt(&session(), &observations, None, 1_200);
+        let prompt = render_prompt(&session(), &observations, Surroundings::default(), 1_200);
         assert!(prompt.contains("FIRST PROMPT"));
         assert!(prompt.contains("LAST PROMPT"));
         assert!(prompt.contains("events omitted"));
@@ -1206,7 +1365,12 @@ mod tests {
 
     #[test]
     fn a_transcript_that_fits_is_not_disturbed() {
-        let prompt = render_prompt(&session(), &working_session(), None, 6_500);
+        let prompt = render_prompt(
+            &session(),
+            &working_session(),
+            Surroundings::default(),
+            6_500,
+        );
         assert!(!prompt.contains("events omitted"));
     }
 

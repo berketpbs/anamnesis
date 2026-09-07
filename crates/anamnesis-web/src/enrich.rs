@@ -21,7 +21,7 @@
 
 use std::sync::Arc;
 
-use anamnesis_consolidate::consolidate_with_source;
+use anamnesis_consolidate::{Surroundings, consolidate_with_source};
 use anamnesis_core::embedding::Embed;
 use anamnesis_core::ids::SessionId;
 use anamnesis_core::scope::{ResolvedScope, resolve_scope};
@@ -91,15 +91,27 @@ pub async fn enrich(
             if observations.is_empty() {
                 return Ok(None);
             }
-            let preferences = {
+            // Both come from the wiki, so both are read under one hold of it.
+            // The session's own page is left out of the list: it exists by now
+            // — `finalize` wrote it — and a page that links to itself has said
+            // nothing.
+            let (preferences, pages) = {
                 let wiki = wiki.lock();
-                read_preferences(&wiki, &scope)
+                let own = crate::pipeline::session_page_path(&session.started_at, session.id)?;
+                let pages = wiki
+                    .pages(&scope.scope)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|path| path != &own)
+                    .map(|path| path.as_str().to_owned())
+                    .collect::<Vec<_>>();
+                (read_preferences(&wiki, &scope), pages)
             };
-            Ok(Some((session, observations, preferences)))
+            Ok(Some((session, observations, preferences, pages)))
         })
         .await?
     };
-    let Some((session, observations, preferences)) = loaded else {
+    let Some((session, observations, preferences, pages)) = loaded else {
         return Ok(Enriched::Nothing);
     };
 
@@ -107,7 +119,10 @@ pub async fn enrich(
         llm.provider.as_ref(),
         &session,
         &observations,
-        preferences.as_deref(),
+        Surroundings {
+            preferences: preferences.as_deref(),
+            pages: &pages,
+        },
         llm.max_input_tokens,
         llm.max_output_tokens,
     )

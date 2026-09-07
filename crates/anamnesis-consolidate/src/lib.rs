@@ -23,8 +23,8 @@ mod llm;
 
 pub use files::mentioned_files;
 pub use llm::{
-    DigestSource, PREFERENCES_PAGE, consolidate_with_llm, consolidate_with_source, render_prompt,
-    schema,
+    DigestSource, PREFERENCES_PAGE, Surroundings, consolidate_with_llm, consolidate_with_source,
+    render_prompt, schema,
 };
 
 /// Longest handoff this module will produce, in bytes.
