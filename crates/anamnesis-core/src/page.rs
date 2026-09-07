@@ -3,7 +3,7 @@
 use jiff::Timestamp;
 
 use crate::error::{CoreError, Result};
-use crate::ids::{PageId, ProjectId};
+use crate::ids::{PageId, ProjectId, SessionId};
 
 /// Longest permitted page path, in bytes.
 pub const MAX_PATH_LEN: usize = 255;
@@ -326,6 +326,14 @@ pub struct Frontmatter {
     pub entities: Vec<Entity>,
     /// When the page should be forgotten.
     pub expires_at: Option<Timestamp>,
+    /// The session whose consolidation wrote this page, if one did.
+    ///
+    /// Provenance, and it lives here rather than in the index for the reason
+    /// the paragraph above gives: the index is rebuilt from these files, so a
+    /// column the markdown does not carry is a fact `reindex` quietly forgets.
+    /// A page somebody wrote by hand names no session, and that is the honest
+    /// answer for it — `None` is "not from a session", never "session unknown".
+    pub session: Option<SessionId>,
 }
 
 impl Default for Frontmatter {
@@ -340,6 +348,7 @@ impl Default for Frontmatter {
             salience: 1.0,
             entities: Vec::new(),
             expires_at: None,
+            session: None,
         }
     }
 }

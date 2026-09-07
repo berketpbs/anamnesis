@@ -11,7 +11,7 @@ use anamnesis_core::embedding::{Embed, page_text};
 use anamnesis_core::handoff::{Handoff, HandoffState, Slot};
 use anamnesis_core::ids::{HandoffId, ObservationId, PageId, ProjectId, SessionId, WorkstreamId};
 use anamnesis_core::observation::{BoundedBody, EventKind, Observation, ToolRef};
-use anamnesis_core::page::Page;
+use anamnesis_core::page::{Page, PagePath};
 use anamnesis_core::session::{AgentKind, Session, SessionState};
 use jiff::Timestamp;
 use rusqlite::{OptionalExtension, Row, params};
@@ -140,6 +140,29 @@ impl Store {
             params![id.to_string(), ended_at.to_string()],
         )?;
         Ok(())
+    }
+
+    /// The pages a session's consolidation wrote, in path order.
+    ///
+    /// The question nothing could answer before. While a session produced one
+    /// page its path could be derived and that was enough; a session that
+    /// produces several needs to know which ones were its, or a later run that
+    /// names its pages differently leaves the earlier ones behind with nothing
+    /// able to find them.
+    ///
+    /// Only pages that say so. A page with no session is not a page whose
+    /// session is unknown — it is a page nobody's consolidation wrote, and it
+    /// is not this caller's to touch.
+    pub fn pages_from_session(&self, session_id: SessionId) -> Result<Vec<PagePath>> {
+        let conn = self.connection();
+        let mut statement = conn.prepare(
+            "SELECT path FROM pages WHERE session_id = ?1 ORDER BY path ASC",
+        )?;
+        let rows = statement.query_map(params![session_id.to_string()], |row| {
+            Ok(crate::convert::parse_page_path(&row.get::<_, String>(0)?))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// Record what wrote a session's page.
@@ -432,8 +455,9 @@ impl Store {
         tx.execute(
             "INSERT INTO pages
                  (id, project_id, path, title, body, tier, status, pinned, canonical,
-                  salience, expires_at, git_commit, supersedes_target, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)
+                  salience, expires_at, git_commit, supersedes_target, session_id,
+                  created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15)
              ON CONFLICT (id) DO UPDATE SET
                  title             = excluded.title,
                  body              = excluded.body,
@@ -445,6 +469,7 @@ impl Store {
                  expires_at        = excluded.expires_at,
                  git_commit        = excluded.git_commit,
                  supersedes_target = excluded.supersedes_target,
+                 session_id        = excluded.session_id,
                  updated_at        = excluded.updated_at",
             params![
                 page.id.to_string(),
@@ -460,6 +485,7 @@ impl Store {
                 fm.expires_at.map(|t| t.to_string()),
                 page.git_commit.clone(),
                 target.clone(),
+                fm.session.map(|id| id.to_string()),
                 now.to_string(),
             ],
         )?;
@@ -813,7 +839,7 @@ impl Store {
         let found = conn
             .query_row(
                 "SELECT title, body, tier, status, pinned, canonical, salience,
-                        expires_at, supersedes_target
+                        expires_at, supersedes_target, session_id
                  FROM pages WHERE id = ?1",
                 params![page.id.to_string()],
                 |row| {
@@ -827,6 +853,7 @@ impl Store {
                         row.get::<_, f64>(6)?,
                         row.get::<_, Option<String>>(7)?,
                         row.get::<_, Option<String>>(8)?,
+                        row.get::<_, Option<String>>(9)?,
                     ))
                 },
             )
@@ -847,6 +874,7 @@ impl Store {
                 fm.salience,
                 fm.expires_at.map(|at| at.to_string()),
                 fm.supersedes.as_ref().map(|p| p.as_str().to_owned()),
+                fm.session.map(|id| id.to_string()),
             ))
     }
 
