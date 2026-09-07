@@ -32,6 +32,7 @@ use tokio_util::task::TaskTracker;
 
 pub mod api;
 pub mod auth;
+pub mod enrich;
 pub mod improve;
 mod pipeline;
 pub mod reap;
@@ -43,7 +44,7 @@ pub use auth::{Auth, Identity};
 use shutdown::{Stop, finish_in_flight, stopped};
 
 pub use pipeline::{
-    Consolidation, Ingested, ProbeReport, Provenance, claim_handoff, finalize, finalize_with_llm,
+    Consolidation, Ingested, ProbeReport, Provenance, claim_handoff, finalize, finalize_and_enrich,
     ingest, probe, read_preferences, recompile, record, session_page_path,
 };
 
@@ -464,6 +465,14 @@ pub async fn serve_on(
     // wrong question.
     tokio::spawn(reap::run_reaper(state.clone()));
 
+    // The net beneath consolidation. Every session now closes with a page
+    // before a provider is asked anything, so a provider that is down costs an
+    // enrichment rather than a page — and this is what collects the ones it
+    // cost. Unconditional for the same reason as the reaper: a session whose
+    // page is a tally because a model answered 503 for an afternoon is a fault
+    // nobody would think to go looking for.
+    tokio::spawn(enrich::run_enricher(state.clone()));
+
     // On by default, unlike the scheduler, and the difference is what each one
     // does: auto-improve makes decisions about someone's memory, so it waits to
     // be asked. The watcher only makes the index say what the wiki already
@@ -689,7 +698,7 @@ async fn receive_hook(
             // would be a session that ended and left no page. Every failure in
             // this system that took days to notice had exactly that shape.
             let handle = tokio::spawn(async move {
-                let outcome = finalize_with_llm(
+                let outcome = finalize_and_enrich(
                     &background.store,
                     &background.wiki,
                     &scope,
@@ -1474,11 +1483,19 @@ mod tests {
     }
 
     /// A provider crate is third-party code running in a task nobody awaits.
-    /// If it dies, the server must stay up and the session must stay
-    /// recoverable — half a summary written over a closed session would be
-    /// worse than none.
+    /// If it dies, the server must stay up — and the session must already have
+    /// its page, because nothing a provider does can now happen before the
+    /// page is written.
+    ///
+    /// This assertion is the inverse of the one it replaces. It used to be
+    /// "no page, and the session still open", which was the best available
+    /// outcome while the model call stood between a session ending and its page
+    /// existing: a session left open could at least be reaped later. Splitting
+    /// the two removes the choice. The counted page is written first, so a
+    /// provider that panics costs the reading of the session and not the record
+    /// of it.
     #[tokio::test]
-    async fn a_provider_that_panics_does_not_take_the_server_with_it() {
+    async fn a_provider_that_panics_leaves_the_session_closed_and_recorded() {
         let harness = harness();
         let provider = Arc::new(Fake::exploding());
         let state = harness.state.clone().with_llm(Some(settings(provider)));
@@ -1493,17 +1510,24 @@ mod tests {
         // shutdown into the full fifteen seconds.
         assert!(finish_in_flight(&state.tasks, std::time::Duration::from_secs(10)).await);
 
-        // No page, which is the honest outcome, and no session pretending to
-        // have been summarised: the transcript is whole and the row is not
-        // closed behind a summary that was never written.
-        assert_eq!(state.store.page_count(project(&harness)).expect("count"), 0);
+        assert_eq!(
+            state.store.page_count(project(&harness)).expect("count"),
+            1,
+            "the counted page is written before a provider is asked anything"
+        );
         let sessions = state
             .store
             .recent_sessions(project(&harness), 10)
             .expect("sessions");
+        let session = sessions.first().expect("the session");
         assert!(
-            sessions.iter().all(|session| session.ended_at.is_none()),
-            "the session should not be closed by a consolidation that died"
+            session.ended_at.is_some(),
+            "the session closed on its own page, not on the model's"
+        );
+        assert_eq!(
+            session.summary_source,
+            Some(anamnesis_store::SummarySource::Counted),
+            "and it says so, which is what puts it in the retry queue"
         );
 
         // And the server is still answering, which is the whole point.
@@ -1678,7 +1702,7 @@ mod tests {
             "handoff": "The provider is wired; nothing else was touched.",
         })));
 
-        let page = finalize_with_llm(
+        let page = finalize_and_enrich(
             &harness.state.store,
             &harness.state.wiki,
             &scope,
@@ -1731,7 +1755,7 @@ mod tests {
         let harness = harness();
         let (scope, session_id) = recorded(&harness);
 
-        let first = finalize_with_llm(
+        let first = finalize_and_enrich(
             &harness.state.store,
             &harness.state.wiki,
             &scope,
@@ -1817,7 +1841,7 @@ mod tests {
         let harness = harness();
         let (scope, session_id) = recorded(&harness);
 
-        finalize_with_llm(
+        finalize_and_enrich(
             &harness.state.store,
             &harness.state.wiki,
             &scope,
@@ -1897,7 +1921,7 @@ mod tests {
         let harness = harness();
         let (scope, session_id) = recorded(&harness);
 
-        finalize_with_llm(
+        finalize_and_enrich(
             &harness.state.store,
             &harness.state.wiki,
             &scope,
@@ -1961,7 +1985,7 @@ mod tests {
         let harness = harness();
         let (scope, session_id) = recorded(&harness);
 
-        let page = finalize_with_llm(
+        let page = finalize_and_enrich(
             &harness.state.store,
             &harness.state.wiki,
             &scope,
@@ -2004,7 +2028,7 @@ mod tests {
             "handoff": "h",
         })));
 
-        finalize_with_llm(
+        finalize_and_enrich(
             &harness.state.store,
             &harness.state.wiki,
             &scope,
@@ -2031,7 +2055,7 @@ mod tests {
         let harness = harness();
         let (scope, session_id) = recorded(&harness);
 
-        let page = finalize_with_llm(
+        let page = finalize_and_enrich(
             &harness.state.store,
             &harness.state.wiki,
             &scope,
@@ -2069,7 +2093,7 @@ mod tests {
         let harness = harness();
         let (scope, session_id) = recorded(&harness);
 
-        finalize_with_llm(
+        finalize_and_enrich(
             &harness.state.store,
             &harness.state.wiki,
             &scope,
@@ -2098,6 +2122,174 @@ mod tests {
         assert_eq!(session.summary_model.as_deref(), Some("fake-1"));
     }
 
+    /// One session's provenance, read back the way the retry pass reads it.
+    fn provenance(
+        state: &AppState,
+        scope: &anamnesis_core::scope::ResolvedScope,
+        session_id: anamnesis_core::ids::SessionId,
+    ) -> Option<anamnesis_store::SummarySource> {
+        state
+            .store
+            .recent_sessions(scope.project_id, 10)
+            .expect("list")
+            .into_iter()
+            .find(|row| row.id == session_id)
+            .expect("the session")
+            .summary_source
+    }
+
+    /// The reason the two steps are worth splitting. A provider that is down
+    /// when a session ends no longer costs that session its reading — it only
+    /// delays it until something asks again.
+    #[tokio::test]
+    async fn a_session_a_model_refused_is_asked_about_again() {
+        let harness = harness();
+        let (scope, session_id) = recorded(&harness);
+
+        finalize_and_enrich(
+            &harness.state.store,
+            &harness.state.wiki,
+            &scope,
+            session_id,
+            None,
+            now(),
+            &settings(Arc::new(Fake::broken())),
+        )
+        .await
+        .expect("finalized")
+        .expect("the counted page");
+
+        assert_eq!(
+            provenance(&harness.state, &scope, session_id),
+            Some(anamnesis_store::SummarySource::Counted)
+        );
+        assert_eq!(
+            harness
+                .state
+                .store
+                .sessions_awaiting_enrichment(10)
+                .expect("waiting")
+                .len(),
+            1,
+            "a counted session is the work this pass exists to find"
+        );
+
+        let state = harness
+            .state
+            .clone()
+            .with_llm(Some(settings(Arc::new(Fake::answering(
+                json!({"title": "t", "body": "b", "handoff": "h"}),
+            )))));
+        assert_eq!(enrich::sweep_awaiting(&state, now()).await, 1);
+
+        assert_eq!(
+            provenance(&state, &scope, session_id),
+            Some(anamnesis_store::SummarySource::Model)
+        );
+        assert!(
+            state
+                .store
+                .sessions_awaiting_enrichment(10)
+                .expect("waiting")
+                .is_empty(),
+            "and it leaves the queue, or the next pass would spend the quota again"
+        );
+    }
+
+    /// The model's handoff is the better one, so it replaces the counted note
+    /// written when the session closed.
+    #[tokio::test]
+    async fn the_model_s_handoff_replaces_the_one_nobody_has_read() {
+        let harness = harness();
+        let (scope, session_id) = recorded(&harness);
+
+        finalize_and_enrich(
+            &harness.state.store,
+            &harness.state.wiki,
+            &scope,
+            session_id,
+            None,
+            now(),
+            &settings(Arc::new(Fake::answering(json!({
+                "title": "t",
+                "body": "b",
+                "handoff": "the model's note",
+            })))),
+        )
+        .await
+        .expect("finalized")
+        .expect("a page");
+
+        let waiting = harness
+            .state
+            .store
+            .peek_handoff(scope.project_id, &anamnesis_core::handoff::Slot::shared())
+            .expect("peek")
+            .expect("a handoff");
+        assert_eq!(waiting, "the model's note");
+    }
+
+    /// And it does not, once somebody has. A note that has been read has been
+    /// acted on; replacing it would hand the next session a briefing on work
+    /// that is already done, which is the outcome `recompile` refuses for the
+    /// same reason.
+    #[tokio::test]
+    async fn a_handoff_already_claimed_is_left_alone() {
+        let harness = harness();
+        let (scope, session_id) = recorded(&harness);
+
+        // Close the session with a counted page, which leaves the counted note.
+        finalize_and_enrich(
+            &harness.state.store,
+            &harness.state.wiki,
+            &scope,
+            session_id,
+            None,
+            now(),
+            &settings(Arc::new(Fake::broken())),
+        )
+        .await
+        .expect("finalized")
+        .expect("the counted page");
+
+        // The next session reads it before the model has said anything.
+        let slot = anamnesis_core::handoff::Slot::shared();
+        let claimed = claim_handoff(
+            &harness.state.store,
+            &harness.cwd,
+            &AgentKind::ClaudeCode,
+            "session-next",
+            now(),
+            None,
+        )
+        .expect("claim");
+        assert!(claimed.is_some(), "the counted note was there to be read");
+
+        let state = harness
+            .state
+            .clone()
+            .with_llm(Some(settings(Arc::new(Fake::answering(json!({
+                "title": "t",
+                "body": "b",
+                "handoff": "a briefing on finished work",
+            }))))));
+        assert_eq!(enrich::sweep_awaiting(&state, now()).await, 1);
+
+        assert_eq!(
+            provenance(&state, &scope, session_id),
+            Some(anamnesis_store::SummarySource::Model),
+            "the page is still improved — it is only the note that is left alone"
+        );
+        assert_eq!(
+            state
+                .store
+                .peek_handoff(scope.project_id, &slot)
+                .expect("peek"),
+            None,
+            "nothing new is left waiting behind a note that has been read"
+        );
+    }
+
     #[tokio::test]
     async fn a_missing_preferences_page_is_not_an_error() {
         let harness = harness();
@@ -2106,7 +2298,7 @@ mod tests {
             json!({"title": "t", "body": "b", "handoff": "h"}),
         ));
 
-        let page = finalize_with_llm(
+        let page = finalize_and_enrich(
             &harness.state.store,
             &harness.state.wiki,
             &scope,
@@ -2208,7 +2400,7 @@ mod tests {
             "entities": []
         })));
         let scope = resolve_scope(&harness.cwd).expect("scope");
-        let page = finalize_with_llm(
+        let page = finalize_and_enrich(
             &harness.state.store,
             &harness.state.wiki,
             &scope,
