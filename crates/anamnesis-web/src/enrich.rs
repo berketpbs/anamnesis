@@ -186,8 +186,8 @@ pub async fn enrich(
 
 /// Ask again about the sessions a model never answered for.
 ///
-/// One pass, bounded by [`BATCH`]. Returns how many pages it wrote, which is
-/// what the tests assert on and what the log line reports.
+/// One pass, over a handful of sessions at a time. Returns how many pages it
+/// wrote, which is what the tests assert on and what the log line reports.
 pub async fn sweep_awaiting(state: &AppState, now: Timestamp) -> usize {
     let Some(settings) = state.llm.clone() else {
         return 0;
