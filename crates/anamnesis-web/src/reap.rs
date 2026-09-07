@@ -37,7 +37,7 @@ use anamnesis_store::OpenSession;
 use jiff::Timestamp;
 
 use crate::improve::TICK;
-use crate::pipeline::{finalize, finalize_with_llm};
+use crate::pipeline::{finalize, finalize_and_enrich};
 use crate::{AppState, WebError};
 
 /// Why an open session was left where it was.
@@ -89,7 +89,7 @@ async fn close(
 ) -> Result<Option<String>, WebError> {
     match &state.llm {
         Some(settings) => {
-            finalize_with_llm(
+            finalize_and_enrich(
                 &state.store,
                 &state.wiki,
                 scope,

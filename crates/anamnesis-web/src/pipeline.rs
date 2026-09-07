@@ -8,9 +8,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anamnesis_consolidate::{
-    DigestSource, PREFERENCES_PAGE, SessionDigest, consolidate, consolidate_with_source,
-};
+use anamnesis_consolidate::{DigestSource, PREFERENCES_PAGE, SessionDigest, consolidate};
 use anamnesis_core::capture::CaptureFilter;
 use anamnesis_core::embedding::Embed;
 use anamnesis_core::handoff::Slot;
@@ -343,7 +341,7 @@ impl Provenance<'_> {
 /// A free function rather than a `From` impl because both types belong to
 /// other crates, and the two enums stay separate deliberately: one is what a
 /// consolidation just did, the other is what a row remembers.
-fn summary_source(source: DigestSource) -> SummarySource {
+pub(crate) fn summary_source(source: DigestSource) -> SummarySource {
     match source {
         DigestSource::Model => SummarySource::Model,
         DigestSource::Counted => SummarySource::Counted,
@@ -385,15 +383,24 @@ pub fn finalize(
     .map(Some)
 }
 
-/// Close a session, asking a model what it was about.
+/// Close a session, then ask a model what it was about.
 ///
-/// The same three steps as [`finalize`] with the middle one replaced. The
-/// shape matters more than it looks: the model call happens between the two
-/// locked sections, holding neither the wiki nor a database transaction, so a
-/// slow or hanging provider delays exactly one session's page and blocks
-/// nothing else. Holding the wiki mutex across that await would serialise
-/// every other session ending in the same minute behind it.
-pub async fn finalize_with_llm(
+/// Two steps, and the order is the whole point. [`finalize`] runs first and
+/// touches no network: the page is written, the handoff recorded, the session
+/// closed, in the time a file write and a git commit take. Only then is a
+/// provider asked, and what it returns *replaces* a page that already exists.
+///
+/// It used to be one step, and the handler that called it wrote down what that
+/// cost: the response goes out before the page does, so a server killed during
+/// the model call lost the page and left the session open. That window was as
+/// long as a model call. Now it is as long as a local write, and everything
+/// past it is retriable — see [`crate::enrich`].
+///
+/// A model that refuses is therefore not an error here. The session is closed
+/// and its page is real; the enrichment is the part that did not happen, it is
+/// recorded as not having happened, and the pass in [`crate::enrich`] will try
+/// again.
+pub async fn finalize_and_enrich(
     store: &Arc<Store>,
     wiki: &Arc<Mutex<Wiki>>,
     scope: &ResolvedScope,
@@ -402,83 +409,43 @@ pub async fn finalize_with_llm(
     now: Timestamp,
     llm: &LlmSettings,
 ) -> Result<Option<String>, WebError> {
-    // Three phases, and the middle one is the only one that belongs on the
-    // runtime. Reading a session out of SQLite and reading a preferences page
-    // off disk are blocking calls; so is writing the page, committing it to
-    // git, and embedding it. Only the model is a network wait.
-    let loaded = {
+    let written = {
         let store = store.clone();
         let wiki = wiki.clone();
         let scope = scope.clone();
-        crate::off_runtime(move || -> Result<_, WebError> {
-            let Some((session, observations)) = prepare(&store, session_id, now)? else {
-                return Ok(None);
-            };
-            let preferences = {
-                let wiki = wiki.lock();
-                read_preferences(&wiki, &scope)
-            };
-            Ok(Some((session, observations, preferences)))
+        let embedder = embedder.clone();
+        crate::off_runtime(move || {
+            let held = wiki.lock();
+            finalize(
+                &store,
+                &held,
+                &scope,
+                session_id,
+                embedder
+                    .as_ref()
+                    .map(|embedder| embedder.as_ref() as &dyn Embed),
+                now,
+            )
         })
         .await?
     };
-    let Some((session, observations, preferences)) = loaded else {
+
+    // Nothing worth recording. `finalize` has closed the session and left no
+    // page, and there is nothing for a model to improve on.
+    let Some(page) = written else {
         return Ok(None);
     };
 
-    let compiled = consolidate_with_source(
-        llm.provider.as_ref(),
-        &session,
-        &observations,
-        preferences.as_deref(),
-        llm.max_input_tokens,
-        llm.max_output_tokens,
-    )
-    .await;
+    // Failing here is not failing the call. The page is on disk and the
+    // session is closed; what is lost is the reading of it, which is exactly
+    // what the retry pass exists to collect.
+    if let Err(error) =
+        crate::enrich::enrich(store, wiki, scope, session_id, embedder, now, llm).await
+    {
+        tracing::error!(%error, %session_id, "could not enrich a session that closed cleanly");
+    }
 
-    // The model is named on both branches. When it answered, this is who wrote
-    // the page; when it did not, this is the model that was configured and
-    // failed — which is the fact a counted page has never been able to carry,
-    // and the whole reason a reader could not tell an outage from a quiet day.
-    let model = llm.provider.model().to_owned();
-    let provenance = compiled
-        .as_ref()
-        .map(|(_, source)| summary_source(*source))
-        .unwrap_or(SummarySource::Counted);
-    let digest = compiled.map(|(digest, _)| digest);
-
-    let Some(digest) = digest else {
-        let store = store.clone();
-        return crate::off_runtime(move || -> Result<_, WebError> {
-            store.close_session(session_id, now)?;
-            Ok(None)
-        })
-        .await;
-    };
-
-    let store = store.clone();
-    let wiki = wiki.clone();
-    let scope = scope.clone();
-    crate::off_runtime(move || {
-        let held = wiki.lock();
-        commit(
-            &store,
-            &held,
-            &scope,
-            &session,
-            &digest,
-            Provenance {
-                source: provenance,
-                model: Some(&model),
-            },
-            embedder
-                .as_ref()
-                .map(|embedder| embedder.as_ref() as &dyn Embed),
-            now,
-        )
-        .map(Some)
-    })
-    .await
+    Ok(Some(page))
 }
 
 /// Load what a finished session consists of.
@@ -712,7 +679,7 @@ pub fn claim_handoff(
 /// Keying by an operator a project never asked to separate would hide the
 /// waiting note the first time somebody presented a different token — and the
 /// symptom, an empty handoff, is the one this system is least able to explain.
-fn slot_for(scope: &ResolvedScope, session: &Session) -> Slot {
+pub(crate) fn slot_for(scope: &ResolvedScope, session: &Session) -> Slot {
     let operator = if scope.slots.per_user {
         session.operator.clone()
     } else {

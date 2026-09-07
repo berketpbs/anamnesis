@@ -248,6 +248,41 @@ impl Store {
             .map_err(Into::into)
     }
 
+    /// Closed sessions whose page a model has not written, oldest first.
+    ///
+    /// The work queue for re-asking a model that was unavailable when the
+    /// session ended. `summary_source` is exactly the right column for it: a
+    /// session is `counted` because a provider refused, timed out, answered
+    /// with something that was not a page, or was never configured — and every
+    /// one of those is worth trying again later.
+    ///
+    /// Sessions with no provenance at all are left out. Those closed before
+    /// the column existed, and a pass that adopted them would re-summarise the
+    /// whole history the first time it ran.
+    ///
+    /// Oldest first so a backlog drains in the order it accumulated, and
+    /// bounded because this runs on a timer against a provider with a rate
+    /// limit.
+    pub fn sessions_awaiting_enrichment(&self, limit: usize) -> Result<Vec<OpenSession>> {
+        let conn = self.connection();
+        let mut statement = conn.prepare(
+            "SELECT s.id, s.checkout_path, COALESCE(s.ended_at, s.started_at)
+             FROM sessions s
+             WHERE s.state = 'closed' AND s.summary_source = 'counted'
+             ORDER BY s.started_at ASC
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map(params![limit as i64], |row| {
+            Ok(OpenSession {
+                id: parse_id(row.get::<_, String>(0)?),
+                checkout_path: PathBuf::from(row.get::<_, String>(1)?),
+                last_seen: parse_time(&row.get::<_, String>(2)?),
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     /// Load one session, with the workspace reached through its project.
     pub fn load_session(&self, id: SessionId) -> Result<Option<Session>> {
         let conn = self.connection();
@@ -504,6 +539,59 @@ impl Store {
         )?;
         transaction.commit()?;
         Ok(())
+    }
+
+    /// Replace a handoff that is still waiting, and only that.
+    ///
+    /// [`Store::record_handoff`] always leaves a pending note behind: it
+    /// expires what was waiting and inserts the new one regardless. That is
+    /// right for a session ending, and wrong for a summary that arrives
+    /// *after* the note it would replace has already been read. A session
+    /// closes with a counted handoff, the next session may claim it within
+    /// seconds, and the model's better prose then turns up behind it — writing
+    /// it would hand somebody a briefing on work that has already been handed
+    /// over, which is the one outcome `recompile` refuses for the same reason.
+    ///
+    /// So the expiry decides. If nothing was pending in this slot the note is
+    /// not written at all and `false` comes back. Both statements share one
+    /// transaction, because the whole point is that a claim arriving between
+    /// them must not be overwritten.
+    pub fn supersede_pending_handoff(&self, handoff: &Handoff) -> Result<bool> {
+        let workstream = handoff.workstream_id.map(|id| id.to_string());
+        let operator = handoff.operator.as_ref().map(ToString::to_string);
+        let mut conn = self.connection();
+        let transaction = conn.transaction()?;
+        let expired = transaction.execute(
+            "UPDATE handoffs SET state = 'expired'
+             WHERE project_id = ?1 AND state = 'pending'
+               AND COALESCE(workstream_id, '') = COALESCE(?2, '')
+               AND COALESCE(operator, '') = COALESCE(?3, '')",
+            params![
+                handoff.project_id.to_string(),
+                workstream.clone(),
+                operator.clone()
+            ],
+        )?;
+        if expired == 0 {
+            transaction.rollback()?;
+            return Ok(false);
+        }
+        transaction.execute(
+            "INSERT INTO handoffs
+                 (id, project_id, from_session, body, state, created_at, workstream_id, operator)
+             VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6, ?7)",
+            params![
+                handoff.id.to_string(),
+                handoff.project_id.to_string(),
+                handoff.from_session.to_string(),
+                handoff.body.as_str(),
+                handoff.created_at.to_string(),
+                workstream,
+                operator,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(true)
     }
 
     /// Claim the pending handoff in one of a project's slots, if there is one.
@@ -1517,6 +1605,103 @@ mod tests {
             .claim_handoff(project, claimant, &Slot::shared(), now())
             .expect("claim");
         assert_eq!(claimed.as_deref(), Some("newer"));
+    }
+
+    /// Superseding is conditional where recording is not: it replaces a note
+    /// still waiting and writes nothing at all once one has been read.
+    #[test]
+    fn a_handoff_is_superseded_only_while_it_is_still_waiting() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+
+        store
+            .record_handoff(&new_handoff(
+                project,
+                session.id,
+                Slot::shared(),
+                "counted",
+                now(),
+            ))
+            .expect("first");
+
+        let replaced = store
+            .supersede_pending_handoff(&new_handoff(
+                project,
+                session.id,
+                Slot::shared(),
+                "the model's",
+                now(),
+            ))
+            .expect("supersede");
+        assert!(replaced, "nobody had read it yet");
+        assert_eq!(
+            store
+                .peek_handoff(project, &Slot::shared())
+                .expect("peek")
+                .as_deref(),
+            Some("the model's")
+        );
+
+        // Read it, and the next attempt must leave nothing behind — handing
+        // the session after next a briefing on finished work is the failure
+        // this method exists to avoid.
+        let claimant = next_session(&store, project, workspace);
+        store
+            .claim_handoff(project, claimant, &Slot::shared(), now())
+            .expect("claim");
+
+        let replaced = store
+            .supersede_pending_handoff(&new_handoff(
+                project,
+                session.id,
+                Slot::shared(),
+                "too late",
+                now(),
+            ))
+            .expect("supersede");
+        assert!(!replaced, "there was nothing waiting to replace");
+        assert_eq!(
+            store.peek_handoff(project, &Slot::shared()).expect("peek"),
+            None,
+            "and nothing new was left waiting"
+        );
+    }
+
+    /// The retry queue: counted means a model was asked and did not answer, or
+    /// was never configured. A session with no provenance at all predates the
+    /// column and must not be adopted.
+    #[test]
+    fn only_counted_sessions_are_waiting_for_a_model() {
+        let (_dir, store, project, workspace) = fixture();
+
+        // `next_session` derives one fixed id, so three distinct sessions have
+        // to be built by hand here.
+        let closed = |name: &str| {
+            let mut session = session_for(project, workspace);
+            session.id = SessionId::derive(project, name);
+            store.ensure_session(&session).expect("session");
+            session.id
+        };
+
+        let untracked = closed("before-the-column-existed");
+        store.close_session(untracked, now()).expect("close");
+
+        let counted = closed("a-model-was-asked-and-did-not-answer");
+        store
+            .record_summary(counted, SummarySource::Counted, Some("gemini-3.8-flash"))
+            .expect("record");
+        store.close_session(counted, now()).expect("close");
+
+        let written = closed("a-model-answered");
+        store
+            .record_summary(written, SummarySource::Model, Some("gemini-3.5-flash"))
+            .expect("record");
+        store.close_session(written, now()).expect("close");
+
+        let waiting = store.sessions_awaiting_enrichment(10).expect("waiting");
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].id, counted);
     }
 
     #[test]
