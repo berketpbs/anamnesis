@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Consolidation can leave durable pages, not only the session's own. The wiki
+  has namespaces that outrank everything else during retrieval — `decisions/`,
+  `gotchas/`, `procedures/` — and until now nothing filled them but a person
+  writing a page by hand, while the one moment that has read an entire session
+  and knows whether it produced a decision, hit a gotcha, or worked out a
+  procedure wrote a session page and stopped. The model is now asked for those
+  too, and they land beside the session page: filed by kind, at the tier that
+  kind belongs to, indexed in the same call that indexes any page, and in one
+  commit for the batch, because a session leaving a decision and a gotcha
+  behind is a single decision about a project's memory rather than two
+  unrelated ones. Almost all of the work here is in not doing it: most sessions
+  teach a project nothing that outlives them, a model asked what it learned
+  will answer, and a weak page in these namespaces does not get ignored — it
+  outranks a real one in every later search. So the empty list is the stated
+  normal answer, the ceiling is three, and the prompt spends its length on what
+  a note is *not*. The path is derived from the title rather than chosen by the
+  model, which cannot name a page into `_rules/` — the project's own voice —
+  or collide its way onto one that exists. Nothing is written over a page this
+  session did not write: a recompile replaces the notes its own earlier run
+  left, because the page on disk records the session that wrote it, and
+  anything else standing at that path belongs to somebody else and is left
+  exactly where it is. A note that cannot be written costs one note; a note
+  that fails to be written costs nothing else at all — the session's own page
+  is already committed and its handoff is recorded regardless, on the same rule
+  the whole model path is built on: a model may improve what a session leaves
+  behind, and may never be the reason there is nothing
+
 ### Fixed
 - `status` reported the model the server was configured with, and nothing
   reported whether it had written anything. Those are different claims, and

@@ -492,6 +492,13 @@ fn commit(
         now,
         &format!("session: {}", digest.title),
     )?;
+    // A no-op today, and here on purpose. The only digest that reaches this
+    // function is the counted one, which never names a durable page — a
+    // session closes before a model is asked anything, and the model's reading
+    // arrives later through `recompile`. It is called anyway so that a path
+    // which does hand this function a model's digest does not silently drop
+    // what that model said the session left behind.
+    write_notes(store, wiki, scope, session, digest, embedder, now);
 
     store.record_handoff(&new_handoff(
         scope.project_id,
@@ -553,6 +560,7 @@ pub fn recompile(
         now,
         &format!("recompile: {}", digest.title),
     )?;
+    write_notes(store, wiki, scope, session, digest, embedder, now);
 
     // The one thing a recompile does touch about the session. Its page has
     // just been replaced, so the old provenance describes a page that no
@@ -610,6 +618,127 @@ fn write_session_page(
     )?;
 
     Ok(path.as_str().to_owned())
+}
+
+/// Write the durable pages a digest named, in one commit.
+///
+/// Returns nothing, and cannot fail the caller, which is the whole shape of
+/// this function. The rule the model path is built on — a model may improve
+/// what a session leaves behind and may never be the reason there is nothing —
+/// reaches its last mile here: the session's own page is already written and
+/// its handoff is about to be recorded, and neither may be lost because a
+/// durable page beside them could not be. A failure is logged and the session
+/// closes.
+///
+/// One commit for the batch, separate from the session page's. Separate
+/// because they are two writes with two subjects and the `session:` and
+/// `recompile:` messages are a shape other things read; one commit for the
+/// batch because a consolidation deciding a session left a decision, a gotcha
+/// and a procedure behind is a single decision about this project's memory.
+fn write_notes(
+    store: &Store,
+    wiki: &Wiki,
+    scope: &ResolvedScope,
+    session: &Session,
+    digest: &SessionDigest,
+    embedder: Option<&dyn Embed>,
+    now: Timestamp,
+) {
+    if digest.notes.is_empty() {
+        return;
+    }
+    if let Err(error) = try_write_notes(store, wiki, scope, session, digest, embedder, now) {
+        tracing::error!(
+            %error,
+            session_id = %session.id,
+            "could not write the durable pages a session left; its own page stands"
+        );
+    }
+}
+
+/// The body of [`write_notes`], with the errors it is not allowed to raise.
+fn try_write_notes(
+    store: &Store,
+    wiki: &Wiki,
+    scope: &ResolvedScope,
+    session: &Session,
+    digest: &SessionDigest,
+    embedder: Option<&dyn Embed>,
+    now: Timestamp,
+) -> Result<(), WebError> {
+    // What this session has already written, which is the only thing it may
+    // write over. A recompile has to be able to replace the notes its earlier
+    // run left, or recompiling would either duplicate them under new names or
+    // do nothing at all. Anything else at that path belongs to somebody else —
+    // a person who wrote the page by hand, or another session that got there
+    // first — and a summary of one session does not get to overwrite it.
+    let mine = store.pages_from_session(session.id)?;
+
+    let mut pages = Vec::with_capacity(digest.notes.len());
+    for note in &digest.notes {
+        if wiki.exists(&scope.scope, &note.path) && !mine.contains(&note.path) {
+            tracing::info!(
+                path = %note.path.as_str(),
+                session_id = %session.id,
+                "a page already stands there; the note was not written over it"
+            );
+            continue;
+        }
+
+        let mut frontmatter = Frontmatter::new(&note.title, Vec::new())?;
+        // The tier is what stops a sweep from reading these as one session's
+        // leftovers, and the session id is what a later recompile reads to
+        // know which of them are its own.
+        frontmatter.tier = note.kind.tier();
+        frontmatter.session = Some(session.id);
+
+        pages.push(Page::new(
+            scope.project_id,
+            note.path.clone(),
+            frontmatter,
+            note.body.clone(),
+        ));
+    }
+
+    let Some(commit) = wiki.write_pages(&scope.scope, &pages, &notes_message(digest, &pages))?
+    else {
+        return Ok(());
+    };
+
+    // Indexed here rather than left to `reindex`, for the reason
+    // `write_session_page` gives: the index the live path builds and the index
+    // a rebuild reproduces have to be the same index.
+    for mut page in pages {
+        page.git_commit = Some(commit.clone());
+        store.index_page(
+            scope.project_id,
+            &page,
+            &anamnesis_wiki::extract_links(&page.body),
+            embedder,
+            now,
+        )?;
+    }
+
+    Ok(())
+}
+
+/// The commit message for a batch of notes.
+///
+/// The subject says how many and which session they came from; the body names
+/// every page, following the sweep's message, because a commit that touches
+/// three files under three namespaces is otherwise unreadable in a log.
+fn notes_message(digest: &SessionDigest, pages: &[Page]) -> String {
+    let plural = if pages.len() == 1 { "page" } else { "pages" };
+    let mut message = format!(
+        "notes: {} durable {plural} from {}\n",
+        pages.len(),
+        digest.title
+    );
+    for page in pages {
+        message.push_str(&format!("\n- {}", page.path.as_str()));
+    }
+    message.push('\n');
+    message
 }
 
 /// The session's own account of who ran it.

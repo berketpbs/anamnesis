@@ -2265,6 +2265,212 @@ mod tests {
         );
     }
 
+    /// The reply that leaves something behind, end to end: the model names a
+    /// durable page, and it arrives filed under its namespace, at its tier, in
+    /// the index, and saying which session wrote it.
+    #[tokio::test]
+    async fn a_durable_page_a_model_named_is_written_filed_and_indexed() {
+        let harness = harness();
+        let (scope, session_id) = recorded(&harness);
+
+        finalize_and_enrich(
+            &harness.state.store,
+            &harness.state.wiki,
+            &scope,
+            session_id,
+            None,
+            now(),
+            &settings(Arc::new(Fake::answering(json!({
+                "title": "The provider was wired in",
+                "body": "## What. The provider answered.",
+                "handoff": "The provider works now.",
+                "entities": [],
+                "notes": [{
+                    "kind": "gotcha",
+                    "title": "A moved crate breaks the Docker build",
+                    "body": "Cargo verifies the move; the Dockerfile does not.",
+                }],
+            })))),
+        )
+        .await
+        .expect("finalized")
+        .expect("a page");
+
+        let path = anamnesis_core::page::PagePath::parse(
+            "gotchas/a-moved-crate-breaks-the-docker-build.md",
+        )
+        .expect("path");
+
+        let parsed = harness
+            .state
+            .wiki
+            .lock()
+            .read_page(&scope.scope, &path)
+            .expect("the note is on disk");
+        assert_eq!(
+            parsed.frontmatter.tier,
+            anamnesis_core::page::Tier::Procedural
+        );
+        assert_eq!(
+            parsed.frontmatter.session,
+            Some(session_id),
+            "a note says which session wrote it, or no recompile can replace it"
+        );
+        assert!(parsed.body.contains("the Dockerfile does not"));
+
+        let indexed = harness
+            .state
+            .store
+            .pages_from_session(session_id)
+            .expect("pages");
+        assert!(
+            indexed.contains(&path),
+            "a note that is only on disk is a note no search finds: {indexed:?}"
+        );
+        assert_eq!(indexed.len(), 2, "the session page and its note");
+    }
+
+    /// The one unrecoverable thing this could do, and does not. What is most
+    /// likely to be standing at a derived path is a page a person wrote by
+    /// hand — that is what these namespaces are for — and a summary of one
+    /// session silently replacing it would be a memory that eats its own best
+    /// pages.
+    #[tokio::test]
+    async fn a_note_does_not_write_over_a_page_that_was_already_there() {
+        let harness = harness();
+        let (scope, session_id) = recorded(&harness);
+
+        let path = anamnesis_core::page::PagePath::parse("gotchas/the-server-has-an-owner.md")
+            .expect("path");
+        let by_hand = anamnesis_core::page::Page::new(
+            scope.project_id,
+            path.clone(),
+            anamnesis_core::page::Frontmatter::new("The server has an owner", Vec::new())
+                .expect("frontmatter"),
+            "Written by a person, and not the model's to replace.".to_owned(),
+        );
+        harness
+            .state
+            .wiki
+            .lock()
+            .write_page(&scope.scope, &by_hand, "by hand")
+            .expect("the page somebody wrote");
+
+        finalize_and_enrich(
+            &harness.state.store,
+            &harness.state.wiki,
+            &scope,
+            session_id,
+            None,
+            now(),
+            &settings(Arc::new(Fake::answering(json!({
+                "title": "The provider was wired in",
+                "body": "## What. The provider answered.",
+                "handoff": "The provider works now.",
+                "entities": [],
+                "notes": [{
+                    "kind": "gotcha",
+                    "title": "The server has an owner",
+                    "body": "The model's version of somebody else's page.",
+                }],
+            })))),
+        )
+        .await
+        .expect("finalized")
+        .expect("a page");
+
+        let parsed = harness
+            .state
+            .wiki
+            .lock()
+            .read_page(&scope.scope, &path)
+            .expect("the page is still there");
+        assert!(
+            parsed.body.contains("Written by a person"),
+            "{:?}",
+            parsed.body
+        );
+    }
+
+    /// The case a page naming its session was written for. Recompiling has to
+    /// replace the durable pages its own earlier run left, or reading a
+    /// session again would either duplicate them under near-identical names or
+    /// do nothing at all — and it may replace them only because the page on
+    /// disk says this session wrote it.
+    #[tokio::test]
+    async fn recompiling_replaces_the_notes_its_own_earlier_run_left() {
+        let harness = harness();
+        let (scope, session_id) = recorded(&harness);
+
+        finalize_and_enrich(
+            &harness.state.store,
+            &harness.state.wiki,
+            &scope,
+            session_id,
+            None,
+            now(),
+            &settings(Arc::new(Fake::broken())),
+        )
+        .await
+        .expect("finalized")
+        .expect("the counted page");
+
+        let closed = harness
+            .state
+            .store
+            .load_session(session_id)
+            .expect("load")
+            .expect("a session");
+
+        let path = anamnesis_core::page::PagePath::parse("gotchas/the-server-has-an-owner.md")
+            .expect("path");
+        let read_again = |body: &str| anamnesis_consolidate::SessionDigest {
+            title: "Read again".to_owned(),
+            body: "## What. It was read by a model this time.".to_owned(),
+            handoff: "h".to_owned(),
+            entities: Vec::new(),
+            notes: vec![anamnesis_consolidate::Note {
+                kind: anamnesis_consolidate::NoteKind::Gotcha,
+                path: path.clone(),
+                title: "The server has an owner".to_owned(),
+                body: body.to_owned(),
+            }],
+        };
+
+        for body in ["First reading.", "Second reading."] {
+            recompile(
+                &harness.state.store,
+                &harness.state.wiki.lock(),
+                &scope,
+                &closed,
+                &read_again(body),
+                Provenance::counted(),
+                None,
+                now(),
+            )
+            .expect("recompiled");
+        }
+
+        let parsed = harness
+            .state
+            .wiki
+            .lock()
+            .read_page(&scope.scope, &path)
+            .expect("the note");
+        assert!(parsed.body.contains("Second reading."), "{:?}", parsed.body);
+
+        let indexed = harness
+            .state
+            .store
+            .pages_from_session(session_id)
+            .expect("pages");
+        assert_eq!(
+            indexed.len(),
+            2,
+            "one session page and one note, not one note per reading: {indexed:?}"
+        );
+    }
+
     /// The reason the two steps are worth splitting. A provider that is down
     /// when a session ends no longer costs that session its reading — it only
     /// delays it until something asks again.
