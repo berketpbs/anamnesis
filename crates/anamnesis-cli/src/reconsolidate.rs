@@ -24,7 +24,7 @@ use anamnesis_core::audit::Action;
 use anamnesis_core::embedding::Embed;
 use anamnesis_core::page::{PagePath, Tier};
 use anamnesis_core::scope::ResolvedScope;
-use anamnesis_store::{SessionSummary, Store};
+use anamnesis_store::{SessionSummary, Store, SummarySource};
 use anamnesis_wiki::Wiki;
 use jiff::Timestamp;
 
@@ -182,12 +182,19 @@ pub fn cmd_reconsolidate(
             continue;
         }
 
+        // Only the model path reaches here — the counted one was refused
+        // above — so this records the outcome that `status` reads as the
+        // outage being over, which for these sessions it now is.
         let path = anamnesis_web::recompile(
             &store,
             &wiki,
             &scope,
             &session,
             &digest,
+            anamnesis_web::Provenance {
+                source: SummarySource::Model,
+                model: Some(provider.model()),
+            },
             embedder.as_ref().map(|inner| inner.as_ref() as &dyn Embed),
             now,
         )?;

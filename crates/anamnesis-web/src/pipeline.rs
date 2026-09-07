@@ -8,7 +8,9 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anamnesis_consolidate::{PREFERENCES_PAGE, SessionDigest, consolidate, consolidate_with_llm};
+use anamnesis_consolidate::{
+    DigestSource, PREFERENCES_PAGE, SessionDigest, consolidate, consolidate_with_source,
+};
 use anamnesis_core::capture::CaptureFilter;
 use anamnesis_core::embedding::Embed;
 use anamnesis_core::handoff::Slot;
@@ -19,7 +21,7 @@ use anamnesis_core::scope::{OperatorName, ResolvedScope, resolve_scope};
 use anamnesis_core::session::{AgentKind, Session};
 use anamnesis_hooks::ParsedHook;
 use anamnesis_llm::Embedder;
-use anamnesis_store::{RawSpool, Store, new_handoff, new_observation, new_session};
+use anamnesis_store::{RawSpool, Store, SummarySource, new_handoff, new_observation, new_session};
 use anamnesis_wiki::Wiki;
 use jiff::Timestamp;
 use parking_lot::Mutex;
@@ -311,6 +313,43 @@ fn excluded_path(scope: &ResolvedScope, hook: &ParsedHook) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// What wrote a page, and which model was in play when it did or did not.
+///
+/// Carried together because either half alone misleads. "Counted" without the
+/// model reads as "no model configured", which is a different fault; the model
+/// name without the source reads as "this model wrote it", which is the claim
+/// that was wrong in the first place.
+#[derive(Debug, Clone, Copy)]
+pub struct Provenance<'a> {
+    /// Whether a model produced the page.
+    pub source: SummarySource,
+    /// The model that wrote it, or that was configured and did not answer.
+    pub model: Option<&'a str>,
+}
+
+impl Provenance<'_> {
+    /// The provenance of a page written with no model configured at all.
+    #[must_use]
+    pub fn counted() -> Self {
+        Self {
+            source: SummarySource::Counted,
+            model: None,
+        }
+    }
+}
+
+/// Restate a consolidation's outcome as the store's spelling of it.
+///
+/// A free function rather than a `From` impl because both types belong to
+/// other crates, and the two enums stay separate deliberately: one is what a
+/// consolidation just did, the other is what a row remembers.
+fn summary_source(source: DigestSource) -> SummarySource {
+    match source {
+        DigestSource::Model => SummarySource::Model,
+        DigestSource::Counted => SummarySource::Counted,
+    }
+}
+
 /// Close a session: summarise it, write the page, leave a handoff.
 ///
 /// Returns the page path, or `None` when the session had nothing in it worth
@@ -333,7 +372,17 @@ pub fn finalize(
         return Ok(None);
     };
 
-    commit(store, wiki, scope, &session, &digest, embedder, now).map(Some)
+    commit(
+        store,
+        wiki,
+        scope,
+        &session,
+        &digest,
+        Provenance::counted(),
+        embedder,
+        now,
+    )
+    .map(Some)
 }
 
 /// Close a session, asking a model what it was about.
@@ -377,7 +426,7 @@ pub async fn finalize_with_llm(
         return Ok(None);
     };
 
-    let digest = consolidate_with_llm(
+    let compiled = consolidate_with_source(
         llm.provider.as_ref(),
         &session,
         &observations,
@@ -386,6 +435,17 @@ pub async fn finalize_with_llm(
         llm.max_output_tokens,
     )
     .await;
+
+    // The model is named on both branches. When it answered, this is who wrote
+    // the page; when it did not, this is the model that was configured and
+    // failed — which is the fact a counted page has never been able to carry,
+    // and the whole reason a reader could not tell an outage from a quiet day.
+    let model = llm.provider.model().to_owned();
+    let provenance = compiled
+        .as_ref()
+        .map(|(_, source)| summary_source(*source))
+        .unwrap_or(SummarySource::Counted);
+    let digest = compiled.map(|(digest, _)| digest);
 
     let Some(digest) = digest else {
         let store = store.clone();
@@ -407,6 +467,10 @@ pub async fn finalize_with_llm(
             &scope,
             &session,
             &digest,
+            Provenance {
+                source: provenance,
+                model: Some(&model),
+            },
             embedder
                 .as_ref()
                 .map(|embedder| embedder.as_ref() as &dyn Embed),
@@ -436,12 +500,18 @@ fn prepare(
 }
 
 /// Write the page, record the handoff, close the session.
+///
+/// Long in the same way `write_session_page` is: these are the things one
+/// finished session consists of, and threading them through a struct would
+/// only move the list somewhere the compiler checks less.
+#[allow(clippy::too_many_arguments)]
 fn commit(
     store: &Store,
     wiki: &Wiki,
     scope: &ResolvedScope,
     session: &Session,
     digest: &SessionDigest,
+    provenance: Provenance<'_>,
     embedder: Option<&dyn Embed>,
     now: Timestamp,
 ) -> Result<String, WebError> {
@@ -463,6 +533,12 @@ fn commit(
         &digest.handoff,
         now,
     ))?;
+    // Recorded before the close so that a session which is closed is never a
+    // session whose page came from nowhere. The two are not in one transaction
+    // and do not need to be: the failure this ordering avoids is a closed
+    // session with no provenance, which `status` would read as "not summarised
+    // yet" forever.
+    store.record_summary(session.id, provenance.source, provenance.model)?;
     store.close_session(session.id, now)?;
 
     Ok(path)
@@ -470,8 +546,8 @@ fn commit(
 
 /// Summarise a finished session again, and write its page over the old one.
 ///
-/// Everything `commit` does about the page, and nothing it does about the
-/// session. Both omissions are the point:
+/// Everything `commit` does about the page, and almost nothing it does about
+/// the session. The two omissions are the point:
 ///
 /// * **No handoff.** A handoff says what the *next* session should know, and
 ///   for a session that ended weeks ago the next session has already been and
@@ -482,19 +558,25 @@ fn commit(
 ///   about it. Closing it again would stamp today on an afternoon in August,
 ///   and the page would then contradict the row it was rendered from.
 ///
+/// What it does touch is the provenance, because that is a fact about the page
+/// rather than about when the session ended, and this call has just replaced
+/// the page it described.
+///
 /// The page path comes from `started_at`, which recompiling does not touch, so
 /// the page is rewritten in place rather than joined by a second copy of the
 /// same session.
+#[allow(clippy::too_many_arguments)]
 pub fn recompile(
     store: &Store,
     wiki: &Wiki,
     scope: &ResolvedScope,
     session: &Session,
     digest: &SessionDigest,
+    provenance: Provenance<'_>,
     embedder: Option<&dyn Embed>,
     now: Timestamp,
 ) -> Result<String, WebError> {
-    write_session_page(
+    let path = write_session_page(
         store,
         wiki,
         scope,
@@ -503,7 +585,16 @@ pub fn recompile(
         embedder,
         now,
         &format!("recompile: {}", digest.title),
-    )
+    )?;
+
+    // The one thing a recompile does touch about the session. Its page has
+    // just been replaced, so the old provenance describes a page that no
+    // longer exists — and a recompile is most often run precisely to replace
+    // counted pages once a model works, which is the moment `status` most
+    // needs to stop reporting an outage that is over.
+    store.record_summary(session.id, provenance.source, provenance.model)?;
+
+    Ok(path)
 }
 
 /// Render a digest to a session's page, and put that page in the index.

@@ -33,6 +33,47 @@ pub struct OpenSession {
     pub last_seen: Timestamp,
 }
 
+/// What wrote a session's page.
+///
+/// Kept apart from the model's name because the two answer different
+/// questions. The name says which model was in play; this says whether it
+/// produced the page or merely failed to, and only the second one distinguishes
+/// a memory from a log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SummarySource {
+    /// A model read the session and wrote the page.
+    Model,
+    /// The page was counted from what the session did, because no model was
+    /// configured or the configured one did not answer.
+    Counted,
+}
+
+impl SummarySource {
+    /// How the value is spelled in the `summary_source` column.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::Counted => "counted",
+        }
+    }
+
+    /// Read one back, tolerating anything else as unknown.
+    ///
+    /// A column value this build does not recognise reads as `None` rather
+    /// than as an error: a database written by a newer binary must stay
+    /// openable by an older one, and a status line is never worth refusing to
+    /// print a session listing over.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "model" => Some(Self::Model),
+            "counted" => Some(Self::Counted),
+            _ => None,
+        }
+    }
+}
+
 /// One row of `anamnesis sessions`: what a session was, without its
 /// observations.
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +94,13 @@ pub struct SessionSummary {
     pub operator: Option<String>,
     /// How many observations it captured.
     pub observation_count: i64,
+    /// What wrote its page, once something has.
+    ///
+    /// `None` for a session that has not been summarised, and for every
+    /// session that ended before this was recorded at all.
+    pub summary_source: Option<SummarySource>,
+    /// The model that wrote its page, or that was configured and did not.
+    pub summary_model: Option<String>,
 }
 
 impl Store {
@@ -90,6 +138,30 @@ impl Store {
         conn.execute(
             "UPDATE sessions SET state = 'closed', ended_at = ?2 WHERE id = ?1",
             params![id.to_string(), ended_at.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Record what wrote a session's page.
+    ///
+    /// Written by whoever produced the page, on every path that produces one —
+    /// the first summary at session end and a later recompile alike, because a
+    /// recompile that replaces a counted page with a model-written one has
+    /// changed the answer and leaving the old provenance would make `status`
+    /// report an outage that has been fixed.
+    ///
+    /// Unconditional on the current value for the same reason: the newest
+    /// write is the true one.
+    pub fn record_summary(
+        &self,
+        id: SessionId,
+        source: SummarySource,
+        model: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.connection();
+        conn.execute(
+            "UPDATE sessions SET summary_source = ?2, summary_model = ?3 WHERE id = ?1",
+            params![id.to_string(), source.as_str(), model],
         )?;
         Ok(())
     }
@@ -817,7 +889,8 @@ fn resolve_supersession(
 /// agent name in the state column.
 const SESSION_SUMMARY_SELECT: &str =
     "SELECT s.id, s.agent, s.state, s.started_at, s.ended_at, w.slug, s.operator,
-            (SELECT COUNT(*) FROM observations o WHERE o.session_id = s.id)
+            (SELECT COUNT(*) FROM observations o WHERE o.session_id = s.id),
+            s.summary_source, s.summary_model
      FROM sessions s
      LEFT JOIN workstreams w ON w.id = s.workstream_id";
 
@@ -832,6 +905,11 @@ fn read_session_summary(row: &Row<'_>) -> rusqlite::Result<SessionSummary> {
         workstream: row.get(5)?,
         operator: row.get(6)?,
         observation_count: row.get(7)?,
+        summary_source: row
+            .get::<_, Option<String>>(8)?
+            .as_deref()
+            .and_then(SummarySource::parse),
+        summary_model: row.get(9)?,
     })
 }
 
@@ -1708,6 +1786,55 @@ mod tests {
         assert_eq!(sessions[0].observation_count, 2);
         assert_eq!(sessions[1].observation_count, 1);
         assert!(sessions[0].workstream.is_none());
+    }
+
+    /// A session nobody has summarised has to be distinguishable from one
+    /// summarised by counting. Both are "no model wrote this", and only one of
+    /// them is a fault.
+    #[test]
+    fn a_session_carries_what_wrote_its_page() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+
+        let unwritten = store.recent_sessions(project, 10).expect("list");
+        assert_eq!(unwritten[0].summary_source, None);
+        assert_eq!(unwritten[0].summary_model, None);
+
+        store
+            .record_summary(session.id, SummarySource::Counted, Some("gemini-3.8-flash"))
+            .expect("record");
+        let counted = store.recent_sessions(project, 10).expect("list");
+        assert_eq!(counted[0].summary_source, Some(SummarySource::Counted));
+        assert_eq!(
+            counted[0].summary_model.as_deref(),
+            Some("gemini-3.8-flash"),
+            "a counted page still has to name the model that did not answer"
+        );
+
+        // What a recompile does once a model works again. The newest write
+        // wins, or `status` would go on reporting an outage that is over.
+        store
+            .record_summary(session.id, SummarySource::Model, Some("gemini-3.5-flash"))
+            .expect("record again");
+        let rewritten = store.recent_sessions(project, 10).expect("list");
+        assert_eq!(rewritten[0].summary_source, Some(SummarySource::Model));
+        assert_eq!(
+            rewritten[0].summary_model.as_deref(),
+            Some("gemini-3.5-flash")
+        );
+    }
+
+    /// A value this build does not know reads as no evidence rather than as an
+    /// error, so a database touched by a newer binary still lists.
+    #[test]
+    fn an_unrecognised_provenance_reads_as_unknown() {
+        assert_eq!(SummarySource::parse("model"), Some(SummarySource::Model));
+        assert_eq!(
+            SummarySource::parse("counted"),
+            Some(SummarySource::Counted)
+        );
+        assert_eq!(SummarySource::parse("summoned"), None);
     }
 
     #[test]

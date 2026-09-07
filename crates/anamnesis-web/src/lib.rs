@@ -43,8 +43,8 @@ pub use auth::{Auth, Identity};
 use shutdown::{Stop, finish_in_flight, stopped};
 
 pub use pipeline::{
-    Consolidation, Ingested, ProbeReport, claim_handoff, finalize, finalize_with_llm, ingest,
-    probe, read_preferences, recompile, record, session_page_path,
+    Consolidation, Ingested, ProbeReport, Provenance, claim_handoff, finalize, finalize_with_llm,
+    ingest, probe, read_preferences, recompile, record, session_page_path,
 };
 
 /// Errors surfaced over HTTP.
@@ -1772,6 +1772,7 @@ mod tests {
             &scope,
             &closed,
             &digest,
+            Provenance::counted(),
             None,
             later,
         )
@@ -1863,6 +1864,7 @@ mod tests {
                 handoff: "This sentence must not reach anybody.".to_owned(),
                 entities: Vec::new(),
             },
+            Provenance::counted(),
             None,
             now(),
         )
@@ -1930,6 +1932,7 @@ mod tests {
                 handoff: "Never write a Windows path into a shell command.".to_owned(),
                 entities: Vec::new(),
             },
+            Provenance::counted(),
             None,
             now(),
         )
@@ -2018,6 +2021,81 @@ mod tests {
                 .prompt()
                 .contains("Always name the migration numbers")
         );
+    }
+
+    /// The whole point of recording provenance: a provider that refuses every
+    /// request still produces a page, and nothing about that page says a model
+    /// did not write it. The session row is what has to say so.
+    #[tokio::test]
+    async fn a_provider_that_refuses_leaves_the_session_marked_counted() {
+        let harness = harness();
+        let (scope, session_id) = recorded(&harness);
+
+        let page = finalize_with_llm(
+            &harness.state.store,
+            &harness.state.wiki,
+            &scope,
+            session_id,
+            None,
+            now(),
+            &settings(Arc::new(Fake::broken())),
+        )
+        .await
+        .expect("finalized");
+
+        assert!(page.is_some(), "a refused model still writes a page");
+        let session = harness
+            .state
+            .store
+            .recent_sessions(scope.project_id, 10)
+            .expect("list")
+            .into_iter()
+            .find(|row| row.id == session_id)
+            .expect("the session");
+        assert_eq!(
+            session.summary_source,
+            Some(anamnesis_store::SummarySource::Counted)
+        );
+        assert_eq!(
+            session.summary_model.as_deref(),
+            Some("fake-1"),
+            "the model that did not answer is the one worth naming"
+        );
+    }
+
+    /// The other half, so the line can be trusted when it says all is well.
+    #[tokio::test]
+    async fn a_model_that_answers_leaves_the_session_marked_written() {
+        let harness = harness();
+        let (scope, session_id) = recorded(&harness);
+
+        finalize_with_llm(
+            &harness.state.store,
+            &harness.state.wiki,
+            &scope,
+            session_id,
+            None,
+            now(),
+            &settings(Arc::new(Fake::answering(
+                json!({"title": "t", "body": "b", "handoff": "h"}),
+            ))),
+        )
+        .await
+        .expect("finalized");
+
+        let session = harness
+            .state
+            .store
+            .recent_sessions(scope.project_id, 10)
+            .expect("list")
+            .into_iter()
+            .find(|row| row.id == session_id)
+            .expect("the session");
+        assert_eq!(
+            session.summary_source,
+            Some(anamnesis_store::SummarySource::Model)
+        );
+        assert_eq!(session.summary_model.as_deref(), Some("fake-1"));
     }
 
     #[tokio::test]
