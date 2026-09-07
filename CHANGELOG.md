@@ -34,8 +34,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is already committed and its handoff is recorded regardless, on the same rule
   the whole model path is built on: a model may improve what a session leaves
   behind, and may never be the reason there is nothing
+- A page records the session that wrote it: `session:` in the frontmatter, and
+  `pages.session_id` in the index (V13). It is in the markdown and not only in
+  the database on purpose — the index is rebuilt from these files, so a column
+  the markdown did not carry would be a fact `reindex` quietly forgot, and
+  which session wrote a page is not a statistic the wiki cannot know. Empty
+  means no session wrote it — a page somebody typed, a bootstrap page, or any
+  page older than the migration — and never "session unknown", because the
+  thing that reads this is deciding which pages it may replace. Forgetting a
+  transcript clears the field rather than deleting the pages compiled from it:
+  a cascade would make forgetting a session destroy the durable knowledge that
+  session produced, which is the opposite of what this is for
+
+### Changed
+- A session closes before a model is asked anything. Consolidation used to be
+  one step — `SessionEnd` arrived, a provider was asked, and whatever came back
+  became the page — which put a network call in the window between a session
+  ending and any record of it existing; a server killed during it lost the page
+  and left the session open. Now `finalize` writes the page, records the
+  handoff and closes the session in the time a file write and a git commit
+  take, and only then is a provider asked, replacing a page that already
+  exists. What follows is retriable, and is retried: the `summary_source`
+  column is the work queue, so an enricher takes the oldest sessions that read
+  `counted` and asks again. A provider that answered `503` all afternoon now
+  costs a delay rather than a permanent tally of counted pages. The handoff
+  needed the care — a summary arriving after its counted note has already been
+  read must not overwrite it, so superseding is conditional and shares a
+  transaction with the expiry, since a claim arriving between the two is
+  exactly what must not be lost
 
 ### Fixed
+- The consolidation prompt had never mentioned that wiki links exist. `[[`
+  appeared in it zero times: the schema asked for a title, a body, a handoff
+  and entities, so every page a model wrote arrived with no outgoing edges at
+  all. A model writes most of the pages in a live memory, which means the link
+  retrieval stream has been ranking over a graph the system starved itself —
+  and its own recorded verdict that links "answered no question on its own in
+  either ablation" was a measurement of an empty graph rather than of link
+  retrieval. Telling the model links exist is not enough on its own: it cannot
+  see the wiki, so inviting links without saying what exists invites invented
+  paths, and an invented path resolves to nothing. The prompt now carries the
+  paths and the rule is to link only to one of them. The list is bounded, in
+  whole paths — a clipped path is not a shorter path, it is a broken link — and
+  what did not fit is counted and said, because a model told to link only to
+  what it can see should know that what it can see is not everything
 - `status` reported the model the server was configured with, and nothing
   reported whether it had written anything. Those are different claims, and
   they came apart for an afternoon: the provider answered `503` to every real
