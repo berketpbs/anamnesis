@@ -19,7 +19,7 @@
 
 use std::path::PathBuf;
 
-use anamnesis_consolidate::{DigestSource, consolidate_with_source};
+use anamnesis_consolidate::{DigestSource, Surroundings, consolidate_with_source};
 use anamnesis_core::audit::Action;
 use anamnesis_core::embedding::Embed;
 use anamnesis_core::page::{PagePath, Tier};
@@ -138,6 +138,16 @@ pub fn cmd_reconsolidate(
         .build()?;
 
     let preferences = anamnesis_web::read_preferences(&wiki, &scope);
+    // Read once for the whole run rather than per session. A recompile of
+    // eight sessions does not change what the wiki holds between them, and
+    // walking it eight times would only make the list drift as the run
+    // rewrites pages that are already in it.
+    let existing: Vec<String> = wiki
+        .pages(&scope.scope)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| path.as_str().to_owned())
+        .collect();
     let now = Timestamp::now();
     let mut written = 0usize;
     let mut refused = 0usize;
@@ -149,11 +159,22 @@ pub fn cmd_reconsolidate(
         };
         let observations = store.observations(item.session.id)?;
 
+        // Its own page is in the wiki already; linking a page to itself says
+        // nothing.
+        let pages: Vec<String> = existing
+            .iter()
+            .filter(|path| path.as_str() != item.path.as_str())
+            .cloned()
+            .collect();
+
         let compiled = runtime.block_on(consolidate_with_source(
             provider.as_ref(),
             &session,
             &observations,
-            preferences.as_deref(),
+            Surroundings {
+                preferences: preferences.as_deref(),
+                pages: &pages,
+            },
             config.max_input_tokens,
             config.max_output_tokens,
         ));
