@@ -2216,6 +2216,52 @@ mod tests {
             .summary_source
     }
 
+    /// The page a session leaves says which session left it, on both steps —
+    /// the counted one written at the close and the model's rewrite of it.
+    /// Nothing reads this yet; the fan-out will, to know what is its to
+    /// replace.
+    #[tokio::test]
+    async fn the_page_a_session_leaves_names_that_session() {
+        let harness = harness();
+        let (scope, session_id) = recorded(&harness);
+
+        // Step one only: a provider that refuses leaves the counted page.
+        finalize_and_enrich(
+            &harness.state.store,
+            &harness.state.wiki,
+            &scope,
+            session_id,
+            None,
+            now(),
+            &settings(Arc::new(Fake::broken())),
+        )
+        .await
+        .expect("finalized")
+        .expect("a page");
+
+        let counted = harness
+            .state
+            .store
+            .pages_from_session(session_id)
+            .expect("pages");
+        assert_eq!(counted.len(), 1, "the counted page names its session");
+
+        // Step two rewrites that page; the attribution must survive it.
+        let state = harness
+            .state
+            .clone()
+            .with_llm(Some(settings(Arc::new(Fake::answering(
+                json!({"title": "t", "body": "b", "handoff": "h"}),
+            )))));
+        assert_eq!(enrich::sweep_awaiting(&state, now()).await, 1);
+
+        let enriched = state.store.pages_from_session(session_id).expect("pages");
+        assert_eq!(
+            enriched, counted,
+            "and the rewrite is the same page, still its"
+        );
+    }
+
     /// The reason the two steps are worth splitting. A provider that is down
     /// when a session ends no longer costs that session its reading — it only
     /// delays it until something asks again.

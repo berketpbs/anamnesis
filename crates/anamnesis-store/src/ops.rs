@@ -155,9 +155,8 @@ impl Store {
     /// is not this caller's to touch.
     pub fn pages_from_session(&self, session_id: SessionId) -> Result<Vec<PagePath>> {
         let conn = self.connection();
-        let mut statement = conn.prepare(
-            "SELECT path FROM pages WHERE session_id = ?1 ORDER BY path ASC",
-        )?;
+        let mut statement =
+            conn.prepare("SELECT path FROM pages WHERE session_id = ?1 ORDER BY path ASC")?;
         let rows = statement.query_map(params![session_id.to_string()], |row| {
             Ok(crate::convert::parse_page_path(&row.get::<_, String>(0)?))
         })?;
@@ -1781,6 +1780,63 @@ mod tests {
             frontmatter,
             "One file on disk. See [[notes/windows.md]].",
         )
+    }
+
+    /// The question that could not be asked before: what did this session
+    /// write? And its other half, which matters more — a page nobody's
+    /// consolidation wrote must not come back, because the first caller of
+    /// this will be deciding what to replace.
+    #[test]
+    fn a_session_can_find_the_pages_it_wrote_and_only_those() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+
+        let mut mine = indexable_page(project);
+        mine.frontmatter.session = Some(session.id);
+        store.upsert_page(&mine, now()).expect("mine");
+
+        // Written by hand: same project, no session, and not this caller's to
+        // touch.
+        let theirs = Page::new(
+            project,
+            anamnesis_core::page::PagePath::parse("gotchas/somebody-typed-this.md").expect("path"),
+            anamnesis_core::page::Frontmatter::new("Typed by a person", Vec::new())
+                .expect("frontmatter"),
+            "Nothing consolidated this.",
+        );
+        store.upsert_page(&theirs, now()).expect("theirs");
+
+        let found = store.pages_from_session(session.id).expect("pages");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].as_str(), "decisions/0001-storage.md");
+    }
+
+    /// Rewriting a page keeps saying who wrote it, and a page that stops
+    /// naming a session stops being that session's.
+    #[test]
+    fn the_session_a_page_names_follows_the_page() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+
+        let mut page = indexable_page(project);
+        page.frontmatter.session = Some(session.id);
+        store.upsert_page(&page, now()).expect("first");
+        assert_eq!(
+            store.pages_from_session(session.id).expect("pages").len(),
+            1
+        );
+
+        page.frontmatter.session = None;
+        store.upsert_page(&page, now()).expect("second");
+        assert!(
+            store
+                .pages_from_session(session.id)
+                .expect("pages")
+                .is_empty(),
+            "the index follows the markdown, which is the source of truth"
+        );
     }
 
     /// The four writes that make a page findable, in one call. Any one of them
