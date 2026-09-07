@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 
 use anamnesis_core::observation::{EventKind, Observation};
-use anamnesis_core::page::Entity;
+use anamnesis_core::page::{Entity, PagePath, Tier};
 use anamnesis_core::session::Session;
 
 mod files;
@@ -49,6 +49,89 @@ const MAX_PROMPT_CHARS: usize = 400;
 /// anyway, and a page that claims to be about twenty things is about none.
 pub const MAX_ENTITIES: usize = 10;
 
+/// Most durable pages one session may leave behind.
+///
+/// Deliberately small. These are filed in the namespaces that outrank ordinary
+/// pages during retrieval, so each one is a standing claim on the top of every
+/// later search — the cost of a weak one is not that it is ignored, it is that
+/// it displaces something better. A session that reports five durable lessons
+/// has almost always reported none, and is summarising itself twice: once as
+/// its page and once as a list.
+pub const MAX_NOTES: usize = 3;
+
+/// What kind of durable page a note is, which is also where it is filed.
+///
+/// Three kinds rather than a free-form namespace, because the namespace
+/// decides retrieval rank and a model naming its own would eventually reach
+/// for `_rules/`. These three are the ones this wiki already ranks as
+/// authority, minus `_rules/`, which is the project's own voice and not
+/// something a summary of one session gets to add to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteKind {
+    /// A choice that was made, and what it was made against.
+    Decision,
+    /// Something that behaves differently than it looks like it does.
+    Gotcha,
+    /// A sequence worth following again.
+    Procedure,
+}
+
+impl NoteKind {
+    /// The wiki namespace pages of this kind are filed under.
+    pub fn namespace(self) -> &'static str {
+        match self {
+            Self::Decision => "decisions",
+            Self::Gotcha => "gotchas",
+            Self::Procedure => "procedures",
+        }
+    }
+
+    /// The tier a page of this kind is written at.
+    ///
+    /// Following what this wiki already does rather than inventing a mapping:
+    /// a decision is distilled durable knowledge, and both a gotcha and a
+    /// procedure are a pattern named because it recurs. The tier is what keeps
+    /// a sweep from treating these as one session's leftovers.
+    pub fn tier(self) -> Tier {
+        match self {
+            Self::Decision => Tier::Semantic,
+            Self::Gotcha | Self::Procedure => Tier::Procedural,
+        }
+    }
+
+    /// Recover a kind from the word a model used for it.
+    ///
+    /// Singular or plural, in any case: the model is given an enum and mostly
+    /// honours it, but a reply that says `gotchas` is not a reply that meant
+    /// something else.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().trim_end_matches('s') {
+            "decision" => Some(Self::Decision),
+            "gotcha" => Some(Self::Gotcha),
+            "procedure" => Some(Self::Procedure),
+            _ => None,
+        }
+    }
+}
+
+/// A durable page a session left behind, beyond its own account of itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Note {
+    /// Which kind of page this is, deciding its namespace and its tier.
+    pub kind: NoteKind,
+    /// Where the page goes.
+    ///
+    /// Derived from the title during validation rather than carried from the
+    /// model or worked out at write time: a title that cannot be made into a
+    /// path is a note that cannot be written, and a digest that has already
+    /// been accepted is the wrong place to discover that.
+    pub path: PagePath,
+    /// The claim the page makes.
+    pub title: String,
+    /// Markdown body.
+    pub body: String,
+}
+
 /// The result of consolidating one session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionDigest {
@@ -65,6 +148,14 @@ pub struct SessionDigest {
     /// links, and vectors — this stream is the one that finds a page whose
     /// words a searcher never used.
     pub entities: Vec<Entity>,
+    /// Durable pages this session left behind, beyond its own.
+    ///
+    /// Empty is the normal case, and the case the prompt argues for: most
+    /// sessions add to what a project has done without teaching it anything
+    /// that outlives them. A wiki whose authority namespaces fill up at one
+    /// page per session is one where being ranked highest stops meaning
+    /// anything.
+    pub notes: Vec<Note>,
 }
 
 /// Consolidate a session into a page and a handoff.
@@ -108,6 +199,10 @@ pub fn consolidate(session: &Session, observations: &[Observation]) -> Option<Se
         body,
         handoff,
         entities,
+        // Never any. Counting can say which tools ran and which failed; it
+        // cannot tell a decision from a tool call, and a durable page is
+        // exactly the judgement this path is defined by not making.
+        notes: Vec::new(),
     })
 }
 
@@ -506,6 +601,35 @@ mod tests {
         assert!(digest.body.contains("Reported failures: 1"));
         assert!(digest.handoff.contains("add the storage layer"));
         assert!(digest.handoff.contains("claude-code"));
+    }
+
+    /// The counted path leaves no durable pages, on a session that plainly did
+    /// something worth remembering. Counting can say which tools ran and which
+    /// failed; whether a project learned a decision from that is the judgement
+    /// this path is defined by not making, and guessing it would put pages
+    /// that outrank everything into a wiki on the strength of a tool tally.
+    #[test]
+    fn counting_never_claims_a_session_left_something_durable() {
+        let observations = vec![
+            observation(
+                EventKind::UserPrompt,
+                "why does the docker build fail",
+                None,
+            ),
+            observation(
+                EventKind::ToolUse,
+                "moved crates/evals to crates/anamnesis-evals",
+                tool("Bash", Some(true)),
+            ),
+            observation(
+                EventKind::ToolUse,
+                "docker build .",
+                tool("Bash", Some(false)),
+            ),
+        ];
+
+        let digest = consolidate(&session(), &observations).expect("digest");
+        assert!(digest.notes.is_empty());
     }
 
     #[test]
