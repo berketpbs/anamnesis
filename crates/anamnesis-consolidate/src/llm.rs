@@ -16,12 +16,15 @@
 use std::collections::VecDeque;
 
 use anamnesis_core::observation::{EventKind, Observation};
-use anamnesis_core::page::Entity;
+use anamnesis_core::page::{Entity, PagePath};
 use anamnesis_core::session::Session;
 use anamnesis_llm::{Completion, Provider, clip_to_tokens, estimate_tokens};
 use serde_json::{Value, json};
 
-use crate::{HANDOFF_LIMIT, MAX_ENTITIES, SessionDigest, clip, clip_bytes, consolidate};
+use crate::{
+    HANDOFF_LIMIT, MAX_ENTITIES, MAX_NOTES, Note, NoteKind, SessionDigest, clip, clip_bytes,
+    consolidate,
+};
 
 /// Wiki page holding project-specific consolidation preferences.
 ///
@@ -124,7 +127,20 @@ the body and link the page by its path: `[[gotchas/a-page-name.md]]`. Link \
 only to a path that appears in that list, exactly as it is written there. A \
 link to a page that does not exist points nowhere, and a page that links to \
 everything distinguishes nothing; when nothing is genuinely related, link \
-nothing.";
+nothing.
+- Most sessions leave nothing behind that outlives them, and for those the \
+notes are an empty list. A note is for the thing a later session would have to \
+be told and could not work out from the code in front of it: a decision and \
+what it was decided against, a gotcha — something that behaves differently \
+than it looks like it does — or a procedure worth following again. It is not a \
+second telling of the session page, not a description of the change, and not \
+advice that would be true of any project. If nothing clears that bar, write \
+none: a memory whose durable pages are mostly filler is one nobody reads far \
+enough into to find the two that were real.
+- A note's title is the claim it makes, so that a listing of them argues with \
+somebody scanning it: `A moved crate breaks the Docker build`, not `Docker \
+notes`. Do not label it with its own kind — it is already filed under one — \
+and give it no date, because a decision is not found by when it was noticed.";
 
 /// The reply shape.
 ///
@@ -152,8 +168,31 @@ pub fn schema() -> Value {
                 "items": {"type": "string"},
                 "description": "Up to 10 canonical names this session was about, spelled as they appear: files, crates, tools, systems, error names. A file is named without its directories — `sanitize.rs`, not `crates/anamnesis-core/src/sanitize.rs`. Nothing generic.",
             },
+            "notes": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": ["decision", "gotcha", "procedure"],
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "The claim this page makes, in under 72 characters. Not a label for its kind, and no date.",
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": "The page, in markdown. Use ## for sections; no level-1 heading.",
+                        },
+                    },
+                    "required": ["kind", "title", "body"],
+                    "additionalProperties": false,
+                },
+                "description": "Durable pages this session leaves behind, at most 3. Usually empty: only what a later session would have to be told and could not work out from the code.",
+            },
         },
-        "required": ["title", "body", "handoff", "entities"],
+        "required": ["title", "body", "handoff", "entities", "notes"],
         "additionalProperties": false,
     })
 }
@@ -435,6 +474,33 @@ fn fit_lines(lines: Vec<String>, budget: usize) -> Vec<String> {
     out
 }
 
+/// Labels a session page's title reaches for.
+const SESSION_LABELS: [&str; 9] = [
+    "session",
+    "session report",
+    "session summary",
+    "session handoff",
+    "session notes",
+    "session log",
+    "summary",
+    "handoff",
+    "report",
+];
+
+/// Labels a note's title reaches for.
+///
+/// The same failure one namespace down, and worse there: a `gotchas/` listing
+/// where every entry opens with `Gotcha:` has spent the most valuable part of
+/// each title restating the directory the reader is already standing in.
+const NOTE_LABELS: [&str; 6] = [
+    "decision",
+    "gotcha",
+    "procedure",
+    "note",
+    "lesson",
+    "learning",
+];
+
 /// Drop a genre label the model wrote in front of the title.
 ///
 /// The prompt tells it not to, and on a short session it complies. On a long
@@ -446,26 +512,14 @@ fn fit_lines(lines: Vec<String>, budget: usize) -> Vec<String> {
 /// Only a label *followed by a separator* goes. `Session to Address the Model
 /// Lock` is a sentence about this session rather than a heading over it, and a
 /// rule that cannot tell those apart would eat the title.
-fn strip_genre_label(title: &str) -> &str {
-    const LABELS: [&str; 9] = [
-        "session",
-        "session report",
-        "session summary",
-        "session handoff",
-        "session notes",
-        "session log",
-        "summary",
-        "handoff",
-        "report",
-    ];
-
+fn strip_genre_label<'a>(title: &'a str, labels: &[&str]) -> &'a str {
     // ':' and the dashes only. A hyphen belongs to `anamnesis-llm` far more
     // often than it separates a label from a title.
     let Some((head, rest)) = title.split_once([':', '—', '–']) else {
         return title;
     };
     let rest = rest.trim();
-    if rest.is_empty() || !LABELS.contains(&head.trim().to_ascii_lowercase().as_str()) {
+    if rest.is_empty() || !labels.contains(&head.trim().to_ascii_lowercase().as_str()) {
         return title;
     }
     rest
@@ -507,20 +561,14 @@ fn digest_from_json(value: &Value, session: &Session) -> Result<SessionDigest, S
         .map(|rest| rest.trim_start_matches([':', '-', ' ']))
         .unwrap_or(&title)
         .trim();
-    let title = strip_genre_label(title);
+    let title = strip_genre_label(title, &SESSION_LABELS);
     let title = if title.is_empty() {
         format!("{date}: {} session", session.agent)
     } else {
         format!("{date}: {}", clip(title, MAX_TITLE_CHARS))
     };
 
-    // A level-1 heading in the body duplicates the frontmatter title and
-    // renders as a second title in every wiki viewer.
-    let body = body
-        .strip_prefix("# ")
-        .and_then(|rest| rest.split_once('\n'))
-        .map(|(_, rest)| rest.trim_start().to_owned())
-        .unwrap_or(body);
+    let body = without_leading_heading(body);
 
     // The handoff budget is not advisory: it is injected into the next
     // session's context, where every byte competes with the work itself.
@@ -532,12 +580,31 @@ fn digest_from_json(value: &Value, session: &Session) -> Result<SessionDigest, S
     // refusing the whole digest over it would cost the page itself.
     let entities = read_entities(value);
 
+    // Same policy as the entities, and for the same reason: an unusable note
+    // costs this session one durable page, while refusing the whole reply over
+    // it would cost the page that was already written.
+    let notes = read_notes(value);
+
     Ok(SessionDigest {
         title,
         body,
         handoff,
         entities,
+        notes,
     })
+}
+
+/// Drop a level-1 heading a model wrote at the top of a page body.
+///
+/// It duplicates the frontmatter title and renders as a second title in every
+/// wiki viewer. Shared by the session page and the notes because it is one
+/// habit rather than two, and a fix that reached only one of them would show
+/// up as whichever page the reader happened to open.
+fn without_leading_heading(body: String) -> String {
+    body.strip_prefix("# ")
+        .and_then(|rest| rest.split_once('\n'))
+        .map(|(_, rest)| rest.trim_start().to_owned())
+        .unwrap_or(body)
 }
 
 /// Undo the escaping a model applied to prose it had already put in a string.
@@ -688,6 +755,67 @@ fn read_entities(value: &Value) -> Vec<Entity> {
         }
     }
     entities
+}
+
+/// The durable pages a model named, validated into notes.
+///
+/// Unusable entries are dropped rather than failing the reply, and each of the
+/// three ways to be unusable is a page that could not have been written: a
+/// kind that is not one of the three has no namespace to go in, a body that
+/// says nothing is a title making a claim and then not supporting it, and a
+/// title with no letters or digits in it leaves nothing a filename can be made
+/// from.
+///
+/// Two notes that derive the same path are one note. A model that decides a
+/// session left two gotchas and names them nearly the same way would otherwise
+/// have the second overwrite the first *inside a single commit*, where no
+/// history records that the first was ever written.
+fn read_notes(value: &Value) -> Vec<Note> {
+    let mut notes: Vec<Note> = Vec::new();
+    let Some(listed) = value.get("notes").and_then(Value::as_array) else {
+        return notes;
+    };
+
+    for entry in listed {
+        let text = |name: &str| entry.get(name).and_then(Value::as_str).unwrap_or_default();
+
+        let Some(kind) = NoteKind::parse(text("kind")) else {
+            continue;
+        };
+
+        let title = clip(
+            strip_genre_label(text("title").trim(), &NOTE_LABELS),
+            MAX_TITLE_CHARS,
+        );
+
+        // The escapes the session page has to undo are undone here too. The
+        // reply is one string from one model, and a habit that puts the two
+        // characters `\` and `n` where a paragraph break belongs does not stop
+        // at a field boundary.
+        let body =
+            without_leading_heading(unescape_quotes(&unescape_newlines(text("body").trim())));
+        if body.trim().is_empty() {
+            continue;
+        }
+
+        let Ok(path) = PagePath::derive(kind.namespace(), &title) else {
+            continue;
+        };
+        if notes.iter().any(|note| note.path == path) {
+            continue;
+        }
+
+        notes.push(Note {
+            kind,
+            path,
+            title,
+            body,
+        });
+        if notes.len() == MAX_NOTES {
+            break;
+        }
+    }
+    notes
 }
 
 #[cfg(test)]
@@ -1223,13 +1351,44 @@ mod tests {
         assert!(schema()["properties"]["entities"].is_object());
         assert_eq!(
             schema()["required"],
-            json!(["title", "body", "handoff", "entities"])
+            json!(["title", "body", "handoff", "entities", "notes"])
         );
         assert!(SYSTEM.contains("what a later search would type"));
         assert!(
             !SYSTEM.contains(char::from(92)),
             "a stray escape in the prompt reaches the model verbatim"
         );
+    }
+
+    /// The kinds are the enum the reply is constrained to and the namespaces
+    /// the pages are filed under, and the two lists have to stay one list: a
+    /// kind the schema offers and [`NoteKind::parse`] does not know is a note
+    /// the model was invited to write and this code silently drops.
+    #[test]
+    fn the_schema_and_the_prompt_agree_about_notes() {
+        let kinds = schema()["properties"]["notes"]["items"]["properties"]["kind"]["enum"].clone();
+        let offered = kinds.as_array().expect("an enum of kinds");
+        assert_eq!(offered.len(), 3);
+        for kind in offered {
+            let name = kind.as_str().expect("a kind name");
+            let parsed = NoteKind::parse(name).expect("the schema offers a kind this code knows");
+            assert_eq!(parsed.namespace(), format!("{name}s"));
+        }
+        assert!(SYSTEM.contains("Most sessions leave nothing behind"));
+    }
+
+    /// `_rules/` is the project's own voice. It outranks everything during
+    /// retrieval, and nothing a model writes about one session belongs there.
+    #[test]
+    fn a_note_cannot_be_filed_in_the_namespace_the_project_speaks_in() {
+        for kind in [NoteKind::Decision, NoteKind::Gotcha, NoteKind::Procedure] {
+            assert_ne!(kind.namespace(), "_rules");
+            assert!(
+                anamnesis_core::page::AUTHORITY_NAMESPACES.contains(&kind.namespace()),
+                "a note is filed where retrieval ranks it: {}",
+                kind.namespace()
+            );
+        }
     }
 
     #[test]
@@ -1384,5 +1543,189 @@ mod tests {
         let rendered = render_observation(&observations[0]);
         assert!(!rendered.contains('\n'));
         assert!(rendered.contains("second line"));
+    }
+
+    /// One note, written out in full, asserting the two things a note is: a
+    /// namespace it is filed under and a name derived from what it claims.
+    #[test]
+    fn a_note_is_filed_by_its_kind_and_named_by_its_claim() {
+        let reply = json!({
+            "title": "t",
+            "body": "b",
+            "handoff": "h",
+            "entities": [],
+            "notes": [{
+                "kind": "gotcha",
+                "title": "A moved crate breaks the Docker build",
+                "body": "## What happens\n\nCargo verifies the move; the Dockerfile does not.",
+            }],
+        });
+        let digest = digest_from_json(&reply, &session()).expect("a digest");
+
+        let [note] = &digest.notes[..] else {
+            panic!("one note, got {:?}", digest.notes);
+        };
+        assert_eq!(note.kind, NoteKind::Gotcha);
+        assert_eq!(
+            note.path.as_str(),
+            "gotchas/a-moved-crate-breaks-the-docker-build.md"
+        );
+        assert_eq!(note.title, "A moved crate breaks the Docker build");
+        assert_eq!(note.kind.tier(), anamnesis_core::page::Tier::Procedural);
+    }
+
+    /// The normal reply. A session that taught the project nothing durable is
+    /// the common case, and it has to be expressible without the absence
+    /// looking like a malformed answer.
+    #[test]
+    fn a_session_that_leaves_nothing_durable_leaves_no_notes() {
+        for notes in [json!([]), Value::Null] {
+            let reply = json!({
+                "title": "t", "body": "b", "handoff": "h",
+                "entities": [], "notes": notes,
+            });
+            let digest = digest_from_json(&reply, &session()).expect("a digest");
+            assert!(digest.notes.is_empty(), "{:?}", digest.notes);
+        }
+    }
+
+    /// A reply with no `notes` field at all — an older provider, or a model
+    /// that dropped a key it read as optional — is a reply with a page in it,
+    /// and the page is the part worth keeping.
+    #[test]
+    fn a_reply_without_notes_is_still_a_page() {
+        let reply = json!({"title": "t", "body": "b", "handoff": "h", "entities": []});
+        let digest = digest_from_json(&reply, &session()).expect("a digest");
+        assert!(digest.notes.is_empty());
+    }
+
+    /// Each way a note can be unusable, and the thing none of them may do:
+    /// take the session's page down with it.
+    #[test]
+    fn an_unusable_note_is_dropped_and_the_page_survives() {
+        let reply = json!({
+            "title": "t",
+            "body": "b",
+            "handoff": "h",
+            "entities": [],
+            "notes": [
+                {"kind": "philosophy", "title": "On memory", "body": "Real body."},
+                {"kind": "decision", "title": "A real title", "body": "   "},
+                {"kind": "decision", "title": "!!! ---", "body": "Real body."},
+                {"kind": "gotcha", "title": "The one that survives", "body": "Real body."},
+            ],
+        });
+        let digest = digest_from_json(&reply, &session()).expect("a digest");
+
+        assert_eq!(digest.body, "b", "the page is untouched by a bad note");
+        let [note] = &digest.notes[..] else {
+            panic!("one note, got {:?}", digest.notes);
+        };
+        assert_eq!(note.title, "The one that survives");
+    }
+
+    /// Not a spelling quibble: the whole batch is written in one commit, so
+    /// the loser of a collision is overwritten in the same breath it was
+    /// written in, and no history records that it ever existed.
+    #[test]
+    fn two_notes_that_would_be_the_same_file_are_one() {
+        let reply = json!({
+            "title": "t",
+            "body": "b",
+            "handoff": "h",
+            "entities": [],
+            "notes": [
+                {"kind": "gotcha", "title": "The server has an owner", "body": "First."},
+                {"kind": "gotcha", "title": "The server has an owner!", "body": "Second."},
+            ],
+        });
+        let digest = digest_from_json(&reply, &session()).expect("a digest");
+
+        assert_eq!(digest.notes.len(), 1);
+        assert_eq!(digest.notes[0].body, "First.", "the first one written wins");
+    }
+
+    /// Same title, different namespace, is two pages. A decision and the
+    /// gotcha it left behind may be named the same thing.
+    #[test]
+    fn the_same_claim_in_two_namespaces_is_two_notes() {
+        let reply = json!({
+            "title": "t",
+            "body": "b",
+            "handoff": "h",
+            "entities": [],
+            "notes": [
+                {"kind": "decision", "title": "Sessions close before the model runs", "body": "a"},
+                {"kind": "gotcha", "title": "Sessions close before the model runs", "body": "b"},
+            ],
+        });
+        let digest = digest_from_json(&reply, &session()).expect("a digest");
+        assert_eq!(digest.notes.len(), 2);
+    }
+
+    #[test]
+    fn a_model_cannot_leave_more_notes_than_the_ceiling() {
+        let many: Vec<Value> = (0..12)
+            .map(|n| json!({"kind": "decision", "title": format!("decision {n}"), "body": "b"}))
+            .collect();
+        let reply = json!({
+            "title": "t", "body": "b", "handoff": "h", "entities": [], "notes": many,
+        });
+        let digest = digest_from_json(&reply, &session()).expect("a digest");
+        assert_eq!(digest.notes.len(), MAX_NOTES);
+    }
+
+    /// A plural kind is not a different answer. The schema's enum says
+    /// `gotcha`; a model that writes the directory's name instead meant the
+    /// same thing, and dropping the note would spend a real page on grammar.
+    #[test]
+    fn a_kind_written_in_the_plural_is_the_same_kind() {
+        let reply = json!({
+            "title": "t", "body": "b", "handoff": "h", "entities": [],
+            "notes": [{"kind": "Gotchas", "title": "A real claim", "body": "Real body."}],
+        });
+        let digest = digest_from_json(&reply, &session()).expect("a digest");
+        assert_eq!(digest.notes[0].kind, NoteKind::Gotcha);
+    }
+
+    /// The session page's two title habits, one namespace down: a label in
+    /// front of the claim, and a heading repeating it inside the body.
+    #[test]
+    fn a_note_does_not_restate_the_directory_it_is_filed_in() {
+        let reply = json!({
+            "title": "t",
+            "body": "b",
+            "handoff": "h",
+            "entities": [],
+            "notes": [{
+                "kind": "gotcha",
+                "title": "Gotcha: The server has an owner",
+                "body": "# The server has an owner\n\nA scheduled task starts it.",
+            }],
+        });
+        let digest = digest_from_json(&reply, &session()).expect("a digest");
+
+        let note = &digest.notes[0];
+        assert_eq!(note.title, "The server has an owner");
+        assert_eq!(note.path.as_str(), "gotchas/the-server-has-an-owner.md");
+        assert_eq!(note.body, "A scheduled task starts it.");
+    }
+
+    /// The escaping the handoff had to survive, arriving in a note instead.
+    #[test]
+    fn a_note_that_escaped_its_own_newlines_gets_them_back() {
+        let reply = json!({
+            "title": "t", "body": "b", "handoff": "h", "entities": [],
+            "notes": [{
+                "kind": "procedure",
+                "title": "Rebasing a stack after a squash",
+                "body": r"Close the PR.\n\nOpen a new one from the rebased branch.",
+            }],
+        });
+        let digest = digest_from_json(&reply, &session()).expect("a digest");
+
+        let body = &digest.notes[0].body;
+        assert!(!body.contains(r"\n"), "{body:?}");
+        assert!(body.contains("the PR.\n\nOpen"), "{body:?}");
     }
 }

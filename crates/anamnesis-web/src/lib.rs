@@ -1866,6 +1866,7 @@ mod tests {
             body: "## Why. The backslash was eaten by the shell.".to_owned(),
             handoff: "Never write a Windows path into a shell command.".to_owned(),
             entities: Vec::new(),
+            notes: Vec::new(),
         };
 
         let second = recompile(
@@ -1965,6 +1966,7 @@ mod tests {
                 body: "## Why. It was worth saying properly.".to_owned(),
                 handoff: "This sentence must not reach anybody.".to_owned(),
                 entities: Vec::new(),
+                notes: Vec::new(),
             },
             Provenance::counted(),
             None,
@@ -2033,6 +2035,7 @@ mod tests {
                 body: "## Why. The backslash was eaten by the shell.".to_owned(),
                 handoff: "Never write a Windows path into a shell command.".to_owned(),
                 entities: Vec::new(),
+                notes: Vec::new(),
             },
             Provenance::counted(),
             None,
