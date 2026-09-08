@@ -227,8 +227,12 @@ fn main() -> anyhow::Result<()> {
         Commands::ForgetSession { sessions, apply } => {
             cmd_forget_session(&sessions, apply, cli.data_dir.clone())?;
         }
-        Commands::Reconsolidate { sessions, apply } => {
-            cmd_reconsolidate(&sessions, apply, cli.data_dir.clone())?;
+        Commands::Reconsolidate {
+            sessions,
+            apply,
+            show_prompt,
+        } => {
+            cmd_reconsolidate(&sessions, apply, show_prompt, cli.data_dir.clone())?;
         }
         Commands::Backup { out } => {
             cmd_backup(out, cli.data_dir.clone())?;

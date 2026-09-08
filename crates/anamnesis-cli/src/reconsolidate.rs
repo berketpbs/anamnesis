@@ -49,9 +49,14 @@ struct Skipped {
 pub fn cmd_reconsolidate(
     prefixes: &[String],
     apply: bool,
+    show_prompt: bool,
     data_dir: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let (scope, data, store) = open_project(data_dir)?;
+
+    if show_prompt {
+        return cmd_show_prompt(prefixes, &scope, &data, &store);
+    }
 
     // Built first, and refused first. Recompiling without a model would
     // replace a counted page with a counted page: the wiki would gain a
@@ -267,6 +272,81 @@ pub fn cmd_reconsolidate(
     // namespaces, and a command that looks only where the session pages are
     // would show none of them.
     println!("  git -C {} log -p", wiki.root().display());
+
+    Ok(())
+}
+
+/// Print what a model would be sent about each session, and send nothing.
+///
+/// Deliberately does not require a model. Rendering the prompt is local work,
+/// and the question it answers — what did the model actually see — is asked
+/// most often by somebody who has just been refused by a provider, or who has
+/// no key at all and is reading the code. Requiring the thing under
+/// investigation to be configured before the investigation can start is how
+/// this stayed unmeasured until now.
+///
+/// The budget is the same one consolidation uses, so what prints is what would
+/// be sent, not an unsqueezed transcript that would answer a different
+/// question.
+fn cmd_show_prompt(
+    prefixes: &[String],
+    scope: &ResolvedScope,
+    data: &anamnesis_core::datadir::DataDir,
+    store: &Store,
+) -> anyhow::Result<()> {
+    let wiki = Wiki::open(data.wiki())?;
+    let (candidates, _) = select(store, &wiki, scope, prefixes)?;
+
+    // Defaults when nothing is configured, so this runs without a key. Where a
+    // provider *is* configured its budget is used, because a prompt rendered
+    // to a different size than the one that would be sent is a different
+    // prompt.
+    let max_input_tokens = anamnesis_llm::LlmConfig::from_env()
+        .map(|config| config.max_input_tokens)
+        .unwrap_or_else(|_| anamnesis_llm::LlmConfig::default().max_input_tokens);
+
+    let preferences = anamnesis_web::read_preferences(&wiki, scope);
+    let existing = wiki.pages(&scope.scope)?;
+
+    println!("♻  What the model is sent about {}", scope.scope);
+    println!("   budget {max_input_tokens} input tokens");
+
+    for item in &candidates {
+        let Some(session) = store.load_session(item.session.id)? else {
+            continue;
+        };
+        let observations = store.observations(item.session.id)?;
+        let pages: Vec<String> = existing
+            .iter()
+            .filter(|path| path.as_str() != item.path.as_str())
+            .map(|path| path.as_str().to_owned())
+            .collect();
+
+        let rendered = anamnesis_consolidate::render_prompt(
+            &session,
+            &observations,
+            Surroundings {
+                preferences: preferences.as_deref(),
+                pages: &pages,
+            },
+            max_input_tokens,
+        );
+
+        println!();
+        println!("─── {} ───", item.path.as_str());
+        println!(
+            "  {} observation(s) recorded, {} characters rendered",
+            observations.len(),
+            rendered.len()
+        );
+        println!();
+        println!("{rendered}");
+    }
+
+    if candidates.is_empty() {
+        println!();
+        println!("  No finished session in this project has a page to rewrite.");
+    }
 
     Ok(())
 }

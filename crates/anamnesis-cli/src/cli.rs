@@ -373,6 +373,16 @@ pub enum Commands {
         /// Actually rewrite the pages, instead of only reporting them
         #[arg(long)]
         apply: bool,
+
+        /// Print what the model would be sent, and send nothing
+        ///
+        /// The transcript is squeezed to fit a token budget before it is
+        /// asked about, and what falls out is invisible from either end: the
+        /// session page names what the model saw, never what it did not. This
+        /// prints the prompt as the model receives it, so "the model ignored
+        /// X" and "X was never in the prompt" stop being the same observation.
+        #[arg(long, conflicts_with = "apply")]
+        show_prompt: bool,
     },
 
     /// Write the whole of memory to one archive
