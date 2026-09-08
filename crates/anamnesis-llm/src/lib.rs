@@ -61,6 +61,16 @@ pub enum LlmError {
         message: String,
     },
 
+    /// The model ran out of output budget mid-answer.
+    ///
+    /// Separate from [`Self::Malformed`] because the caller can do something
+    /// about this one and nothing about the other. A reply that is bad JSON
+    /// will be bad again on the same request; a reply that did not fit can be
+    /// asked for smaller, and a caller that knows which part of its request
+    /// was optional is the only thing that knows how.
+    #[error("llm reply did not fit its output budget: {0}")]
+    Truncated(String),
+
     /// A safety classifier declined the request. Not a failure of ours, and
     /// not something a retry fixes.
     #[error("llm declined the request{}", match .category {
@@ -91,7 +101,7 @@ impl LlmError {
             Self::Api { status, .. } => matches!(status, 408 | 409 | 429) || *status >= 500,
             // A malformed reply is worth one more roll of the dice: sampling
             // is not deterministic, and the same prompt often parses next time.
-            Self::Malformed(_) => true,
+            Self::Malformed(_) | Self::Truncated(_) => true,
             Self::Config(_) | Self::Refused { .. } => false,
         }
     }

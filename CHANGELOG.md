@@ -75,6 +75,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly what must not be lost
 
 ### Fixed
+- A durable page could cost a session its page entirely. The summary and the
+  notes are asked for in one reply and so share one output budget: a long
+  session whose model was generous with notes hit the ceiling, the reply came
+  back truncated, and *every* field was lost — the page fell back to a tally of
+  tool calls because of a field that was never required. Retrying identically
+  cannot help, since the budget has not moved, and the retry that already
+  existed spent two more requests proving it. A truncated reply is now its own
+  error rather than one more malformed one, because the caller can act on this
+  one: it asks again without the notes, once, and the session gets the reading
+  it would have had before the feature existed. Found by running a real session
+  of 526 observations, which a model had been summarising until notes were
+  added to the schema and which then fell back to counted twice in a row
 - The consolidation prompt had never mentioned that wiki links exist. `[[`
   appeared in it zero times: the schema asked for a title, a body, a handoff
   and entities, so every page a model wrote arrived with no outgoing edges at

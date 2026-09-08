@@ -202,7 +202,7 @@ fn parse_response(payload: &Value) -> Result<CompletionOutput, LlmError> {
         // The JSON is cut off mid-object, so parsing it would fail anyway —
         // but with a message that blames the model's grammar rather than our
         // budget, which is the thing someone would have to fix.
-        return Err(LlmError::Malformed(
+        return Err(LlmError::Truncated(
             "reply hit max_tokens and is incomplete; raise ANAMNESIS_LLM_MAX_OUTPUT_TOKENS"
                 .to_owned(),
         ));
