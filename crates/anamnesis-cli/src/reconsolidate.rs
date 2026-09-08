@@ -118,6 +118,16 @@ pub fn cmd_reconsolidate(
     if !apply {
         if !candidates.is_empty() {
             println!();
+            // Said plainly because this list is the only thing anyone sees
+            // before agreeing to the run, and it is no longer the whole story:
+            // a reading can also write decisions, gotchas and procedures,
+            // which nothing knows until the model has answered.
+            println!(
+                "  Recompiling can also write durable pages — decisions, gotchas,\n  \
+                 procedures — which this list cannot show, because none of them\n  \
+                 exist until the model has been asked."
+            );
+            println!();
             println!("  Nothing has been written. Re-run with --apply to carry this out.");
         }
         return Ok(());
@@ -149,7 +159,8 @@ pub fn cmd_reconsolidate(
         .map(|path| path.as_str().to_owned())
         .collect();
     let now = Timestamp::now();
-    let mut written = 0usize;
+    let mut rewritten = 0usize;
+    let mut durable = 0usize;
     let mut refused = 0usize;
 
     println!();
@@ -206,7 +217,7 @@ pub fn cmd_reconsolidate(
         // Only the model path reaches here — the counted one was refused
         // above — so this records the outcome that `status` reads as the
         // outage being over, which for these sessions it now is.
-        let path = anamnesis_web::recompile(
+        let written = anamnesis_web::recompile(
             &store,
             &wiki,
             &scope,
@@ -224,12 +235,20 @@ pub fn cmd_reconsolidate(
             &store,
             Some(scope.project_id),
             Action::SessionRecompiled,
-            path.clone(),
+            written.page.clone(),
             Some(format!("{} observation(s)", observations.len())),
         );
 
-        println!("  ✓ {path}  {}", digest.title);
-        written += 1;
+        println!("  ✓ {}  {}", written.page, digest.title);
+        // Named one per line rather than counted. These are pages in the
+        // namespaces that outrank everything during retrieval, and a run that
+        // reports "8 pages rewritten" while quietly adding eleven more is a
+        // run somebody has to check against `git log` to know what it did.
+        for note_path in &written.notes {
+            println!("      + {note_path}");
+            durable += 1;
+        }
+        rewritten += 1;
     }
 
     let left = match refused {
@@ -237,10 +256,17 @@ pub fn cmd_reconsolidate(
         n => format!(", {n} left as they were"),
     };
     println!();
-    println!("  {written} page(s) rewritten{left}");
+    println!("  {rewritten} page(s) rewritten{left}");
+    if durable > 0 {
+        let plural = if durable == 1 { "page" } else { "pages" };
+        println!("  {durable} durable {plural} written beside them");
+    }
     println!();
     println!("  Every page they replaced is still in the wiki's git history:");
-    println!("  git -C {} log -p sessions/", wiki.root().display());
+    // Not `sessions/` any more. A reading can leave pages in three other
+    // namespaces, and a command that looks only where the session pages are
+    // would show none of them.
+    println!("  git -C {} log -p", wiki.root().display());
 
     Ok(())
 }
