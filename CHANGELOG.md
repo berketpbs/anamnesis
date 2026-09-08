@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `reconsolidate --show-prompt` prints what a model would be sent, and sends
+  nothing. The transcript is squeezed to fit a token budget before anything is
+  asked about it, and what falls out was invisible from either end: the page
+  names what the model saw and never what it did not, so "the model ignored
+  this" and "this was never in the prompt" were the same observation. They are
+  now different. It needs no model configured, because the question is asked
+  most often by somebody who has just been refused by a provider — requiring
+  the thing under investigation to be working first is how this stayed
+  unmeasured. Its first use answered a real question: one session of 526
+  observations reaches the model as 76, with a three-hour hole in the middle
 - Consolidation can leave durable pages, not only the session's own. The wiki
   has namespaces that outrank everything else during retrieval — `decisions/`,
   `gotchas/`, `procedures/` — and until now nothing filled them but a person
