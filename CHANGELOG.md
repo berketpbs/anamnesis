@@ -85,6 +85,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly what must not be lost
 
 ### Fixed
+- A page now says how much of its session it was written from. The transcript is
+  squeezed to fit before a model is asked anything, and the only party told was
+  the model: the prompt carries `[… N events omitted …]` and the page carried
+  nothing. So a summary written from a seventh of an afternoon read exactly like
+  one written from all of it, and nobody reading the page a month later has the
+  transcript open beside them to notice. Model-written pages that left something
+  out end with the count — how many of the session's events they were written
+  from, and how many did not fit. Pages written from the whole session say
+  nothing, because a line that appears everywhere is a line nobody reads on the
+  one page where it matters. `--show-prompt` counts in events rather than
+  characters for the same reason: a character count cannot be compared against
+  anything a reader already knows
 - The prompt budget was throwing most of a session away, and saying nothing.
   The transcript is squeezed to fit `max_input_tokens` before a model is asked
   anything, and the default was 6,500 — chosen so a small local model could be

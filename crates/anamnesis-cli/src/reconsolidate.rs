@@ -322,7 +322,7 @@ fn cmd_show_prompt(
             .map(|path| path.as_str().to_owned())
             .collect();
 
-        let rendered = anamnesis_consolidate::render_prompt(
+        let (rendered, omitted) = anamnesis_consolidate::render_prompt_reporting(
             &session,
             &observations,
             Surroundings {
@@ -334,11 +334,17 @@ fn cmd_show_prompt(
 
         println!();
         println!("─── {} ───", item.path.as_str());
+        // Events, not characters. The question this answers is "did the
+        // model see the part I am asking about", and a character count cannot
+        // be compared against anything a reader knows.
         println!(
-            "  {} observation(s) recorded, {} characters rendered",
-            observations.len(),
-            rendered.len()
+            "  {} of {} recorded event(s) reach the model",
+            observations.len().saturating_sub(omitted),
+            observations.len()
         );
+        if omitted > 0 {
+            println!("  {omitted} did not fit and are not below");
+        }
         println!();
         println!("{rendered}");
     }
