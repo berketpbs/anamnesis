@@ -179,7 +179,21 @@ const GOOGLE_MAX_EFFORT: Effort = Effort::High;
 const DEFAULT_MAX_INPUT_TOKENS: usize = 6_500;
 
 /// Default ceiling on the reply.
-const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 2_000;
+///
+/// A ceiling, not a purchase: nobody is billed for headroom, only for what a
+/// model actually generates. So the number is not an estimate of the answer —
+/// it is the point past which something has gone wrong and generation should
+/// stop.
+///
+/// It was 2,000, which is roughly twice a long answer and turned out to be
+/// far under what a reasoning model needs. Measured on one real session of 526
+/// observations: at a ceiling of 8,000 the reply was cut off on six attempts
+/// in a row, and at 24,000 it succeeded on the first, with an answer of 878
+/// tokens. The answer never came close to either number — the budget was
+/// spent before the answer began, and a ceiling set to the size of the answer
+/// leaves no room for that. What a ceiling that low actually buys is a long
+/// session silently summarised by counting.
+const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 16_000;
 
 /// Floor on the reply ceiling. A page and a handoff do not fit in less.
 const MIN_MAX_OUTPUT_TOKENS: u32 = 1_000;

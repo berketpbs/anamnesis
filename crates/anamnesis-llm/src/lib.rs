@@ -101,7 +101,14 @@ impl LlmError {
             Self::Api { status, .. } => matches!(status, 408 | 409 | 429) || *status >= 500,
             // A malformed reply is worth one more roll of the dice: sampling
             // is not deterministic, and the same prompt often parses next time.
-            Self::Malformed(_) | Self::Truncated(_) => true,
+            Self::Malformed(_) => true,
+            // Measured, not reasoned about: the same request truncated on
+            // every attempt, twice over, in two separate runs. Nothing about
+            // a ceiling changes between one request and the next, so a retry
+            // here is a refusal bought at full price — six requests where two
+            // were possible. The caller is the one that can act on this, by
+            // asking for less.
+            Self::Truncated(_) => false,
             Self::Config(_) | Self::Refused { .. } => false,
         }
     }
