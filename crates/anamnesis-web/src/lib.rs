@@ -44,8 +44,8 @@ pub use auth::{Auth, Identity};
 use shutdown::{Stop, finish_in_flight, stopped};
 
 pub use pipeline::{
-    Consolidation, Ingested, ProbeReport, Provenance, claim_handoff, finalize, finalize_and_enrich,
-    ingest, probe, read_preferences, recompile, record, session_page_path,
+    Consolidation, Ingested, ProbeReport, Provenance, Recompiled, claim_handoff, finalize,
+    finalize_and_enrich, ingest, probe, read_preferences, recompile, record, session_page_path,
 };
 
 /// Errors surfaced over HTTP.
@@ -1883,9 +1883,9 @@ mod tests {
 
         // The same page, not a second one: the path comes from when the
         // session started, and recompiling does not touch that.
-        assert_eq!(first, second);
+        assert_eq!(first, second.page);
 
-        let path = anamnesis_core::page::PagePath::parse(&second).expect("path");
+        let path = anamnesis_core::page::PagePath::parse(&second.page).expect("path");
         let read = harness
             .state
             .wiki
@@ -2437,19 +2437,33 @@ mod tests {
             }],
         };
 
+        let mut last = None;
         for body in ["First reading.", "Second reading."] {
-            recompile(
-                &harness.state.store,
-                &harness.state.wiki.lock(),
-                &scope,
-                &closed,
-                &read_again(body),
-                Provenance::counted(),
-                None,
-                now(),
-            )
-            .expect("recompiled");
+            last = Some(
+                recompile(
+                    &harness.state.store,
+                    &harness.state.wiki.lock(),
+                    &scope,
+                    &closed,
+                    &read_again(body),
+                    Provenance::counted(),
+                    None,
+                    now(),
+                )
+                .expect("recompiled"),
+            );
         }
+
+        // What it wrote, said out loud. A recompile that reports one path
+        // while three files changed is one somebody has to check against
+        // `git log` to believe.
+        let reported = last.expect("two recompiles");
+        assert_eq!(reported.notes, vec![path.as_str().to_owned()]);
+        assert!(
+            reported.page.starts_with("sessions/"),
+            "{:?}",
+            reported.page
+        );
 
         let parsed = harness
             .state

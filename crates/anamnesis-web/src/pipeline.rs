@@ -498,7 +498,7 @@ fn commit(
     // arrives later through `recompile`. It is called anyway so that a path
     // which does hand this function a model's digest does not silently drop
     // what that model said the session left behind.
-    write_notes(store, wiki, scope, session, digest, embedder, now);
+    let _ = write_notes(store, wiki, scope, session, digest, embedder, now);
 
     store.record_handoff(&new_handoff(
         scope.project_id,
@@ -516,6 +516,20 @@ fn commit(
     store.close_session(session.id, now)?;
 
     Ok(path)
+}
+
+/// What a recompile wrote.
+///
+/// The session's page was always the answer to "what did this do"; it stopped
+/// being the whole answer when a reading could also leave durable pages
+/// behind. A caller that reports one path while three files changed is a
+/// caller that has to be checked against `git log` to be believed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recompiled {
+    /// The session page, rewritten in place.
+    pub page: String,
+    /// Durable pages written beside it, if the reading named any.
+    pub notes: Vec<String>,
 }
 
 /// Summarise a finished session again, and write its page over the old one.
@@ -549,8 +563,8 @@ pub fn recompile(
     provenance: Provenance<'_>,
     embedder: Option<&dyn Embed>,
     now: Timestamp,
-) -> Result<String, WebError> {
-    let path = write_session_page(
+) -> Result<Recompiled, WebError> {
+    let page = write_session_page(
         store,
         wiki,
         scope,
@@ -560,7 +574,7 @@ pub fn recompile(
         now,
         &format!("recompile: {}", digest.title),
     )?;
-    write_notes(store, wiki, scope, session, digest, embedder, now);
+    let notes = write_notes(store, wiki, scope, session, digest, embedder, now);
 
     // The one thing a recompile does touch about the session. Its page has
     // just been replaced, so the old provenance describes a page that no
@@ -569,7 +583,7 @@ pub fn recompile(
     // needs to stop reporting an outage that is over.
     store.record_summary(session.id, provenance.source, provenance.model)?;
 
-    Ok(path)
+    Ok(Recompiled { page, notes })
 }
 
 /// Render a digest to a session's page, and put that page in the index.
@@ -628,7 +642,8 @@ fn write_session_page(
 /// reaches its last mile here: the session's own page is already written and
 /// its handoff is about to be recorded, and neither may be lost because a
 /// durable page beside them could not be. A failure is logged and the session
-/// closes.
+/// closes, and the caller is told nothing was written rather than told why —
+/// there is nothing it could do differently.
 ///
 /// One commit for the batch, separate from the session page's. Separate
 /// because they are two writes with two subjects and the `session:` and
@@ -643,16 +658,20 @@ fn write_notes(
     digest: &SessionDigest,
     embedder: Option<&dyn Embed>,
     now: Timestamp,
-) {
+) -> Vec<String> {
     if digest.notes.is_empty() {
-        return;
+        return Vec::new();
     }
-    if let Err(error) = try_write_notes(store, wiki, scope, session, digest, embedder, now) {
-        tracing::error!(
-            %error,
-            session_id = %session.id,
-            "could not write the durable pages a session left; its own page stands"
-        );
+    match try_write_notes(store, wiki, scope, session, digest, embedder, now) {
+        Ok(written) => written,
+        Err(error) => {
+            tracing::error!(
+                %error,
+                session_id = %session.id,
+                "could not write the durable pages a session left; its own page stands"
+            );
+            Vec::new()
+        }
     }
 }
 
@@ -665,7 +684,7 @@ fn try_write_notes(
     digest: &SessionDigest,
     embedder: Option<&dyn Embed>,
     now: Timestamp,
-) -> Result<(), WebError> {
+) -> Result<Vec<String>, WebError> {
     // What this session has already written, which is the only thing it may
     // write over. A recompile has to be able to replace the notes its earlier
     // run left, or recompiling would either duplicate them under new names or
@@ -702,12 +721,13 @@ fn try_write_notes(
 
     let Some(commit) = wiki.write_pages(&scope.scope, &pages, &notes_message(digest, &pages))?
     else {
-        return Ok(());
+        return Ok(Vec::new());
     };
 
     // Indexed here rather than left to `reindex`, for the reason
     // `write_session_page` gives: the index the live path builds and the index
     // a rebuild reproduces have to be the same index.
+    let mut written = Vec::with_capacity(pages.len());
     for mut page in pages {
         page.git_commit = Some(commit.clone());
         store.index_page(
@@ -717,9 +737,10 @@ fn try_write_notes(
             embedder,
             now,
         )?;
+        written.push(page.path.as_str().to_owned());
     }
 
-    Ok(())
+    Ok(written)
 }
 
 /// The commit message for a batch of notes.

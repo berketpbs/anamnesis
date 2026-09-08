@@ -47,6 +47,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session produced, which is the opposite of what this is for
 
 ### Changed
+- `reconsolidate` says what else it wrote. Recompiling can now create pages in
+  the three namespaces that outrank everything during retrieval, and the
+  command reported one path per session — so a run that also wrote eleven
+  durable pages looked exactly like one that wrote none, and finding out meant
+  reading `git log`. Each is now named on its own line under the session that
+  produced it, counted in the summary, and the history hint no longer looks
+  only in `sessions/`, where none of them are. The dry run says the one true
+  thing it can: that recompiling may write durable pages and that this list
+  cannot show them, because none of them exist until the model has been asked.
+  A preview that quietly omits the part with the most reach is worse than one
+  that admits the omission
 - A session closes before a model is asked anything. Consolidation used to be
   one step — `SessionEnd` arrived, a provider was asked, and whatever came back
   became the page — which put a network call in the window between a session

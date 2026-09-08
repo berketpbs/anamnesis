@@ -194,7 +194,7 @@ pub async fn enrich(
             ),
         }
 
-        Ok(Enriched::Wrote(page))
+        Ok(Enriched::Wrote(page.page))
     })
     .await
 }
