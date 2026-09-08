@@ -271,9 +271,11 @@ pub async fn consolidate_with_source(
     // thing that can go wrong.
     let fallback = consolidate(session, observations)?;
 
+    let (user, omitted) =
+        render_prompt_reporting(session, observations, surroundings, max_input_tokens);
     let mut request = Completion {
         system: SYSTEM.to_owned(),
-        user: render_prompt(session, observations, surroundings, max_input_tokens),
+        user,
         schema: schema(),
         max_output_tokens,
     };
@@ -314,7 +316,10 @@ pub async fn consolidate_with_source(
                     output_tokens = output.output_tokens,
                     "session consolidated by model"
                 );
-                Some((digest, DigestSource::Model))
+                Some((
+                    disclosing(digest, observations.len(), omitted),
+                    DigestSource::Model,
+                ))
             }
             Err(reason) => {
                 tracing::warn!(%reason, "model reply was not a page; using the counted summary");
@@ -335,6 +340,22 @@ pub fn render_prompt(
     surroundings: Surroundings<'_>,
     max_tokens: usize,
 ) -> String {
+    render_prompt_reporting(session, observations, surroundings, max_tokens).0
+}
+
+/// The same, and how many events did not fit.
+///
+/// A separate entry point rather than a changed return type, because most
+/// callers want the prompt and nothing else, and the two that want the number
+/// want it for the same reason: an omission that only the model is told about
+/// is an omission nobody can act on. The marker inside the prompt says it to
+/// the model; this says it to us.
+pub fn render_prompt_reporting(
+    session: &Session,
+    observations: &[Observation],
+    surroundings: Surroundings<'_>,
+    max_tokens: usize,
+) -> (String, usize) {
     let preferences = surroundings.preferences;
     let mut out = String::new();
 
@@ -374,12 +395,13 @@ pub fn render_prompt(
     let remaining = max_tokens.saturating_sub(spent);
 
     let lines: Vec<String> = observations.iter().map(render_observation).collect();
-    for line in fit_lines(lines, remaining) {
+    let (lines, omitted) = fit_lines(lines, remaining);
+    for line in lines {
         out.push_str(&line);
         out.push('\n');
     }
 
-    out
+    (out, omitted)
 }
 
 /// The paths a model may link to, as many as the budget holds.
@@ -465,11 +487,11 @@ fn render_observation(observation: &Observation) -> String {
 /// about. The part that survives least well under compression is the long
 /// grind in between, which is also the part the counted summary already
 /// covers.
-fn fit_lines(lines: Vec<String>, budget: usize) -> Vec<String> {
+fn fit_lines(lines: Vec<String>, budget: usize) -> (Vec<String>, usize) {
     let cost = |line: &String| estimate_tokens(line) + 1;
     let total: usize = lines.iter().map(cost).sum();
     if total <= budget {
-        return lines;
+        return (lines, 0);
     }
 
     // Room for the marker, so disclosing the omission cannot itself overflow.
@@ -512,7 +534,7 @@ fn fit_lines(lines: Vec<String>, budget: usize) -> Vec<String> {
         out.push(format!("[… {omitted} events omitted to fit the context …]"));
     }
     out.extend(tail);
-    out
+    (out, omitted)
 }
 
 /// Labels a session page's title reaches for.
@@ -633,6 +655,35 @@ fn digest_from_json(value: &Value, session: &Session) -> Result<SessionDigest, S
         entities,
         notes,
     })
+}
+
+/// Say, on the page, how much of the session the page was written from.
+///
+/// The transcript is squeezed to fit before the model is asked anything, and
+/// until now the only party told was the model — the prompt carries a marker
+/// and the page carries nothing. So a summary written from a seventh of an
+/// afternoon read exactly like one written from all of it, and the difference
+/// was invisible from every side: the page cannot say what it did not see, and
+/// nobody reading it later has the transcript open beside them.
+///
+/// Written into the body rather than logged, because a log is a file nobody
+/// opens and the page is the thing read a month later, when the question is
+/// why it does not mention the afternoon's real work.
+///
+/// Nothing is added when nothing was dropped. A line saying "all of it" on
+/// every page is a line people stop reading, and then the one time it says
+/// something else it is not read either.
+fn disclosing(mut digest: SessionDigest, recorded: usize, omitted: usize) -> SessionDigest {
+    if omitted == 0 {
+        return digest;
+    }
+    let seen = recorded.saturating_sub(omitted);
+    digest.body = format!(
+        "{}\n\nWritten from {seen} of this session's {recorded} recorded events; \
+         {omitted} did not fit the model's context.\n",
+        digest.body.trim_end()
+    );
+    digest
 }
 
 /// Drop a level-1 heading a model wrote at the top of a page body.
@@ -1584,6 +1635,80 @@ mod tests {
         let rendered = render_observation(&observations[0]);
         assert!(!rendered.contains('\n'));
         assert!(rendered.contains("second line"));
+    }
+
+    /// A page written from part of a session says which part.
+    ///
+    /// The failure it closes: a summary of a seventh of an afternoon reads
+    /// exactly like a summary of all of it, and nobody reading the page later
+    /// has the transcript open beside them to notice.
+    #[tokio::test]
+    async fn a_page_written_from_part_of_a_session_says_so() {
+        let mut observations = vec![observation(EventKind::UserPrompt, "FIRST", None)];
+        for index in 0..200 {
+            observations.push(observation(
+                EventKind::ToolUse,
+                &format!("event number {index} with enough padding to cost something"),
+                Some(ToolRef {
+                    name: "Read".to_owned(),
+                    ok: Some(true),
+                }),
+            ));
+        }
+
+        let (digest, source) = consolidate_with_source(
+            &Fake(Ok(json!({
+                "title": "The long one",
+                "body": "## What. It went on for a while.",
+                "handoff": "h",
+                "entities": [],
+            }))),
+            &session(),
+            &observations,
+            Surroundings::default(),
+            600,
+            1_000,
+        )
+        .await
+        .expect("a digest");
+
+        assert_eq!(source, DigestSource::Model);
+        assert!(
+            digest.body.contains("did not fit the model's context"),
+            "{:?}",
+            digest.body
+        );
+        assert!(
+            digest.body.contains(&format!(
+                "of this session's {} recorded events",
+                observations.len()
+            )),
+            "{:?}",
+            digest.body
+        );
+    }
+
+    /// And a page written from all of it says nothing, because a line that
+    /// appears on every page is a line nobody reads on the one that matters.
+    #[tokio::test]
+    async fn a_page_written_from_the_whole_session_says_nothing_about_it() {
+        let (digest, _) = consolidate_with_source(
+            &Fake(Ok(json!({
+                "title": "The short one",
+                "body": "## What. It was brief.",
+                "handoff": "h",
+                "entities": [],
+            }))),
+            &session(),
+            &working_session(),
+            Surroundings::default(),
+            6_500,
+            1_000,
+        )
+        .await
+        .expect("a digest");
+
+        assert!(!digest.body.contains("did not fit"), "{:?}", digest.body);
     }
 
     /// A provider that truncates once and then answers, recording what it was
