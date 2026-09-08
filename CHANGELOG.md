@@ -85,6 +85,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly what must not be lost
 
 ### Fixed
+- The prompt budget was throwing most of a session away, and saying nothing.
+  The transcript is squeezed to fit `max_input_tokens` before a model is asked
+  anything, and the default was 6,500 — chosen so a small local model could be
+  pointed at the same code path. Measured on one real session: 526 observations
+  reached the model as **76**, with a three-hour hole in the middle. The page it
+  produced read perfectly well, which is the problem — nothing on it said which
+  seventh of the afternoon it was written from. The two failures are not
+  comparable: a budget too large is refused by the provider and logged, a budget
+  too small is a plausible page. The default is now 32,000, which holds an
+  ordinary session whole; a small local window is what
+  `ANAMNESIS_LLM_MAX_INPUT_TOKENS` is for. Unlike the reply ceiling this is not
+  free — input tokens are billed whether or not they change the answer — which
+  is why it is 32,000 rather than the largest window that exists. On the session
+  above the omission fell from 450 events to 145, and the model, given what it
+  had been missing, wrote the first durable page this feature has produced
 - A wait an API asked for is now waited. `retry-after` was read from the HTTP
   header and nowhere else, and Google sends no such header — it states the wait
   inside the body. So a 429 asking for thirteen seconds was retried after one

@@ -173,10 +173,26 @@ const GOOGLE_MAX_EFFORT: Effort = Effort::High;
 
 /// Default ceiling on prompt size, in estimated tokens.
 ///
-/// Small enough that a locally hosted model with a modest window can be
-/// pointed at the same code path, which is the reason to have a budget at all
-/// rather than sending whatever a session happened to produce.
-const DEFAULT_MAX_INPUT_TOKENS: usize = 6_500;
+/// It was 6,500, chosen so a locally hosted model with a modest window could
+/// be pointed at the same code path. That is a real thing to want and it is
+/// not what a default is for: the cost of the number being too small fell on
+/// every session, and the cost of it being too large falls on a configuration
+/// that can say so.
+///
+/// The two failures are not comparable. Too large is *loud* — a provider
+/// refuses the request and the log says why. Too small is silent: the
+/// transcript is squeezed to fit, the reply is a perfectly ordinary-looking
+/// page, and nothing on it says which part of the session it was written
+/// from. Measured on one real session: 526 observations reached the model as
+/// 76, with a three-hour hole in the middle where the durable lesson of that
+/// afternoon was actually learned. The page it produced read fine.
+///
+/// So the default now holds an ordinary session whole, and a small local
+/// window is what `ANAMNESIS_LLM_MAX_INPUT_TOKENS` is for. Unlike the reply
+/// ceiling this is not free — input tokens are billed whether or not they
+/// change the answer — which is the reason it is 32,000 and not the window
+/// size of the largest model that exists.
+const DEFAULT_MAX_INPUT_TOKENS: usize = 32_000;
 
 /// Default ceiling on the reply.
 ///
