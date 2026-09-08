@@ -203,6 +203,15 @@ mod tests {
         assert_eq!(retry_delay(&error, 0), Duration::from_secs(7));
     }
 
+    /// Retrying a reply that did not fit cannot help, and was measured not
+    /// helping: the same request truncated on every attempt, twice over. The
+    /// caller drops the optional half instead.
+    #[test]
+    fn a_reply_that_did_not_fit_is_not_retried_identically() {
+        assert!(!LlmError::Truncated("did not fit".to_owned()).is_retryable());
+        assert!(LlmError::Malformed("not json".to_owned()).is_retryable());
+    }
+
     /// The header stays the trustworthy answer where there is one.
     #[test]
     fn a_header_outranks_anything_the_body_says() {

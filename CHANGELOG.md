@@ -94,9 +94,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   existed spent two more requests proving it. A truncated reply is now its own
   error rather than one more malformed one, because the caller can act on this
   one: it asks again without the notes, once, and the session gets the reading
-  it would have had before the feature existed. Found by running a real session
-  of 526 observations, which a model had been summarising until notes were
-  added to the schema and which then fell back to counted twice in a row
+  it would have had before the feature existed. The retry that already existed
+  is gone from this path: a request that overflowed a ceiling overflows it
+  again — measured on six attempts across two runs — so it spent refusals at
+  full price with no way to succeed. That measurement also showed the notes
+  were **not** what overflowed the budget; the same session truncated without
+  them. The ceiling was: 2,000 by default, 8,000 on the machine this was found
+  on, against an answer that turned out to be 878 tokens once there was room
+  for it. A reasoning model spends the budget before the answer begins, so a
+  ceiling sized to the answer leaves nothing for that, and the default is now
+  16,000. Nobody is billed for headroom — only for what a model generates — so
+  the low ceiling bought nothing and cost long sessions their reading
 - The consolidation prompt had never mentioned that wiki links exist. `[[`
   appeared in it zero times: the schema asked for a title, a body, a handoff
   and entities, so every page a model wrote arrived with no outgoing edges at
