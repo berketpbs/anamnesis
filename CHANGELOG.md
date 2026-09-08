@@ -75,6 +75,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly what must not be lost
 
 ### Fixed
+- A wait an API asked for is now waited. `retry-after` was read from the HTTP
+  header and nowhere else, and Google sends no such header — it states the wait
+  inside the body. So a 429 asking for thirteen seconds was retried after one
+  and then two, which bought two more refusals out of the same twenty-a-day
+  quota the wait exists to protect, and turned a rate limit into a consolidation
+  that failed. Both shapes are read now, the structured `RetryInfo.retryDelay`
+  before the message's own sentence, and the number is rounded up rather than
+  truncated: 12.9 seconds became 12, which is one refusal early for no saving.
+  The header still outranks anything the body says, and an error that states no
+  wait backs off exactly as before
 - A durable page could cost a session its page entirely. The summary and the
   notes are asked for in one reply and so share one output budget: a long
   session whose model was generous with notes hit the ceiling, the reply came
