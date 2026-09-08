@@ -268,7 +268,7 @@ fn parse_response(payload: &Value) -> Result<CompletionOutput, LlmError> {
             .get("reasoning")
             .and_then(Value::as_str)
             .is_some_and(|reasoning| !reasoning.trim().is_empty());
-        return Err(LlmError::Malformed(if content.is_empty() && thinking {
+        return Err(LlmError::Truncated(if content.is_empty() && thinking {
             "the model spent its whole output budget thinking and answered nothing; \
              raise ANAMNESIS_LLM_MAX_OUTPUT_TOKENS or choose a model that reasons less"
                 .to_owned()

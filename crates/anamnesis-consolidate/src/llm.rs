@@ -18,7 +18,7 @@ use std::collections::VecDeque;
 use anamnesis_core::observation::{EventKind, Observation};
 use anamnesis_core::page::{Entity, PagePath};
 use anamnesis_core::session::Session;
-use anamnesis_llm::{Completion, Provider, clip_to_tokens, estimate_tokens};
+use anamnesis_llm::{Completion, LlmError, Provider, clip_to_tokens, estimate_tokens};
 use serde_json::{Value, json};
 
 use crate::{
@@ -197,6 +197,21 @@ pub fn schema() -> Value {
     })
 }
 
+/// The same shape with the optional half removed.
+///
+/// Not a flag on [`schema`], because these are not two configurations of one
+/// request: this one is what a session gets when the full answer would not
+/// fit, and naming it says so at every call site.
+pub fn schema_without_notes() -> Value {
+    let mut reduced = schema();
+    reduced["properties"]
+        .as_object_mut()
+        .expect("the schema is an object")
+        .remove("notes");
+    reduced["required"] = json!(["title", "body", "handoff", "entities"]);
+    reduced
+}
+
 /// Which path produced a digest.
 ///
 /// Capture does not need to ask: there is no page yet, and a counted one is
@@ -256,14 +271,40 @@ pub async fn consolidate_with_source(
     // thing that can go wrong.
     let fallback = consolidate(session, observations)?;
 
-    let request = Completion {
+    let mut request = Completion {
         system: SYSTEM.to_owned(),
         user: render_prompt(session, observations, surroundings, max_input_tokens),
         schema: schema(),
         max_output_tokens,
     };
 
-    match provider.complete(&request).await {
+    let mut reply = provider.complete(&request).await;
+
+    // A reply that did not fit is asked for again without the notes, once.
+    //
+    // This is the invariant this whole module is built on, arriving somewhere
+    // it was not expected: the durable pages a session leaves are optional,
+    // the page itself is not, and they are asked for in the same reply and so
+    // share one output budget. A long session whose model wrote three extra
+    // pages hits the ceiling, and *every* field is lost — the page becomes a
+    // tally of tool calls because the model was generous about something that
+    // was never required. Retrying the identical request cannot help; the
+    // budget is the same and so is the answer. Dropping the optional half can,
+    // and does: the session gets the reading it would have had before this
+    // feature existed.
+    //
+    // Found by running it against a real session of 526 observations, which
+    // had been summarised by a model until notes were added to the schema and
+    // then fell back to counted twice in a row.
+    if matches!(reply, Err(LlmError::Truncated(_))) {
+        tracing::warn!(
+            "the reply did not fit its output budget; asking again without the durable pages"
+        );
+        request.schema = schema_without_notes();
+        reply = provider.complete(&request).await;
+    }
+
+    match reply {
         Ok(output) => match digest_from_json(&output.json, session) {
             Ok(digest) => {
                 tracing::info!(
@@ -1543,6 +1584,89 @@ mod tests {
         let rendered = render_observation(&observations[0]);
         assert!(!rendered.contains('\n'));
         assert!(rendered.contains("second line"));
+    }
+
+    /// A provider that truncates once and then answers, recording what it was
+    /// asked for each time.
+    struct Cramped {
+        asked: std::sync::Mutex<Vec<Value>>,
+    }
+
+    #[async_trait]
+    impl Provider for Cramped {
+        fn name(&self) -> &'static str {
+            "cramped"
+        }
+        fn model(&self) -> &str {
+            "cramped-1"
+        }
+        async fn complete(&self, request: &Completion) -> Result<CompletionOutput, LlmError> {
+            let mut asked = self.asked.lock().expect("lock");
+            asked.push(request.schema.clone());
+            if asked.len() == 1 {
+                return Err(LlmError::Truncated("did not fit".to_owned()));
+            }
+            Ok(CompletionOutput {
+                json: json!({
+                    "title": "The long one",
+                    "body": "## What. It was long.",
+                    "handoff": "h",
+                    "entities": [],
+                }),
+                model: "cramped-1".to_owned(),
+                input_tokens: 1,
+                output_tokens: 1,
+            })
+        }
+    }
+
+    /// The failure real use found, and what it costs now.
+    ///
+    /// The page and the durable pages share one output budget, so a long
+    /// session whose model was generous with notes lost *everything* — the
+    /// page became a tally of tool calls because of a field that was never
+    /// required. Asking again identically cannot help; the budget has not
+    /// moved. Dropping the optional half can.
+    #[tokio::test]
+    async fn a_reply_that_did_not_fit_is_asked_for_again_without_the_notes() {
+        let provider = Cramped {
+            asked: std::sync::Mutex::new(Vec::new()),
+        };
+        let (digest, source) = consolidate_with_source(
+            &provider,
+            &session(),
+            &working_session(),
+            Surroundings::default(),
+            4_000,
+            1_000,
+        )
+        .await
+        .expect("a digest");
+
+        assert_eq!(
+            source,
+            DigestSource::Model,
+            "the page is not lost to a note"
+        );
+        assert_eq!(digest.title, "2026-08-20: The long one");
+        assert!(digest.notes.is_empty());
+
+        let asked = provider.asked.lock().expect("lock");
+        assert_eq!(asked.len(), 2, "asked twice, not more");
+        assert!(
+            asked[0]["properties"]["notes"].is_object(),
+            "the first ask is the full one"
+        );
+        assert!(
+            asked[1]["properties"]["notes"].is_null(),
+            "the second drops what was optional: {:?}",
+            asked[1]["properties"]
+        );
+        assert_eq!(
+            asked[1]["required"],
+            json!(["title", "body", "handoff", "entities"]),
+            "and does not go on requiring what it no longer offers"
+        );
     }
 
     /// One note, written out in full, asserting the two things a note is: a
