@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- An eval case says what **kind of question** it is, and every measure is
+  reported per kind as well as in total. A total is where a trade goes to hide:
+  a change that teaches retrieval to match a paraphrase can cost it a bare
+  keyword, and one mean over both reports that nothing much happened, which is
+  exactly the change worth arguing about. The label describes how somebody
+  *phrased* the question — `keyword`, `natural`, `paraphrase`, `symptom`,
+  `temporal` — not what the corpus is doing to the ranker, because the point is
+  to see which kind of asking a change helps. All twenty-five shipped cases are
+  labelled, and the table said something on the first run: the whole of
+  `crowded`'s shortfall is one category. Keyword 1.000, symptom 1.000, natural
+  and temporal 1.000, and **paraphrase hit@1 0.750** — the lexical-gap questions
+  are the only ones retrieval is getting wrong, which is the finding the single
+  0.933 was averaging away. A suite declares its categories up front and a case
+  naming one it did not declare is refused, so that `paraprase` is a suite that
+  fails to load rather than a sixth category with one question in it; a declared
+  category no case asks is refused too, being the same typo in the other
+  direction. The count sits in its own column beside the rates, because over
+  four questions a rate moves in quarters and a quarter is not a finding. A
+  suite that labels nothing keeps loading and is scored exactly as it was
 - `anamnesis eval` reports **hit@1** and **NDCG@k** beside the mean reciprocal
   rank and recall it already had, and a suite can be gated on either. The
   shipped suites were reading 1.000 / 1.000 and 0.967 / 1.000, which looks like

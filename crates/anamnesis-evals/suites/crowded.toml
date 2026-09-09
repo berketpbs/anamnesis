@@ -31,6 +31,10 @@ description = "Ranking under competition: a corpus where more than one page coul
 
 limit = 5
 
+# The labels are defined in `retrieval.toml`. This suite is the one that has a
+# temporal question in it.
+categories = ["keyword", "natural", "paraphrase", "symptom", "temporal"]
+
 # Measured, then rounded down. A floor, not a target.
 #
 # The first run scored MRR 0.436, recall 0.533, against full-text search alone
@@ -353,75 +357,90 @@ Related: [[procedures/rollback.md]], [[decisions/0004-migrations.md]]
 
 [[case]]
 query = "why did the queue back up in july"
+category = "temporal"
 relevant = ["notes/postmortem-2026-07-14.md", "sessions/2026-07-14-a1b2c3d4.md"]
 note = "The answer is a plain note; a canonical decision page about retries shares its whole vocabulary and links to it. If authority is weighted too heavily, the decision wins and this case says so."
 
 [[case]]
 query = "keys disappearing under load"
+category = "symptom"
 relevant = ["notes/redis-memory.md"]
 note = "Again a note against a canonical page: the queue decision is the page that says Redis, but the one that answers this says maxmemory and eviction."
 
 [[case]]
 query = "how long before we give up on a call"
+category = "paraphrase"
 relevant = ["decisions/0005-timeouts.md"]
 note = "Paraphrase — the page says give up after five seconds, the question says how long. It also has to beat the page it replaced, which is still in the wiki."
 
 [[case]]
 query = "timeout"
+category = "keyword"
 relevant = ["decisions/0005-timeouts.md"]
 note = "The superseded page declares the same entity and says timeout in its title. Retrieval must offer the replacement, not the page it replaced."
 
 [[case]]
 query = "can i deploy on friday"
+category = "paraphrase"
 relevant = ["_rules/release-window.md"]
 note = "Question shape: the page never says Friday except to exclude it, and never says deploy at all."
 
 [[case]]
 query = "jitter"
+category = "keyword"
 relevant = ["decisions/0002-retries.md"]
 note = "A single entity, declared by one page and said once in its body. Both the entity and full-text streams should reach it."
 
 [[case]]
 query = "expand contract migration"
+category = "keyword"
 relevant = ["decisions/0004-migrations.md", "sessions/2026-08-03-c3d4e5f6.md"]
 note = "A decision and the session that carried it out. Either is a fair answer; the decision is the better one."
 
 [[case]]
 query = "roll back a bad release"
+category = "natural"
 relevant = ["procedures/rollback.md", "sessions/2026-08-19-e5f6a7b8.md"]
 note = "Three pages link to the procedure, so this is the case where link expansion is genuinely earning its place rather than adding neighbours."
 
 [[case]]
 query = "scheduled job ran twice"
+category = "symptom"
 relevant = ["gotchas/clock-skew.md"]
 note = "Not one word of the question appears in the page, which says fired twice a day and compares timestamps across hosts."
 
 [[case]]
 query = "test passes locally fails in ci"
+category = "symptom"
 relevant = ["notes/flaky-test.md"]
 note = "Full text alone, in a corpus where nothing else is about tests. The case that notices if the FTS stream is weighted down too far."
 
 [[case]]
 query = "env file committed"
+category = "keyword"
 relevant = ["_rules/secrets.md"]
 note = "A punctuated token against a page that says .env once, in a body about credentials."
 
 [[case]]
 query = "load test looked fine before release"
+category = "symptom"
 relevant = ["notes/staging-parity.md"]
 note = "The answer is the least connected page in the corpus: no entities, no inbound links, nothing but its body."
 
 [[case]]
 query = "who writes what is still open at shift end"
+category = "paraphrase"
 relevant = ["procedures/oncall-handover.md"]
 note = "Question shape against a procedure. The release rule is pinned, canonical, and also about who is awake — the competitor is deliberate."
 
 [[case]]
 query = "kafka"
+category = "keyword"
 relevant = ["decisions/0001-queue.md"]
 note = "A name that appears in exactly one page, as the thing that was rejected. Being about the alternative is still being about the subject."
 
 [[case]]
 query = "where did the runbook go"
+category = "paraphrase"
 relevant = ["notes/old-runbook-link.md", "procedures/rollback.md"]
 note = "A stub whose only content is a pointer. The page it points at is a fair answer too, and is what link expansion should surface."
