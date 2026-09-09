@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A page now says what a session **changed**, apart from what it merely read.
+  `Files mentioned` was one list of everything a path pattern found anywhere in
+  a session, so a session that read forty files and edited two made
+  forty-two claims about what it was about, of which two were true. Files
+  written by a writing tool — `Write`, `Edit` and the names other harnesses
+  give the same two moments, matched through an MCP prefix as well — now get
+  their own heading, the first entity slots, and the line in the handoff, and
+  the mentioned list holds only what is left. `Bash` is deliberately not a
+  writing tool: it is by far the most used one here, it can obviously change a
+  file, and working out *which* file from the text of a shell command means
+  parsing every shell — a wrong answer is worse than none on a heading that
+  says "this changed". The file comes from the tool's own declared field rather
+  than from the body at large, because an edit carries the text it replaced and
+  that text names files the edit never touched; and a call that never came back
+  changes nothing, since nobody observed that it wrote
 - A call that failed is now on the page, on a harness that never says one did.
   Claude Code fires no `PostToolUse` hook at all for a failed tool call —
   probed directly: one session running `echo AAA`, `exit 3`, `echo BBB`

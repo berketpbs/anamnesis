@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
-use anamnesis_core::observation::Observation;
+use anamnesis_core::observation::{EventKind, Observation, RESULT_MARKER};
 use regex::Regex;
 
 /// Extensions worth recognising. Restricting to a known list is what keeps
@@ -33,6 +33,118 @@ pub fn mentioned_files(observations: &[Observation]) -> Vec<String> {
     }
 
     found.into_iter().collect()
+}
+
+/// Tool names that change a file, by the last segment of the name.
+///
+/// Taken from what this project's own index actually holds — `Write` (201
+/// calls) and `Edit` (176) — plus the names the other harnesses give the same
+/// two moments. Matched on the last `__`-separated segment so that an MCP tool
+/// registered as `mcp__something__write` is recognised as the write it is.
+///
+/// `Bash` is deliberately absent, and it is by far the most used tool here
+/// (3,070 calls). A shell command can obviously change a file; deciding
+/// *which* file from the text of a command means parsing every shell, and a
+/// wrong answer here is worse than no answer — this list is what a page will
+/// claim the session changed.
+const WRITING_TOOLS: &[&str] = &[
+    "write",
+    "edit",
+    "multiedit",
+    "notebookedit",
+    "create",
+    "createfile",
+    "create_file",
+    "applypatch",
+    "apply_patch",
+    "str_replace_editor",
+];
+
+/// Whether a tool of this name changes the file it names.
+fn is_writing_tool(name: &str) -> bool {
+    let last = name
+        .rsplit("__")
+        .next()
+        .unwrap_or(name)
+        .to_ascii_lowercase();
+    WRITING_TOOLS.contains(&last.as_str())
+}
+
+/// The files a session actually changed, as distinct from the ones it read.
+///
+/// A page that lists both together says a session was *about* every file it
+/// happened to open, which on a session that read forty files and edited two
+/// is forty-two claims of which two are true. The entities are drawn from this
+/// list first for the same reason: what a session changed is what a later
+/// search is looking for.
+///
+/// Only completed calls count. An attempt that never came back may or may not
+/// have written anything, and a page that lists a file as changed when the
+/// call failed is worse than one that leaves it out.
+///
+/// The file comes from the tool's own input field when the body parses as JSON
+/// — which is what every harness seen so far sends — and from the path pattern
+/// otherwise. An `Edit` body carries the replaced text as well, and that text
+/// can name other files; taking the declared field first is what keeps those
+/// out of a list that says "this changed".
+pub fn changed_files(observations: &[Observation]) -> Vec<String> {
+    let mut found = BTreeSet::new();
+
+    for observation in observations {
+        if observation.kind != EventKind::ToolUse {
+            continue;
+        }
+        let Some(tool) = &observation.tool else {
+            continue;
+        };
+        if !is_writing_tool(&tool.name) {
+            continue;
+        }
+
+        // The result is not part of what was asked for, and a command's output
+        // can name any number of files it did not touch.
+        let input = observation
+            .body
+            .as_str()
+            .split(RESULT_MARKER)
+            .next()
+            .unwrap_or_default();
+
+        if let Some(declared) = declared_path(input) {
+            found.insert(declared);
+            continue;
+        }
+        if let Some(capture) = pattern().find(input) {
+            let path = normalize(capture.as_str());
+            if is_plausible(&path) {
+                found.insert(path);
+            }
+        }
+    }
+
+    found.into_iter().collect()
+}
+
+/// The path a tool input names outright, when the body is the JSON a harness
+/// sends and one of the known keys is in it.
+fn declared_path(input: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(input).ok()?;
+    let object = value.as_object()?;
+    for key in [
+        "file_path",
+        "filePath",
+        "notebook_path",
+        "notebookPath",
+        "path",
+    ] {
+        if let Some(raw) = object.get(key).and_then(serde_json::Value::as_str) {
+            let path = normalize(raw);
+            if is_plausible(&path) {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 /// The compiled path pattern.
@@ -97,7 +209,7 @@ fn is_plausible(path: &str) -> bool {
 mod tests {
     use super::*;
     use anamnesis_core::ids::{ObservationId, SessionId};
-    use anamnesis_core::observation::{BoundedBody, EventKind};
+    use anamnesis_core::observation::{BoundedBody, EventKind, ToolRef};
     use jiff::Timestamp;
 
     fn observation(body: &str) -> Observation {
@@ -110,6 +222,66 @@ mod tests {
             body: BoundedBody::truncating(body, BoundedBody::DEFAULT_LIMIT),
             sanitized: true,
         }
+    }
+
+    fn by(tool: &str, body: &str) -> Observation {
+        Observation {
+            tool: Some(ToolRef {
+                name: tool.to_owned(),
+                ok: None,
+                call_id: None,
+            }),
+            ..observation(body)
+        }
+    }
+
+    /// The distinction the page is built on: a session that read forty files
+    /// and edited two changed two.
+    #[test]
+    fn a_file_read_is_not_a_file_changed() {
+        let changed = changed_files(&[
+            by("Read", r#"{"file_path": "crates/core/src/page.rs"}"#),
+            by("Edit", r#"{"file_path": "crates/core/src/lib.rs"}"#),
+            by("Bash", r#"{"command": "cat crates/store/src/ops.rs"}"#),
+        ]);
+
+        assert_eq!(changed, vec!["crates/core/src/lib.rs".to_owned()]);
+    }
+
+    /// An edit carries the text it replaced, and that text names files the
+    /// edit did not touch. The declared field is the one that means "this".
+    #[test]
+    fn an_edits_replaced_text_does_not_become_a_file_it_changed() {
+        let changed = changed_files(&[by(
+            "Edit",
+            r#"{"file_path": "src/lib.rs", "old_string": "mod files; // see crates/other/src/thing.rs", "new_string": "mod files;"}"#,
+        )]);
+
+        assert_eq!(changed, vec!["src/lib.rs".to_owned()]);
+    }
+
+    /// A write that never came back may have written nothing. A page that
+    /// lists it as changed is asserting something nobody observed.
+    #[test]
+    fn a_call_that_never_completed_changed_nothing() {
+        let attempted = Observation {
+            kind: EventKind::ToolAttempt,
+            ..by("Write", r#"{"file_path": "src/never.rs"}"#)
+        };
+
+        assert!(changed_files(&[attempted]).is_empty());
+    }
+
+    /// A harness that registers its editor through MCP names it
+    /// `mcp__server__write`, and it is still a write.
+    #[test]
+    fn a_namespaced_write_is_still_a_write() {
+        let changed = changed_files(&[by(
+            "mcp__editor__write",
+            r#"{"file_path": "docs/readme.md"}"#,
+        )]);
+
+        assert_eq!(changed, vec!["docs/readme.md".to_owned()]);
     }
 
     #[test]
