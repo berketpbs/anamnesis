@@ -190,6 +190,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly what must not be lost
 
 ### Fixed
+- An `error` field that is present and empty is no longer read as a failure. A
+  JSON-RPC reply — which is what a tool answering over MCP sends — carries
+  `error: null` on every successful call, and the outcome reader treated the
+  key's presence as the answer. No such payload is in this project's index yet;
+  the shape gets more likely with every tool that arrives over MCP, and a
+  wrongly recorded failure is the same lie as a wrongly recorded success.
+  `doctor` also notices a harness wired before the assistant's own account was
+  captured, which looks complete and produces pages compiled from tool calls
+  alone — and a test now fails if any of its verdicts carries the indentation
+  of the source line it was written on, which had happened three times
 - A Turkish page is written in Turkish letters. The prompt asked for the
   language the person wrote in and got it — `Ozet`, `gorev`, `Gerceklestirilen`
   — a page in no language at all, and unfindable by anybody who types the word

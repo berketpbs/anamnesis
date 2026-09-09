@@ -237,8 +237,20 @@ fn tool_outcome(object: &serde_json::Map<String, Value>) -> Option<bool> {
         if let Some(is_error) = response.get("is_error").and_then(Value::as_bool) {
             return Some(!is_error);
         }
-        if response.contains_key("error") {
-            return Some(false);
+        // Present is not the same as set. A JSON-RPC-shaped reply carries
+        // `error: null` on success, and an MCP tool that answers with the
+        // field always present would have had every one of its calls recorded
+        // as a failure — a lie of exactly the kind this module is otherwise
+        // careful about, and one that gets *more* likely as more tools arrive
+        // over MCP.
+        if let Some(error) = response.get("error") {
+            let empty = error.is_null()
+                || error.as_str().is_some_and(|text| text.trim().is_empty())
+                || error.as_array().is_some_and(|items| items.is_empty())
+                || error.as_object().is_some_and(|fields| fields.is_empty());
+            if !empty {
+                return Some(false);
+            }
         }
     }
     None
@@ -655,6 +667,24 @@ mod tests {
                 .as_str()
                 .contains("Error: Exit code 3")
         );
+    }
+
+    /// A field that is present and empty says nothing happened, not that
+    /// something failed. JSON-RPC replies — which is what MCP tools answer
+    /// with — carry `error: null` on every successful call.
+    #[test]
+    fn an_error_field_that_is_empty_is_not_a_failure() {
+        for empty in [json!(null), json!(""), json!("   "), json!([]), json!({})] {
+            let payload = json!({
+                "session_id": "s",
+                "hook_event_name": "PostToolUse",
+                "tool_name": "mcp__server__query",
+                "tool_response": {"error": empty, "result": "ok"}
+            });
+
+            let parsed = parse(&claude(), &payload).unwrap();
+            assert_eq!(parsed.tool.unwrap().ok, None, "{empty:?} is not a failure");
+        }
     }
 
     #[test]
