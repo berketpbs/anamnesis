@@ -108,7 +108,13 @@ Rules:
 infer it, and word it so a reader can tell it was inferred. Never invent a \
 file, a command, a decision, or an outcome that is not there.
 - Failed tool calls are the most useful thing in a transcript. Say what \
-failed and, if it is visible, why.
+failed and, if it is visible, why — quoting the error the tool printed rather \
+than summarising it away.
+- Say what was actually established, in the terms the session produced: the \
+test that passed, the number that was measured, the error that was fixed, the \
+file that ended up different. A page that says work was carried out, on a \
+session with the verdict sitting in front of it, is a page written from the \
+tool names alone.
 - Name files and identifiers exactly as they appear.
 - The title names this session, not its genre. Every page here is a session \
 report, so `Session Summary`, `Session Handoff` and `Session Report` pick out \
@@ -116,7 +122,8 @@ none of them, and neither does an identifier copied out of a path. Do not \
 begin the title with the word `Session`, and do not label it before saying \
 it: write what this session was about, the way somebody scanning a directory \
 listing would want it named.
-- Write in the language the person wrote their prompts in.
+- Write in the language the person wrote their prompts in, in that language's own alphabet. A page written in Turkish with the Turkish letters stripped out — `Ozet` for `Özet`, `gorev` for `görev` — is a page in no language at all, and it is also unsearchable by anybody typing the word properly.
+- A tool line shows what was run and, after a `→`, the end of what came back. Read it: that is where a command says whether it worked. `(FAILED)` marks a call the harness reported as failed, and `(NO RESULT ...)` marks one the agent started that never came back, which on some harnesses is the only trace a failed call leaves. Do not describe a session as having gone well because nothing is marked; the header says when this harness reports no outcomes at all, and then nothing being marked means nothing.
 - The handoff is read by an agent that has no other context and a limited \
 budget for it. It is prose, not headings, and it says what to know and what \
 to do next — not what happened, except where that changes what to do.
@@ -1554,6 +1561,24 @@ mod tests {
         assert!(prompt.contains("crates/anamnesis-llm/src/lib.rs"));
         assert!(prompt.contains("(FAILED)"));
         assert!(prompt.contains("Working directory"));
+    }
+
+    /// The rules a page's quality actually turned on, kept as assertions so
+    /// that a reworded prompt cannot quietly drop one. Each is here because a
+    /// page in this project's own wiki went wrong without it: summaries of
+    /// Turkish sessions written in stripped ASCII, and bodies that named the
+    /// tools a session ran while the verdicts sat unread in the transcript.
+    #[test]
+    fn the_rules_that_pages_went_wrong_without_are_in_the_prompt() {
+        for rule in [
+            "own alphabet",
+            "quoting the error",
+            "Say what was actually established",
+            "NO RESULT",
+            "nothing being marked means nothing",
+        ] {
+            assert!(SYSTEM.contains(rule), "the prompt no longer says {rule:?}");
+        }
     }
 
     /// A transcript that told every call twice would be half as long for the

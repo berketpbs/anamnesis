@@ -134,6 +134,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly what must not be lost
 
 ### Fixed
+- A Turkish page is written in Turkish letters. The prompt asked for the
+  language the person wrote in and got it — `Ozet`, `gorev`, `Gerceklestirilen`
+  — a page in no language at all, and unfindable by anybody who types the word
+  properly. The rule now names the alphabet as well as the language. Two more
+  rules follow the results that tool lines now carry: read what came back after
+  the `→` rather than describing what was run, and quote the error a tool
+  printed rather than summarising it away. And a caution the counted page has
+  had since the outcome work: `(NO RESULT)` marks a call that never came back,
+  and on a harness that reports no outcomes at all, nothing being marked means
+  nothing
 - A silent harness is no longer reported as a session without failures. A tool
   outcome is optional in every payload this project reads — some harnesses send
   `success`, some `is_error`, some only an `error` field, and some say nothing
