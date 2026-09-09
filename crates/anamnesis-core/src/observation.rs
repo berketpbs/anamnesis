@@ -15,6 +15,17 @@ pub enum EventKind {
     UserPrompt,
     /// A tool invocation and its outcome.
     ToolUse,
+    /// A tool call the agent was about to make.
+    ///
+    /// Recorded from the harness's pre-tool hook, and normally redundant: the
+    /// same call arrives again, completed, a moment later. It earns its place
+    /// on the calls where it does not. Claude Code fires no post-tool hook for
+    /// a call that failed — probed directly on 2026-09-09: `echo AAA`,
+    /// `exit 3`, `echo BBB` in one session produced payloads for the first and
+    /// the third and nothing for the second — so a failure is not an unflagged
+    /// event in the record, it is absent from it. An attempt with no
+    /// completion beside it is that absence, made visible.
+    ToolAttempt,
     /// Checkpoint taken before the model compacts its context.
     PreCompact,
     /// Summary produced by compaction.
@@ -32,6 +43,7 @@ impl EventKind {
             Self::SessionStart => "session-start",
             Self::UserPrompt => "user-prompt",
             Self::ToolUse => "tool-use",
+            Self::ToolAttempt => "tool-attempt",
             Self::PreCompact => "pre-compact",
             Self::PostCompact => "post-compact",
             Self::SessionEnd => "session-end",
@@ -51,6 +63,7 @@ impl EventKind {
             "session-start" => Self::SessionStart,
             "user-prompt" => Self::UserPrompt,
             "tool-use" => Self::ToolUse,
+            "tool-attempt" => Self::ToolAttempt,
             "pre-compact" => Self::PreCompact,
             "post-compact" => Self::PostCompact,
             "session-end" => Self::SessionEnd,
@@ -91,6 +104,14 @@ pub struct ToolRef {
     pub name: String,
     /// Whether the call succeeded, when the harness reports it.
     pub ok: Option<bool>,
+    /// The harness's own identifier for this call, when it sends one.
+    ///
+    /// What ties an attempt to its completion. Optional because most harnesses
+    /// send nothing of the kind, and defaulted on deserialization because
+    /// every observation already written to the raw spool was written without
+    /// it — a rebuild has to be able to read those.
+    #[serde(default)]
+    pub call_id: Option<String>,
 }
 
 /// Text held to a byte budget.

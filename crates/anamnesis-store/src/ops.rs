@@ -334,8 +334,9 @@ impl Store {
         let conn = self.connection();
         let inserted = conn.execute(
             "INSERT INTO observations
-                 (id, session_id, kind, tool_name, tool_ok, at, body, truncated, sanitized)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 (id, session_id, kind, tool_name, tool_ok, tool_call_id, at, body,
+                  truncated, sanitized)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT (id) DO NOTHING",
             params![
                 observation.id.to_string(),
@@ -343,6 +344,7 @@ impl Store {
                 observation.kind.as_str(),
                 observation.tool.as_ref().map(|t| t.name.clone()),
                 observation.tool.as_ref().and_then(|t| t.ok),
+                observation.tool.as_ref().and_then(|t| t.call_id.clone()),
                 observation.at.to_string(),
                 observation.body.as_str(),
                 observation.body.is_truncated(),
@@ -356,7 +358,8 @@ impl Store {
     pub fn observations(&self, session_id: SessionId) -> Result<Vec<Observation>> {
         let conn = self.connection();
         let mut statement = conn.prepare(
-            "SELECT id, session_id, kind, tool_name, tool_ok, at, body, truncated, sanitized
+            "SELECT id, session_id, kind, tool_name, tool_ok, at, body, truncated, sanitized,
+                    tool_call_id
              FROM observations WHERE session_id = ?1 ORDER BY at, rowid",
         )?;
         let rows = statement.query_map(params![session_id.to_string()], read_observation)?;
@@ -1060,6 +1063,7 @@ fn read_observation(row: &Row<'_>) -> rusqlite::Result<Observation> {
         tool: tool_name.map(|name| ToolRef {
             name,
             ok: row.get(4).unwrap_or(None),
+            call_id: row.get(9).unwrap_or(None),
         }),
         at: parse_time(&row.get::<_, String>(5)?),
         body: BoundedBody::from_stored(row.get::<_, String>(6)?, row.get(7)?),
@@ -1509,6 +1513,7 @@ mod tests {
                 Some(ToolRef {
                     name: "Bash".to_owned(),
                     ok: Some(false),
+                    call_id: None,
                 }),
                 BoundedBody::truncating("cargo test", 1024),
                 now(),

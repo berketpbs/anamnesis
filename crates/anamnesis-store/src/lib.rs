@@ -260,14 +260,14 @@ mod tests {
         assert_eq!(store.schema_version().expect("version"), None);
 
         store.migrate().expect("migrate");
-        assert_eq!(store.schema_version().expect("version"), Some(13));
+        assert_eq!(store.schema_version().expect("version"), Some(14));
     }
 
     #[test]
     fn migrating_twice_is_a_no_op() {
         let store = migrated();
         store.migrate().expect("second migrate");
-        assert_eq!(store.schema_version().expect("version"), Some(13));
+        assert_eq!(store.schema_version().expect("version"), Some(14));
     }
 
     #[test]

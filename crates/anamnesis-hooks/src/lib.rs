@@ -154,6 +154,16 @@ fn working_directory(object: &serde_json::Map<String, Value>) -> Option<PathBuf>
 ///
 /// An unrecognised name becomes a notification rather than an error: a harness
 /// that invents a new hook should still be captured, just not classified.
+///
+/// Public because the command that *registers* hooks writes these names, and
+/// the two lists drifting apart is a silent failure: an event registered under
+/// a name this function does not know is captured as an unclassified
+/// notification for as long as nobody looks. `install-hooks` is tested against
+/// this function rather than against a second copy of the names.
+pub fn classify_event(name: &str) -> EventKind {
+    classify(Some(name))
+}
+
 fn classify(name: Option<&str>) -> EventKind {
     let normalized = name.unwrap_or_default().to_ascii_lowercase();
     match normalized.as_str() {
@@ -164,10 +174,16 @@ fn classify(name: Option<&str>) -> EventKind {
         "userpromptsubmit" | "user_prompt_submit" | "beforeagent" | "beforesubmitprompt" => {
             EventKind::UserPrompt
         }
-        // `aftertool` likewise. A harness naming the moment differently is not
-        // a different moment.
-        "pretooluse" | "posttooluse" | "pre_tool_use" | "post_tool_use" | "beforetool"
-        | "aftertool" => EventKind::ToolUse,
+        // Before and after are two moments, and the difference between them is
+        // the only evidence some harnesses give that a call failed: Claude
+        // Code fires nothing at all when one does, so an attempt with no
+        // completion beside it is the failure it never reported. They were one
+        // kind until that was measured, which made every failed call
+        // indistinguishable from a call that was never made.
+        "pretooluse" | "pre_tool_use" | "beforetool" => EventKind::ToolAttempt,
+        // `aftertool` is Gemini CLI's name for the completion. A harness
+        // naming the moment differently is not a different moment.
+        "posttooluse" | "post_tool_use" | "aftertool" => EventKind::ToolUse,
         "precompact" | "pre_compact" | "precompress" => EventKind::PreCompact,
         "postcompact" | "post_compact" => EventKind::PostCompact,
         "sessionend" | "session_end" => EventKind::SessionEnd,
@@ -175,12 +191,14 @@ fn classify(name: Option<&str>) -> EventKind {
     }
 }
 
-/// Extract the tool name and, where the harness reports it, the outcome.
+/// Extract the tool name, the harness's identifier for the call, and the
+/// outcome where it reports one.
 fn tool_from(object: &serde_json::Map<String, Value>) -> Option<ToolRef> {
     let name = string_field(object, "tool_name").or_else(|| string_field(object, "toolName"))?;
     Some(ToolRef {
         name,
         ok: tool_outcome(object),
+        call_id: string_field(object, "tool_use_id").or_else(|| string_field(object, "toolUseId")),
     })
 }
 
@@ -335,7 +353,10 @@ fn body_for(kind: EventKind, object: &serde_json::Map<String, Value>) -> String 
         // outcome flag, on the harness this project runs on, is never there.
         // So a session page could say `cargo test` ran and never whether it
         // passed, and every page read like a list of intentions.
-        EventKind::ToolUse => {
+        // An attempt has no result yet, by definition; it records what was
+        // about to run so that a call which never comes back is still a call
+        // somebody can read.
+        EventKind::ToolUse | EventKind::ToolAttempt => {
             let input = object
                 .get("tool_input")
                 .or_else(|| object.get("toolInput"))

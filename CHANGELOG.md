@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A call that failed is now on the page, on a harness that never says one did.
+  Claude Code fires no `PostToolUse` hook at all for a failed tool call —
+  probed directly: one session running `echo AAA`, `exit 3`, `echo BBB`
+  produced payloads for the first and the third and nothing for the second — so
+  a failure was not an unflagged event in the record, it was missing from it,
+  and every tool tally on every page counted successes only. `install-hooks`
+  now registers the pre-tool moment as well, an attempt is its own event kind,
+  and an attempt whose completion never arrives is reported as a call that
+  never came back. Paired by the harness's own `tool_use_id` where there is
+  one and by tool name in order where there is not, so three attempts and two
+  completions is one unfinished call rather than three. The tool counts are
+  taken from completions alone, because a pre hook and a post hook are one call
+  seen twice and counting both would have doubled every number on the page the
+  day the hook was registered. The transcript sent to a model drops an attempt
+  that completed for the same reason, and marks the ones that did not
 - A session page can now say what a command returned, not only that it ran. A
   tool observation records the tail of the tool's result beside its input, so a
   transcript that said `cargo test` now says `cargo test → test result: ok. 81
