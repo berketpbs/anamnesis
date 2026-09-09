@@ -21,7 +21,7 @@ use anamnesis_core::session::Session;
 mod files;
 mod llm;
 
-pub use files::mentioned_files;
+pub use files::{changed_files, mentioned_files};
 pub use llm::{
     DigestSource, PREFERENCES_PAGE, Surroundings, consolidate_with_llm, consolidate_with_source,
     render_prompt, render_prompt_reporting, schema,
@@ -176,23 +176,27 @@ pub fn consolidate(session: &Session, observations: &[Observation]) -> Option<Se
     let tools = count_tools(observations);
     let outcomes = outcomes(observations);
     let files = files::mentioned_files(observations);
+    let changed = files::changed_files(observations);
     let truncated = observations
         .iter()
         .filter(|o| o.body.is_truncated())
         .count();
 
-    let entities = entities_from_files(&files);
+    // What a session changed is what a later search is looking for, so it gets
+    // the entity slots first and the files it merely read get what is left.
+    let entities = entities_from_files(&changed, &files);
     let title = title_for(session, prompts.first().map(String::as_str));
     let body = render_body(
         session,
         &prompts,
         &tools,
         outcomes,
+        &changed,
         &files,
         truncated,
         observations.len(),
     );
-    let handoff = render_handoff(session, &prompts, &tools, outcomes, &files);
+    let handoff = render_handoff(session, &prompts, &tools, outcomes, &changed, &files);
 
     Some(SessionDigest {
         title,
@@ -217,9 +221,9 @@ pub fn consolidate(session: &Session, observations: &[Observation]) -> Option<Se
 ///
 /// This is what counting can reach. A model, when one is configured, names
 /// the ideas instead — see `llm::consolidate_with_llm`.
-fn entities_from_files(files: &[String]) -> Vec<Entity> {
+fn entities_from_files(changed: &[String], mentioned: &[String]) -> Vec<Entity> {
     let mut names: Vec<String> = Vec::new();
-    for file in files {
+    for file in changed.iter().chain(mentioned.iter()) {
         let base = file.rsplit('/').next().unwrap_or(file);
         if !base.is_empty() && !names.iter().any(|seen| seen == base) {
             names.push(base.to_owned());
@@ -395,6 +399,7 @@ fn render_body(
     prompts: &[String],
     tools: &BTreeMap<String, usize>,
     outcomes: Outcomes,
+    changed: &[String],
     files: &[String],
     truncated: usize,
     total: usize,
@@ -427,15 +432,31 @@ fn render_body(
         }
     }
 
-    if !files.is_empty() {
-        out.push_str("\n## Files mentioned\n\n");
-        for file in files.iter().take(MAX_NAMED_FILES) {
+    if !changed.is_empty() {
+        out.push_str("\n## Files changed\n\n");
+        for file in changed.iter().take(MAX_NAMED_FILES) {
             out.push_str(&format!("- `{file}`\n"));
         }
-        if files.len() > MAX_NAMED_FILES {
+        if changed.len() > MAX_NAMED_FILES {
             out.push_str(&format!(
                 "- ...and {} more\n",
-                files.len() - MAX_NAMED_FILES
+                changed.len() - MAX_NAMED_FILES
+            ));
+        }
+    }
+
+    // Only the files not already named above. One appearing under both
+    // headings would make the first heading mean nothing.
+    let mentioned: Vec<&String> = files.iter().filter(|f| !changed.contains(f)).collect();
+    if !mentioned.is_empty() {
+        out.push_str("\n## Files mentioned\n\n");
+        for file in mentioned.iter().take(MAX_NAMED_FILES) {
+            out.push_str(&format!("- `{file}`\n"));
+        }
+        if mentioned.len() > MAX_NAMED_FILES {
+            out.push_str(&format!(
+                "- ...and {} more\n",
+                mentioned.len() - MAX_NAMED_FILES
             ));
         }
     }
@@ -522,6 +543,7 @@ fn render_handoff(
     prompts: &[String],
     tools: &BTreeMap<String, usize>,
     outcomes: Outcomes,
+    changed: &[String],
     files: &[String],
 ) -> String {
     let mut out = String::new();
@@ -537,11 +559,19 @@ fn render_handoff(
         ));
     }
 
-    if !files.is_empty() {
-        let named: Vec<&str> = files.iter().take(6).map(String::as_str).collect();
-        out.push_str(&format!("Files in play: {}", named.join(", ")));
-        if files.len() > named.len() {
-            out.push_str(&format!(" (+{} more)", files.len() - named.len()));
+    // What was changed, whenever anything was. The next session needs to know
+    // which files are no longer what it would otherwise find, and a list of
+    // everything that was opened buries that under everything else.
+    let (label, listed) = if changed.is_empty() {
+        ("Files in play", files)
+    } else {
+        ("Files changed", changed)
+    };
+    if !listed.is_empty() {
+        let named: Vec<&str> = listed.iter().take(6).map(String::as_str).collect();
+        out.push_str(&format!("{label}: {}", named.join(", ")));
+        if listed.len() > named.len() {
+            out.push_str(&format!(" (+{} more)", listed.len() - named.len()));
         }
         out.push('\n');
     }
@@ -790,6 +820,90 @@ mod tests {
         );
         assert!(
             digest.handoff.contains("no tool outcomes reported"),
+            "{}",
+            digest.handoff
+        );
+    }
+
+    /// A page that lists everything a session opened says it was about
+    /// everything it opened. What it changed is the part a later search wants,
+    /// so it gets its own heading, the first entity slots, and the line in the
+    /// handoff.
+    #[test]
+    fn a_page_separates_what_was_changed_from_what_was_only_read() {
+        let observations = vec![
+            observation(EventKind::UserPrompt, "fix the parser", None),
+            observation(
+                EventKind::ToolUse,
+                r#"{"file_path": "crates/anamnesis-hooks/src/lib.rs"}"#,
+                tool("Read", None),
+            ),
+            observation(
+                EventKind::ToolUse,
+                r#"{"file_path": "crates/anamnesis-core/src/observation.rs"}"#,
+                tool("Edit", None),
+            ),
+        ];
+
+        let digest = consolidate(&session(), &observations).expect("digest");
+
+        let changed_at = digest
+            .body
+            .find("## Files changed")
+            .expect("a changed heading");
+        let mentioned_at = digest
+            .body
+            .find("## Files mentioned")
+            .expect("a mentioned heading");
+        assert!(changed_at < mentioned_at, "{}", digest.body);
+
+        let changed_section = &digest.body[changed_at..mentioned_at];
+        assert!(
+            changed_section.contains("observation.rs"),
+            "{changed_section}"
+        );
+        assert!(!changed_section.contains("hooks.rs"), "{changed_section}");
+
+        // A file cannot be under both headings: the first would stop meaning
+        // anything.
+        let mentioned_section = &digest.body[mentioned_at..];
+        assert!(
+            !mentioned_section.contains("observation.rs"),
+            "{mentioned_section}"
+        );
+
+        assert!(
+            digest
+                .handoff
+                .contains("Files changed: crates/anamnesis-core/src/observation.rs"),
+            "{}",
+            digest.handoff
+        );
+        assert_eq!(
+            digest.entities.first().map(|e| e.as_str()),
+            Some("observation.rs"),
+            "what changed takes the first entity slot"
+        );
+    }
+
+    /// A session that changed nothing says so by saying nothing: the heading
+    /// is absent and the handoff falls back to the files that were in play.
+    #[test]
+    fn a_session_that_changed_nothing_claims_nothing() {
+        let observations = vec![
+            observation(EventKind::UserPrompt, "explain the parser", None),
+            observation(
+                EventKind::ToolUse,
+                r#"{"file_path": "crates/anamnesis-hooks/src/lib.rs"}"#,
+                tool("Read", None),
+            ),
+        ];
+
+        let digest = consolidate(&session(), &observations).expect("digest");
+
+        assert!(!digest.body.contains("## Files changed"), "{}", digest.body);
+        assert!(
+            digest.handoff.contains("Files in play"),
             "{}",
             digest.handoff
         );
@@ -1087,7 +1201,7 @@ mod tests {
         ];
         let tools = BTreeMap::new();
 
-        let handoff = render_handoff(&session, &prompts, &tools, Outcomes::default(), &[]);
+        let handoff = render_handoff(&session, &prompts, &tools, Outcomes::default(), &[], &[]);
 
         assert!(
             handoff.contains("Last request: fix the release"),
