@@ -73,6 +73,17 @@ impl EventKind {
     }
 }
 
+/// What separates what a tool was asked to do from what it returned, inside a
+/// tool observation's body.
+///
+/// Both halves live in one string because a body is one string everywhere it
+/// goes — spool, database, raw transcript — and splitting the type to carry
+/// two would touch every one of them. The marker is here, in the type both
+/// sides share, rather than written out at each end: the hook that writes it
+/// and the consolidation that clips the halves separately have to agree on it,
+/// and a private copy in each is an agreement that breaks silently.
+pub const RESULT_MARKER: &str = "\n→ ";
+
 /// A tool invocation referenced by an observation.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ToolRef {

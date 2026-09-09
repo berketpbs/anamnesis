@@ -190,9 +190,17 @@ const GOOGLE_MAX_EFFORT: Effort = Effort::High;
 /// So the default now holds an ordinary session whole, and a small local
 /// window is what `ANAMNESIS_LLM_MAX_INPUT_TOKENS` is for. Unlike the reply
 /// ceiling this is not free — input tokens are billed whether or not they
-/// change the answer — which is the reason it is 32,000 and not the window
-/// size of the largest model that exists.
-const DEFAULT_MAX_INPUT_TOKENS: usize = 32_000;
+/// change the answer — which is the reason it is not the window size of the
+/// largest model that exists.
+///
+/// Raised from 32,000 when tool results started being recorded. A transcript
+/// used to carry what the agent tried and nothing about what came back; now
+/// each tool line also carries the tail of its output, which is the half that
+/// says whether the command worked. Measured on this project's largest
+/// session — 686 events — the prompt was 24,000 tokens before and lands near
+/// 57,000 after, so leaving the ceiling where it was would have bought the
+/// results by dropping the events they belong to.
+const DEFAULT_MAX_INPUT_TOKENS: usize = 64_000;
 
 /// Default ceiling on the reply.
 ///

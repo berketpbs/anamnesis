@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A session page can now say what a command returned, not only that it ran. A
+  tool observation records the tail of the tool's result beside its input, so a
+  transcript that said `cargo test` now says `cargo test → test result: ok. 81
+  passed`. Until now the result was dropped whole at the hook, on the reasoning
+  that it is the largest part of the payload and the least informative once the
+  outcome flag has been read out of it — and the outcome flag, measured against
+  live `PostToolUse` payloads from Claude Code, is not in there at all. So every
+  page in this project's own wiki was written from a list of intentions, which
+  is what a summary of them reads like. The tail rather than the head, because
+  a command's verdict is printed at the end; 240 characters of it, because a
+  session records hundreds of calls and all of them compete for one context
+  later. `stdout` is preferred over `stderr` for the same reason a person would
+  prefer it: a build tool writes `Compiling anamnesis-core` to stderr and
+  whether the tests passed to stdout. The two halves of the body are clipped
+  separately when the transcript is rendered, so a long command can no longer
+  consume the room its own output needed, and the prompt budget goes from
+  32,000 to 64,000 tokens because the results are worth having only if the
+  events they belong to are still there — measured on this project's largest
+  session, 686 events, which lands near 57,000
 - `reconsolidate --show-prompt` prints what a model would be sent, and sends
   nothing. The transcript is squeezed to fit a token budget before anything is
   asked about it, and what falls out was invisible from either end: the page
