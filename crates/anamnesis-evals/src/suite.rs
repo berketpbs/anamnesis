@@ -43,8 +43,12 @@ pub struct Suite {
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Thresholds {
+    /// Lowest acceptable share of cases answered in first place.
+    pub min_hit1: f64,
     /// Lowest acceptable mean reciprocal rank.
     pub min_mrr: f64,
+    /// Lowest acceptable normalised discounted cumulative gain.
+    pub min_ndcg: f64,
     /// Lowest acceptable share of cases whose answer appears at all.
     pub min_recall: f64,
 }
@@ -53,9 +57,16 @@ impl Default for Thresholds {
     /// Zero: a suite that states no bar cannot fail one. Declaring the numbers
     /// is how a suite opts into being a gate, and every suite in this repo
     /// does.
+    ///
+    /// Which also settles what happens to a suite written before a measure
+    /// existed: it keeps parsing, and it keeps being gated on exactly the
+    /// measures it named. A new number that retroactively failed somebody
+    /// else's checked-in suite would be a poor way to introduce itself.
     fn default() -> Self {
         Self {
+            min_hit1: 0.0,
             min_mrr: 0.0,
+            min_ndcg: 0.0,
             min_recall: 0.0,
         }
     }

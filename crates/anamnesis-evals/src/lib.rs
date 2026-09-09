@@ -43,7 +43,7 @@ pub mod sweep;
 pub use ablation::{Ablation, StreamScore, ablate, ablate_with};
 pub use corpus::Corpus;
 pub use run::{CaseOutcome, Report, run, run_embedded, run_on};
-pub use score::{CaseScore, mean_reciprocal_rank, recall, score_case};
+pub use score::{CaseScore, hit_at_one, mean_reciprocal_rank, ndcg_at, recall, score_case};
 pub use suite::{Case, FixturePage, Suite, Thresholds};
 pub use sweep::{SuiteScore, SweepPoint, SweepReport, default_grid, sweep};
 
@@ -116,10 +116,15 @@ mod tests {
             let report = run(&suite, now).expect("run");
             assert!(
                 report.passed(),
-                "suite {name} scored mrr {:.3} / recall {:.3}, below its own {:.3} / {:.3}; misses: {:?}",
+                "suite {name} scored hit@1 {:.3} / mrr {:.3} / ndcg {:.3} / recall {:.3}, \
+                 below its own {:.3} / {:.3} / {:.3} / {:.3}; misses: {:?}",
+                report.hit1,
                 report.mrr,
+                report.ndcg,
                 report.recall,
+                report.thresholds.min_hit1,
                 report.thresholds.min_mrr,
+                report.thresholds.min_ndcg,
                 report.thresholds.min_recall,
                 report.misses().map(|case| &case.query).collect::<Vec<_>>(),
             );

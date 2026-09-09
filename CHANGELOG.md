@@ -8,6 +8,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `anamnesis eval` reports **hit@1** and **NDCG@k** beside the mean reciprocal
+  rank and recall it already had, and a suite can be gated on either. The
+  shipped suites were reading 1.000 / 1.000 and 0.967 / 1.000, which looks like
+  good news and is a saturated instrument: a measure at its ceiling cannot
+  report an improvement, and with twenty-five questions it can barely report a
+  regression. Hit@1 is the number with somewhere to go — `crowded` scores 0.933,
+  because one question in fifteen is answered second, and second is not what the
+  agent is handed. The NDCG is the number another project's published figure can
+  be held against, which is most of the reason to have it; ours would otherwise
+  only ever be comparable to our own past. It is single-relevance and says so: a
+  case's `relevant` list is a set of *acceptable* answers, any one of which
+  settles the question, so the ideal ranking is one page in first place and the
+  textbook form — accumulating gain over every page the case listed — would
+  report five of the twenty-five shipped cases as partial failures for returning
+  exactly what was asked. It prints as `NDCG@5`, over the window the suite
+  actually scores, because a gain quoted without its `k` is the kind of figure
+  that gets compared to somebody else's by mistake. `[thresholds]` takes
+  `min_hit1` and `min_ndcg`; a suite written before they existed keeps parsing
+  and keeps being gated on exactly the measures it named, since a new number
+  that retroactively failed somebody's checked-in suite would be a poor way to
+  introduce itself
 - What a subagent found is now in memory. A subagent is a whole session inside
   one tool call — an investigation that reads thirty files and hands back three
   lines — and the parent recorded the call and the prompt that started it and

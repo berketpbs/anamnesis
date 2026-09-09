@@ -45,7 +45,9 @@ limit = 5
 # keeping: fusion is now better than its best single stream, which is the only
 # thing that makes fusing four of them worth doing.
 [thresholds]
+min_hit1 = 0.93
 min_mrr = 0.96
+min_ndcg = 0.97
 min_recall = 1.0
 
 # ---------------------------------------------------------------------------
