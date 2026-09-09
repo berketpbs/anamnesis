@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `anamnesis doctor` says why a memory is thinner than the work that went into
+  it. `status` answers whether work is being recorded, and answers it well —
+  but recording can be working perfectly while the pages are worth little, and
+  none of the reasons look like failures. A harness wired for four moments of
+  five captures sessions with holes in them. A harness that never states an
+  outcome makes every tally count successes only. A hook binary older than the
+  build that records what a tool returned records what it knew how to record.
+  Each of those looks exactly like a quiet week. The command reads the wired
+  hooks through the parser's own classifier, the last twenty sessions from the
+  index, and what actually wrote their pages, then names what it found, what it
+  means, and the command that fixes it. Judged from the pages rather than from
+  the terminal's environment, because the model lives in the server's — a
+  provider exported in this shell says nothing about the process that
+  consolidates, and its absence says nothing either. Run against this project's
+  own setup it found three real things on the first try
 - A page now says what a session **changed**, apart from what it merely read.
   `Files mentioned` was one list of everything a path pattern found anywhere in
   a session, so a session that read forty files and edited two made

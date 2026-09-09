@@ -61,6 +61,16 @@ pub enum Commands {
         token: Option<String>,
     },
 
+    /// Say why this memory is thinner than the work that went into it
+    ///
+    /// `status` answers whether work is being recorded. This answers the other
+    /// question: recording can be working perfectly and the pages still be
+    /// worth little — a harness wired for four moments of five, a harness that
+    /// never says whether a call failed, a hook binary older than the build
+    /// that records what a tool returned. None of those look like failures.
+    /// They look like a quiet week.
+    Doctor,
+
     /// Search the memory wiki
     Search {
         /// Search query
