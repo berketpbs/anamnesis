@@ -32,6 +32,13 @@ pub enum EventKind {
     PostCompact,
     /// Session closed.
     SessionEnd,
+    /// What the agent said when it finished answering.
+    ///
+    /// Its own account of the turn, in its own words — by some distance the
+    /// highest-signal text a session produces, and the one thing a transcript
+    /// of tool calls cannot reconstruct. Claude Code attaches it to `Stop` as
+    /// `last_assistant_message`, verified from a live payload on 2026-09-09.
+    AssistantMessage,
     /// Out-of-band notice from the harness.
     Notification,
 }
@@ -44,6 +51,7 @@ impl EventKind {
             Self::UserPrompt => "user-prompt",
             Self::ToolUse => "tool-use",
             Self::ToolAttempt => "tool-attempt",
+            Self::AssistantMessage => "assistant-message",
             Self::PreCompact => "pre-compact",
             Self::PostCompact => "post-compact",
             Self::SessionEnd => "session-end",
@@ -64,6 +72,7 @@ impl EventKind {
             "user-prompt" => Self::UserPrompt,
             "tool-use" => Self::ToolUse,
             "tool-attempt" => Self::ToolAttempt,
+            "assistant-message" => Self::AssistantMessage,
             "pre-compact" => Self::PreCompact,
             "post-compact" => Self::PostCompact,
             "session-end" => Self::SessionEnd,
@@ -81,6 +90,12 @@ impl EventKind {
     pub fn body_limit(&self) -> usize {
         match self {
             Self::Notification => BoundedBody::NOTIFICATION_LIMIT,
+            // Tighter than an ordinary body. An agent's closing message is
+            // prose written for a person, so the first few thousand bytes
+            // carry the account and the rest is usually the same account in
+            // more detail — and one of these arrives per turn, into the same
+            // context every tool call is competing for.
+            Self::AssistantMessage => BoundedBody::ASSISTANT_LIMIT,
             _ => BoundedBody::DEFAULT_LIMIT,
         }
     }
@@ -132,6 +147,9 @@ impl BoundedBody {
 
     /// Budget for harness notifications.
     pub const NOTIFICATION_LIMIT: usize = 2 * 1024;
+
+    /// Budget for an agent's closing message.
+    pub const ASSISTANT_LIMIT: usize = 4 * 1024;
 
     /// Hold `text` to `limit` bytes, cutting it short if necessary.
     ///

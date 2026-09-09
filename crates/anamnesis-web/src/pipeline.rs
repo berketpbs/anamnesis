@@ -253,6 +253,15 @@ pub fn record(
     // day it touched.
     let session = store.load_session(session_id)?.unwrap_or(session);
 
+    // A turn that ended without the agent saying anything is a boundary, not
+    // an account of anything, and a row holding an empty string costs a line
+    // in every transcript a model is later asked to read. The session row
+    // stays: the turn did happen.
+    if hook.kind == EventKind::AssistantMessage && hook.body.as_str().trim().is_empty() {
+        tracing::debug!(%session_id, "dropping event: the agent finished without saying anything");
+        return Ok((scope, session_id));
+    }
+
     let mut observation = new_observation(
         session_id,
         hook.kind,

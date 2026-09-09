@@ -184,6 +184,11 @@ fn classify(name: Option<&str>) -> EventKind {
         // `aftertool` is Gemini CLI's name for the completion. A harness
         // naming the moment differently is not a different moment.
         "posttooluse" | "post_tool_use" | "aftertool" => EventKind::ToolUse,
+        // The moment the agent finishes answering. Claude Code attaches its
+        // closing message to this event, which is the only place a session
+        // says in words what it just did — a transcript of tool calls cannot
+        // reconstruct it.
+        "stop" => EventKind::AssistantMessage,
         "precompact" | "pre_compact" | "precompress" => EventKind::PreCompact,
         "postcompact" | "post_compact" => EventKind::PostCompact,
         "sessionend" | "session_end" => EventKind::SessionEnd,
@@ -372,6 +377,15 @@ fn body_for(kind: EventKind, object: &serde_json::Map<String, Value>) -> String 
             .or_else(|| string_field(object, "summary"))
             .unwrap_or_default(),
 
+        // Verified from a live `Stop` payload on 2026-09-09: the field is
+        // `last_assistant_message`, alongside `stop_hook_active` and
+        // `transcript_path`. A harness that sends the event without the field
+        // records an empty body, which the capture path drops — a turn
+        // boundary with nothing in it is not worth a row.
+        EventKind::AssistantMessage => string_field(object, "last_assistant_message")
+            .or_else(|| string_field(object, "lastAssistantMessage"))
+            .unwrap_or_default(),
+
         EventKind::SessionStart => string_field(object, "source").unwrap_or_default(),
         EventKind::SessionEnd => string_field(object, "reason").unwrap_or_default(),
 
@@ -468,6 +482,45 @@ mod tests {
         assert_eq!(parsed.tool.as_ref().unwrap().name, "Edit");
         assert_eq!(parsed.tool.as_ref().unwrap().ok, Some(true));
         assert!(parsed.body.as_str().contains("src/lib.rs"));
+    }
+
+    /// The `Stop` payload as it actually arrives from Claude Code today,
+    /// captured live on 2026-09-09: alongside `stop_hook_active` and
+    /// `transcript_path` it carries `last_assistant_message`, which is the
+    /// agent's own account of the turn — the only text in a session that says
+    /// in words what was done, and nothing a transcript of tool calls can
+    /// reconstruct.
+    #[test]
+    fn the_agents_closing_message_is_recorded_as_its_own_kind() {
+        let payload = json!({
+            "session_id": "abc-123",
+            "hook_event_name": "Stop",
+            "stop_hook_active": false,
+            "transcript_path": "C:/Users/x/.claude/projects/p/s.jsonl",
+            "last_assistant_message": "Fixed the parser: `cargo test` passes, 81 of 81."
+        });
+
+        let parsed = parse(&claude(), &payload).unwrap();
+
+        assert_eq!(parsed.kind, EventKind::AssistantMessage);
+        assert!(
+            parsed.body.as_str().contains("81 of 81"),
+            "{:?}",
+            parsed.body
+        );
+    }
+
+    /// A turn that ended with the agent saying nothing carries no account, and
+    /// an empty body is what the capture path drops.
+    #[test]
+    fn a_turn_that_said_nothing_carries_nothing() {
+        let payload = json!({
+            "session_id": "abc-123",
+            "hook_event_name": "Stop",
+            "stop_hook_active": true
+        });
+
+        assert!(parse(&claude(), &payload).unwrap().body.as_str().is_empty());
     }
 
     /// The payload shape as it actually arrives from Claude Code today,

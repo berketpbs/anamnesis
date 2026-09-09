@@ -42,6 +42,20 @@ const MAX_NAMED_FILES: usize = 12;
 /// Longest single quoted prompt, in characters.
 const MAX_PROMPT_CHARS: usize = 400;
 
+/// Longest quoted closing message, in characters.
+///
+/// Longer than a prompt's allowance and deliberately so: a prompt is a request
+/// and its first sentence is the request, while a closing message is the
+/// account — what was done, what came of it, what is still open — and its last
+/// paragraph is usually the part a later session needs.
+const MAX_ACCOUNT_CHARS: usize = 900;
+
+/// How many closing messages a page quotes.
+///
+/// The last ones, not the first: a session's early turns are superseded by its
+/// later ones, and the final account is the one that knows how the work ended.
+const MAX_QUOTED_ACCOUNTS: usize = 3;
+
 /// How many entities a page may name.
 ///
 /// The same ceiling `memory_write_page` puts on an agent writing a page by
@@ -173,6 +187,7 @@ pub fn consolidate(session: &Session, observations: &[Observation]) -> Option<Se
     }
 
     let prompts = collect_prompts(observations);
+    let accounts = collect_accounts(observations);
     let tools = count_tools(observations);
     let outcomes = outcomes(observations);
     let files = files::mentioned_files(observations);
@@ -188,6 +203,7 @@ pub fn consolidate(session: &Session, observations: &[Observation]) -> Option<Se
     let title = title_for(session, prompts.first().map(String::as_str));
     let counted = Counted {
         prompts: &prompts,
+        accounts: &accounts,
         tools: &tools,
         outcomes,
         changed: &changed,
@@ -196,7 +212,9 @@ pub fn consolidate(session: &Session, observations: &[Observation]) -> Option<Se
         total: observations.len(),
     };
     let body = render_body(session, &counted);
-    let handoff = render_handoff(session, &prompts, &tools, outcomes, &changed, &files);
+    let handoff = render_handoff(
+        session, &prompts, &accounts, &tools, outcomes, &changed, &files,
+    );
 
     Some(SessionDigest {
         title,
@@ -233,6 +251,21 @@ fn entities_from_files(changed: &[String], mentioned: &[String]) -> Vec<Entity> 
     names
         .iter()
         .filter_map(|name| Entity::parse(name).ok())
+        .collect()
+}
+
+/// What the agent itself said, in order.
+///
+/// The counted page has always been written from the outside: which tools ran,
+/// which files were named, how many of each. This is the one part of a session
+/// that says what happened in words, and it costs nothing to quote — the agent
+/// wrote it for a person to read, at the moment it knew most about the turn.
+fn collect_accounts(observations: &[Observation]) -> Vec<String> {
+    observations
+        .iter()
+        .filter(|o| o.kind == EventKind::AssistantMessage)
+        .map(|o| clip(o.body.as_str().trim(), MAX_ACCOUNT_CHARS))
+        .filter(|text| !text.is_empty())
         .collect()
 }
 
@@ -402,6 +435,8 @@ fn title_for(session: &Session, first_prompt: Option<&str>) -> String {
 /// about argument order.
 struct Counted<'a> {
     prompts: &'a [String],
+    /// What the agent said when it finished each turn.
+    accounts: &'a [String],
     tools: &'a BTreeMap<String, usize>,
     outcomes: Outcomes,
     /// Files a writing tool changed.
@@ -418,6 +453,7 @@ struct Counted<'a> {
 fn render_body(session: &Session, counted: &Counted<'_>) -> String {
     let Counted {
         prompts,
+        accounts,
         tools,
         outcomes,
         changed,
@@ -450,6 +486,26 @@ fn render_body(session: &Session, counted: &Counted<'_>) -> String {
                 "- ...and {} more\n",
                 prompts.len() - MAX_QUOTED_PROMPTS
             ));
+        }
+    }
+
+    // The agent's own words, and the only part of a counted page that is not
+    // a tally. Placed above the counts because it is what a reader wants
+    // first: a paragraph saying what happened beats a list of how often each
+    // tool ran, and until this arrived the counted path had no way to produce
+    // one. The last turns rather than the first — a session's early answers
+    // are superseded by its later ones.
+    if !accounts.is_empty() {
+        out.push_str("\n## What the agent said it did\n\n");
+        let skipped = accounts.len().saturating_sub(MAX_QUOTED_ACCOUNTS);
+        if skipped > 0 {
+            out.push_str(&format!(
+                "_The last {MAX_QUOTED_ACCOUNTS} of {} turns._\n\n",
+                accounts.len()
+            ));
+        }
+        for account in accounts.iter().skip(skipped) {
+            out.push_str(&format!("> {}\n\n", account.replace('\n', "\n> ")));
         }
     }
 
@@ -562,6 +618,7 @@ fn last_human_prompt(prompts: &[String]) -> Option<&String> {
 fn render_handoff(
     session: &Session,
     prompts: &[String],
+    accounts: &[String],
     tools: &BTreeMap<String, usize>,
     outcomes: Outcomes,
     changed: &[String],
@@ -577,6 +634,17 @@ fn render_handoff(
         out.push_str(&format!(
             "Last request: {}\n",
             clip(&last.replace('\n', " "), 240)
+        ));
+    }
+
+    // The agent's closing word, clipped hard. The next session is starting
+    // with nothing, and one sentence of "here is where this was left" is worth
+    // more to it than any count — but it is spent out of that session's own
+    // context, so it gets a quarter of the budget and no more.
+    if let Some(last) = accounts.last() {
+        out.push_str(&format!(
+            "Last account: {}\n",
+            clip(&last.replace('\n', " "), 400)
         ));
     }
 
@@ -843,6 +911,65 @@ mod tests {
             digest.handoff.contains("no tool outcomes reported"),
             "{}",
             digest.handoff
+        );
+    }
+
+    /// The counted path has always written from the outside — which tools
+    /// ran, how many times. The agent's own closing message is the one part of
+    /// a session that says what happened in words, and quoting it costs
+    /// nothing: it was written for a person, at the moment the agent knew most
+    /// about the turn.
+    #[test]
+    fn the_page_quotes_what_the_agent_said_it_did() {
+        let observations = vec![
+            observation(EventKind::UserPrompt, "fix the parser", None),
+            observation(EventKind::ToolUse, "cargo test", tool("Bash", None)),
+            observation(
+                EventKind::AssistantMessage,
+                "Parser fixed: the drive letter survives now, and `cargo test` passes 81 of 81.",
+                None,
+            ),
+        ];
+
+        let digest = consolidate(&session(), &observations).expect("digest");
+
+        assert!(
+            digest.body.contains("## What the agent said it did"),
+            "{}",
+            digest.body
+        );
+        assert!(digest.body.contains("passes 81 of 81"), "{}", digest.body);
+        assert!(
+            digest.handoff.contains("Last account: Parser fixed"),
+            "{}",
+            digest.handoff
+        );
+    }
+
+    /// A long session says several things and the last one knows how the work
+    /// ended, so the page keeps the final turns rather than the opening ones —
+    /// and says how many it left out, since a quote that silently stands for
+    /// twelve is a quote nobody can weigh.
+    #[test]
+    fn the_last_turns_are_the_ones_quoted() {
+        let mut observations = vec![observation(EventKind::UserPrompt, "go", None)];
+        for turn in 1..=6 {
+            observations.push(observation(
+                EventKind::AssistantMessage,
+                &format!("account number {turn}"),
+                None,
+            ));
+        }
+
+        let digest = consolidate(&session(), &observations).expect("digest");
+
+        assert!(digest.body.contains("account number 6"), "{}", digest.body);
+        assert!(digest.body.contains("account number 4"), "{}", digest.body);
+        assert!(!digest.body.contains("account number 3"), "{}", digest.body);
+        assert!(
+            digest.body.contains("The last 3 of 6 turns"),
+            "{}",
+            digest.body
         );
     }
 
@@ -1222,7 +1349,15 @@ mod tests {
         ];
         let tools = BTreeMap::new();
 
-        let handoff = render_handoff(&session, &prompts, &tools, Outcomes::default(), &[], &[]);
+        let handoff = render_handoff(
+            &session,
+            &prompts,
+            &[],
+            &tools,
+            Outcomes::default(),
+            &[],
+            &[],
+        );
 
         assert!(
             handoff.contains("Last request: fix the release"),

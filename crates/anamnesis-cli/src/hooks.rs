@@ -48,6 +48,12 @@ pub struct Harness {
 /// Without the pre-tool hook a failed call is not an unflagged event in the
 /// record, it is missing from it, and the session page counts only what
 /// worked.
+///
+/// `Stop` is here for the opposite reason — not something missing, something
+/// nobody had asked for. Its payload carries `last_assistant_message`: the
+/// agent's own account of the turn it just finished, which is the only place a
+/// session says in words what it did. Verified from a live payload on
+/// 2026-09-09.
 pub const CLAUDE_CODE: Harness = Harness {
     agent: "claude-code",
     settings: &[".claude", "settings.local.json"],
@@ -56,6 +62,7 @@ pub const CLAUDE_CODE: Harness = Harness {
         "UserPromptSubmit",
         "PreToolUse",
         "PostToolUse",
+        "Stop",
         "PreCompact",
         "SessionEnd",
     ],
