@@ -13,6 +13,7 @@ mod bench;
 mod bootstrap;
 mod capture;
 mod cli;
+mod doctor;
 mod evals;
 mod format;
 mod hooks;
@@ -114,6 +115,9 @@ fn main() -> anyhow::Result<()> {
             token,
         } => {
             cmd_status(verbose, &server, token.as_deref(), cli.data_dir.clone())?;
+        }
+        Commands::Doctor => {
+            doctor::cmd_doctor(cli.data_dir.clone())?;
         }
         Commands::Search { query, limit, path } => {
             cmd_search(&query, limit, path, cli.data_dir.clone())?;

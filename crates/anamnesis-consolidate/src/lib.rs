@@ -186,16 +186,16 @@ pub fn consolidate(session: &Session, observations: &[Observation]) -> Option<Se
     // the entity slots first and the files it merely read get what is left.
     let entities = entities_from_files(&changed, &files);
     let title = title_for(session, prompts.first().map(String::as_str));
-    let body = render_body(
-        session,
-        &prompts,
-        &tools,
+    let counted = Counted {
+        prompts: &prompts,
+        tools: &tools,
         outcomes,
-        &changed,
-        &files,
+        changed: &changed,
+        files: &files,
         truncated,
-        observations.len(),
-    );
+        total: observations.len(),
+    };
+    let body = render_body(session, &counted);
     let handoff = render_handoff(session, &prompts, &tools, outcomes, &changed, &files);
 
     Some(SessionDigest {
@@ -393,17 +393,38 @@ fn title_for(session: &Session, first_prompt: Option<&str>) -> String {
     }
 }
 
-/// The session page body.
-fn render_body(
-    session: &Session,
-    prompts: &[String],
-    tools: &BTreeMap<String, usize>,
+/// Everything counted about one session, in the shape the page is written
+/// from.
+///
+/// A struct rather than eight parameters, and the eight were not arbitrary:
+/// each was added when the page learned to say something it could not say
+/// before. Grouping them keeps the next such addition from being a decision
+/// about argument order.
+struct Counted<'a> {
+    prompts: &'a [String],
+    tools: &'a BTreeMap<String, usize>,
     outcomes: Outcomes,
-    changed: &[String],
-    files: &[String],
+    /// Files a writing tool changed.
+    changed: &'a [String],
+    /// Files named anywhere in the session, changed or not.
+    files: &'a [String],
+    /// Observations whose body was cut to fit its budget.
     truncated: usize,
+    /// Observations recorded, of every kind.
     total: usize,
-) -> String {
+}
+
+/// The session page body.
+fn render_body(session: &Session, counted: &Counted<'_>) -> String {
+    let Counted {
+        prompts,
+        tools,
+        outcomes,
+        changed,
+        files,
+        truncated,
+        total,
+    } = *counted;
     let mut out = String::new();
 
     out.push_str("## Session\n\n");
