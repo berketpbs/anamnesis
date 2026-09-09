@@ -15,7 +15,7 @@
 
 use std::collections::VecDeque;
 
-use anamnesis_core::observation::{EventKind, Observation};
+use anamnesis_core::observation::{EventKind, Observation, RESULT_MARKER};
 use anamnesis_core::page::{Entity, PagePath};
 use anamnesis_core::session::Session;
 use anamnesis_llm::{Completion, LlmError, Provider, clip_to_tokens, estimate_tokens};
@@ -47,6 +47,15 @@ const PREFERENCES_SHARE: usize = 5;
 
 /// Longest single observation body included in the prompt, in characters.
 const MAX_BODY_CHARS: usize = 600;
+
+/// How much of a tool's *result* one transcript line may carry.
+///
+/// Its own allowance rather than a share of the body, so that a long command
+/// cannot spend the room its own output needed. Smaller than the command's,
+/// because the end of a result is usually one line — `test result: ok`,
+/// `error[E0308]`, an exit code — while a command can legitimately be a
+/// paragraph of shell.
+const MAX_RESULT_CHARS: usize = 200;
 
 /// Share of the prompt the list of existing pages may take, as a divisor.
 ///
@@ -481,9 +490,23 @@ fn render_observation(observation: &Observation) -> String {
         } else {
             MAX_BODY_CHARS / 2
         };
+        // The two halves of a tool body are clipped separately, because they
+        // are not competing for the same budget: a long command would
+        // otherwise consume the whole allowance and the result — the half that
+        // says what happened — would be cut off every time it was worth
+        // reading. What survives is the start of the command and the end of
+        // its output, which is where a verdict is printed.
+        let flattened = match observation.body.as_str().split_once(RESULT_MARKER) {
+            Some((input, result)) => format!(
+                "{}{RESULT_MARKER}{}",
+                clip(input.trim(), limit),
+                clip(result.trim(), MAX_RESULT_CHARS)
+            ),
+            None => clip(body, limit),
+        };
         // Newlines would break the one-line-per-event shape the model is
         // reading, and the shape is what makes a long transcript legible.
-        let flattened = clip(body, limit).replace(['\n', '\r'], " ⏎ ");
+        let flattened = flattened.replace(['\n', '\r'], " ⏎ ");
         line.push_str(&format!(": {flattened}"));
     }
 
@@ -1515,6 +1538,31 @@ mod tests {
         assert!(prompt.contains("crates/anamnesis-llm/src/lib.rs"));
         assert!(prompt.contains("(FAILED)"));
         assert!(prompt.contains("Working directory"));
+    }
+
+    /// A tool body carries what was run and what came back, and the model
+    /// needs both. Clipped as one string, a long command would eat the whole
+    /// allowance and the result — which is the half that says what happened —
+    /// would never survive the cut.
+    #[test]
+    fn a_long_command_cannot_crowd_out_its_own_result() {
+        let body = format!(
+            "{{\"command\":\"{}\"}}{RESULT_MARKER}test result: ok. 81 passed; 0 failed",
+            "cargo test --workspace --all-features ".repeat(40)
+        );
+        let observation = observation(
+            EventKind::ToolUse,
+            &body,
+            Some(ToolRef {
+                name: "Bash".to_owned(),
+                ok: None,
+            }),
+        );
+
+        let line = render_observation(&observation);
+
+        assert!(line.contains("test result: ok. 81 passed"), "{line}");
+        assert!(line.contains("cargo test --workspace"), "{line}");
     }
 
     /// The transcript marks failures and nothing else, which reads as "all

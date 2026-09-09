@@ -16,7 +16,7 @@
 use std::path::PathBuf;
 
 use anamnesis_core::ids::ObservationId;
-use anamnesis_core::observation::{BoundedBody, EventKind, ToolRef};
+use anamnesis_core::observation::{BoundedBody, EventKind, RESULT_MARKER, ToolRef};
 use anamnesis_core::sanitize::Redactor;
 use anamnesis_core::session::AgentKind;
 use serde_json::Value;
@@ -251,6 +251,76 @@ fn paths_from(object: &serde_json::Map<String, Value>) -> Vec<String> {
     paths
 }
 
+/// How much of a tool's result is kept, in characters.
+///
+/// Small on purpose. A working session records hundreds of tool calls — 686 in
+/// one of this project's own — and all of them compete for one model context
+/// later. The end of a result is where its verdict is: `test result: ok. 81
+/// passed`, `error[E0308]`, the last line of a diff. A few hundred characters
+/// of that is worth more than a full transcript nobody can afford to send.
+const MAX_RESULT_CHARS: usize = 240;
+
+/// Fields a harness puts a tool's result text in, in the order they are worth
+/// reading.
+///
+/// `error` first because a payload that carries one is telling you the thing
+/// that matters. `stdout` before `stderr` because a build tool writes its
+/// progress to stderr and its verdict to stdout: preferring stderr would
+/// reliably record `Compiling anamnesis-core v1.0.0` in place of whether the
+/// tests passed. `stderr` still gets its turn, since a command that failed
+/// quietly leaves nothing else.
+const RESULT_KEYS: [&str; 6] = ["error", "stdout", "content", "result", "message", "stderr"];
+
+/// The tail of what a tool returned, bounded, or `None` when it returned
+/// nothing worth keeping.
+///
+/// A response that is a bare string is kept as it is: harnesses that report a
+/// failure at all report it here, as text. A response that is an object is
+/// read through `RESULT_KEYS`, which is where the harnesses seen so far put
+/// the part a person would read.
+fn response_tail(object: &serde_json::Map<String, Value>) -> Option<String> {
+    let parsed;
+    let response = match object
+        .get("tool_response")
+        .or_else(|| object.get("toolResponse"))
+    {
+        Some(response) => response,
+        None => {
+            let raw = object.get("tool_output").and_then(Value::as_str)?;
+            parsed = serde_json::from_str::<Value>(raw).unwrap_or(Value::String(raw.to_owned()));
+            &parsed
+        }
+    };
+
+    let text = match response {
+        Value::String(text) => text.clone(),
+        Value::Object(fields) => RESULT_KEYS
+            .iter()
+            .find_map(|key| string_field(fields, key).map(|v| v.trim().to_owned()))
+            .filter(|v| !v.is_empty())?,
+        _ => return None,
+    };
+
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(tail(text, MAX_RESULT_CHARS))
+}
+
+/// The last `max` characters, marking the cut at the front.
+///
+/// Counted in characters rather than bytes so that a Turkish or emoji-carrying
+/// result is not sliced through the middle of one.
+fn tail(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_owned();
+    }
+    let kept: String = text.chars().skip(count - max).collect();
+    format!("…{}", kept.trim_start())
+}
+
 /// Choose what to record as the body for this kind of event.
 fn body_for(kind: EventKind, object: &serde_json::Map<String, Value>) -> String {
     match kind {
@@ -258,14 +328,24 @@ fn body_for(kind: EventKind, object: &serde_json::Map<String, Value>) -> String 
             .or_else(|| string_field(object, "user_prompt"))
             .unwrap_or_default(),
 
-        // The input is what the agent decided to do. The response is kept out
-        // of the body on purpose: it is usually the largest part of the payload
-        // and the least informative once the outcome flag has been read from it.
-        EventKind::ToolUse => object
-            .get("tool_input")
-            .or_else(|| object.get("toolInput"))
-            .map(render_compact)
-            .unwrap_or_default(),
+        // The input is what the agent decided to do; the tail of the response
+        // is what came of it. The response used to be dropped whole, on the
+        // reasoning that it is the largest part of the payload and the least
+        // informative once the outcome flag has been read from it — and the
+        // outcome flag, on the harness this project runs on, is never there.
+        // So a session page could say `cargo test` ran and never whether it
+        // passed, and every page read like a list of intentions.
+        EventKind::ToolUse => {
+            let input = object
+                .get("tool_input")
+                .or_else(|| object.get("toolInput"))
+                .map(render_compact)
+                .unwrap_or_default();
+            match response_tail(object) {
+                Some(tail) => format!("{input}{RESULT_MARKER}{tail}"),
+                None => input,
+            }
+        }
 
         EventKind::PreCompact | EventKind::PostCompact => string_field(object, "trigger")
             .or_else(|| string_field(object, "summary"))
@@ -367,6 +447,140 @@ mod tests {
         assert_eq!(parsed.tool.as_ref().unwrap().name, "Edit");
         assert_eq!(parsed.tool.as_ref().unwrap().ok, Some(true));
         assert!(parsed.body.as_str().contains("src/lib.rs"));
+    }
+
+    /// The payload shape as it actually arrives from Claude Code today,
+    /// captured from a live `PostToolUse` hook rather than remembered: the
+    /// response is an object of `stdout`, `stderr`, `interrupted`, `isImage`
+    /// and `noOutputExpected`, and carries no success flag of any kind. What
+    /// a later reader wants from it is the end of `stdout`.
+    #[test]
+    fn a_bash_result_is_recorded_as_the_end_of_its_output() {
+        let payload = json!({
+            "session_id": "abc-123",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cargo test"},
+            "tool_response": {
+                "stdout": "running 81 tests\ntest result: ok. 81 passed; 0 failed",
+                "stderr": "",
+                "interrupted": false,
+                "isImage": false,
+                "noOutputExpected": false
+            }
+        });
+
+        let body = parse(&claude(), &payload).unwrap().body;
+        let body = body.as_str();
+
+        assert!(body.contains("cargo test"), "{body}");
+        assert!(body.contains("test result: ok. 81 passed"), "{body}");
+    }
+
+    /// A build tool writes its progress to stderr and its verdict to stdout.
+    /// Reading stderr first would record `Compiling anamnesis-core` on every
+    /// page and the answer on none of them.
+    #[test]
+    fn the_verdict_beats_the_progress_it_was_printed_beside() {
+        let payload = json!({
+            "session_id": "s",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cargo test"},
+            "tool_response": {
+                "stdout": "test result: FAILED. 3 passed; 1 failed",
+                "stderr": "   Compiling anamnesis-core v1.0.0\n    Finished in 4.79s"
+            }
+        });
+
+        let parsed = parse(&claude(), &payload).unwrap();
+
+        assert!(parsed.body.as_str().contains("FAILED. 3 passed"));
+        assert!(!parsed.body.as_str().contains("Compiling"));
+    }
+
+    /// And stderr still gets its turn: a command that printed nothing to
+    /// stdout leaves nothing else to record.
+    #[test]
+    fn stderr_is_kept_when_it_is_all_there_is() {
+        let payload = json!({
+            "session_id": "s",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "false"},
+            "tool_response": {"stdout": "", "stderr": "bash: no such file"}
+        });
+
+        assert!(
+            parse(&claude(), &payload)
+                .unwrap()
+                .body
+                .as_str()
+                .contains("bash: no such file")
+        );
+    }
+
+    /// Hundreds of tool calls compete for one model context later, so a result
+    /// is kept as its tail — where a command's verdict is — and bounded.
+    #[test]
+    fn a_long_result_is_kept_as_its_ending() {
+        let long = format!("{}\nthe part that matters", "noise ".repeat(400));
+        let payload = json!({
+            "session_id": "s",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+            "tool_response": {"stdout": long}
+        });
+
+        let parsed = parse(&claude(), &payload).unwrap();
+        let body = parsed.body.as_str();
+
+        assert!(body.contains("the part that matters"), "{body}");
+        assert!(body.chars().count() < MAX_RESULT_CHARS + 100, "{body}");
+        assert!(body.contains('…'), "the cut is marked: {body}");
+    }
+
+    /// A tool that returned nothing adds nothing. An arrow pointing at an
+    /// empty string is a line every later reader has to skip.
+    #[test]
+    fn a_silent_tool_adds_no_arrow() {
+        let payload = json!({
+            "session_id": "s",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "true"},
+            "tool_response": {"stdout": "", "stderr": "", "interrupted": false}
+        });
+
+        assert!(
+            !parse(&claude(), &payload)
+                .unwrap()
+                .body
+                .as_str()
+                .contains('→')
+        );
+    }
+
+    /// A response that is a bare string is what a harness that reports failure
+    /// at all reports it as, so it is kept whole rather than searched for keys.
+    #[test]
+    fn a_string_response_is_recorded_as_written() {
+        let payload = json!({
+            "session_id": "s",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "exit 3"},
+            "tool_response": "Error: Exit code 3"
+        });
+
+        assert!(
+            parse(&claude(), &payload)
+                .unwrap()
+                .body
+                .as_str()
+                .contains("Error: Exit code 3")
+        );
     }
 
     #[test]
