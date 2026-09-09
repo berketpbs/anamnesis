@@ -85,6 +85,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly what must not be lost
 
 ### Fixed
+- A silent harness is no longer reported as a session without failures. A tool
+  outcome is optional in every payload this project reads — some harnesses send
+  `success`, some `is_error`, some only an `error` field, and some say nothing
+  at all — and `None` has always meant "not reported" rather than "fine". One
+  function away from the page that distinction was dropped: the counted page
+  printed a failure line only when there were failures, so a harness that never
+  states an outcome produced a page identical to a clean run, and this
+  project's own dogfood sessions are exactly that harness. The page now says
+  the failure count is unknown and why, the handoff says it in four words
+  because it is spent out of the next session's context, and a partly
+  reporting harness says how many of its calls the count actually covers. The
+  model path had the same hole from the other side — the transcript annotates
+  failures and nothing else, so a session with no annotations reads as a
+  session that went well, and the model is told once in the header that the
+  absence proves nothing. Nothing is added when outcomes did arrive: a caveat
+  printed on every page is a caveat nobody reads on the one page that needed it
 - A page now says how much of its session it was written from. The transcript is
   squeezed to fit before a model is asked anything, and the only party told was
   the model: the prompt carries `[… N events omitted …]` and the page carried
