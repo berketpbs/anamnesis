@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `anamnesis lint` says which pages are not worth what they cost to keep.
+  `doctor` judges the machinery; this judges the output, and the two fail
+  independently — capture can be perfect and the wiki still full of pages that
+  say nothing. Four rules, each of which fires on this project's own wiki or
+  came from a failure it has had: a session page thin against the session
+  behind it (measured in characters per recorded event, which is the original
+  complaint stated as a number), a page too short to be anything at all,
+  two pages claiming one title, and an episodic page a month old that
+  retrieval has never once handed to anybody. The ratio applies only to the
+  page that *is* the account of a session: run without that restriction it
+  fired six times here and was right once, because a gotcha is one claim and
+  judging it against the length of the afternoon that produced it reports
+  every good one as thin
 - A build says which commit it is, and `doctor` notices when the server is not
   running it. `1.0.0` is the same string across every commit of a release
   cycle, so a server started three weeks ago and a binary compiled a minute ago

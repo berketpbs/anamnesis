@@ -18,6 +18,7 @@ mod evals;
 mod format;
 mod hooks;
 mod improve;
+mod lint;
 mod mcp_config;
 mod opencode;
 mod pages;
@@ -118,6 +119,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Doctor { server } => {
             doctor::cmd_doctor(&server, cli.data_dir.clone())?;
+        }
+        Commands::Lint => {
+            lint::cmd_lint(cli.data_dir.clone())?;
         }
         Commands::Search { query, limit, path } => {
             cmd_search(&query, limit, path, cli.data_dir.clone())?;
