@@ -96,11 +96,11 @@ pub fn cmd_probe(agent: &str, server: &str, token: Option<&str>) -> anyhow::Resu
     let body = response.text()?;
     let report: anamnesis_web::ProbeReport = serde_json::from_str(&body).map_err(|_| {
         anyhow::anyhow!(
-            "the server answered {body:?} instead of a probe report, which means it is              older than --probe: it ignored the parameter and recorded the event. Point              the server at a current binary, then remove what this left behind with              `anamnesis forget-session`."
+            "the server answered {body:?} instead of a probe report, which means it is older than --probe: it ignored the parameter and recorded the event. Point              the server at a current binary, then remove what this left behind with              `anamnesis forget-session`."
         )
     })?;
     println!("  Server:     reachable");
-    println!("  Scope:      {}/{}", report.workspace, report.project);
+    println!("  Scope: {}/{}", report.workspace, report.project);
     println!(
         "  Session:    {} ({})",
         &report.session[..report.session.len().min(8)],
@@ -110,7 +110,7 @@ pub fn cmd_probe(agent: &str, server: &str, token: Option<&str>) -> anyhow::Resu
             "new"
         }
     );
-    println!("  Event:      {} (read as {})", report.event, report.agent);
+    println!("  Event: {} (read as {})", report.event, report.agent);
     println!(
         "  Redacted:   {}",
         if report.redactions.is_empty() {

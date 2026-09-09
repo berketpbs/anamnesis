@@ -98,7 +98,7 @@ async fn a_model_with_no_thinking_mode_still_answers_with_effort_set() {
 
     assert!(
         still_refuses_thinking(&model).await,
-        "{model} no longer refuses reasoning_effort, so this test is no longer          exercising the fallback — pick a model without a thinking mode, or          retire the fallback"
+        "{model} no longer refuses reasoning_effort, so this test is no longer exercising the fallback — pick a model without a thinking mode, or          retire the fallback"
     );
 
     let provider = ollama(&model);

@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A build says which commit it is, and `doctor` notices when the server is not
+  running it. `1.0.0` is the same string across every commit of a release
+  cycle, so a server started three weeks ago and a binary compiled a minute ago
+  were indistinguishable from outside — which is exactly the state this project
+  spent weeks in, with hooks calling an executable that predated the code meant
+  to record what tools return and nothing anywhere saying so. `anamnesis
+  --version` now prints `1.0.0 (a40902a)`, with a trailing `+` when the tree
+  had uncommitted changes, and the server answers `/version` with the same.
+  `doctor` compares them. A server that answers liveness but not `/version` is
+  not a missing answer either — the endpoint has existed since builds were
+  stamped, so silence there means the server predates it. The stamp degrades to
+  `unknown` rather than failing the build: a source archive, a vendored copy,
+  or a Docker context without `.git` is a legitimate build, and refusing to
+  compile it to protect a diagnostic would be the tail wagging the dog
 - `anamnesis doctor` says why a memory is thinner than the work that went into
   it. `status` answers whether work is being recorded, and answers it well —
   but recording can be working perfectly while the pages are worth little, and

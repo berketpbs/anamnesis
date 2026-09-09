@@ -267,6 +267,7 @@ pub fn router(state: AppState, ui: bool) -> Router {
 
     let mut app = Router::new()
         .route("/health", get(health))
+        .route("/version", get(version))
         .merge(guarded)
         .merge(api::routes(&state));
     if ui {
@@ -523,7 +524,33 @@ pub async fn serve_on(
     Ok(())
 }
 
+/// Which build is answering.
+///
+/// Open, like liveness, and for the same reason: it is asked by a machine
+/// working out what it is talking to, and an endpoint that demanded a token
+/// would answer "no" identically for a stopped server, a wrong token, and a
+/// stale build.
+///
+/// It exists because a version cannot answer the question people actually
+/// have. `1.0.0` is the same string across every commit of a release cycle, so
+/// a server started three weeks ago and a binary compiled a minute ago look
+/// alike from outside — and on this project they were not alike: the running
+/// server predated the code that records what a tool returned, and every page
+/// written in between was quietly worth less for it.
+async fn version() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "version": anamnesis_core::build::VERSION,
+        "commit": anamnesis_core::build::COMMIT,
+        "identity": anamnesis_core::build::IDENTITY,
+    }))
+}
+
 /// Liveness probe.
+///
+/// The body stays exactly `ok\n`: it is what `status` reads to tell a server
+/// that is down from one that refuses this machine, and appending to it for
+/// the sake of a diagnostic would change a contract. Which build is answering
+/// is [`version`]'s question.
 async fn health() -> &'static str {
     "ok\n"
 }
@@ -3040,6 +3067,27 @@ mod tests {
         assert!(!body.contains("beta"), "{body}");
     }
 
+    /// Which build is answering is asked by a machine that does not yet know
+    /// whether it is talking to a server, so it cannot be behind a token: a
+    /// refusal is indistinguishable from a stopped server, and the whole point
+    /// of the question is telling situations apart.
+    #[tokio::test]
+    async fn the_build_is_named_without_a_token() {
+        let harness = harness();
+        let state = guarded(&harness, "alice=alpha");
+
+        let request = HttpRequest::builder()
+            .uri("/version")
+            .body(Body::empty())
+            .expect("request");
+        let response = send(&state, request).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_of(response).await;
+        assert!(body.contains(anamnesis_core::build::COMMIT), "{body}");
+        assert!(body.contains(anamnesis_core::build::VERSION), "{body}");
+    }
+
     /// `status` distinguishes "the server is down" from "the server refuses
     /// this machine", and it can only do that if liveness stays answerable
     /// without a token.
@@ -3104,7 +3152,7 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(&body_of(response).await).expect("json");
         assert!(
             body.get("consolidation").is_some(),
-            "the field has to be present even when there is no model, or a              client cannot tell 'counted' from 'an older server'"
+            "the field has to be present even when there is no model, or a client cannot tell 'counted' from 'an older server'"
         );
         assert_eq!(body["consolidation"], serde_json::Value::Null);
         assert_eq!(body["embedding"], serde_json::Value::Null);
