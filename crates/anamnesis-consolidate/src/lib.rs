@@ -50,6 +50,15 @@ const MAX_PROMPT_CHARS: usize = 400;
 /// paragraph is usually the part a later session needs.
 const MAX_ACCOUNT_CHARS: usize = 900;
 
+/// Longest quoted subagent report, in characters.
+///
+/// Shorter than the agent's own account: a subagent answers one question, and
+/// its answer is usually a paragraph with the finding in the first sentence.
+const MAX_REPORT_CHARS: usize = 500;
+
+/// How many subagent reports a page quotes.
+const MAX_QUOTED_REPORTS: usize = 4;
+
 /// How many closing messages a page quotes.
 ///
 /// The last ones, not the first: a session's early turns are superseded by its
@@ -188,6 +197,7 @@ pub fn consolidate(session: &Session, observations: &[Observation]) -> Option<Se
 
     let prompts = collect_prompts(observations);
     let accounts = collect_accounts(observations);
+    let reports = collect_subagent_reports(observations);
     let tools = count_tools(observations);
     let outcomes = outcomes(observations);
     let files = files::mentioned_files(observations);
@@ -204,6 +214,7 @@ pub fn consolidate(session: &Session, observations: &[Observation]) -> Option<Se
     let counted = Counted {
         prompts: &prompts,
         accounts: &accounts,
+        reports: &reports,
         tools: &tools,
         outcomes,
         changed: &changed,
@@ -266,6 +277,27 @@ fn collect_accounts(observations: &[Observation]) -> Vec<String> {
         .filter(|o| o.kind == EventKind::AssistantMessage)
         .map(|o| clip(o.body.as_str().trim(), MAX_ACCOUNT_CHARS))
         .filter(|text| !text.is_empty())
+        .collect()
+}
+
+/// What each subagent reported, with the kind of agent that reported it.
+///
+/// A subagent is a session inside a tool call: it reads, searches, reasons,
+/// and hands back a paragraph. The parent's transcript holds the call and the
+/// prompt that started it and nothing of the finding, which is the only part
+/// that outlives the call.
+fn collect_subagent_reports(observations: &[Observation]) -> Vec<(String, String)> {
+    observations
+        .iter()
+        .filter(|o| o.kind == EventKind::SubagentReport)
+        .map(|o| {
+            let kind = o
+                .tool
+                .as_ref()
+                .map_or_else(|| "subagent".to_owned(), |tool| tool.name.clone());
+            (kind, clip(o.body.as_str().trim(), MAX_REPORT_CHARS))
+        })
+        .filter(|(_, text)| !text.is_empty())
         .collect()
 }
 
@@ -437,6 +469,8 @@ struct Counted<'a> {
     prompts: &'a [String],
     /// What the agent said when it finished each turn.
     accounts: &'a [String],
+    /// What each subagent reported, and which kind of agent reported it.
+    reports: &'a [(String, String)],
     tools: &'a BTreeMap<String, usize>,
     outcomes: Outcomes,
     /// Files a writing tool changed.
@@ -454,6 +488,7 @@ fn render_body(session: &Session, counted: &Counted<'_>) -> String {
     let Counted {
         prompts,
         accounts,
+        reports,
         tools,
         outcomes,
         changed,
@@ -506,6 +541,22 @@ fn render_body(session: &Session, counted: &Counted<'_>) -> String {
         }
         for account in accounts.iter().skip(skipped) {
             out.push_str(&format!("> {}\n\n", account.replace('\n', "\n> ")));
+        }
+    }
+
+    // A subagent is a session inside a tool call, and its report is the only
+    // part of it that outlives the call: the parent transcript keeps the
+    // prompt that started the investigation and nothing of what it found.
+    if !reports.is_empty() {
+        out.push_str("\n## What the subagents found\n\n");
+        for (kind, report) in reports.iter().take(MAX_QUOTED_REPORTS) {
+            out.push_str(&format!("- **{kind}**: {}\n", report.replace('\n', " ")));
+        }
+        if reports.len() > MAX_QUOTED_REPORTS {
+            out.push_str(&format!(
+                "- ...and {} more\n",
+                reports.len() - MAX_QUOTED_REPORTS
+            ));
         }
     }
 
@@ -968,6 +1019,46 @@ mod tests {
         assert!(!digest.body.contains("account number 3"), "{}", digest.body);
         assert!(
             digest.body.contains("The last 3 of 6 turns"),
+            "{}",
+            digest.body
+        );
+    }
+
+    /// A subagent is a session inside a tool call: it reads, searches, and
+    /// hands back a paragraph. The parent transcript keeps the prompt that
+    /// started the investigation and nothing of what it found, so without this
+    /// the finding — the only part that outlives the call — was never in
+    /// memory at all.
+    #[test]
+    fn a_subagents_finding_reaches_the_page() {
+        let observations = vec![
+            observation(
+                EventKind::UserPrompt,
+                "where is RESULT_MARKER defined",
+                None,
+            ),
+            observation(EventKind::ToolUse, "Explore the repo", tool("Agent", None)),
+            observation(
+                EventKind::SubagentReport,
+                "Definition found — crates/anamnesis-core/src/observation.rs:113, one place only.",
+                Some(ToolRef {
+                    name: "Explore".to_owned(),
+                    ok: None,
+                    call_id: Some("a93ff5e8".to_owned()),
+                }),
+            ),
+        ];
+
+        let digest = consolidate(&session(), &observations).expect("digest");
+
+        assert!(
+            digest.body.contains("## What the subagents found"),
+            "{}",
+            digest.body
+        );
+        assert!(digest.body.contains("**Explore**"), "{}", digest.body);
+        assert!(
+            digest.body.contains("observation.rs:113"),
             "{}",
             digest.body
         );

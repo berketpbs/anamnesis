@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- What a subagent found is now in memory. A subagent is a whole session inside
+  one tool call — an investigation that reads thirty files and hands back three
+  lines — and the parent recorded the call and the prompt that started it and
+  nothing of the finding, which is the only part that outlives the call.
+  `SubagentStop` carries the report along with `agent_type` and `agent_id`,
+  verified from a live payload. It is recorded as its own kind, the page quotes
+  the reports under a heading of their own, and the model is told that the
+  calls behind a report are not in its transcript. `SubagentStart` is
+  deliberately not registered: it carries nothing the parent's own tool call
+  does not already have. The subagent's kind and identity are read only on the
+  report event, because a harness stamps `agent_id` and `agent_type` on every
+  event that happens inside a subagent — reading them wherever they appear
+  would file a `Bash` call made by an Explore subagent as a call to `Explore`,
+  and every tool tally of a session that used one would be wrong in a way that
+  looks entirely plausible. Also lands the model-facing rule for #170, which
+  was written against a line that had already been reflowed and never applied
 - A session now records what the agent said it did. Claude Code's `Stop` event
   carries `last_assistant_message` — the agent's own account of the turn it
   just finished, verified from a live payload rather than from documentation —
