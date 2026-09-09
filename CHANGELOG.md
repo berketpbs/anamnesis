@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A session now records what the agent said it did. Claude Code's `Stop` event
+  carries `last_assistant_message` — the agent's own account of the turn it
+  just finished, verified from a live payload rather than from documentation —
+  and it is the only text in a session that says in words what happened. A
+  transcript of tool calls cannot reconstruct it. `install-hooks` registers the
+  moment, it is recorded as its own kind, the counted page quotes the last
+  turns under a heading of their own, and the handoff carries the closing one,
+  clipped, because a sentence of "here is where this was left" is worth more to
+  a session starting with nothing than any tally. The model is told what those
+  lines are and told to prefer the tools where the two disagree: an account
+  written before a command failed is still what was believed at the time. A
+  turn that ended with the agent saying nothing records nothing — a row holding
+  an empty string costs a line in every transcript a model is later asked to
+  read
 - `anamnesis lint` says which pages are not worth what they cost to keep.
   `doctor` judges the machinery; this judges the output, and the two fail
   independently — capture can be perfect and the wiki still full of pages that

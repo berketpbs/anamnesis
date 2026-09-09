@@ -506,7 +506,13 @@ fn render_observation(observation: &Observation) -> String {
 
     let body = observation.body.as_str().trim();
     if !body.is_empty() {
-        let limit = if observation.kind == EventKind::UserPrompt {
+        // A prompt and the agent's own account of a turn are prose written to
+        // be read; a tool body is JSON. The two kinds that carry an argument
+        // get the full allowance.
+        let limit = if matches!(
+            observation.kind,
+            EventKind::UserPrompt | EventKind::AssistantMessage
+        ) {
             MAX_BODY_CHARS
         } else {
             MAX_BODY_CHARS / 2
