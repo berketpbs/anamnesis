@@ -40,12 +40,21 @@ pub struct Harness {
 }
 
 /// Claude Code: hooks live beside the rest of its settings.
+///
+/// `PreToolUse` is registered as well as `PostToolUse`, and it is not
+/// redundant: probed on 2026-09-09, this harness fires no post-tool hook at all
+/// for a call that failed — one session running `echo AAA`, `exit 3`, `echo
+/// BBB` produced payloads for the first and third and nothing for the second.
+/// Without the pre-tool hook a failed call is not an unflagged event in the
+/// record, it is missing from it, and the session page counts only what
+/// worked.
 pub const CLAUDE_CODE: Harness = Harness {
     agent: "claude-code",
     settings: &[".claude", "settings.local.json"],
     events: &[
         "SessionStart",
         "UserPromptSubmit",
+        "PreToolUse",
         "PostToolUse",
         "PreCompact",
         "SessionEnd",
@@ -67,6 +76,7 @@ pub const CODEX: Harness = Harness {
     events: &[
         "SessionStart",
         "UserPromptSubmit",
+        "PreToolUse",
         "PostToolUse",
         "PreCompact",
         "SessionEnd",
@@ -95,6 +105,7 @@ pub const GEMINI_CLI: Harness = Harness {
     events: &[
         "SessionStart",
         "BeforeAgent",
+        "BeforeTool",
         "AfterTool",
         "PreCompress",
         "SessionEnd",
@@ -630,18 +641,75 @@ mod tests {
         assert!(strays.is_empty(), "{strays:?}");
     }
 
-    /// The five events are the same five for every harness, whatever each one
-    /// calls them. A harness wired for four of them captures a session with a
-    /// hole in it, and nothing would say which.
+    /// Every harness wires the same moments, whatever each one calls them, and
+    /// every name it wires is one the parser recognises. Checked through
+    /// `anamnesis_hooks::classify_event` rather than against a second list of
+    /// names here: a name registered that the parser does not know is captured
+    /// as an unclassified notification, which looks like nothing at all until
+    /// somebody reads a session page with a hole in it.
     #[test]
-    fn every_harness_wires_the_same_five_moments() {
+    fn every_harness_wires_moments_the_parser_recognises() {
+        use anamnesis_core::observation::EventKind;
+
         for harness in HARNESSES {
-            assert_eq!(
-                harness.events.len(),
-                5,
-                "{} wires {} events",
+            let kinds: Vec<EventKind> = harness
+                .events
+                .iter()
+                .map(|name| anamnesis_hooks::classify_event(name))
+                .collect();
+
+            for required in [
+                EventKind::SessionStart,
+                EventKind::UserPrompt,
+                EventKind::ToolUse,
+                EventKind::PreCompact,
+                EventKind::SessionEnd,
+            ] {
+                assert!(
+                    kinds.contains(&required),
+                    "{} does not wire {required:?}: {:?}",
+                    harness.agent,
+                    harness.events
+                );
+            }
+
+            assert!(
+                !kinds.contains(&EventKind::Notification),
+                "{} wires a name the parser does not recognise: {:?}",
                 harness.agent,
-                harness.events.len()
+                harness.events
+            );
+
+            assert_eq!(
+                kinds.len(),
+                kinds.iter().collect::<std::collections::HashSet<_>>().len(),
+                "{} wires one moment twice: {:?}",
+                harness.agent,
+                harness.events
+            );
+        }
+    }
+
+    /// The pre-tool moment is what makes a failed call visible on a harness
+    /// that reports none, so it is wired wherever this project has confirmed a
+    /// name for it. Cursor is the exception, and deliberately so: nobody has
+    /// captured a payload from its pre-tool hook, and registering a guessed
+    /// name would write a hook that never fires and report success.
+    #[test]
+    fn the_pre_tool_moment_is_wired_where_its_name_is_known() {
+        use anamnesis_core::observation::EventKind;
+
+        for harness in HARNESSES {
+            let attempts = harness
+                .events
+                .iter()
+                .filter(|name| anamnesis_hooks::classify_event(name) == EventKind::ToolAttempt)
+                .count();
+            let expected = usize::from(harness.agent != "cursor");
+            assert_eq!(
+                attempts, expected,
+                "{} wires {attempts} pre-tool events",
+                harness.agent
             );
         }
     }

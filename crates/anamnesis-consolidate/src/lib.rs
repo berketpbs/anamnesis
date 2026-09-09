@@ -243,9 +243,19 @@ fn collect_prompts(observations: &[Observation]) -> Vec<String> {
 }
 
 /// Tool invocation counts, keyed by tool name.
+///
+/// Completions only. A harness with a pre-tool hook reports the same call
+/// twice — once as an attempt, once as a completion — and counting both would
+/// double every number on the page the day that hook was registered, which
+/// would look exactly like the agent having worked twice as hard. Attempts
+/// that never completed are counted separately, by [`outcomes`], because they
+/// are a different fact.
 fn count_tools(observations: &[Observation]) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();
     for observation in observations {
+        if observation.kind != EventKind::ToolUse {
+            continue;
+        }
         if let Some(tool) = &observation.tool {
             *counts.entry(tool.name.clone()).or_insert(0) += 1;
         }
@@ -270,6 +280,13 @@ pub(crate) struct Outcomes {
     pub reported: usize,
     /// Of those, how many the harness stated had failed.
     pub failures: usize,
+    /// Calls the agent began that never reported a result.
+    ///
+    /// Evidence rather than inference, and the only kind available on a
+    /// harness that stays silent about failures: an attempt was recorded, the
+    /// completion that always follows never arrived. On Claude Code that is
+    /// precisely what a failed tool call looks like from outside.
+    pub unfinished: usize,
 }
 
 impl Outcomes {
@@ -283,10 +300,69 @@ impl Outcomes {
     }
 }
 
+/// The attempts that never completed, by position in `observations`.
+///
+/// Match each attempt against the completion that should have followed it.
+///
+/// By the harness's own identifier where there is one. Where there is not —
+/// most harnesses send none — attempts and completions are matched by tool
+/// name in order, so a session that attempted `Bash` four times and completed
+/// it three has one unfinished call and not four. Anything left over is a call
+/// that began and never came back.
+pub(crate) fn unfinished_attempts(observations: &[Observation]) -> Vec<usize> {
+    let mut completed_ids: Vec<&str> = Vec::new();
+    let mut completed_names: BTreeMap<&str, usize> = BTreeMap::new();
+    for observation in observations {
+        if observation.kind != EventKind::ToolUse {
+            continue;
+        }
+        if let Some(tool) = &observation.tool {
+            match tool.call_id.as_deref() {
+                Some(id) => completed_ids.push(id),
+                None => *completed_names.entry(tool.name.as_str()).or_insert(0) += 1,
+            }
+        }
+    }
+
+    let mut unfinished = Vec::new();
+    for (index, observation) in observations.iter().enumerate() {
+        if observation.kind != EventKind::ToolAttempt {
+            continue;
+        }
+        let Some(tool) = &observation.tool else {
+            continue;
+        };
+        // An identified attempt is answered only by its own completion. This
+        // is the exact case, and the one where a claim of failure is safe to
+        // make.
+        if let Some(id) = tool.call_id.as_deref() {
+            if let Some(at) = completed_ids.iter().position(|seen| *seen == id) {
+                completed_ids.swap_remove(at);
+            } else {
+                unfinished.push(index);
+            }
+            continue;
+        }
+        // Otherwise the best available answer: some completion of this tool.
+        match completed_names.get_mut(tool.name.as_str()) {
+            Some(left) if *left > 0 => *left -= 1,
+            _ => unfinished.push(index),
+        }
+    }
+    unfinished
+}
+
 /// Count the tool calls and what the harness said about them.
 fn outcomes(observations: &[Observation]) -> Outcomes {
-    let mut counted = Outcomes::default();
-    for tool in observations.iter().filter_map(|o| o.tool.as_ref()) {
+    let mut counted = Outcomes {
+        unfinished: unfinished_attempts(observations).len(),
+        ..Outcomes::default()
+    };
+    for tool in observations
+        .iter()
+        .filter(|o| o.kind == EventKind::ToolUse)
+        .filter_map(|o| o.tool.as_ref())
+    {
         counted.calls += 1;
         match tool.ok {
             Some(true) => counted.reported += 1,
@@ -364,10 +440,21 @@ fn render_body(
         }
     }
 
-    if !tools.is_empty() {
+    if !tools.is_empty() || outcomes.unfinished > 0 {
         out.push_str("\n## Tools\n\n");
         for (name, count) in sorted_by_count(tools) {
             out.push_str(&format!("- {name}: {count}\n"));
+        }
+        // Worth more than the line below it: this is a failure the harness
+        // never named, recovered from the fact that a call it announced never
+        // came back.
+        if outcomes.unfinished > 0 {
+            out.push_str(&format!(
+                "- Calls that never reported back: {} (the agent began them and no result \
+                 followed, which is what a failed call looks like on a harness that reports \
+                 none)\n",
+                outcomes.unfinished
+            ));
         }
         // Said in full, because the page is read by someone who has no
         // transcript beside them. "Reported failures: 0" and no line at all
@@ -469,10 +556,15 @@ fn render_handoff(
         // Short, because every byte here is spent out of the next session's
         // context — but present, because the next session otherwise starts by
         // believing nothing went wrong.
-        if outcomes.unreported() {
-            out.push_str(" (no tool outcomes reported)");
-        } else if outcomes.failures > 0 {
+        if outcomes.failures > 0 {
             out.push_str(&format!(" ({} reported failures)", outcomes.failures));
+        } else if outcomes.unfinished > 0 {
+            out.push_str(&format!(
+                " ({} calls never reported back)",
+                outcomes.unfinished
+            ));
+        } else if outcomes.unreported() {
+            out.push_str(" (no tool outcomes reported)");
         }
         out.push('\n');
     }
@@ -547,6 +639,17 @@ mod tests {
         Some(ToolRef {
             name: name.to_owned(),
             ok,
+            call_id: None,
+        })
+    }
+
+    /// A call the harness named, so an attempt and its completion can be
+    /// paired exactly rather than by tool name.
+    fn identified(name: &str, call_id: &str) -> Option<ToolRef> {
+        Some(ToolRef {
+            name: name.to_owned(),
+            ok: None,
+            call_id: Some(call_id.to_owned()),
         })
     }
 
@@ -689,6 +792,89 @@ mod tests {
             digest.handoff.contains("no tool outcomes reported"),
             "{}",
             digest.handoff
+        );
+    }
+
+    /// The failure a silent harness leaves behind, recovered from its shape:
+    /// the agent announced three calls and two came back. Claude Code fires no
+    /// post-tool hook for a call that failed, so the missing completion is the
+    /// only evidence the failure ever happened.
+    #[test]
+    fn an_attempt_with_no_completion_is_reported_as_a_call_that_failed() {
+        let observations = vec![
+            observation(EventKind::UserPrompt, "run the tests", None),
+            observation(
+                EventKind::ToolAttempt,
+                "cargo test",
+                identified("Bash", "a"),
+            ),
+            observation(EventKind::ToolUse, "cargo test", identified("Bash", "a")),
+            observation(EventKind::ToolAttempt, "exit 3", identified("Bash", "b")),
+        ];
+
+        let digest = consolidate(&session(), &observations).expect("digest");
+
+        assert!(
+            digest.body.contains("Calls that never reported back: 1"),
+            "{}",
+            digest.body
+        );
+        // The completed call is counted once, not twice: the attempt and the
+        // completion are one call seen from two moments.
+        assert!(digest.body.contains("Bash: 1"), "{}", digest.body);
+        assert!(
+            digest.handoff.contains("1 calls never reported back"),
+            "{}",
+            digest.handoff
+        );
+    }
+
+    /// Without identifiers — which is what most harnesses send — attempts and
+    /// completions are paired by tool name in order. Three attempts and two
+    /// completions is one unfinished call, not three.
+    #[test]
+    fn attempts_pair_with_completions_by_name_when_nothing_identifies_them() {
+        let mut observations = vec![observation(EventKind::UserPrompt, "build", None)];
+        for _ in 0..3 {
+            observations.push(observation(
+                EventKind::ToolAttempt,
+                "cargo build",
+                tool("Bash", None),
+            ));
+        }
+        for _ in 0..2 {
+            observations.push(observation(
+                EventKind::ToolUse,
+                "cargo build",
+                tool("Bash", None),
+            ));
+        }
+
+        let digest = consolidate(&session(), &observations).expect("digest");
+
+        assert!(
+            digest.body.contains("Calls that never reported back: 1"),
+            "{}",
+            digest.body
+        );
+    }
+
+    /// A session where every attempt came back says nothing about attempts at
+    /// all. The line is evidence of a failure, and printing it at zero would
+    /// make it noise on every page instead.
+    #[test]
+    fn a_session_where_every_call_returned_reports_no_unfinished_calls() {
+        let observations = vec![
+            observation(EventKind::ToolAttempt, "ls", identified("Bash", "a")),
+            observation(EventKind::ToolUse, "ls", identified("Bash", "a")),
+        ];
+
+        let digest = consolidate(&session(), &observations).expect("digest");
+
+        assert!(
+            !digest.body.contains("never reported back"),
+            "{}",
+            digest.body
         );
     }
 

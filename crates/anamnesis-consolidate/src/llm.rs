@@ -417,7 +417,17 @@ pub fn render_prompt_reporting(
     let spent = estimate_tokens(&out);
     let remaining = max_tokens.saturating_sub(spent);
 
-    let lines: Vec<String> = observations.iter().map(render_observation).collect();
+    // An attempt whose completion arrived is the same call told twice, and a
+    // transcript that tells every call twice is a transcript half as long. The
+    // ones worth a line are those with no completion behind them: on a harness
+    // that reports no failure, that absence is the failure.
+    let unfinished = crate::unfinished_attempts(observations);
+    let lines: Vec<String> = observations
+        .iter()
+        .enumerate()
+        .filter(|(index, o)| o.kind != EventKind::ToolAttempt || unfinished.contains(index))
+        .map(|(_, o)| render_observation(o))
+        .collect();
     let (lines, omitted) = fit_lines(lines, remaining);
     for line in lines {
         out.push_str(&line);
@@ -480,6 +490,10 @@ fn render_observation(observation: &Observation) -> String {
         // third of the transcript's budget restating the default.
         if tool.ok == Some(false) {
             line.push_str(" (FAILED)");
+        } else if observation.kind == EventKind::ToolAttempt {
+            // It reached the transcript at all only because no completion
+            // followed it, which every caller filters on before rendering.
+            line.push_str(" (NO RESULT — this call was started and never came back)");
         }
     }
 
@@ -993,6 +1007,7 @@ mod tests {
                 Some(ToolRef {
                     name: "Write".to_owned(),
                     ok: Some(true),
+                    call_id: None,
                 }),
             ),
             observation(
@@ -1001,6 +1016,7 @@ mod tests {
                 Some(ToolRef {
                     name: "Bash".to_owned(),
                     ok: Some(false),
+                    call_id: None,
                 }),
             ),
         ]
@@ -1540,6 +1556,36 @@ mod tests {
         assert!(prompt.contains("Working directory"));
     }
 
+    /// A transcript that told every call twice would be half as long for the
+    /// same money. An attempt earns its line only when no completion followed
+    /// it — and then it is the most important line on the page, because on
+    /// this harness that absence is the failure.
+    #[test]
+    fn only_the_attempts_that_never_came_back_reach_the_model() {
+        let paired = |id: &str| {
+            Some(ToolRef {
+                name: "Bash".to_owned(),
+                ok: None,
+                call_id: Some(id.to_owned()),
+            })
+        };
+        let observations = vec![
+            observation(EventKind::ToolAttempt, "cargo build", paired("a")),
+            observation(EventKind::ToolUse, "cargo build", paired("a")),
+            observation(EventKind::ToolAttempt, "rm -rf /tmp/x", paired("b")),
+        ];
+
+        let prompt = render_prompt(&session(), &observations, Surroundings::default(), 4_000);
+
+        assert_eq!(
+            prompt.matches("cargo build").count(),
+            1,
+            "the completed call is told once:\n{prompt}"
+        );
+        assert!(prompt.contains("rm -rf /tmp/x"), "{prompt}");
+        assert!(prompt.contains("NO RESULT"), "{prompt}");
+    }
+
     /// A tool body carries what was run and what came back, and the model
     /// needs both. Clipped as one string, a long command would eat the whole
     /// allowance and the result — which is the half that says what happened —
@@ -1556,6 +1602,7 @@ mod tests {
             Some(ToolRef {
                 name: "Bash".to_owned(),
                 ok: None,
+                call_id: None,
             }),
         );
 
@@ -1580,6 +1627,7 @@ mod tests {
                 Some(ToolRef {
                     name: "Bash".to_owned(),
                     ok: None,
+                    call_id: None,
                 }),
             ),
         ];
@@ -1698,6 +1746,7 @@ mod tests {
                 Some(ToolRef {
                     name: "Read".to_owned(),
                     ok: Some(true),
+                    call_id: None,
                 }),
             ));
         }
@@ -1748,6 +1797,7 @@ mod tests {
                 Some(ToolRef {
                     name: "Read".to_owned(),
                     ok: Some(true),
+                    call_id: None,
                 }),
             ));
         }
