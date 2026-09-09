@@ -174,7 +174,7 @@ pub fn consolidate(session: &Session, observations: &[Observation]) -> Option<Se
 
     let prompts = collect_prompts(observations);
     let tools = count_tools(observations);
-    let failures = count_failures(observations);
+    let outcomes = outcomes(observations);
     let files = files::mentioned_files(observations);
     let truncated = observations
         .iter()
@@ -187,12 +187,12 @@ pub fn consolidate(session: &Session, observations: &[Observation]) -> Option<Se
         session,
         &prompts,
         &tools,
-        failures,
+        outcomes,
         &files,
         truncated,
         observations.len(),
     );
-    let handoff = render_handoff(session, &prompts, &tools, failures, &files);
+    let handoff = render_handoff(session, &prompts, &tools, outcomes, &files);
 
     Some(SessionDigest {
         title,
@@ -253,12 +253,51 @@ fn count_tools(observations: &[Observation]) -> BTreeMap<String, usize> {
     counts
 }
 
-/// Tool calls the harness reported as failed.
-fn count_failures(observations: &[Observation]) -> usize {
-    observations
-        .iter()
-        .filter(|o| o.tool.as_ref().is_some_and(|t| t.ok == Some(false)))
-        .count()
+/// What the harness said about how the session's tool calls went.
+///
+/// Three numbers rather than one, because a page that prints only failures
+/// cannot tell the two silences apart: a session where every call succeeded
+/// and a session where the harness never says whether anything succeeded both
+/// render as nothing at all, and a reader takes nothing at all for "clean
+/// run". `ToolRef::ok` is deliberately an `Option` for exactly this reason —
+/// `None` means "not reported", not "fine" — and until now that distinction
+/// died here, one function away from the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Outcomes {
+    /// Tool calls recorded in this session.
+    pub calls: usize,
+    /// Of those, how many arrived with an outcome the harness stated.
+    pub reported: usize,
+    /// Of those, how many the harness stated had failed.
+    pub failures: usize,
+}
+
+impl Outcomes {
+    /// Whether the harness said nothing about any of the calls it recorded.
+    ///
+    /// The condition for the line that replaces silence. Requires at least one
+    /// call: a session that ran no tools has no outcomes to report and nobody
+    /// needs telling that none were reported.
+    pub fn unreported(&self) -> bool {
+        self.calls > 0 && self.reported == 0
+    }
+}
+
+/// Count the tool calls and what the harness said about them.
+fn outcomes(observations: &[Observation]) -> Outcomes {
+    let mut counted = Outcomes::default();
+    for tool in observations.iter().filter_map(|o| o.tool.as_ref()) {
+        counted.calls += 1;
+        match tool.ok {
+            Some(true) => counted.reported += 1,
+            Some(false) => {
+                counted.reported += 1;
+                counted.failures += 1;
+            }
+            None => {}
+        }
+    }
+    counted
 }
 
 /// A title derived from the first prompt, falling back to the date.
@@ -279,7 +318,7 @@ fn render_body(
     session: &Session,
     prompts: &[String],
     tools: &BTreeMap<String, usize>,
-    failures: usize,
+    outcomes: Outcomes,
     files: &[String],
     truncated: usize,
     total: usize,
@@ -330,8 +369,25 @@ fn render_body(
         for (name, count) in sorted_by_count(tools) {
             out.push_str(&format!("- {name}: {count}\n"));
         }
-        if failures > 0 {
-            out.push_str(&format!("- Reported failures: {failures}\n"));
+        // Said in full, because the page is read by someone who has no
+        // transcript beside them. "Reported failures: 0" and no line at all
+        // both claim a clean run; only one of the three states below is that
+        // claim, and it is the one that has to be earned.
+        if outcomes.unreported() {
+            out.push_str(
+                "- Reported failures: unknown — this harness reported no outcome for any of \
+                 its tool calls, so a failure would not appear here\n",
+            );
+        } else {
+            if outcomes.failures > 0 {
+                out.push_str(&format!("- Reported failures: {}\n", outcomes.failures));
+            }
+            if outcomes.reported < outcomes.calls {
+                out.push_str(&format!(
+                    "- Outcomes reported for {} of {} tool calls; the rest are unknown\n",
+                    outcomes.reported, outcomes.calls
+                ));
+            }
         }
     }
 
@@ -378,7 +434,7 @@ fn render_handoff(
     session: &Session,
     prompts: &[String],
     tools: &BTreeMap<String, usize>,
-    failures: usize,
+    outcomes: Outcomes,
     files: &[String],
 ) -> String {
     let mut out = String::new();
@@ -410,8 +466,13 @@ fn render_handoff(
             .map(|(name, count)| format!("{name}×{count}"))
             .collect();
         out.push_str(&format!("Activity: {}", summary.join(", ")));
-        if failures > 0 {
-            out.push_str(&format!(" ({failures} reported failures)"));
+        // Short, because every byte here is spent out of the next session's
+        // context — but present, because the next session otherwise starts by
+        // believing nothing went wrong.
+        if outcomes.unreported() {
+            out.push_str(" (no tool outcomes reported)");
+        } else if outcomes.failures > 0 {
+            out.push_str(&format!(" ({} reported failures)", outcomes.failures));
         }
         out.push('\n');
     }
@@ -603,6 +664,82 @@ mod tests {
         assert!(digest.handoff.contains("claude-code"));
     }
 
+    /// The failure this closes, as it actually arrived: this project's own
+    /// harness reports no `tool_response` at all, so every session it recorded
+    /// was consolidated with `ok == None` on every call — and the page, which
+    /// prints a failure line only when there are failures, said nothing. A
+    /// reader takes nothing for "clean run". The page cannot know whether
+    /// anything failed; what it can do is stop implying it knows.
+    #[test]
+    fn a_harness_that_reports_no_outcome_is_not_a_session_without_failures() {
+        let observations = vec![
+            observation(EventKind::UserPrompt, "run the tests", None),
+            observation(EventKind::ToolUse, "cargo test", tool("Bash", None)),
+            observation(EventKind::ToolUse, "cargo clippy", tool("Bash", None)),
+        ];
+
+        let digest = consolidate(&session(), &observations).expect("digest");
+
+        assert!(
+            digest.body.contains("Reported failures: unknown"),
+            "{}",
+            digest.body
+        );
+        assert!(
+            digest.handoff.contains("no tool outcomes reported"),
+            "{}",
+            digest.handoff
+        );
+    }
+
+    /// The other half of the same honesty: a session the harness *did* report
+    /// on says nothing about unknowns, because there are none. A warning
+    /// printed on every page is a warning nobody reads on the one page where
+    /// it matters.
+    #[test]
+    fn a_reported_clean_run_carries_no_warning() {
+        let observations = vec![
+            observation(EventKind::UserPrompt, "run the tests", None),
+            observation(EventKind::ToolUse, "cargo test", tool("Bash", Some(true))),
+        ];
+
+        let digest = consolidate(&session(), &observations).expect("digest");
+
+        assert!(!digest.body.contains("unknown"), "{}", digest.body);
+        assert!(
+            !digest.handoff.contains("no tool outcomes reported"),
+            "{}",
+            digest.handoff
+        );
+    }
+
+    /// A harness that reports some calls and not others is the mixed case, and
+    /// the page says how far its failure count reaches rather than letting the
+    /// count stand for all of them.
+    #[test]
+    fn a_partly_reporting_harness_says_how_far_the_count_reaches() {
+        let observations = vec![
+            observation(EventKind::UserPrompt, "run the tests", None),
+            observation(EventKind::ToolUse, "cargo test", tool("Bash", Some(false))),
+            observation(EventKind::ToolUse, "cargo build", tool("Bash", None)),
+        ];
+
+        let digest = consolidate(&session(), &observations).expect("digest");
+
+        assert!(
+            digest.body.contains("Reported failures: 1"),
+            "{}",
+            digest.body
+        );
+        assert!(
+            digest
+                .body
+                .contains("Outcomes reported for 1 of 2 tool calls"),
+            "{}",
+            digest.body
+        );
+    }
+
     /// The counted path leaves no durable pages, on a session that plainly did
     /// something worth remembering. Counting can say which tools ran and which
     /// failed; whether a project learned a decision from that is the judgement
@@ -764,7 +901,7 @@ mod tests {
         ];
         let tools = BTreeMap::new();
 
-        let handoff = render_handoff(&session, &prompts, &tools, 0, &[]);
+        let handoff = render_handoff(&session, &prompts, &tools, Outcomes::default(), &[]);
 
         assert!(
             handoff.contains("Last request: fix the release"),

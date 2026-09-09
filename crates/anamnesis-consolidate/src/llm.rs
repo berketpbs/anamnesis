@@ -371,6 +371,20 @@ pub fn render_prompt_reporting(
     ));
     out.push_str(&format!("- Events recorded: {}\n", observations.len()));
 
+    // The transcript marks failures and nothing else, so a harness that never
+    // states an outcome produces a transcript indistinguishable from a session
+    // where everything worked — and the model, told that failures are the most
+    // useful thing in a transcript, faithfully reports a clean run. Saying it
+    // once here is cheaper than annotating every line, and it is the only
+    // place the model can learn that the absence means nothing.
+    if crate::outcomes(observations).unreported() {
+        out.push_str(
+            "- Tool outcomes: not reported by this harness. No call below can be marked \
+             FAILED, and the absence of failures is not evidence that none occurred — do not \
+             report the session as succeeding on that basis.\n",
+        );
+    }
+
     if let Some(text) = preferences.map(str::trim).filter(|t| !t.is_empty()) {
         let share = max_tokens / PREFERENCES_SHARE;
         out.push_str("\n# Project preferences\n\n");
@@ -1501,6 +1515,40 @@ mod tests {
         assert!(prompt.contains("crates/anamnesis-llm/src/lib.rs"));
         assert!(prompt.contains("(FAILED)"));
         assert!(prompt.contains("Working directory"));
+    }
+
+    /// The transcript marks failures and nothing else, which reads as "all
+    /// clear" when the harness marks nothing. The model is told once, in the
+    /// header, so it does not write a page reporting a clean run it has no
+    /// evidence for — and is told nothing when outcomes do arrive, since a
+    /// caveat on every prompt is a caveat the model learns to skip.
+    #[test]
+    fn a_transcript_with_no_outcomes_says_so_to_the_model() {
+        let silent = vec![
+            observation(EventKind::UserPrompt, "add the llm provider", None),
+            observation(
+                EventKind::ToolUse,
+                "cargo test",
+                Some(ToolRef {
+                    name: "Bash".to_owned(),
+                    ok: None,
+                }),
+            ),
+        ];
+
+        let prompt = render_prompt(&session(), &silent, Surroundings::default(), 6_500);
+        assert!(prompt.contains("Tool outcomes: not reported"), "{prompt}");
+
+        let reported = render_prompt(
+            &session(),
+            &working_session(),
+            Surroundings::default(),
+            6_500,
+        );
+        assert!(
+            !reported.contains("Tool outcomes: not reported"),
+            "{reported}"
+        );
     }
 
     #[test]
