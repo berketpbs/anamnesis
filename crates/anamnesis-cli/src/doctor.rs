@@ -168,6 +168,21 @@ fn judge_hooks(symptoms: &Symptoms) -> Vec<Finding> {
             });
         }
 
+        // Not in the required list below, because a harness that does not
+        // send an assistant message cannot be faulted for not being wired for
+        // one. Where the moment exists and is unwired, the pages lose the only
+        // part of a session written in words.
+        if !wired.contains(&EventKind::AssistantMessage) {
+            findings.push(Finding {
+                severity: Severity::Thin,
+                subject: "hooks",
+                verdict: format!(
+                    "{agent} does not report what the agent said when it finished, so pages are compiled from tool calls alone"
+                ),
+                remedy: Some(format!("anamnesis install-hooks --agent {agent}")),
+            });
+        }
+
         let missing: Vec<&str> = [
             (EventKind::SessionStart, "session starts"),
             (EventKind::UserPrompt, "prompts"),
@@ -183,7 +198,9 @@ fn judge_hooks(symptoms: &Symptoms) -> Vec<Finding> {
             // Only when the pre-tool moment is there too, or the same harness
             // would be reported as complete on the line after it was reported
             // as unable to see a failure.
-            if wired.contains(&EventKind::ToolAttempt) {
+            if wired.contains(&EventKind::ToolAttempt)
+                && wired.contains(&EventKind::AssistantMessage)
+            {
                 findings.push(Finding {
                     severity: Severity::Fine,
                     subject: "hooks",
@@ -566,13 +583,72 @@ mod tests {
         symptoms
     }
 
-    const EVERY_MOMENT: [EventKind; 5] = [
+    const EVERY_MOMENT: [EventKind; 6] = [
         EventKind::SessionStart,
         EventKind::UserPrompt,
         EventKind::ToolAttempt,
         EventKind::ToolUse,
+        EventKind::AssistantMessage,
         EventKind::SessionEnd,
     ];
+
+    /// A string continued across source lines keeps the indentation of the
+    /// next line unless the continuation is written exactly right, and a
+    /// verdict reading `pages are            compiled` has happened three
+    /// times in this file's history. It is invisible in review and obvious to
+    /// the person the line is printed to.
+    #[test]
+    fn no_verdict_carries_the_indentation_of_the_source_it_was_written_in() {
+        let mut symptoms = wired("claude-code", &[EventKind::SessionStart]);
+        symptoms.unwired.push("codex".to_owned());
+        symptoms.server_answered = true;
+        symptoms.sessions = vec![SessionFacts {
+            summary: Some(SummarySource::Counted),
+            ..session(&[(EventKind::UserPrompt, 1), (EventKind::ToolUse, 9)])
+        }];
+
+        for finding in diagnose(&symptoms) {
+            assert!(
+                !finding.verdict.contains("  "),
+                "{}: {:?}",
+                finding.subject,
+                finding.verdict
+            );
+            if let Some(remedy) = &finding.remedy {
+                assert!(!remedy.contains("  "), "{remedy:?}");
+            }
+        }
+    }
+
+    /// A setup wired before the assistant's own account was captured looks
+    /// complete and produces pages compiled from tool calls alone.
+    #[test]
+    fn a_setup_that_never_hears_the_agent_speak_is_reported_as_thin() {
+        let symptoms = wired(
+            "claude-code",
+            &[
+                EventKind::SessionStart,
+                EventKind::UserPrompt,
+                EventKind::ToolAttempt,
+                EventKind::ToolUse,
+                EventKind::SessionEnd,
+            ],
+        );
+
+        let findings = diagnose(&symptoms);
+
+        assert!(
+            findings.iter().any(|f| f.subject == "hooks"
+                && f.verdict.contains("what the agent said when it finished")),
+            "{findings:#?}"
+        );
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.verdict.contains("reports every moment")),
+            "{findings:#?}"
+        );
+    }
 
     /// The gap this command was written for: everything looks healthy, and
     /// failures have been invisible for as long as the setup has existed.
