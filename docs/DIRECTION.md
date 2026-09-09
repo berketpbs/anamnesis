@@ -158,10 +158,15 @@ copy, and leave the restart to the scheduled task that owns the server.
 
 Small, and everything after it depends on it.
 
-- Add **hit@1** and **NDCG@k** beside the existing MRR and recall in
+- ~~Add **hit@1** and **NDCG@k** beside the existing MRR and recall in
   `crates/anamnesis-evals/src/score.rs`. They are pure functions over the same
   ranked list, and having them makes our numbers comparable to anyone else's
-  rather than only to our own past.
+  rather than only to our own past.~~ **Landed.** Both are gated: `[thresholds]`
+  takes `min_hit1` and `min_ndcg`, and the suite that was reading 1.000 / 1.000
+  now reads hit@1 0.933 on `crowded`, which is a number with somewhere to go.
+  The NDCG is over the suite's own scored window and prints as `NDCG@5` for that
+  reason — it is single-relevance, because a case's `relevant` list is a set of
+  acceptable answers rather than a set of pages that all must appear.
 - Let `eval` run against a **restored snapshot**. `archive.rs` already does the
   difficult part; nothing connects it to the evals crate.
 - Grow the question set and **freeze it before evaluating**, with category
@@ -274,9 +279,10 @@ separate, small change.
   loaded, echoed on every hit, and **never enters the score**; the post-fusion
   multiplier reads namespace, canonical and pinned. Either the document or the
   code is wrong, and no test would notice.
-- **`docs/GETTING_STARTED.md` prints stale example output** in its "Score
+- ~~**`docs/GETTING_STARTED.md` prints stale example output** in its "Score
   Retrieval" section — `MRR 0.708 (bar 0.700)`, from before the 2026-08-29 sweep.
-  The suite now scores 1.000 against a bar of 1.000.
+  The suite now scores 1.000 against a bar of 1.000.~~ **Fixed** alongside the
+  first Phase 1 item, since that change rewrote the same block of output.
 - **`page_links.to_project_id` is in the schema and never written.** Cross-project
   links are declared and unpopulated; the `_global` scope is reached by fusing
   two searches instead.

@@ -32,7 +32,9 @@ limit = 5
 # A floor at 1.000 leaves no room, which is the point. There is nowhere further
 # for this corpus to go, so any change that costs it a rank has to say so here.
 [thresholds]
+min_hit1 = 1.0
 min_mrr = 1.0
+min_ndcg = 1.0
 min_recall = 1.0
 
 # ---------------------------------------------------------------------------

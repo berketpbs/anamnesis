@@ -811,21 +811,33 @@ anamnesis eval --streams   # what each stream contributes on its own
 ```
 
 ```
-🎯 retrieval — Recall and ranking over a small project memory, through the real query path
-   retrieval · 10 pages · 10 cases · scored over the first 5
+🎯 crowded — Ranking under competition: a corpus where more than one page could plausibly answer
+   crowded · 22 pages · 15 cases · scored over the first 5
 
-   MRR     0.708  (bar 0.700) ok
+   Hit@1   0.933  (bar 0.930) ok
+   MRR     0.967  (bar 0.960) ok
+   NDCG@5  0.975  (bar 0.970) ok
    Recall  1.000  (bar 1.000) ok
-
-   Answered, but not near the top:
-     [4] "why is vector search off by default"
-         The page says opt-in, not off by default. Different words, same question.
 ```
+
+Four numbers because they fail differently. **Hit@1** is what the agent is
+actually handed — it reads the top result and works from it. **MRR** notices an
+answer sliding from first place to third while hit@1 has already written it off.
+**NDCG@5** is the one another project's published figure can be held against,
+discounted over however many results the suite scores (the `@5` travels with it
+for that reason). **Recall** says only whether the page came back at all.
+
+Two more lists print when they have anything in them: questions nothing relevant
+came back for, and questions answered so far down the page nobody would scroll
+to the answer. A suite passing on average with one question unanswered is the
+result most likely to be read as fine.
 
 The corpus is checked in at `crates/anamnesis-evals/suites/`, and a run builds it in a
 throwaway directory — it never touches your own memory, because every query
 would otherwise count as a read and the decay sweep believes those. Write your
-own with `--suite path/to/suite.toml`; the format is the shipped file.
+own with `--suite path/to/suite.toml`; the format is the shipped file. A suite
+is gated on the measures it names in `[thresholds]` and no others, so an older
+suite goes on meaning what it meant.
 
 ### Turn On Semantic Search
 

@@ -7,7 +7,7 @@ use jiff::Timestamp;
 
 use crate::EvalError;
 use crate::corpus::Corpus;
-use crate::score::{CaseScore, mean_reciprocal_rank, recall, score_case};
+use crate::score::{CaseScore, hit_at_one, mean_reciprocal_rank, ndcg_at, recall, score_case};
 use crate::suite::{Case, Suite};
 
 /// Rank at which an answer stops being one the reader is likely to see.
@@ -44,8 +44,16 @@ pub struct Report {
     pub pages: usize,
     /// Every case, in the order the suite lists them.
     pub cases: Vec<CaseOutcome>,
+    /// Share of cases answered in first place.
+    pub hit1: f64,
     /// Mean reciprocal rank across the cases.
     pub mrr: f64,
+    /// Normalised discounted cumulative gain over the scored window.
+    ///
+    /// `@limit`, not `@10`: the window is however many results the suite
+    /// scores over, and quoting the number without the `k` beside it is how
+    /// two projects come to compare figures that were never the same measure.
+    pub ndcg: f64,
     /// Share of cases whose answer appeared at all.
     pub recall: f64,
     /// The bar the suite set for itself.
@@ -58,7 +66,10 @@ impl Report {
     /// A suite that declares no thresholds always passes; declaring the
     /// numbers is how a suite opts into being a gate.
     pub fn passed(&self) -> bool {
-        self.mrr >= self.thresholds.min_mrr && self.recall >= self.thresholds.min_recall
+        self.mrr >= self.thresholds.min_mrr
+            && self.recall >= self.thresholds.min_recall
+            && self.hit1 >= self.thresholds.min_hit1
+            && self.ndcg >= self.thresholds.min_ndcg
     }
 
     /// The cases that returned nothing relevant, which are the ones worth
@@ -129,7 +140,9 @@ pub fn run_on(
         description: suite.description.clone(),
         limit: suite.limit,
         pages: suite.pages.len(),
+        hit1: hit_at_one(&scores),
         mrr: mean_reciprocal_rank(&scores),
+        ndcg: ndcg_at(&scores, suite.limit),
         recall: recall(&scores),
         thresholds: suite.thresholds,
         cases,
@@ -259,6 +272,42 @@ relevant = ["notes/windows.md"]
             report.misses().next().expect("a miss").query,
             "kubernetes ingress"
         );
+    }
+
+    /// A measure that no gate reads is a decoration. This is the whole reason
+    /// the two new numbers are on the report rather than only in the printing:
+    /// a suite can be held to first place, and fail there while its recall and
+    /// its mean are both untouched.
+    ///
+    /// Constructed rather than provoked, because this two-page corpus answers
+    /// both its questions outright and there is no honest way to make it miss
+    /// one without changing what it measures.
+    #[test]
+    fn a_bar_on_first_place_can_fail_a_suite_the_older_numbers_pass() {
+        let suite = Suite::from_toml(SUITE).expect("suite");
+        let mut report = run(&suite, now()).expect("run");
+        assert!(report.passed(), "the corpus answers itself");
+        assert_eq!(report.hit1, 1.0);
+        assert_eq!(report.ndcg, 1.0);
+
+        report.hit1 = 0.5;
+        report.thresholds.min_hit1 = 1.0;
+        assert!(!report.passed(), "recall and mrr still pass; this must not");
+
+        report.hit1 = 1.0;
+        report.ndcg = 0.5;
+        report.thresholds.min_ndcg = 1.0;
+        assert!(!report.passed());
+    }
+
+    /// The window the gain is discounted over is the suite's, not a constant.
+    /// A suite scoring over three and one scoring over ten report different
+    /// measures, and the report has to carry which one it took.
+    #[test]
+    fn the_gain_is_taken_over_the_window_the_suite_scores() {
+        let suite = Suite::from_toml(SUITE).expect("suite");
+        let report = run(&suite, now()).expect("run");
+        assert_eq!(report.limit, suite.limit);
     }
 
     /// Two runs of one suite have to agree, or no number it prints means

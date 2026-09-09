@@ -115,16 +115,30 @@ fn print_report(report: &anamnesis_evals::Report, source: &str, verbose: bool) {
         report.limit
     );
     println!();
-    println!(
-        "   MRR     {:.3}  {}",
-        report.mrr,
-        describe_bar(report.mrr, report.thresholds.min_mrr)
-    );
-    println!(
-        "   Recall  {:.3}  {}",
-        report.recall,
-        describe_bar(report.recall, report.thresholds.min_recall)
-    );
+    // Four numbers rather than two, in the order the projects worth comparing
+    // to publish them. Each fails differently: hit@1 is the answer the agent is
+    // actually handed, MRR notices a slide from first place to third, NDCG is
+    // the one another project's figure can be held against, and recall says
+    // whether the page came back at all.
+    // The `k` travels with the number: `NDCG@5` and `NDCG@10` are different
+    // measures, and a figure quoted without it is the kind that gets compared
+    // to somebody else's by mistake.
+    for (label, value, bar) in [
+        ("Hit@1".to_owned(), report.hit1, report.thresholds.min_hit1),
+        ("MRR".to_owned(), report.mrr, report.thresholds.min_mrr),
+        (
+            format!("NDCG@{}", report.limit),
+            report.ndcg,
+            report.thresholds.min_ndcg,
+        ),
+        (
+            "Recall".to_owned(),
+            report.recall,
+            report.thresholds.min_recall,
+        ),
+    ] {
+        println!("   {label:<8}{value:.3}  {}", describe_bar(value, bar));
+    }
 
     // Printed whether or not anyone asked, and in two lists rather than one.
     // A suite that passes on average while a question goes unanswered is the
