@@ -123,6 +123,8 @@ begin the title with the word `Session`, and do not label it before saying \
 it: write what this session was about, the way somebody scanning a directory \
 listing would want it named.
 - Write in the language the person wrote their prompts in, in that language's own alphabet. A page written in Turkish with the Turkish letters stripped out — `Ozet` for `Özet`, `gorev` for `görev` — is a page in no language at all, and it is also unsearchable by anybody typing the word properly.
+- An `assistant-message` line is what the agent said when it finished a turn: its own account of what it had just done, written for a person. It is the most direct statement of intent and outcome in the transcript, and where it and the tool calls disagree, say what the tools show — an account written before a command failed is still what was believed at the time.
+- A `subagent-report` line is what a subagent handed back, labelled with the kind of agent that produced it. A subagent is a whole investigation inside one tool call, and its report is the only record of what it found: the calls it made are not in this transcript.
 - A tool line shows what was run and, after a `→`, the end of what came back. Read it: that is where a command says whether it worked. `(FAILED)` marks a call the harness reported as failed, and `(NO RESULT ...)` marks one the agent started that never came back, which on some harnesses is the only trace a failed call leaves. Do not describe a session as having gone well because nothing is marked; the header says when this harness reports no outcomes at all, and then nothing being marked means nothing.
 - The handoff is read by an agent that has no other context and a limited \
 budget for it. It is prose, not headings, and it says what to know and what \
@@ -511,7 +513,7 @@ fn render_observation(observation: &Observation) -> String {
         // get the full allowance.
         let limit = if matches!(
             observation.kind,
-            EventKind::UserPrompt | EventKind::AssistantMessage
+            EventKind::UserPrompt | EventKind::AssistantMessage | EventKind::SubagentReport
         ) {
             MAX_BODY_CHARS
         } else {
@@ -1581,6 +1583,8 @@ mod tests {
             "quoting the error",
             "Say what was actually established",
             "NO RESULT",
+            "subagent-report",
+            "assistant-message",
             "nothing being marked means nothing",
         ] {
             assert!(SYSTEM.contains(rule), "the prompt no longer says {rule:?}");

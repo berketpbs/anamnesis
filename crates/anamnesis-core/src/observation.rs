@@ -39,6 +39,15 @@ pub enum EventKind {
     /// of tool calls cannot reconstruct. Claude Code attaches it to `Stop` as
     /// `last_assistant_message`, verified from a live payload on 2026-09-09.
     AssistantMessage,
+    /// What a subagent reported when it finished.
+    ///
+    /// A harness that runs subagents does the work of a whole session inside
+    /// one tool call: an investigation that reads thirty files and reports
+    /// three lines. The parent session records the call and its prompt and
+    /// nothing of what came back, so the finding — the only durable part —
+    /// was never in memory at all. Claude Code sends it on `SubagentStop`,
+    /// with `agent_id` and `agent_type`, verified live on 2026-09-09.
+    SubagentReport,
     /// Out-of-band notice from the harness.
     Notification,
 }
@@ -52,6 +61,7 @@ impl EventKind {
             Self::ToolUse => "tool-use",
             Self::ToolAttempt => "tool-attempt",
             Self::AssistantMessage => "assistant-message",
+            Self::SubagentReport => "subagent-report",
             Self::PreCompact => "pre-compact",
             Self::PostCompact => "post-compact",
             Self::SessionEnd => "session-end",
@@ -73,6 +83,7 @@ impl EventKind {
             "tool-use" => Self::ToolUse,
             "tool-attempt" => Self::ToolAttempt,
             "assistant-message" => Self::AssistantMessage,
+            "subagent-report" => Self::SubagentReport,
             "pre-compact" => Self::PreCompact,
             "post-compact" => Self::PostCompact,
             "session-end" => Self::SessionEnd,
@@ -95,7 +106,7 @@ impl EventKind {
             // carry the account and the rest is usually the same account in
             // more detail — and one of these arrives per turn, into the same
             // context every tool call is competing for.
-            Self::AssistantMessage => BoundedBody::ASSISTANT_LIMIT,
+            Self::AssistantMessage | Self::SubagentReport => BoundedBody::ASSISTANT_LIMIT,
             _ => BoundedBody::DEFAULT_LIMIT,
         }
     }

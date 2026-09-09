@@ -94,7 +94,7 @@ pub fn parse(agent: &AgentKind, raw: &Value) -> Result<ParsedHook> {
     let agent_session_id = correlation_id(object).ok_or(HookError::MissingSessionId)?;
 
     let kind = classify(string_field(object, "hook_event_name").as_deref());
-    let tool = tool_from(object);
+    let tool = tool_from(kind, object);
     let paths = paths_from(object);
     let raw_body = body_for(kind, object);
 
@@ -189,6 +189,13 @@ fn classify(name: Option<&str>) -> EventKind {
         // says in words what it just did — a transcript of tool calls cannot
         // reconstruct it.
         "stop" => EventKind::AssistantMessage,
+        // The moment a subagent finishes. Its payload carries the same
+        // `last_assistant_message` — the subagent's report — plus `agent_id`
+        // and `agent_type`. `SubagentStart` is deliberately not classified:
+        // it carries no content the parent's own tool call does not already
+        // record, and a row with an empty body costs a line in every
+        // transcript a model is later asked to read.
+        "subagentstop" | "subagent_stop" => EventKind::SubagentReport,
         "precompact" | "pre_compact" | "precompress" => EventKind::PreCompact,
         "postcompact" | "post_compact" => EventKind::PostCompact,
         "sessionend" | "session_end" => EventKind::SessionEnd,
@@ -198,7 +205,27 @@ fn classify(name: Option<&str>) -> EventKind {
 
 /// Extract the tool name, the harness's identifier for the call, and the
 /// outcome where it reports one.
-fn tool_from(object: &serde_json::Map<String, Value>) -> Option<ToolRef> {
+///
+/// A subagent has neither a tool name nor a tool outcome, but it does have a
+/// kind and an identity — `agent_type` and `agent_id` — and they answer the
+/// same two questions the fields exist for: what ran, and which run was it.
+/// Recording them here rather than in a second pair of columns is what lets a
+/// transcript line say `subagent-report Explore` without the storage layer
+/// learning a new shape.
+fn tool_from(kind: EventKind, object: &serde_json::Map<String, Value>) -> Option<ToolRef> {
+    // Keyed on the event, not on the field being present. A harness running a
+    // subagent stamps `agent_id` and `agent_type` on *every* event that
+    // happens inside it, so reading them wherever they appear would record a
+    // `Bash` call made by an Explore subagent as a call to `Explore` — the
+    // tool tallies of any session that used one would be wrong, and wrong in a
+    // way that looks plausible.
+    if kind == EventKind::SubagentReport {
+        return Some(ToolRef {
+            name: string_field(object, "agent_type").unwrap_or_else(|| "subagent".to_owned()),
+            ok: None,
+            call_id: string_field(object, "agent_id"),
+        });
+    }
     let name = string_field(object, "tool_name").or_else(|| string_field(object, "toolName"))?;
     Some(ToolRef {
         name,
@@ -394,9 +421,11 @@ fn body_for(kind: EventKind, object: &serde_json::Map<String, Value>) -> String 
         // `transcript_path`. A harness that sends the event without the field
         // records an empty body, which the capture path drops — a turn
         // boundary with nothing in it is not worth a row.
-        EventKind::AssistantMessage => string_field(object, "last_assistant_message")
-            .or_else(|| string_field(object, "lastAssistantMessage"))
-            .unwrap_or_default(),
+        EventKind::AssistantMessage | EventKind::SubagentReport => {
+            string_field(object, "last_assistant_message")
+                .or_else(|| string_field(object, "lastAssistantMessage"))
+                .unwrap_or_default()
+        }
 
         EventKind::SessionStart => string_field(object, "source").unwrap_or_default(),
         EventKind::SessionEnd => string_field(object, "reason").unwrap_or_default(),
@@ -494,6 +523,52 @@ mod tests {
         assert_eq!(parsed.tool.as_ref().unwrap().name, "Edit");
         assert_eq!(parsed.tool.as_ref().unwrap().ok, Some(true));
         assert!(parsed.body.as_str().contains("src/lib.rs"));
+    }
+
+    /// The `SubagentStop` payload as captured live on 2026-09-09: the
+    /// subagent's own report, its `agent_type`, its `agent_id`, and the parent
+    /// session's id, so the work attaches to the session that asked for it.
+    #[test]
+    fn a_subagent_reports_into_the_session_that_asked_for_it() {
+        let payload = json!({
+            "session_id": "parent-1",
+            "hook_event_name": "SubagentStop",
+            "agent_id": "a93ff5e8b4b4b90f2",
+            "agent_type": "Explore",
+            "agent_transcript_path": "C:/Users/x/.claude/projects/p/a.jsonl",
+            "last_assistant_message": "Definition found — crates/anamnesis-core/src/observation.rs:113"
+        });
+
+        let parsed = parse(&claude(), &payload).unwrap();
+
+        assert_eq!(parsed.kind, EventKind::SubagentReport);
+        assert_eq!(parsed.agent_session_id, "parent-1");
+        let tool = parsed.tool.expect("the subagent's kind and identity");
+        assert_eq!(tool.name, "Explore");
+        assert_eq!(tool.call_id.as_deref(), Some("a93ff5e8b4b4b90f2"));
+        assert!(parsed.body.as_str().contains("observation.rs:113"));
+    }
+
+    /// A harness stamps `agent_id` and `agent_type` on every event that
+    /// happens inside a subagent. Reading them wherever they appear would file
+    /// a `Bash` call made by an Explore subagent as a call to `Explore`, and
+    /// every tool tally of a session that used one would be wrong in a way
+    /// that looks entirely plausible.
+    #[test]
+    fn a_tool_call_inside_a_subagent_is_still_that_tool() {
+        let payload = json!({
+            "session_id": "parent-1",
+            "hook_event_name": "PostToolUse",
+            "agent_id": "a93ff5e8b4b4b90f2",
+            "agent_type": "Explore",
+            "tool_name": "Bash",
+            "tool_input": {"command": "rg RESULT_MARKER"}
+        });
+
+        assert_eq!(
+            parse(&claude(), &payload).unwrap().tool.unwrap().name,
+            "Bash"
+        );
     }
 
     /// The `Stop` payload as it actually arrives from Claude Code today,

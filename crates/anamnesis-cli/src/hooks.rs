@@ -54,6 +54,13 @@ pub struct Harness {
 /// agent's own account of the turn it just finished, which is the only place a
 /// session says in words what it did. Verified from a live payload on
 /// 2026-09-09.
+///
+/// `SubagentStop` is the same thing one level down. A subagent does the work
+/// of a whole session inside a single tool call — an investigation that reads
+/// thirty files and reports three lines — and the parent records the call and
+/// its prompt and nothing of what came back. `SubagentStart` is deliberately
+/// not registered: it carries nothing the parent's own tool call does not
+/// already have.
 pub const CLAUDE_CODE: Harness = Harness {
     agent: "claude-code",
     settings: &[".claude", "settings.local.json"],
@@ -63,6 +70,7 @@ pub const CLAUDE_CODE: Harness = Harness {
         "PreToolUse",
         "PostToolUse",
         "Stop",
+        "SubagentStop",
         "PreCompact",
         "SessionEnd",
     ],
