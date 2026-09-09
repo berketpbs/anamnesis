@@ -78,6 +78,13 @@ pub enum Commands {
         server: String,
     },
 
+    /// Say which pages in this wiki are not worth what they cost to keep
+    ///
+    /// `doctor` judges the machinery. This judges the output, and the two fail
+    /// independently: capture can be perfect and the wiki still full of pages
+    /// that say nothing.
+    Lint,
+
     /// Search the memory wiki
     Search {
         /// Search query
