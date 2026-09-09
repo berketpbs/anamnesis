@@ -20,7 +20,10 @@ use crate::bootstrap;
 #[derive(Parser)]
 #[command(name = "anamnesis")]
 #[command(about = "Long-term memory for AI coding agents")]
-#[command(version)]
+// The commit as well as the version, because `1.0.0` is the same string for
+// every commit of a release cycle and the question somebody asks a `--version`
+// is usually "is this the build I think it is".
+#[command(version = anamnesis_core::build::IDENTITY)]
 #[command(
     long_about = "Anamnesis preserves context across AI agent sessions through a persistent wiki.
 Quit Claude Code mid-task, start Codex in the same directory, and the next agent
@@ -69,7 +72,11 @@ pub enum Commands {
     /// never says whether a call failed, a hook binary older than the build
     /// that records what a tool returned. None of those look like failures.
     /// They look like a quiet week.
-    Doctor,
+    Doctor {
+        /// Server whose build to compare against this one
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        server: String,
+    },
 
     /// Search the memory wiki
     Search {

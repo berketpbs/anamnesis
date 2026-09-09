@@ -81,6 +81,20 @@ pub struct Symptoms {
     pub sessions: Vec<SessionFacts>,
     /// Whether a model is configured to write pages.
     pub model: Option<String>,
+    /// Which build the server answering is, when one answered.
+    ///
+    /// `None` means nothing answered, which `status` is the command for. This
+    /// one is about the case where something did answer and is not the build
+    /// the person thinks it is.
+    pub server_build: Option<String>,
+    /// Whether anything answered at the server's address at all.
+    ///
+    /// Separate from the build it named, because the interesting case is the
+    /// one where those disagree: something is running and cannot say what it
+    /// is, which is itself an answer.
+    pub server_answered: bool,
+    /// Which build is asking.
+    pub this_build: String,
 }
 
 /// What one recent session shows about what capture is producing.
@@ -119,6 +133,7 @@ pub fn diagnose(symptoms: &Symptoms) -> Vec<Finding> {
     findings.extend(judge_hooks(symptoms));
     findings.extend(judge_capture(symptoms));
     findings.extend(judge_pages(symptoms));
+    findings.extend(judge_build(symptoms));
     findings.sort_by_key(|finding| std::cmp::Reverse(finding.severity));
     findings
 }
@@ -268,6 +283,60 @@ fn judge_capture(symptoms: &Symptoms) -> Vec<Finding> {
     findings
 }
 
+/// Whether the server recording sessions is the build that is being asked.
+///
+/// A version cannot answer this: `1.0.0` is the same string all release cycle,
+/// so a server started weeks ago and a binary compiled a minute ago compare
+/// equal. The commit stamp is what makes the difference visible, and on this
+/// project the difference was the whole problem — the running server predated
+/// the code that records what a tool returned, everything looked healthy, and
+/// the only symptom was pages worth less than the work behind them.
+fn judge_build(symptoms: &Symptoms) -> Vec<Finding> {
+    let Some(server) = &symptoms.server_build else {
+        // Nothing answering is `status`'s question. Something answering that
+        // cannot name its build is this one's, and it is not ambiguous: the
+        // endpoint has been there since builds were stamped, so a server
+        // without it is older than any build that could ask.
+        if symptoms.server_answered {
+            return vec![Finding {
+                severity: Severity::Thin,
+                subject: "build",
+                verdict: format!(
+                    "the server is answering but cannot say which build it is, which means it predates the build stamp and is older than this one ({})",
+                    symptoms.this_build
+                ),
+                remedy: Some(
+                    "install this build where the hooks and the server run, then restart the server"
+                        .to_owned(),
+                ),
+            }];
+        }
+        return Vec::new();
+    };
+
+    if server == &symptoms.this_build {
+        return vec![Finding {
+            severity: Severity::Fine,
+            subject: "build",
+            verdict: format!("the server is running this build ({server})"),
+            remedy: None,
+        }];
+    }
+
+    vec![Finding {
+        severity: Severity::Thin,
+        subject: "build",
+        verdict: format!(
+            "the server is running {server} and this is {} — it records what its own build knows how to record",
+            symptoms.this_build
+        ),
+        remedy: Some(
+            "install this build where the hooks and the server run, then restart the server"
+                .to_owned(),
+        ),
+    }]
+}
+
 /// What became of the sessions that were recorded.
 ///
 /// Judged from what actually wrote the pages rather than from this shell's
@@ -309,7 +378,7 @@ fn judge_pages(symptoms: &Symptoms) -> Vec<Finding> {
     // both and the remedy starts where they are told apart.
     let hint = match &symptoms.model {
         Some(provider) => format!(
-            " (this terminal has ANAMNESIS_LLM_PROVIDER={provider}, which the server does not              inherit)"
+            " (this terminal has ANAMNESIS_LLM_PROVIDER={provider}, which the server does not inherit)"
         ),
         None => String::new(),
     };
@@ -317,11 +386,11 @@ fn judge_pages(symptoms: &Symptoms) -> Vec<Finding> {
         severity: Severity::Thin,
         subject: "pages",
         verdict: format!(
-            "{counted} of {} recent pages were written by counting — a tally of what happened              rather than an account of it{hint}",
+            "{counted} of {} recent pages were written by counting — a tally of what happened rather than an account of it{hint}",
             summarised.len()
         ),
         remedy: Some(
-            "the model lives in the server's environment, not this one: check the server log              for why it fell back, then rewrite the pages with `anamnesis reconsolidate --apply`"
+            "the model lives in the server's environment, not this one: check the server log for why it fell back, then rewrite the pages with `anamnesis reconsolidate --apply`"
                 .to_owned(),
         ),
     });
@@ -330,7 +399,7 @@ fn judge_pages(symptoms: &Symptoms) -> Vec<Finding> {
 }
 
 /// Gather what is true on this machine, then say what it means.
-pub fn cmd_doctor(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
+pub fn cmd_doctor(server: &str, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let scope = resolve_scope(&cwd)?;
     let data = DataDir::resolve(data_dir)?;
@@ -339,6 +408,9 @@ pub fn cmd_doctor(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
         model: std::env::var("ANAMNESIS_LLM_PROVIDER")
             .ok()
             .filter(|value| !value.trim().is_empty()),
+        server_answered: server_answers(server),
+        server_build: server_build(server),
+        this_build: anamnesis_core::build::IDENTITY.to_owned(),
         ..Symptoms::default()
     };
 
@@ -403,6 +475,42 @@ pub fn cmd_doctor(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Whether anything is listening at the server's address.
+fn server_answers(server: &str) -> bool {
+    let Ok(client) = probe_client() else {
+        return false;
+    };
+    client
+        .get(format!("{server}/health"))
+        .send()
+        .is_ok_and(|response| response.status().is_success())
+}
+
+/// The client both probes use: quick to give up, because a person is watching.
+fn probe_client() -> reqwest::Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_millis(500))
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+}
+
+/// Ask the server which build it is.
+///
+/// Nothing answering is not this command's problem — `status` exists to tell a
+/// stopped server from a refused one — so every failure here is the same
+/// `None`, and the finding it produces is no finding at all.
+fn server_build(server: &str) -> Option<String> {
+    let client = probe_client().ok()?;
+    let response = client.get(format!("{server}/version")).send().ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = response.json().ok()?;
+    body.get("identity")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
 }
 
 /// The lifecycle moments a settings file wires to anamnesis.
@@ -649,6 +757,80 @@ mod tests {
         assert!(
             findings.iter().all(|f| f.severity == Severity::Fine),
             "{findings:#?}"
+        );
+    }
+
+    /// The gap that cost this project weeks of page quality: a server running
+    /// a build older than the code, with every other signal healthy.
+    #[test]
+    fn a_server_running_another_build_is_named_as_one() {
+        let mut symptoms = wired("claude-code", &EVERY_MOMENT);
+        symptoms.this_build = "1.0.0 (2baf7c7)".to_owned();
+        symptoms.server_answered = true;
+        symptoms.server_build = Some("1.0.0 (83745dc)".to_owned());
+        symptoms.sessions = vec![SessionFacts {
+            summary: Some(SummarySource::Model),
+            with_results: 2,
+            with_outcome: 0,
+            ..session(&[(EventKind::UserPrompt, 1), (EventKind::ToolUse, 2)])
+        }];
+
+        let findings = diagnose(&symptoms);
+        let build = findings
+            .iter()
+            .find(|f| f.subject == "build")
+            .expect("a build finding");
+
+        assert_eq!(build.severity, Severity::Thin);
+        assert!(build.verdict.contains("83745dc"), "{build:#?}");
+        assert!(build.verdict.contains("2baf7c7"), "{build:#?}");
+    }
+
+    /// The same version on both sides is not evidence of the same build, which
+    /// is the entire reason the commit is stamped: `1.0.0` never moves.
+    #[test]
+    fn a_matching_version_with_a_different_commit_is_still_a_mismatch() {
+        let mut symptoms = wired("claude-code", &EVERY_MOMENT);
+        symptoms.this_build = "1.0.0 (aaaaaaa)".to_owned();
+        symptoms.server_answered = true;
+        symptoms.server_build = Some("1.0.0 (bbbbbbb)".to_owned());
+
+        assert!(
+            diagnose(&symptoms)
+                .iter()
+                .any(|f| f.subject == "build" && f.severity == Severity::Thin)
+        );
+    }
+
+    /// Nothing answering is `status`'s question, not this one. A server that
+    /// is simply not running must not be reported here as a stale build.
+    #[test]
+    fn a_server_that_did_not_answer_produces_no_build_finding() {
+        let mut symptoms = wired("claude-code", &EVERY_MOMENT);
+        symptoms.server_build = None;
+        symptoms.server_answered = false;
+
+        assert!(diagnose(&symptoms).iter().all(|f| f.subject != "build"));
+    }
+
+    /// The case this project was actually in: a server old enough that it does
+    /// not know how to say which build it is. Silence from that endpoint is
+    /// not missing information — it is the answer.
+    #[test]
+    fn a_server_that_cannot_name_its_build_is_older_than_this_one() {
+        let mut symptoms = wired("claude-code", &EVERY_MOMENT);
+        symptoms.server_answered = true;
+        symptoms.server_build = None;
+
+        let build = diagnose(&symptoms)
+            .into_iter()
+            .find(|f| f.subject == "build")
+            .expect("a build finding");
+
+        assert_eq!(build.severity, Severity::Thin);
+        assert!(
+            build.verdict.contains("predates the build stamp"),
+            "{build:#?}"
         );
     }
 

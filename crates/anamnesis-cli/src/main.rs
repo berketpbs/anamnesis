@@ -116,8 +116,8 @@ fn main() -> anyhow::Result<()> {
         } => {
             cmd_status(verbose, &server, token.as_deref(), cli.data_dir.clone())?;
         }
-        Commands::Doctor => {
-            doctor::cmd_doctor(cli.data_dir.clone())?;
+        Commands::Doctor { server } => {
+            doctor::cmd_doctor(&server, cli.data_dir.clone())?;
         }
         Commands::Search { query, limit, path } => {
             cmd_search(&query, limit, path, cli.data_dir.clone())?;

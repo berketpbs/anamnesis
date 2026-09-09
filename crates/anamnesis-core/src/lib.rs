@@ -18,6 +18,7 @@
 #![warn(missing_docs)]
 
 pub mod audit;
+pub mod build;
 pub mod capture;
 pub mod config;
 pub mod datadir;
