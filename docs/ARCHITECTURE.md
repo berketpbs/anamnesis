@@ -325,7 +325,7 @@ Session Ends
     │
     ├─→ anamnesis-llm (Generate summary)      ← optional; counting otherwise
     │
-    ├─→ a digest: title, body, handoff, entities
+    ├─→ a digest: title, body, handoff, entities, and up to three notes
     │
     ├─→ anamnesis-wiki (Create/update pages)
     │
@@ -831,11 +831,13 @@ audit log, and hosted providers for both completion and embeddings.
 What is still missing is listed by what it costs, measured against a working
 memory rather than guessed at.
 
-1. **Consolidation writes one page per session.** A session that made a
-   decision, hit a gotcha and established a procedure leaves all three inside
-   one `sessions/` page, so retrieval can only ever return the whole session.
-   This is why `notes/` is empty in every memory this has been run against,
-   and it is the largest single gap.
+1. **Nothing measures the memory that actually exists.** `anamnesis eval`
+   scores three checked-in corpora, rebuilt into a temporary directory under a
+   pinned clock. That is what makes a suite reproducible, and it is also what
+   keeps the live wiki invisible to every figure this project publishes.
+   `archive.rs` restores a snapshot carefully and nothing in `anamnesis-evals`
+   references it. Until that is connected, a retrieval change can only be
+   defended against fixtures.
 2. **`memory_query` returns snippets, not pages.** An agent that finds the
    right page has no tool to read the rest of it, and works from three
    sentences.
