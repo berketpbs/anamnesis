@@ -1,6 +1,6 @@
 //! Whether a fusion constant is doing anything a corpus can see.
 //!
-//! [`crate::sweep`] answers "which setting scores best". This answers the
+//! [`mod@crate::sweep`] answers "which setting scores best". This answers the
 //! question that has to come first and never has been asked here: **can these
 //! corpora tell the settings apart at all?**
 //!
