@@ -8,6 +8,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `anamnesis eval --k-sensitivity` scores every suite **once per `rrf_k`** and
+  reports what moved. `--sweep` answers which setting scores best; this answers
+  the question that has to come first and had never been asked here — whether
+  these corpora can tell the settings apart at all. A score identical at `k = 1`
+  and `k = 60` would not mean the value between them is right, it would mean
+  nothing here can see the difference, and a number measured where the question
+  does not live reads exactly like one measured where it does. Beside the table
+  it prints the count that settles it: how many questions changed their **first
+  answer** anywhere in the grid, and how many changed their ordering at all.
+  **It was built expecting to find that the corpora are blind to `k`, and found
+  the opposite.** Every shipped suite discriminates sharply — hit@1 moves 0.300
+  across the grid on `retrieval`, 0.375 on `adversarial`, 0.533 on `crowded`,
+  and ten of `crowded`'s fifteen questions change their first answer somewhere
+  in it. The low `k` this project ships is not an artifact of a corpus too small
+  to object; these corpora object loudly and they agree. Two findings that were
+  not what it was looking for: `k = 1` and `k = 2` are indistinguishable on all
+  three suites to three decimals, so what is measured is "≤ 2" and the 2 is a
+  choice inside that rather than a result; and the penalty for a high `k` *grows*
+  with the corpus, which runs opposite to the worry that prompted the work —
+  though `crowded` is crowded by construction, so that may be about
+  confusability rather than size, and telling those apart still wants a bigger
+  corpus. A test landed with it: nothing in the grid may beat what ships, on any
+  shipped suite. `docs/DIRECTION.md` has been corrected where it asserted the
+  opposite
 - The consolidation schema can no longer **ask the model for something nothing
   reads**. This is ai-memory's #667 turned into a test instead of a note: they
   asked their model for typed relations in the prompt, had no field on the

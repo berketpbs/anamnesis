@@ -17,15 +17,41 @@ use jiff::Timestamp;
 /// suite file rather than here, so a change that costs recall shows up as a
 /// number someone had to edit.
 /// Run the retrieval suites and print what they measured.
+/// Which of `eval`'s mutually-exclusive readings was asked for, and how.
+///
+/// A struct rather than six positional `bool`s: they are all the same type, so
+/// a caller that transposed two of them would compile and quietly score the
+/// wrong thing — and the list had grown long enough that clippy said so before
+/// anybody did.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EvalOptions {
+    /// Print every case with the rank its answer came back at.
+    pub verbose: bool,
+    /// Exit non-zero when a suite scores below its own thresholds.
+    pub check: bool,
+    /// Score each stream on its own, and say what only it finds.
+    pub streams: bool,
+    /// Score once per candidate setting and rank the settings.
+    pub sweep: bool,
+    /// Score once per `rrf_k`, and say what moved.
+    pub k_sensitivity: bool,
+    /// Score with the embedding stream switched on.
+    pub embed: bool,
+}
+
 pub fn cmd_eval(
     suite: Option<&std::path::Path>,
-    verbose: bool,
-    check: bool,
-    streams: bool,
-    sweep: bool,
-    embed: bool,
+    options: EvalOptions,
     data_dir: Option<PathBuf>,
 ) -> anyhow::Result<()> {
+    let EvalOptions {
+        verbose,
+        check,
+        streams,
+        sweep,
+        k_sensitivity,
+        embed,
+    } = options;
     // Held still on purpose. Freshness is an input to nothing a suite scores,
     // and it can only be that way if two runs are handed the same instant.
     let now: Timestamp = "2026-01-01T00:00:00Z".parse()?;
@@ -65,6 +91,18 @@ pub fn cmd_eval(
         .as_deref()
         .map(|embedder| embedder as &dyn anamnesis_core::embedding::Embed);
 
+    if k_sensitivity {
+        println!(
+            "Scoring {} suite(s) once per rrf_k. Nothing here changes what ships.",
+            suites.len()
+        );
+        println!();
+        for (_, suite) in &suites {
+            print_k_sensitivity(&anamnesis_evals::k_sensitivity(suite, now, embed)?, verbose);
+        }
+        return Ok(());
+    }
+
     if sweep {
         let grid = anamnesis_evals::default_grid();
         println!(
@@ -102,6 +140,75 @@ pub fn cmd_eval(
         );
     }
     Ok(())
+}
+
+/// What varying `rrf_k` did to one suite, and whether it did anything.
+///
+/// The verdict is printed under the table rather than over it, because the
+/// table is the evidence and somebody reading a claim wants to have seen the
+/// numbers it is drawn from first.
+fn print_k_sensitivity(measured: &anamnesis_evals::KSensitivity, verbose: bool) {
+    println!(
+        "📏 {} — {} pages, {} questions",
+        measured.suite, measured.pages, measured.cases
+    );
+    println!();
+    println!(
+        "   {:>8}  {:>6}  {:>6}  {:>6}  {:>6}",
+        "rrf_k", "Hit@1", "MRR", "NDCG", "Recall"
+    );
+    let shipped = anamnesis_core::retrieval::RRF_K;
+    for point in &measured.points {
+        let marker = if point.rrf_k == shipped {
+            " ← ships"
+        } else {
+            ""
+        };
+        println!(
+            "   {:>8}  {:>6.3}  {:>6.3}  {:>6.3}  {:>6.3}{marker}",
+            point.rrf_k, point.hit1, point.mrr, point.ndcg, point.recall
+        );
+    }
+    println!();
+
+    let moved = measured.top1_moved.len();
+    let shuffled = measured.order_moved.len();
+    println!(
+        "   {moved} of {} questions changed their first answer anywhere in the grid",
+        measured.cases
+    );
+    println!("   {shuffled} changed their ordering at all");
+    println!(
+        "   hit@1 spread across the grid: {:.3}",
+        measured.hit1_spread()
+    );
+    println!();
+
+    if measured.discriminates() {
+        println!("   → this corpus can tell the settings apart.");
+    } else {
+        println!(
+            "   → this corpus cannot tell k = {} from k = {}. The value between them\n      \
+             was not chosen by this suite, whatever a sweep reported.",
+            anamnesis_evals::K_GRID[0],
+            anamnesis_evals::K_GRID[anamnesis_evals::K_GRID.len() - 1]
+        );
+    }
+    println!();
+
+    if verbose {
+        for query in &measured.order_moved {
+            let first = if measured.top1_moved.contains(query) {
+                "first answer"
+            } else {
+                "ordering only"
+            };
+            println!("     moved ({first}): {query}");
+        }
+        if !measured.order_moved.is_empty() {
+            println!();
+        }
+    }
 }
 
 /// One suite's results.
