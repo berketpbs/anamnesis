@@ -310,6 +310,16 @@ pub enum Commands {
         #[arg(long)]
         sweep: bool,
 
+        /// Score the same questions once per `rrf_k`, and say what moved
+        ///
+        /// `--sweep` answers which setting scores best. This answers the
+        /// question that comes first: whether these corpora can tell the
+        /// settings apart at all. A score identical at k=1 and k=60 does not
+        /// mean the value between them is right — it means nothing here can
+        /// see the difference.
+        #[arg(long)]
+        k_sensitivity: bool,
+
         /// Score with the embedding stream switched on
         ///
         /// Off by default, as it is in production: the model is a download

@@ -217,15 +217,19 @@ fn main() -> anyhow::Result<()> {
             check,
             streams,
             sweep,
+            k_sensitivity,
             embed,
         } => {
             cmd_eval(
                 suite.as_deref(),
-                verbose,
-                check,
-                streams,
-                sweep,
-                embed,
+                crate::evals::EvalOptions {
+                    verbose,
+                    check,
+                    streams,
+                    sweep,
+                    k_sensitivity,
+                    embed,
+                },
                 cli.data_dir.clone(),
             )?;
         }

@@ -213,9 +213,30 @@ Small, and everything after it depends on it.
   does not live. **A measured parameter is more dangerous than an unmeasured
   one, because nobody looks at it twice**: `vectors = 1.0` is flagged in
   `retrieval.rs` as standing on an argument, and is for that reason safer than
-  `rrf_k`, which is flagged as settled. The restored-snapshot item above is
-  what makes this askable. Until it is asked, `rrf_k = 2.0` should be read as
-  "true of a corpus this size" rather than as true.
+  `rrf_k`, which is flagged as settled.
+
+  **Half of this was wrong, and `anamnesis eval --k-sensitivity` is what said
+  so.** The paragraph above was written before anything measured it, and its
+  load-bearing guess — that corpora this small cannot see `k` at all, so the
+  sweep chose in the dark — is false. Every shipped suite discriminates, and
+  sharply: hit@1 moves **0.300** across the grid on `retrieval`, **0.375** on
+  `adversarial`, **0.533** on `crowded`, and ten of `crowded`'s fifteen
+  questions change their first answer somewhere in it. The low `k` is not an
+  artifact of a corpus too small to object.
+
+  Two things the run did say, neither of them what it was built to look for.
+  **`k = 1` and `k = 2` are indistinguishable on all three suites**, to three
+  decimals on every measure — what is measured is "≤ 2", and the 2 is a choice
+  inside that rather than a result. And **the penalty for a high `k` grows with
+  the corpus** (0.300 at ten pages, 0.533 at twenty-two), which runs opposite to
+  the worry above; `crowded` is crowded by construction, so that is at least as
+  likely to be about confusability as about size, and telling the two apart is
+  what a larger corpus is still needed for.
+
+  What survives is the smaller claim, and it is still worth holding: `rrf_k =
+  2.0` is measured *on corpora of ten to twenty-two pages*. The restored-snapshot
+  item above is what would extend it. The guard that landed with the instrument
+  is that nothing in the grid may beat what ships, on any shipped suite.
 - Add an explicit baseline-versus-variant mode, and adopt the rule: **a
   retrieval change without a paired measurement does not land.**
 
