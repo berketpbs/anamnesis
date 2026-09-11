@@ -191,6 +191,31 @@ Small, and everything after it depends on it.
   shortfall is `paraphrase`. Two corpora disagreeing about which kind of
   question is hard is worth more than either figure on its own. Growing the set
   beyond forty-one questions is still open.
+- ~~Make the fused score **show its working**.~~ **Landed** in #179.
+  `memory_query` takes `explain` and reports, per hit, each stream's rank, what
+  that rank contributed, the summed fusion, and the standing multiplier. Every
+  weight here was settled by an argument and then by one sweep, and none of
+  those arguments can be re-examined from a fused list, where a page three
+  streams agreed on and a page one stream liked look identical. A stream that
+  missed reports no rank rather than a rank of zero: only "never found it"
+  indicts a weight.
+- Measure **`rrf_k` against corpus size**, which nothing here has done. This is
+  the item this phase was missing, and it hides behind a number that looks
+  settled. The 2026-08-29 sweep lowered `k` from the canonical 60 to 2.0 and
+  recorded it as the single biggest win — on corpora of ten and twenty-two
+  pages. `k` is precisely the knob deciding how far one stream's first place
+  outranks everything else: at `k = 2` rank one is worth four times rank ten,
+  at `k = 60` the two are nearly level. On thirty pages "the stream that is
+  sure is right" is a safe bet; on five hundred it is how a single full-text
+  false positive takes the ranking. ai-memory, whose corpus is two years old,
+  still ships `k = 60` and calls it canonical — not evidence that they are
+  right, but evidence that our answer was measured somewhere their question
+  does not live. **A measured parameter is more dangerous than an unmeasured
+  one, because nobody looks at it twice**: `vectors = 1.0` is flagged in
+  `retrieval.rs` as standing on an argument, and is for that reason safer than
+  `rrf_k`, which is flagged as settled. The restored-snapshot item above is
+  what makes this askable. Until it is asked, `rrf_k = 2.0` should be read as
+  "true of a corpus this size" rather than as true.
 - Add an explicit baseline-versus-variant mode, and adopt the rule: **a
   retrieval change without a paired measurement does not land.**
 
@@ -294,10 +319,17 @@ Stated so that the reasoning does not have to be rediscovered.
   brute-force cosine over 26 pages is not a bottleneck, and an index that is
   wrong is worse than a scan that is slow.
 
-One near-term candidate that is *not* ranking and deserves naming here:
+~~One near-term candidate that is *not* ranking and deserves naming here:
 `ARCHITECTURE.md` Future work item 2 — `memory_query` returns snippets, so an
 agent that finds exactly the right page still has no tool to read the rest of
-it, and works from three sentences.
+it, and works from three sentences.~~ **Landed** in #178. `memory_read_page`
+takes the path a hit reported and returns the body whole, along with the
+frontmatter that qualifies it — status above all, since a `do-not-answer-from`
+page is evidence about what was once believed rather than about what is true,
+and a body handed over without that is worse than no body. Worth recording how
+it was found: by reading what a comparable project ships. ai-memory has had the
+tool for some time, and a feature the neighbour shipped and we named as a gap
+is the cheapest evidence available that the gap is real.
 
 ## Discrepancies found while writing this
 
