@@ -320,6 +320,18 @@ pub enum Commands {
         #[arg(long)]
         k_sensitivity: bool,
 
+        /// Score what ships against a variant, and name every question that moved
+        ///
+        /// Takes `name=value` pairs — `--compare rrf_k=5,links=0.5`. The rule
+        /// this exists for is that a retrieval change without a paired
+        /// measurement does not land: a mean that rises because three
+        /// questions improved and two got worse reads exactly like one that
+        /// rose because five improved and none did, and only one of those
+        /// should ship. Knobs: rrf_k, fts, entity, links, vectors,
+        /// authority_exponent, entity_coverage, candidates.
+        #[arg(long, value_name = "NAME=VALUE,...")]
+        compare: Option<String>,
+
         /// Score with the embedding stream switched on
         ///
         /// Off by default, as it is in production: the model is a download

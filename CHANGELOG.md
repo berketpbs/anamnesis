@@ -8,6 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `anamnesis eval --compare rrf_k=5,links=0.5` scores what ships against a
+  variant and **names every question that moved**. `docs/DIRECTION.md` adopts
+  the rule that a retrieval change without a paired measurement does not land,
+  and until now there was nothing to measure one with. `--sweep` ranks sixty
+  settings by a mean, and a mean is exactly where a trade hides: a change that
+  lifts three questions and drops two reports as a small gain and reads
+  identically to one that lifted five and dropped none — those are not the same
+  change and only one of them should ship. So the output is not a pair of
+  numbers. Improved, regressed and unchanged are counted separately, the
+  regressions are printed whether or not anybody asked for them (the
+  improvements need `--verbose`, because a change is argued for by what it
+  cost), and each moved question shows where it went — `1 → 3 [symptom] test
+  passes locally fails in ci`. With `--check` a variant that loses ground on any
+  question exits non-zero, so the rule can be a CI step rather than a habit.
+  Nothing relevant coming back is treated as **worse** than any rank rather than
+  better than all of them: Rust orders `None` below `Some`, and a comparison
+  that leaned on that would have recorded every disappearance as a win. The
+  variant is read off the command line and nowhere else — `Tuning` documents
+  that nothing loads it from configuration, because a knob set per project and
+  measured by nobody is the class of setting this codebase keeps deleting, so a
+  variant lives for one command and then either becomes a default in code or
+  does not
 - `anamnesis eval --k-sensitivity` scores every suite **once per `rrf_k`** and
   reports what moved. `--sweep` answers which setting scores best; this answers
   the question that has to come first and had never been asked here — whether
