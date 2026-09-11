@@ -1,10 +1,17 @@
 //! MCP server implementation for anamnesis.
 //!
-//! Exposes three tools over the Model Context Protocol: `memory_query`,
-//! `memory_write_page`, and `memory_handoff_accept`. All three operate against
+//! Exposes six tools over the Model Context Protocol: `memory_query`,
+//! `memory_read_page`, `memory_write_page`, `memory_handoff_accept`,
+//! `workstream_start`, and `workstream_status`. All of them operate against
 //! one resolved scope — the project the server was started against — the same
 //! way `anamnesis serve` binds to one project's store and wiki rather than
 //! discovering scope per request.
+//!
+//! Reading is deliberately two tools rather than one. `memory_query` ranks and
+//! returns snippets, which is what deciding *which* page needs; reading the
+//! page it picked is `memory_read_page`, which returns the body whole. Folding
+//! the second into the first would mean either truncating every hit or
+//! returning ten full pages to answer one question.
 //!
 //! Transport is the caller's choice (stdio is what `anamnesis mcp` uses); this
 //! crate only implements [`ServerHandler`].
@@ -126,6 +133,49 @@ pub struct WritePageResponse {
     pub path: String,
     /// Git commit the write landed in.
     pub commit: String,
+}
+
+/// Request for [`AnamnesisMcp::memory_read_page`].
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReadPageRequest {
+    /// Project-relative path, exactly as `memory_query` reported it, e.g.
+    /// `decisions/0001-storage.md`.
+    pub path: String,
+}
+
+/// Response for [`AnamnesisMcp::memory_read_page`].
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ReadPageResponse {
+    /// Project-relative path the page was found at.
+    pub path: String,
+    /// Page title.
+    pub title: String,
+    /// The whole markdown body, untruncated. This is the point of the tool.
+    pub body: String,
+    /// Temporal tier: working, episodic, semantic, or procedural.
+    pub tier: String,
+    /// Trust status: active, historical, do-not-answer-from, or superseded.
+    ///
+    /// Worth reading before the body. A `do-not-answer-from` page is kept
+    /// deliberately — it explains a contradiction a reader may already be
+    /// holding — and is the one status where the body is evidence about what
+    /// was once believed rather than about what is true.
+    pub status: String,
+    /// Exempt from decay.
+    pub pinned: bool,
+    /// Declared authoritative on its subject.
+    pub canonical: bool,
+    /// Canonical names this page declares itself to be about.
+    pub entities: Vec<String>,
+    /// Path of the page this one replaces, if it replaces one.
+    pub supersedes: Option<String>,
+    /// Importance assigned at write time, the seed of the decay score.
+    pub salience: f64,
+    /// RFC 3339 instant after which the page should be forgotten, if set.
+    pub expires_at: Option<String>,
+    /// True when the page came from the workspace's shared `_global` scope
+    /// rather than this project.
+    pub global: bool,
 }
 
 /// Request for [`AnamnesisMcp::memory_handoff_accept`].
@@ -309,6 +359,30 @@ impl AnamnesisMcp {
             .map_err(|error| error.to_string())
     }
 
+    /// Read one page whole.
+    ///
+    /// `memory_query` returns a snippet, which is enough to decide whether a
+    /// page is the right one and not enough to act on it. Without this tool an
+    /// agent that has found exactly the page it needs still works from three
+    /// sentences, and the usual repair — querying again with narrower words to
+    /// shake loose a better snippet — asks retrieval to do a job reading does.
+    ///
+    /// The page is looked up in this project first and in the workspace's
+    /// shared `_global` scope second, so a path copied straight out of a
+    /// `memory_query` hit resolves whichever scope it came from.
+    #[tool(
+        name = "memory_read_page",
+        description = "Read one page of the memory wiki in full, by the path memory_query reported."
+    )]
+    pub async fn memory_read_page(
+        &self,
+        params: Parameters<ReadPageRequest>,
+    ) -> Result<Json<ReadPageResponse>, String> {
+        self.read_page(params.0)
+            .map(Json)
+            .map_err(|error| error.to_string())
+    }
+
     /// Claim the pending handoff left by the previous session, if there is one.
     ///
     /// A handoff is single-use: the first session to accept it consumes it, so
@@ -372,7 +446,10 @@ impl ServerHandler for AnamnesisMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "Long-term memory for this project. Call memory_query before starting work that \
-             might already have prior decisions, gotchas, or context recorded. Call \
+             might already have prior decisions, gotchas, or context recorded. It returns \
+             snippets: when a hit looks like the answer, call memory_read_page with its path \
+             to read the page in full rather than querying again with different words — a \
+             snippet is enough to choose a page and not enough to act on one. Call \
              memory_write_page to record durable knowledge — decisions, gotchas, procedures — \
              worth keeping past this session; ordinary session summaries are written \
              automatically and do not need this tool. If this project has more than one \
@@ -540,6 +617,84 @@ impl AnamnesisMcp {
             path: path.as_str().to_owned(),
             commit,
         })
+    }
+
+    fn read_page(&self, request: ReadPageRequest) -> Result<ReadPageResponse, McpError> {
+        let path = PagePath::parse(&request.path)?;
+
+        // This project first, the shared scope second. A path arrives here
+        // copied out of a `memory_query` hit, and that hit may have come from
+        // either — the `global` flag tells the caller which, but nothing
+        // requires the caller to hand it back.
+        let global = self.global_scope();
+        let (parsed, scope_project_id, from_global) =
+            match self.read_from_scope(&self.scope.scope, &path)? {
+                Some(parsed) => (parsed, self.scope.project_id, false),
+                None => match self.read_from_scope(&global.scope, &path)? {
+                    Some(parsed) => (parsed, global.project_id, true),
+                    None => {
+                        return Err(McpError::Invalid(format!(
+                            "no page at {path} in this project or the workspace's shared scope"
+                        )));
+                    }
+                },
+            };
+
+        // Reading a page is using it, which is the same thing the decay sweep
+        // reads `access_count` to find out — so a page an agent opens and acts
+        // on is renewed exactly as one a query surfaced is. Best-effort: a
+        // page present on disk but absent from the index is still a page, and
+        // the wiki is what decides that.
+        let page_id = anamnesis_core::ids::PageId::derive(scope_project_id, &path);
+        if let Err(error) = self.store.record_access(page_id, Timestamp::now()) {
+            tracing::warn!(%error, %path, "page was read but its access was not recorded");
+        }
+
+        let frontmatter = parsed.frontmatter;
+        Ok(ReadPageResponse {
+            path: path.as_str().to_owned(),
+            title: frontmatter.title,
+            body: parsed.body,
+            tier: frontmatter.tier.as_str().to_owned(),
+            status: frontmatter.status.as_str().to_owned(),
+            pinned: frontmatter.pinned,
+            canonical: frontmatter.canonical,
+            entities: frontmatter
+                .entities
+                .iter()
+                .map(|entity| entity.as_str().to_owned())
+                .collect(),
+            supersedes: frontmatter
+                .supersedes
+                .map(|target| target.as_str().to_owned()),
+            salience: frontmatter.salience,
+            expires_at: frontmatter.expires_at.map(|at| at.to_string()),
+            global: from_global,
+        })
+    }
+
+    /// Read a page from one scope, distinguishing "not there" from "broken".
+    ///
+    /// A missing file is how the project scope reports that the page belongs
+    /// to the shared one, so it has to be a `None` rather than an error; a
+    /// malformed or unreadable file is a real failure and stays one, because
+    /// silently treating it as absent would send the caller looking in the
+    /// other scope for a page that is right here and damaged.
+    fn read_from_scope(
+        &self,
+        scope: &anamnesis_core::scope::Scope,
+        path: &PagePath,
+    ) -> Result<Option<anamnesis_wiki::ParsedPage>, McpError> {
+        let wiki = self.wiki.lock();
+        match wiki.read_page(scope, path) {
+            Ok(parsed) => Ok(Some(parsed)),
+            Err(anamnesis_wiki::WikiError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn accept_handoff(
@@ -853,12 +1008,23 @@ mod tests {
     fn tool_router_lists_every_tool() {
         let (_repo, _data, server) = harness();
         let tools = server.tool_router.list_all();
-        let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
-        assert!(names.contains(&"memory_query"));
-        assert!(names.contains(&"memory_write_page"));
-        assert!(names.contains(&"memory_handoff_accept"));
-        assert!(names.contains(&"workstream_start"));
-        assert!(names.contains(&"workstream_status"));
+        let mut names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
+        names.sort_unstable();
+
+        // Exact, not `contains`: the name of this test claims every tool, and
+        // a set that only grows would pass while a tool went missing from the
+        // router — which is a tool the model silently stops being offered.
+        assert_eq!(
+            names,
+            [
+                "memory_handoff_accept",
+                "memory_query",
+                "memory_read_page",
+                "memory_write_page",
+                "workstream_start",
+                "workstream_status",
+            ]
+        );
     }
 
     #[test]
@@ -1084,5 +1250,200 @@ mod tests {
             })
             .expect("query should still succeed via the other streams");
         assert_eq!(found.hits.len(), 1);
+    }
+
+    /// The body the tool returns is the whole file, not the prefix a query
+    /// would have shown — which is the entire reason the tool exists.
+    #[test]
+    fn reading_a_page_returns_more_than_its_snippet() {
+        let (_repo, _data, server) = harness();
+
+        // Long enough that any snippet has to cut it, and shaped so the cut
+        // is detectable: the sentence that matters is at the end.
+        let body = format!(
+            "{}\n\nThe decision was to keep the index rebuildable.",
+            "Background that goes on for a while. ".repeat(40)
+        );
+        write_page(&server, "decisions/0001-storage.md", "Storage", &body);
+
+        let hit = server
+            .query(QueryRequest {
+                text: "rebuildable".to_owned(),
+                limit: None,
+            })
+            .expect("query");
+        let snippet = &hit.hits[0].snippet;
+
+        let page = server
+            .read_page(ReadPageRequest {
+                path: "decisions/0001-storage.md".to_owned(),
+            })
+            .expect("read");
+
+        // The document the wiki writes ends in a newline whatever the caller
+        // passed, so the round trip is equal up to that one character.
+        assert_eq!(page.body.trim_end(), body);
+        assert!(page.body.len() > snippet.len());
+        assert!(
+            page.body
+                .trim_end()
+                .ends_with("keep the index rebuildable."),
+            "the tail of the page is what the snippet was dropping"
+        );
+        assert_eq!(page.title, "Storage");
+        assert_eq!(page.tier, "episodic");
+        assert_eq!(page.status, "active");
+        assert!(!page.global);
+    }
+
+    /// Frontmatter travels with the body, because status changes how the body
+    /// should be read: a `do-not-answer-from` page is evidence about what was
+    /// believed, not about what is true.
+    #[test]
+    fn reading_a_page_carries_the_frontmatter_that_qualifies_it() {
+        let (_repo, _data, server) = harness();
+
+        server
+            .write_page(WritePageRequest {
+                path: "gotchas/stale.md".to_owned(),
+                title: "The old limit".to_owned(),
+                body: "We believed the cap was 512.".to_owned(),
+                tier: Some("semantic".to_owned()),
+                status: Some("do-not-answer-from".to_owned()),
+                pinned: Some(true),
+                canonical: Some(true),
+                entities: Some(vec!["token cap".to_owned()]),
+                expires_at: None,
+                supersedes: Some("gotchas/older.md".to_owned()),
+                salience: Some(2.5),
+            })
+            .expect("write");
+
+        let page = server
+            .read_page(ReadPageRequest {
+                path: "gotchas/stale.md".to_owned(),
+            })
+            .expect("read");
+
+        assert_eq!(page.status, "do-not-answer-from");
+        assert_eq!(page.tier, "semantic");
+        assert!(page.pinned);
+        assert!(page.canonical);
+        assert_eq!(page.entities, vec!["token cap".to_owned()]);
+        assert_eq!(page.supersedes.as_deref(), Some("gotchas/older.md"));
+        assert_eq!(page.salience, 2.5);
+    }
+
+    /// A path out of a `memory_query` hit resolves whichever scope it came
+    /// from: the caller is told which one, but is not required to say so.
+    #[test]
+    fn reading_falls_through_to_the_shared_scope() {
+        let (_repo, _data, server) = harness();
+
+        let global = server.global_scope();
+        let page = anamnesis_wiki::page(
+            global.project_id,
+            PagePath::parse("_rules/style.md").expect("path"),
+            Frontmatter::new("House style", Vec::new()).expect("frontmatter"),
+            "Every project here wraps at eighty columns.",
+        );
+        server
+            .wiki
+            .lock()
+            .write_page(&global.scope, &page, "test: shared page")
+            .expect("write to the shared scope");
+
+        let read = server
+            .read_page(ReadPageRequest {
+                path: "_rules/style.md".to_owned(),
+            })
+            .expect("the shared scope is searched after this project");
+
+        assert!(read.global, "the caller is told where it came from");
+        assert_eq!(read.title, "House style");
+        assert!(read.body.contains("eighty columns"));
+    }
+
+    /// The project's own page wins a path both scopes hold: specificity is
+    /// the reason the two scopes are separate at all.
+    #[test]
+    fn a_local_page_shadows_the_shared_one_at_the_same_path() {
+        let (_repo, _data, server) = harness();
+
+        let global = server.global_scope();
+        let shared = anamnesis_wiki::page(
+            global.project_id,
+            PagePath::parse("_rules/style.md").expect("path"),
+            Frontmatter::new("Shared style", Vec::new()).expect("frontmatter"),
+            "The workspace-wide answer.",
+        );
+        server
+            .wiki
+            .lock()
+            .write_page(&global.scope, &shared, "test: shared page")
+            .expect("write to the shared scope");
+        write_page(
+            &server,
+            "_rules/style.md",
+            "Local style",
+            "This project's answer.",
+        );
+
+        let read = server
+            .read_page(ReadPageRequest {
+                path: "_rules/style.md".to_owned(),
+            })
+            .expect("read");
+
+        assert!(!read.global);
+        assert_eq!(read.title, "Local style");
+    }
+
+    /// Reading a page is using it, so it renews the page against the decay
+    /// sweep exactly as a query that surfaced it would have.
+    #[test]
+    fn reading_a_page_renews_it() {
+        let (_repo, _data, server) = harness();
+        write_page(&server, "notes/a.md", "A", "content");
+        let path = PagePath::parse("notes/a.md").expect("path");
+
+        let before = server
+            .store
+            .sweep_row(server.scope.project_id, &path)
+            .expect("sweep row")
+            .expect("page is indexed");
+        assert_eq!(before.facts.access_count, 0);
+
+        server
+            .read_page(ReadPageRequest {
+                path: "notes/a.md".to_owned(),
+            })
+            .expect("read");
+
+        let after = server
+            .store
+            .sweep_row(server.scope.project_id, &path)
+            .expect("sweep row")
+            .expect("page is indexed");
+        assert_eq!(after.facts.access_count, 1);
+        assert!(after.facts.last_accessed_at.is_some());
+    }
+
+    /// The error says where it looked, because "not found" with one scope
+    /// named and the other silent is the report that sends someone hunting
+    /// for a typo that is not there.
+    #[test]
+    fn reading_a_missing_page_names_both_scopes() {
+        let (_repo, _data, server) = harness();
+
+        let error = server
+            .read_page(ReadPageRequest {
+                path: "notes/absent.md".to_owned(),
+            })
+            .expect_err("no such page");
+        let message = error.to_string();
+
+        assert!(message.contains("notes/absent.md"), "{message}");
+        assert!(message.contains("shared scope"), "{message}");
     }
 }

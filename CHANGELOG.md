@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A sixth MCP tool, **`memory_read_page`**, reads one page whole. `memory_query`
+  returns a snippet, which is exactly enough to decide *which* page is the right
+  one and not enough to act on it — so an agent that had already found the page
+  it needed was left working from three sentences, and the only repair available
+  to it was to query again with narrower words and hope for a better slice. That
+  asks retrieval to do a job reading does, and it fails in the direction nobody
+  checks: the agent gets a plausible answer built on a partial page. The tool
+  takes the path a hit reported and returns the body untruncated, along with the
+  frontmatter that qualifies it — status especially, because a
+  `do-not-answer-from` page is evidence about what was once believed rather than
+  about what is true, and a body handed over without that is worse than no body.
+  This project's scope is searched first and the workspace's shared `_global`
+  scope second, so a path copied straight out of a hit resolves whichever scope
+  it came from without the caller having to say which; where both hold the same
+  path the project's own page wins, specificity being the reason the two scopes
+  are separate at all. Reading renews a page against the decay sweep exactly as
+  a query that surfaced it does — opening a page and acting on it is use, and
+  the sweep's whole question is what is still being used
 - A third eval corpus, `adversarial`, and the first one **frozen before it was
   scored**: eighteen pages of an identity service and sixteen questions, each
   written so that some *other* page is the better literal match — more of the
