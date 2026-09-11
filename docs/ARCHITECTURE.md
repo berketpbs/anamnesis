@@ -626,14 +626,27 @@ plus `pages_fts` (FTS5, unicode61), `entities`, `entity_tokens`,
 `page_entities`, `page_links`, `handoffs`, `page_feedback`, `page_embeddings`,
 `page_embed_failures`, `workstreams`.
 
-`page_embed_failures` is the negative of `page_embeddings`, keyed the same way:
-a page that was meant to have a vector and does not, with the error that
-stopped it. It exists because the alternative was a log line, and a page whose
-embedding failed is otherwise indistinguishable from a healthy one — in the
-wiki, in the index, in full-text and entity and link retrieval, and silently
-absent from the one stream somebody switched embedding on to get. `embed_page`
-writes a row here or deletes one, never both, so the two tables cannot disagree;
-`anamnesis doctor` reads it, and `anamnesis reindex` is what clears it.
+`page_embed_failures` says, in one sentence, that a page's vector is missing or
+incomplete, and `kind` says which. It exists because the alternative was a log
+line, and a page whose vector is wrong is otherwise indistinguishable from a
+healthy one — in the wiki, in the index, in full-text and entity and link
+retrieval, and quietly wrong in the one stream somebody switched embedding on to
+get. `anamnesis doctor` reads it, and `anamnesis reindex` is what clears it.
+
+`kind = 'failed'` is the strict negative of `page_embeddings`: no vector at all.
+`kind = 'truncated'` is the case that made the original invariant untenable — a
+page longer than the model's window is not refused, it is embedded from as much
+of itself as fits, so it has a vector *and* a complaint. The row then carries
+`tokens` and `budget`, both null on a failure, because a page that never reached
+the model has no length the model would recognise.
+
+The window is smaller than it looks, and was documented wrong here by a factor
+of four. `config.json` puts `max_position_embeddings` at 512, but
+`tokenizer.json` carries its own `truncation.max_length` of **128**, applied by
+`encode` before the positional clamp is ever reached. On this project's own wiki
+that leaves 43 of 49 pages embedded from part of themselves, the longest from
+about a twelfth. Full-text, entity and link retrieval see those pages whole; the
+vector stream is the one that does not.
 
 An entity is stored twice, like a supersession and like a link: `entities.name`
 is what someone wrote, and `entity_tokens` is that name split the same way a

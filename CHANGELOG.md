@@ -8,6 +8,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A page **longer than the model that embedded it** now says so, in a row and in
+  `anamnesis doctor`. A model with a fixed window does not refuse a long page —
+  it embeds as much as it can reach and returns an ordinary vector, and nothing
+  about that vector says it stands for part of a page. So the page was in the
+  wiki, in the index, whole in full-text, entity and link retrieval, and
+  answering with a fraction of itself in the fourth stream, with no way to find
+  that out. The two embedders did not even agree about it: the hosted one sends
+  the text whole, the endpoint answers 400, and that already landed as a failure
+  row — so switching provider silently changed whether an over-long page was
+  reported at all. `V16` adds `kind` to `page_embed_failures` (`failed` or
+  `truncated`) plus the `tokens` and `budget` the page met, and widens that
+  table's invariant deliberately: it used to be the strict negative of
+  `page_embeddings`, and a truncated page has a vector *and* a complaint. One
+  sentence still covers it — a row means this page's vector is missing or
+  incomplete. `doctor` reports the two separately, because they share no remedy:
+  a missing vector is `broken`, a partial one is `thin`, and the second verdict
+  leads with the worst page rather than the first, since the question being
+  asked is how bad this gets. The count is taken from the embedder rather than
+  estimated by the writer — only a tokenizer knows what a tokenizer will do, and
+  a characters-over-three rule would under-report exactly the pages of file
+  paths and identifiers this project writes
+- **The truncation window was documented as 512 tokens and is actually 128.**
+  `config.json` puts `max_position_embeddings` at 512, and the clamp in
+  `embed.rs` compares against it — but `tokenizer.json` carries its own
+  `truncation.max_length` of 128 and `encode` applies it first, so that clamp
+  has never fired for the default model. Found by running the new report against
+  this project's wiki and getting zero, which was the wrong answer: the first
+  implementation counted with the embedding tokenizer, which truncates and then
+  reports the truncated length, so the comparison could never be true. Counting
+  with an untruncated copy instead, the real figure is **43 of 49 pages**, the
+  longest embedded from about **8%** of itself, and the two most authoritative
+  pages in the corpus both under 12%. `docs/DIRECTION.md` argued for a fifth
+  retrieval stream on the strength of the wrong number; it now argues from the
+  right one, which is four times stronger
 - `anamnesis eval --compare rrf_k=5,links=0.5` scores what ships against a
   variant and **names every question that moved**. `docs/DIRECTION.md` adopts
   the rule that a retrieval change without a paired measurement does not land,
