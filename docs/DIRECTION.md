@@ -174,7 +174,15 @@ Small, and everything after it depends on it.
   deliberately adversarial set. *Category labels have landed*, on all
   twenty-five existing cases, and the first table they printed found that the
   whole of `crowded`'s shortfall is `paraphrase`: hit@1 0.750 there against
-  1.000 in every other kind. Growing the set and freezing it is still open.
+  1.000 in every other kind. *The adversarial set has landed too*, and it is the
+  first suite here frozen before it was scored: sixteen questions over eighteen
+  pages of an identity service, every one written so that some other page is the
+  better literal match, and no sweep will ever be run against it. Its first run
+  scored hit@1 0.938 / MRR 0.969 / NDCG@5 0.977 / recall 1.000, and its whole
+  shortfall is `keyword` (0.800) — the opposite of `crowded`, where the whole
+  shortfall is `paraphrase`. Two corpora disagreeing about which kind of
+  question is hard is worth more than either figure on its own. Growing the set
+  beyond forty-one questions is still open.
 - Add an explicit baseline-versus-variant mode, and adopt the rule: **a
   retrieval change without a paired measurement does not land.**
 

@@ -1,0 +1,413 @@
+# The adversarial suite: what happens when the obvious match is the wrong page.
+#
+# `retrieval.toml` asks whether an answer is reachable. `crowded.toml` asks
+# whether it wins against plausible company. This one asks the question neither
+# of them can: **what does retrieval do when something else is a better match
+# than the answer?**
+#
+# Every case here was written to be got wrong. The trap is named in each note,
+# and in most of them the wrong page has more of the query's words, more
+# authority, or both.
+#
+# Two rules govern this file, and they are the reason it is worth having:
+#
+#   1. **It was frozen before it was run.** The corpus and all sixteen
+#      questions were written, and their answers fixed, before the suite was
+#      scored once. The number below is what the first run produced.
+#   2. **No knob is ever tuned against it, and no case is edited to make it
+#      pass.** A case that fails is a finding. `crowded.toml` was written to be
+#      the set retrieval is not tuned on and then a sweep was run over it
+#      anyway, on the reasoning that a second corpus makes a fitted gain
+#      visible. That reasoning is sound and it still costs the set some of its
+#      independence. This one keeps all of it.
+#
+# The corpus is an identity service, on purpose: none of its vocabulary appears
+# in the other two suites, so a knob that happens to suit queues and deploys
+# has nothing to lean on here.
+
+name = "adversarial"
+description = "Questions written to be got wrong: what retrieval does when the better match is the wrong page"
+
+limit = 5
+
+# The labels are defined in `retrieval.toml`.
+categories = ["keyword", "natural", "paraphrase", "symptom", "temporal"]
+
+# Measured on the first run, then rounded down. A floor, not a target.
+#
+# The first run scored **hit@1 0.938, MRR 0.969, NDCG@5 0.977, recall 1.000**.
+# Every answer came back inside five, and exactly one of the sixteen came back
+# second: `argon2id`, where the session page that carried out the migration
+# says the word twice as often as the decision that chose it. That is the trap
+# the case was written for, and it fired. It has not been edited.
+#
+# By category, the shortfall is entirely in `keyword` (0.800), which is the
+# opposite of `crowded.toml`, where it is entirely in `paraphrase`. Two corpora
+# disagreeing about which kind of question is hard is worth more than either
+# figure on its own.
+[thresholds]
+min_hit1 = 0.93
+min_mrr = 0.96
+min_ndcg = 0.97
+min_recall = 1.0
+
+# ---------------------------------------------------------------------------
+# The corpus. Eighteen pages of an identity service's memory.
+#
+# Four of them exist mainly to be wrong: `_rules/mfa.md` is pinned, canonical
+# and shares vocabulary with half the questions; `decisions/0003-rate-limit.md`
+# is superseded and still says the words; `sessions/2026-05-11-9a4c1f22.md`
+# says Argon2id far more often than the decision that chose it; and
+# `notes/session-store.md` collides with a decision page's title.
+# ---------------------------------------------------------------------------
+
+[[page]]
+path = "_rules/mfa.md"
+title = "Everyone with production access enrols in MFA"
+tier = "procedural"
+canonical = true
+pinned = true
+entities = ["MFA"]
+body = """
+Anyone who can reach production enrols a second factor before their first
+deploy, and re-enrols when they change device. TOTP or a hardware key; SMS is
+not a second factor here.
+
+Losing the device is a support request, not a self-service reset. See
+[[procedures/revoke-a-session.md]].
+"""
+
+[[page]]
+path = "decisions/0001-sessions.md"
+title = "Sessions live on the server, not in a token"
+tier = "semantic"
+canonical = true
+entities = ["session cookie", "JWT"]
+body = """
+A login issues an opaque session cookie. The alternative was a signed JWT
+carrying claims, and it was rejected: nothing about this product needs a
+credential that survives being revoked, and every JWT deployment eventually
+grows a revocation list, at which point it is a session with extra steps.
+
+The cost is a lookup on every request. See [[notes/session-store.md]].
+"""
+
+[[page]]
+path = "notes/session-store.md"
+title = "Where sessions are kept"
+tier = "semantic"
+entities = ["session cookie"]
+body = """
+Sessions are rows in Redis, keyed by the cookie value, with the account id and
+the issue time. Redis is not the store of record: losing it logs everybody out
+and loses nothing else.
+
+The lookup is what [[decisions/0001-sessions.md]] pays for.
+"""
+
+[[page]]
+path = "decisions/0002-password-hashing.md"
+title = "Argon2id for passwords"
+tier = "semantic"
+canonical = true
+entities = ["Argon2id", "bcrypt"]
+body = """
+Passwords are hashed with Argon2id. bcrypt was what we had; the memory cost is
+the reason to move, since a GPU that walks a bcrypt list cheaply does not walk
+this one.
+
+Parameters live in configuration and are raised, never lowered.
+"""
+
+[[page]]
+path = "sessions/2026-05-11-9a4c1f22.md"
+title = "Session: migrating the password hashes"
+tier = "episodic"
+entities = ["Argon2id", "bcrypt"]
+body = """
+Rehashed on next login rather than in a batch: an Argon2id hash cannot be
+derived from a bcrypt one, so every account keeps its bcrypt hash until its
+owner signs in and the Argon2id hash replaces it.
+
+Argon2id parameters were left at the defaults for the first week. The
+Argon2id rollout is finished for eighty per cent of accounts. Anything still
+on bcrypt after a year gets a reset mail.
+
+See [[decisions/0002-password-hashing.md]].
+"""
+
+[[page]]
+path = "decisions/0003-rate-limit.md"
+title = "Rate limit: 100 requests a minute per IP"
+tier = "semantic"
+entities = ["rate limit"]
+body = """
+Login attempts are limited to 100 requests a minute from one address.
+
+Replaced. The address was never the thing worth counting. See
+[[decisions/0004-rate-limit.md]].
+"""
+
+[[page]]
+path = "decisions/0004-rate-limit.md"
+title = "Rate limit: per account"
+tier = "semantic"
+canonical = true
+entities = ["rate limit"]
+supersedes = "decisions/0003-rate-limit.md"
+body = """
+Failed logins are counted against the account, not the address they came from.
+Counting addresses punished offices and universities, where hundreds of people
+share one, and did nothing at all about a list of stolen passwords tried once
+each from a thousand machines.
+
+Adopted in August, after the third such attempt in a month.
+"""
+
+[[page]]
+path = "notes/lockout-loop.md"
+title = "The reset mail that locks the account again"
+tier = "episodic"
+body = """
+Three failures lock the account for fifteen minutes. The reset link signs the
+account in, and signing in counts as an attempt, so somebody who is already at
+two failures and clicks the link is locked out by the thing that was meant to
+let them back in.
+
+Nothing points at this page and it declares nothing. It is the whole answer
+anyway.
+"""
+
+[[page]]
+path = "sessions/2026-06-02-b7e3d114.md"
+title = "Session: chasing a support ticket about lockouts"
+tier = "episodic"
+body = """
+Reproduced the loop from a fresh account in about ten minutes. The support
+queue had four of these and every one of them had been closed as user error.
+
+See [[notes/lockout-loop.md]].
+"""
+
+[[page]]
+path = "gotchas/clock-drift-totp.md"
+title = "TOTP codes rejected on one machine and accepted on another"
+tier = "procedural"
+entities = ["TOTP"]
+body = """
+The code is derived from the time, so a phone or a laptop whose clock has
+drifted more than thirty seconds produces codes the server has already stopped
+accepting. Nothing in the error says so; it says the code is wrong, because
+from the server's side it is.
+
+The window is one step either side. Widening it is not the fix.
+"""
+
+[[page]]
+path = "procedures/rotate-signing-key.md"
+title = "Rotating the cookie signing key"
+tier = "procedural"
+canonical = true
+entities = ["signing key"]
+body = """
+Add the new key as an accepted verifier, wait one session lifetime, promote it
+to the signer, wait again, then remove the old one. Skipping the first wait
+signs everybody out.
+
+Quarterly, and after anybody with access to it leaves.
+"""
+
+[[page]]
+path = "notes/deleted-runbook.md"
+title = "Key rotation runbook (moved)"
+tier = "episodic"
+body = """
+The runbook that used to live here is [[procedures/rotate-signing-key.md]].
+"""
+
+[[page]]
+path = "procedures/revoke-a-session.md"
+title = "Ending somebody's sessions"
+tier = "procedural"
+canonical = true
+entities = ["session cookie"]
+body = """
+Deleting the account's rows in Redis ends every session it has, everywhere, at
+once — there is no token still valid in somebody's browser afterwards, which is
+the property [[decisions/0001-sessions.md]] was chosen for.
+
+Do it on any report of a stolen laptop, before anything else.
+"""
+
+[[page]]
+path = "notes/cookie-samesite.md"
+title = "SameSite=Lax and the payment return"
+tier = "episodic"
+entities = ["SameSite"]
+body = """
+The cookie is SameSite=Lax. The payment provider returns by POST, and a Lax
+cookie is not sent on a cross-site POST, so the customer came back signed out
+in the middle of paying.
+
+Handled by returning through a GET redirect rather than by loosening the
+cookie.
+"""
+
+[[page]]
+path = "notes/oauth-scopes.md"
+title = "What each scope is allowed to do"
+tier = "semantic"
+entities = ["scope"]
+body = """
+Four scopes: `profile`, `email`, `orders:read`, `orders:write`. A token gets
+the intersection of what was asked for and what the account may do, and the
+consent screen shows the intersection rather than the request.
+
+Adding a scope is a decision, not a configuration change.
+"""
+
+[[page]]
+path = "decisions/0005-email-verification.md"
+title = "Verification mail is sent once, on a delay"
+tier = "semantic"
+canonical = true
+entities = ["verification mail"]
+body = """
+The mail goes out sixty seconds after sign-up, from a job keyed by account id,
+so a double-submitted form produces one mail rather than two.
+
+The delay is also the window in which a typo can be corrected without a second
+message arriving.
+"""
+
+[[page]]
+path = "gotchas/case-sensitive-emails.md"
+title = "Two accounts for one address"
+tier = "procedural"
+entities = ["email address"]
+body = """
+The local part of an address is case sensitive by the standard and is not in
+practice. Sign-up compared the address as typed, so somebody who capitalised
+their own name got a second account and could not understand why their
+password was refused.
+
+Addresses are lowercased on the way in now. The accounts made before that are
+merged by hand.
+"""
+
+[[page]]
+path = "notes/eski-parola-kurali.md"
+title = "Eski parola kuralı"
+tier = "semantic"
+entities = ["parola"]
+body = """
+Parola kuralı eskiden şuydu: en az sekiz karakter, bir büyük harf, bir rakam ve
+bir noktalama işareti. Kural insanları aynı parolayı sonuna bir ünlem ekleyerek
+yeniden kullanmaya itti.
+
+Şimdi tek kural uzunluk: on iki karakter, ve sızmış parola listesine karşı
+kontrol.
+"""
+
+# ---------------------------------------------------------------------------
+# The questions. Sixteen, each with the trap it is testing named in its note.
+#
+# Written before the suite was run once. One of them came back second and its
+# note says so; it was not changed afterwards.
+# ---------------------------------------------------------------------------
+
+[[case]]
+query = "why not jwt"
+category = "natural"
+relevant = ["decisions/0001-sessions.md"]
+note = "The word JWT appears in exactly one page, which is also the answer — so the trap is not lexical. It is that a three-word question with one rare term in it has to beat the whole of a corpus that talks about sessions constantly."
+
+[[case]]
+query = "argon2id"
+category = "keyword"
+relevant = ["decisions/0002-password-hashing.md"]
+note = "The trap: the session page says Argon2id four times to the decision's two, and declares it as an entity as well. Full text should prefer the session; the decision is the answer because it is the page that decided. This is the one case in the suite that came back second on the first run, and the session page is what beat it — the trap worked. Left as it is."
+
+[[case]]
+query = "rate limit"
+category = "keyword"
+relevant = ["decisions/0004-rate-limit.md"]
+note = "The superseded page has the words in its title and a number in its body. The replacement must be offered and the replaced page must not."
+
+[[case]]
+query = "why did we stop counting per ip"
+category = "paraphrase"
+relevant = ["decisions/0004-rate-limit.md"]
+note = "The words per IP appear in the superseded page's title, and the page that answers says address rather than IP. Both halves of the trap at once: the wrong page matches lexically and the right one does not."
+
+[[case]]
+query = "what changed about rate limits in august"
+category = "temporal"
+relevant = ["decisions/0004-rate-limit.md"]
+note = "August appears in one page. The temporal anchor is the only thing separating the replacement from the page it replaced, both of which are about rate limits."
+
+[[case]]
+query = "users get locked out by the reset link"
+category = "symptom"
+relevant = ["notes/lockout-loop.md", "sessions/2026-06-02-b7e3d114.md"]
+note = "The answer is the least connected page in the corpus: no entities, no inbound links, nothing but its body. The pinned canonical MFA rule is also about people who cannot get in."
+
+[[case]]
+query = "codes are refused on one laptop and accepted on another"
+category = "symptom"
+relevant = ["gotchas/clock-drift-totp.md"]
+note = "Not one word of the question is in the page, which says drifted and thirty seconds. The pinned MFA rule names TOTP and is the wrong answer."
+
+[[case]]
+query = "mfa"
+category = "keyword"
+relevant = ["_rules/mfa.md"]
+note = "The pinned canonical page is the trap in four other cases, so it needs one where it is right — a suite that only ever punishes authority teaches the opposite lesson to the one intended."
+
+[[case]]
+query = "how do i sign somebody out everywhere"
+category = "paraphrase"
+relevant = ["procedures/revoke-a-session.md"]
+note = "The page says ending sessions and never says sign out. Two other pages are about sessions and one of them is canonical."
+
+[[case]]
+query = "where are sessions kept"
+category = "paraphrase"
+relevant = ["notes/session-store.md"]
+note = "A near-title collision: the decision page is called sessions live on the server, is canonical, and is not the answer. The note is, and it is the plainer page of the two."
+
+[[case]]
+query = "key rotation runbook"
+category = "natural"
+relevant = ["notes/deleted-runbook.md", "procedures/rotate-signing-key.md"]
+note = "A stub whose only content is a pointer, and the page it points at. Either is a fair answer; this is the case where link expansion is doing something no other stream can."
+
+[[case]]
+query = "samesite"
+category = "keyword"
+relevant = ["notes/cookie-samesite.md"]
+note = "A single entity said once, in a page whose title contains it. It should be easy, and a suite where nothing is easy cannot tell a hard case from a broken stream."
+
+[[case]]
+query = "customer came back signed out after paying"
+category = "symptom"
+relevant = ["notes/cookie-samesite.md"]
+note = "The same page as the previous case, asked the other way round: the symptom is in the body, the cause is a word the asker does not know. If only one of the two ways in works, the streams are not doing what the fusion assumes."
+
+[[case]]
+query = "scopes"
+category = "keyword"
+relevant = ["notes/oauth-scopes.md"]
+note = "Plural against a page that declares the singular. Entity matching has to be doing more than string equality, and this is where that shows."
+
+[[case]]
+query = "the same address with different capitals made two accounts"
+category = "symptom"
+relevant = ["gotchas/case-sensitive-emails.md"]
+note = "The page says local part and case sensitive; the question says capitals. The verification decision is also about addresses and sign-up."
+
+[[case]]
+query = "parola kuralı ne"
+category = "natural"
+relevant = ["notes/eski-parola-kurali.md"]
+note = "A page written in Turkish, asked in Turkish. Full text is language-bound by nature and this is the case that says whether a page in another alphabet is reachable at all — ARCHITECTURE.md's seventh future-work item, stated as a question rather than as a claim."

@@ -8,6 +8,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A third eval corpus, `adversarial`, and the first one **frozen before it was
+  scored**: eighteen pages of an identity service and sixteen questions, each
+  written so that some *other* page is the better literal match — more of the
+  query's words, more authority, or both — with the trap it tests named in its
+  note. `retrieval` asks whether an answer is reachable and `crowded` whether it
+  wins against plausible company; neither can ask what retrieval does when the
+  obvious match is the wrong page. It shares no vocabulary with the other two on
+  purpose, so a knob that happens to suit queues and deploys has nothing to lean
+  on here. Two rules govern it, both stricter than `crowded`'s: the corpus and
+  the questions were fixed before the suite was run once, and no sweep is ever
+  run against it — `crowded` was written to be the set retrieval is not tuned on
+  and then had a sweep run over it anyway, which was sound reasoning and still
+  cost it some of its independence. A case that fails here is a finding about
+  retrieval, not a threshold to lower. The first run scored **hit@1 0.938 / MRR
+  0.969 / NDCG@5 0.977 / recall 1.000**: every answer inside five, and exactly
+  one of the sixteen second — `argon2id`, beaten by the session page that
+  carried out the migration and says the word twice as often as the decision
+  that chose it. That is precisely the trap the case was written for, and the
+  case has not been edited since. By category the whole shortfall is `keyword`
+  (0.800), which is the opposite of `crowded`, where the whole shortfall is
+  `paraphrase` — two corpora disagreeing about which kind of question is hard
+  says more than either figure on its own. All three suites are built into the
+  binary, so `anamnesis eval` with no `--suite` now scores forty-one questions
+  over fifty pages, and each is run as an ordinary unit test against the bar it
+  sets for itself.
 - An eval case says what **kind of question** it is, and every measure is
   reported per kind as well as in total. A total is where a trade goes to hide:
   a change that teaches retrieval to match a paraphrase can cost it a bare
