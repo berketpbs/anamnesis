@@ -43,7 +43,10 @@ pub use ops::{
     OpenSession, SessionSummary, SummarySource, new_handoff, new_observation, new_session,
 };
 pub use purge::Purged;
-pub use query::PageHit;
+// `StreamBreakdown` travels with `PageHit` because `Store::query_streams` is
+// public and returns one: without this a caller outside the crate can call the
+// method and has no way to name what it hands back.
+pub use query::{PageHit, StreamBreakdown};
 pub use raw::{RawError, RawRecord, RawSpool};
 pub use rename::{RenameError, Renamed};
 pub use sweep::SweepRow;

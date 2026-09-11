@@ -8,6 +8,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `memory_query` takes **`explain`**, and answers with the working behind each
+  score: which of the four streams found the page, where it ranked in each, what
+  that rank contributed, and the standing multiplier applied afterwards. The
+  numbers were already being computed — `StreamBreakdown` has existed since the
+  streams did — and were visible only from inside the process, which is the
+  wrong place for them. Every weight in the fusion was settled by an argument
+  and then by one sweep over twenty-five questions, and none of those arguments
+  can be re-examined from a fused list, where a page three streams agreed on and
+  a page one stream liked look identical. This is the field that tells them
+  apart. A stream that missed reports no rank rather than a rank of zero,
+  because "full text never found this" and "full text found it last" are
+  different facts and only the first one indicts a weight. Scoring is two
+  stages and the field says which one it is reporting: within a scope the four
+  streams are fused by weighted RRF and multiplied by standing, and *then* this
+  project's ranking and the shared scope's are fused again by plain RRF — so
+  `within_scope` is deliberately not the `score` beside it, and is the number a
+  weight argument is actually about. The explain pass re-runs the streams
+  through `Store::query_streams`, which records no access: asking which stream
+  would have found a page is not the same as handing the page over, and the
+  decay sweep reads those counters to decide what to keep. Off by default, and
+  absent from the response rather than null when it is off
+- `anamnesis-store` exports `StreamBreakdown`. `Store::query_streams` is public
+  and returns one, so until now a caller outside the crate could make the call
+  and had no way to name what came back
 - A sixth MCP tool, **`memory_read_page`**, reads one page whole. `memory_query`
   returns a snippet, which is exactly enough to decide *which* page is the right
   one and not enough to act on it — so an agent that had already found the page
