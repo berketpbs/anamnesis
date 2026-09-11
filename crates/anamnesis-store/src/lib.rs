@@ -40,7 +40,8 @@ mod workstream;
 
 pub use improve::{Filed, ProjectRow, StoredProposal};
 pub use ops::{
-    OpenSession, SessionSummary, SummarySource, new_handoff, new_observation, new_session,
+    EmbedFailure, OpenSession, SessionSummary, SummarySource, new_handoff, new_observation,
+    new_session,
 };
 pub use purge::Purged;
 // `StreamBreakdown` travels with `PageHit` because `Store::query_streams` is
@@ -263,14 +264,14 @@ mod tests {
         assert_eq!(store.schema_version().expect("version"), None);
 
         store.migrate().expect("migrate");
-        assert_eq!(store.schema_version().expect("version"), Some(14));
+        assert_eq!(store.schema_version().expect("version"), Some(15));
     }
 
     #[test]
     fn migrating_twice_is_a_no_op() {
         let store = migrated();
         store.migrate().expect("second migrate");
-        assert_eq!(store.schema_version().expect("version"), Some(14));
+        assert_eq!(store.schema_version().expect("version"), Some(15));
     }
 
     #[test]
@@ -289,6 +290,7 @@ mod tests {
             "handoffs",
             "page_feedback",
             "page_embeddings",
+            "page_embed_failures",
             "workstreams",
             "audit_log",
         ] {

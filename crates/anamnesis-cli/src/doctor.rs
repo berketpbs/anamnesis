@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use anamnesis_core::datadir::DataDir;
 use anamnesis_core::observation::{EventKind, RESULT_MARKER};
 use anamnesis_core::scope::resolve_scope;
-use anamnesis_store::{Store, SummarySource};
+use anamnesis_store::{EmbedFailure, Store, SummarySource};
 
 use crate::hooks;
 
@@ -95,6 +95,12 @@ pub struct Symptoms {
     pub server_answered: bool,
     /// Which build is asking.
     pub this_build: String,
+    /// Pages that were meant to have a vector and do not.
+    ///
+    /// Its own field rather than a count, because the remedy differs entirely
+    /// between a model that would not load and a page that would not fit, and
+    /// the reason is only in the rows.
+    pub embed_failures: Vec<EmbedFailure>,
 }
 
 /// What one recent session shows about what capture is producing.
@@ -133,9 +139,58 @@ pub fn diagnose(symptoms: &Symptoms) -> Vec<Finding> {
     findings.extend(judge_hooks(symptoms));
     findings.extend(judge_capture(symptoms));
     findings.extend(judge_pages(symptoms));
+    findings.extend(judge_embeddings(symptoms));
     findings.extend(judge_build(symptoms));
     findings.sort_by_key(|finding| std::cmp::Reverse(finding.severity));
     findings
+}
+
+/// Whether every page that should carry a vector does.
+///
+/// Silent by design when there is nothing wrong. An embedder is opt-in, and a
+/// project that never switched one on has no vectors, no failures, and no
+/// business being told about either — printing "0 pages failed to embed" to
+/// somebody who is not embedding is noise that trains people to skim.
+fn judge_embeddings(symptoms: &Symptoms) -> Vec<Finding> {
+    if symptoms.embed_failures.is_empty() {
+        return Vec::new();
+    }
+
+    // One reason or several changes what to do next, so the verdict says which
+    // rather than leaving it to be guessed from a count. A single recurring
+    // error is a broken embedder; a spread of them is more likely the pages.
+    let mut reasons: Vec<&str> = symptoms
+        .embed_failures
+        .iter()
+        .map(|failure| failure.reason.as_str())
+        .collect();
+    reasons.sort_unstable();
+    reasons.dedup();
+
+    let count = symptoms.embed_failures.len();
+    let pages = if count == 1 { "page" } else { "pages" };
+    let first = &symptoms.embed_failures[0];
+
+    vec![Finding {
+        severity: Severity::Broken,
+        subject: "embeddings",
+        verdict: format!(
+            "{count} {pages} are indexed without a vector and are missing from the \
+             vector stream ({}, under {})",
+            first.path, first.model
+        ),
+        remedy: Some(match reasons.as_slice() {
+            [only] => format!(
+                "every one failed the same way: {only} — fix that, then `anamnesis reindex` \
+                 re-embeds them"
+            ),
+            many => format!(
+                "{} different errors, the first being: {} — `anamnesis reindex` retries them all",
+                many.len(),
+                first.reason
+            ),
+        }),
+    }]
 }
 
 /// Whether the harnesses are wired for every moment anamnesis records.
@@ -472,6 +527,7 @@ pub fn cmd_doctor(server: &str, data_dir: Option<PathBuf>) -> anyhow::Result<()>
         }
         symptoms.sessions.push(facts);
     }
+    symptoms.embed_failures = store.embed_failures(scope.project_id)?;
 
     println!("🩺 Anamnesis Memory Diagnosis");
     println!();
@@ -571,6 +627,16 @@ mod tests {
         SessionFacts {
             kinds: kinds.iter().copied().collect(),
             ..SessionFacts::default()
+        }
+    }
+
+    fn embed_failure(path: &str, reason: &str) -> EmbedFailure {
+        EmbedFailure {
+            path: anamnesis_core::page::PagePath::parse(path).expect("path"),
+            title: "A page".to_owned(),
+            model: "all-MiniLM-L6-v2".to_owned(),
+            at: "2026-09-11T12:00:00Z".to_owned(),
+            reason: reason.to_owned(),
         }
     }
 
@@ -729,6 +795,76 @@ mod tests {
                 .verdict
                 .contains("anything but its own start and end")
         );
+    }
+
+    /// An embedder is opt-in. A project that never switched one on has no
+    /// vectors, no failures, and no business being told about either.
+    #[test]
+    fn a_project_with_no_embedding_failures_hears_nothing_about_embeddings() {
+        let symptoms = wired("claude-code", &EVERY_MOMENT);
+
+        assert!(
+            diagnose(&symptoms)
+                .iter()
+                .all(|f| f.subject != "embeddings")
+        );
+    }
+
+    /// The page is in the wiki, in the index, and in three of four streams.
+    /// Nothing else in `doctor` would have said a word about it.
+    #[test]
+    fn pages_missing_a_vector_are_reported_as_broken_and_named() {
+        let mut symptoms = wired("claude-code", &EVERY_MOMENT);
+        symptoms.embed_failures = vec![embed_failure("decisions/0001-storage.md", "no model")];
+
+        let findings = diagnose(&symptoms);
+
+        let embeddings = findings
+            .iter()
+            .find(|f| f.subject == "embeddings")
+            .expect("an embeddings finding");
+        assert_eq!(embeddings.severity, Severity::Broken);
+        assert!(
+            embeddings.verdict.contains("decisions/0001-storage.md"),
+            "a report that cannot name the page is one nobody can act on: {embeddings:#?}"
+        );
+        assert!(
+            embeddings.verdict.contains("all-MiniLM-L6-v2"),
+            "{embeddings:#?}"
+        );
+        assert!(embeddings.verdict.contains("1 page"), "{embeddings:#?}");
+    }
+
+    /// One recurring error is a broken embedder; a spread of them is more
+    /// likely the pages. The remedy differs, so the verdict has to tell them
+    /// apart rather than leave it to be guessed from a count.
+    #[test]
+    fn one_shared_reason_reads_differently_from_several() {
+        let mut symptoms = wired("claude-code", &EVERY_MOMENT);
+
+        symptoms.embed_failures = vec![
+            embed_failure("notes/a.md", "no model loaded"),
+            embed_failure("notes/b.md", "no model loaded"),
+        ];
+        let same = diagnose(&symptoms)
+            .into_iter()
+            .find(|f| f.subject == "embeddings")
+            .expect("finding");
+        assert!(same.verdict.contains("2 pages"), "{same:#?}");
+        let remedy = same.remedy.as_deref().expect("a remedy");
+        assert!(remedy.contains("every one failed the same way"), "{remedy}");
+        assert!(remedy.contains("no model loaded"), "{remedy}");
+
+        symptoms.embed_failures = vec![
+            embed_failure("notes/a.md", "no model loaded"),
+            embed_failure("notes/b.md", "input too long"),
+        ];
+        let mixed = diagnose(&symptoms)
+            .into_iter()
+            .find(|f| f.subject == "embeddings")
+            .expect("finding");
+        let remedy = mixed.remedy.as_deref().expect("a remedy");
+        assert!(remedy.contains("2 different errors"), "{remedy}");
     }
 
     /// A model that was asked and could not answer leaves counted pages, and
