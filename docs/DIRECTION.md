@@ -118,6 +118,14 @@ retrieval. It is at least as likely a verdict on an empty graph — and the two 
 indistinguishable from the outside. **Adding a fifth stream while the third one
 is starved is the wrong order.**
 
+*Overtaken, 2026-09-11.* #149 put the link form in the prompt and the schema
+description. The live wiki now holds **24 edges across 16 pages, four of them
+session pages the model wrote**, against the four hardcoded `bootstrap/` links
+this paragraph counted. The starvation is over and the ordering argument with
+it. What survives is the second half of the finding, and it is now sharper: the
+0.25 weight was measured on fixture corpora whose graphs were written by hand,
+and has never once been scored against a graph consolidation produced.
+
 **2. #672's router would be uncompensated here.**
 ai-memory charges session pages a bounded authority penalty (−0.15 by kind,
 −0.08 by tier) precisely because session pages are rarely the answer to a fact
@@ -188,23 +196,34 @@ explains why 25 will not.
 
 The actual work, in two pieces of very different size.
 
-**2a — tell the consolidation model that `[[links]]` exist.** One change to the
-prompt and the returned schema. It is the only change available that could make
-the existing links stream mean anything, and it is cheap enough to do before
-Phase 1 finishes if someone wants a quick win. Note the constraint discovered in
-#124: what the model writes has to be the name the index will match, so the same
-discipline that applies to entities applies to link targets.
+**2a — tell the consolidation model that `[[links]]` exist.** ~~One change to
+the prompt and the returned schema.~~ **Landed** in #149. The prompt lists the
+pages this memory already holds, names the form, and admits only paths from that
+list, on the grounds that a link to a page that does not exist points nowhere
+and a page that links to everything distinguishes nothing. The constraint from
+#124 held: what the model writes has to be the name the index will match.
 
-**2b — more than one page per session.** The documented largest gap. This is what
-fills `notes/`, populates the graph, gives Phase 3 something to rank, and turns
-a session page from a transcript summary into the several durable things the
-session actually produced.
+**2b — more than one page per session.** ~~The documented largest gap.~~
+**Landed** in #152. The schema carries `notes`: at most three durable pages per
+session, each typed `decision`, `gotcha` or `procedure`. #156 added the half
+that makes it safe — `schema_without_notes()` is what a session gets when the
+full answer will not fit, so a note can never cost a session its own page.
 
-Design it against #667 from the start: **if the schema asks for relations, the
-type must be able to carry them, and the frontmatter serializer must be shared
-with the single-page path.** Their fix was exactly that — a defaulted field, an
-aligned allowed-key list, and one serializer for both paths — and it is cheaper
-to adopt as a constraint than to rediscover as a bug.
+In the four days since, eleven new sessions were accompanied by seven new
+durable pages: gotchas 7 → 11, procedures 0 → 2, decisions 1 → 2. Not every
+one of those is necessarily the consolidator's — hand-written pages and MCP
+writes land in the same namespaces — but before #152 the model had no way to
+write any of them at all.
+
+It did not fill `notes/`, and that is the better outcome: the pages land in the
+typed namespaces where authority and supersession already apply to them.
+
+The #667 constraint still governs whatever adds **typed** relations: **if the
+schema asks for relations, the type must be able to carry them, and the
+frontmatter serializer must be shared with the single-page path.** Their fix was
+exactly that — a defaulted field, an aligned allowed-key list, and one
+serializer for both paths — and it is cheaper to adopt as a constraint than to
+rediscover as a bug.
 
 ### Phase 3 — ranking signals, and only after 1 and 2
 
