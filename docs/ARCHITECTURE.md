@@ -407,7 +407,7 @@ anamnesis eval [--suite FILE] [--streams] [--sweep] [--check]
     │
     ├─→ ask each case through Store::query_pages, the call memory_query makes
     │
-    └─→ mean reciprocal rank + recall, against the suite's own thresholds
+    └─→ hit@1 + MRR + NDCG@k + recall, against the suite's own thresholds
 ```
 
 Everything else in the workspace is tested for being *correct*. This is the
