@@ -568,8 +568,11 @@ improved on defaults it never chose.
 
 ## Storage Schema
 
-Twelve tables across six migrations (`V01`–`V06`), the authoritative copy of
-which is `crates/anamnesis-store/migrations/`. Every timestamp is RFC 3339
+The authoritative copy is `crates/anamnesis-store/migrations/`, and the count
+of tables and migrations is deliberately not repeated here: it was stated once
+as "twelve tables across six migrations" and was wrong by nine migrations
+before anyone noticed, because nothing fails when a number in prose goes stale.
+Every timestamp is RFC 3339
 with an explicit `Z`, always written from Rust — no column carries a SQL
 default, because SQLite's `CURRENT_TIMESTAMP` has a different shape and
 mixing the two would break both parsing and lexicographic ordering.
@@ -621,7 +624,16 @@ same row rather than filing a second copy of it.
 last improved, so a scheduler can find its settings and honour its interval —
 plus `pages_fts` (FTS5, unicode61), `entities`, `entity_tokens`,
 `page_entities`, `page_links`, `handoffs`, `page_feedback`, `page_embeddings`,
-`workstreams`.
+`page_embed_failures`, `workstreams`.
+
+`page_embed_failures` is the negative of `page_embeddings`, keyed the same way:
+a page that was meant to have a vector and does not, with the error that
+stopped it. It exists because the alternative was a log line, and a page whose
+embedding failed is otherwise indistinguishable from a healthy one — in the
+wiki, in the index, in full-text and entity and link retrieval, and silently
+absent from the one stream somebody switched embedding on to get. `embed_page`
+writes a row here or deletes one, never both, so the two tables cannot disagree;
+`anamnesis doctor` reads it, and `anamnesis reindex` is what clears it.
 
 An entity is stored twice, like a supersession and like a link: `entities.name`
 is what someone wrote, and `entity_tokens` is that name split the same way a

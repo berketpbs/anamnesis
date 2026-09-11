@@ -8,6 +8,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A page whose embedding failed **says so**, in a table and in `anamnesis
+  doctor`, instead of in a log line nobody reads on the day it is written. The
+  trade itself was right and is unchanged: a failed embedding costs the page one
+  retrieval stream, and refusing the write would cost the page. What was wrong
+  was the reporting. The page lands in the wiki, in the index, and in full-text,
+  entity and link retrieval, and is silently missing from the vector stream —
+  everything looks healthy while that stream is quietly smaller than the corpus,
+  which is precisely the shape of fault this project exists to make loud. `V15`
+  adds `page_embed_failures`, keyed `(page_id, model)` to match
+  `page_embeddings`, holding when the last attempt failed and what it said.
+  Keyed by model because a page can hold a good vector under one embedder and
+  have failed under another, and reporting the first as broken would be a new
+  wrong answer. It is the negative of `page_embeddings` rather than a log of
+  everything that ever went wrong: `embed_page` writes a row or deletes one and
+  never both, so a page that gets its vector stops being reported, and
+  `anamnesis reindex` is what clears the table by retrying. The reason is stored
+  alongside the count because the remedy differs completely between a model that
+  would not load and a page that would not fit — `doctor` says which, naming the
+  page and the model, and reads differently when every failure shares one error
+  (a broken embedder) from when they do not (more likely the pages). Silent when
+  there is nothing wrong: an embedder is opt-in, and telling somebody who is not
+  embedding that zero pages failed to embed is the kind of line that teaches
+  people to skim
 - `memory_query` takes **`explain`**, and answers with the working behind each
   score: which of the four streams found the page, where it ranked in each, what
   that rank contributed, and the standing multiplier applied afterwards. The

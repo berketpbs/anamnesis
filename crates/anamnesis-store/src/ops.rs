@@ -74,6 +74,30 @@ impl SummarySource {
     }
 }
 
+/// A page that was meant to have a vector and does not.
+///
+/// The row exists because the alternative was a log line. A page whose
+/// embedding failed is in the wiki, in the index, and in three of the four
+/// retrieval streams — everything looks healthy while the vector stream is
+/// quietly smaller than the corpus, which is the shape of fault this project
+/// exists to make loud.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbedFailure {
+    /// Which page.
+    pub path: PagePath,
+    /// Its title, so a report can name it the way a person would.
+    pub title: String,
+    /// The model it failed under. A page can hold a good vector under one
+    /// model and have failed under another; those are different facts.
+    pub model: String,
+    /// When the most recent attempt failed, as stored.
+    pub at: String,
+    /// The error as it was reported. Kept because the remedy differs entirely
+    /// between a model that would not load and a page that would not fit, and
+    /// a count alone cannot tell those apart.
+    pub reason: String,
+}
+
 /// One row of `anamnesis sessions`: what a session was, without its
 /// observations.
 #[derive(Debug, Clone, PartialEq)]
@@ -416,14 +440,97 @@ impl Store {
         };
         let text = page_text(&page.frontmatter.title, &page.body);
         match embedder.embed(&text) {
-            Ok(vector) => self.set_page_embedding(page.id, embedder.model(), &vector)?,
-            Err(error) => tracing::warn!(
-                %error,
-                path = %page.path,
-                "page embedding failed; the page is indexed without one"
-            ),
+            Ok(vector) => {
+                self.set_page_embedding(page.id, embedder.model(), &vector)?;
+                // The page has a vector now, so whatever was recorded about it
+                // not having one is no longer true. Clearing here is what keeps
+                // this table the negative of `page_embeddings` rather than a
+                // log of everything that ever went wrong.
+                self.clear_embed_failure(page.id, embedder.model())?;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path = %page.path,
+                    "page embedding failed; the page is indexed without one"
+                );
+                // A warning scrolls. This is the same fact written somewhere a
+                // person can still find it tomorrow, which is the difference
+                // between a fault and an invisible one.
+                self.record_embed_failure(page.id, embedder.model(), &error.to_string())?;
+            }
         }
         Ok(())
+    }
+
+    /// Record that a page could not be embedded under one model.
+    ///
+    /// Replaces any earlier row for the same `(page, model)` rather than
+    /// appending: the question this answers is "what is missing a vector now",
+    /// and an unbounded attempt log would make one unreachable embedder look
+    /// like a growing catastrophe.
+    pub fn record_embed_failure(&self, page_id: PageId, model: &str, reason: &str) -> Result<()> {
+        let conn = self.connection();
+        conn.execute(
+            "INSERT INTO page_embed_failures (page_id, model, at, reason)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (page_id, model) DO UPDATE SET at = ?3, reason = ?4",
+            params![
+                page_id.to_string(),
+                model,
+                Timestamp::now().to_string(),
+                reason
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Forget a recorded failure, because the page has a vector now.
+    pub fn clear_embed_failure(&self, page_id: PageId, model: &str) -> Result<()> {
+        let conn = self.connection();
+        conn.execute(
+            "DELETE FROM page_embed_failures WHERE page_id = ?1 AND model = ?2",
+            params![page_id.to_string(), model],
+        )?;
+        Ok(())
+    }
+
+    /// Every page in a project that is currently missing a vector it was meant
+    /// to have, newest failure first.
+    ///
+    /// Joined to `pages` rather than returning bare identifiers: a report that
+    /// says three pages failed and cannot name them is one nobody can act on.
+    pub fn embed_failures(&self, project_id: ProjectId) -> Result<Vec<EmbedFailure>> {
+        let conn = self.connection();
+        let mut statement = conn.prepare(
+            "SELECT p.path, p.title, f.model, f.at, f.reason
+             FROM page_embed_failures f
+             JOIN pages p ON p.id = f.page_id
+             WHERE p.project_id = ?1
+             ORDER BY f.at DESC, p.path ASC",
+        )?;
+        let rows = statement.query_map(params![project_id.to_string()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+
+        let mut failures = Vec::new();
+        for row in rows {
+            let (path, title, model, at, reason) = row?;
+            failures.push(EmbedFailure {
+                path: crate::convert::parse_page_path(&path),
+                title,
+                model,
+                at,
+                reason,
+            });
+        }
+        Ok(failures)
     }
 
     /// Insert or refresh the index row for a page.
@@ -1771,6 +1878,113 @@ mod tests {
         fn embed(&self, _text: &str) -> std::result::Result<Vec<f32>, String> {
             Err("no model loaded".to_owned())
         }
+    }
+
+    /// The fault this table exists for: the page lands everywhere except the
+    /// stream somebody switched embedding on to get, and says so.
+    #[test]
+    fn an_embedding_that_failed_is_recorded_rather_than_only_logged() {
+        let (_dir, store, project, _workspace) = fixture();
+        let page = indexable_page(project);
+
+        store
+            .index_page(project, &page, &[], Some(&BrokenEmbedder), now())
+            .expect("the page is written even though the embedding is not");
+
+        let failures = store.embed_failures(project).expect("failures");
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].path.as_str(), "decisions/0001-storage.md");
+        assert_eq!(failures[0].title, "Why SQLite");
+        assert_eq!(failures[0].model, "broken");
+        assert_eq!(failures[0].reason, "no model loaded");
+    }
+
+    /// A failed embedding costs the page one stream and never the page: the
+    /// row is a report, not a rejection.
+    #[test]
+    fn a_failed_embedding_still_leaves_the_page_retrievable() {
+        let (_dir, store, project, _workspace) = fixture();
+        let page = indexable_page(project);
+
+        store
+            .index_page(project, &page, &[], Some(&BrokenEmbedder), now())
+            .expect("index");
+
+        let hits = store
+            .query_pages(project, "sqlite", 10, now(), None)
+            .expect("query");
+        assert_eq!(hits.len(), 1, "found by the three streams that still work");
+        assert_eq!(hits[0].path.as_str(), "decisions/0001-storage.md");
+    }
+
+    /// The table is the negative of `page_embeddings`, not a log of everything
+    /// that ever went wrong — so a page that gets its vector stops appearing.
+    #[test]
+    fn embedding_a_page_that_failed_before_clears_the_record() {
+        let (_dir, store, project, _workspace) = fixture();
+        let mut page = indexable_page(project);
+        store.upsert_page(&page, now()).expect("row");
+
+        store
+            .embed_page(&page, Some(&BrokenEmbedder))
+            .expect("failed attempt");
+        assert_eq!(store.embed_failures(project).expect("failures").len(), 1);
+
+        // Same model, working this time: the way a retry looks after whatever
+        // was wrong is fixed.
+        struct RecoveredEmbedder;
+        impl anamnesis_core::embedding::Embed for RecoveredEmbedder {
+            fn model(&self) -> &str {
+                "broken"
+            }
+            fn embed(&self, _text: &str) -> std::result::Result<Vec<f32>, String> {
+                Ok(vec![1.0, 0.0])
+            }
+        }
+
+        page.body = "One file on disk.".to_owned();
+        store
+            .embed_page(&page, Some(&RecoveredEmbedder))
+            .expect("retry");
+
+        assert!(
+            store.embed_failures(project).expect("failures").is_empty(),
+            "the page has a vector now, so the record of it not having one is false"
+        );
+    }
+
+    /// A page can hold a good vector under one model and have failed under
+    /// another, and conflating those would report a healthy page as broken.
+    #[test]
+    fn a_failure_under_one_model_says_nothing_about_another() {
+        let (_dir, store, project, _workspace) = fixture();
+        let page = indexable_page(project);
+        store.upsert_page(&page, now()).expect("row");
+
+        store
+            .embed_page(&page, Some(&FakeEmbedder))
+            .expect("succeeds under fake-embed-1");
+        store
+            .embed_page(&page, Some(&BrokenEmbedder))
+            .expect("fails under broken");
+
+        let failures = store.embed_failures(project).expect("failures");
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].model, "broken");
+    }
+
+    /// Nothing to report is the normal state, and has to be distinguishable
+    /// from a query that did not run.
+    #[test]
+    fn a_project_that_embeds_cleanly_reports_nothing() {
+        let (_dir, store, project, _workspace) = fixture();
+        let page = indexable_page(project);
+
+        store
+            .index_page(project, &page, &[], Some(&FakeEmbedder), now())
+            .expect("index");
+
+        assert!(store.embed_failures(project).expect("failures").is_empty());
     }
 
     fn indexable_page(project: ProjectId) -> Page {
