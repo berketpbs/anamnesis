@@ -414,13 +414,27 @@ Everything else in the workspace is tested for being *correct*. This is the
 only thing that asks whether memory is any *good*: whether the page that
 answers a question comes back, and comes back near the top.
 
-Two suites ship. `retrieval` asks whether an answer is *reachable*: ten pages,
-sparse links, mostly one right answer. `crowded` asks whether it *wins*:
+Three suites ship. `retrieval` asks whether an answer is *reachable*: ten
+pages, sparse links, mostly one right answer. `crowded` asks whether it *wins*:
 twenty-two pages, a plausible competitor for most questions, half the answers
 on pages with no authority at all, and a link cluster dense enough to offer
 noise as readily as signal. The second exists to be the corpus no knob is
 tuned on — a sweep run against ten questions finds whatever those ten
 questions reward.
+
+`adversarial` asks the question neither of the others can: what retrieval does
+when something else is a *better* match than the answer. Eighteen pages of an
+identity service — no vocabulary shared with the other two, so a knob that
+happens to suit queues and deploys has nothing to lean on — and sixteen
+questions, each written so that some other page has more of the query's words,
+more authority, or both. The trap is named in every case's note. It is stricter
+than `crowded` in the way that decides what a suite is worth: it was frozen
+before it was scored once, and no sweep is ever run against it. `crowded` was
+written to be the untuned corpus and then had a sweep run over it anyway, on
+the sound reasoning that a second corpus makes a fitted gain visible — a
+defensible trade that still cost that set some of its independence. This one
+keeps all of it, so a case that fails here is a finding about retrieval rather
+than a threshold to lower.
 
 It earned that role immediately. Under the constants retrieval shipped with,
 `crowded` scored MRR 0.436 / recall 0.533 while plain full-text search alone

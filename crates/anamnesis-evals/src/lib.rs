@@ -61,9 +61,21 @@ pub const RETRIEVAL_SUITE: &str = include_str!("../suites/retrieval.toml");
 /// whether it suits anything else.
 pub const CROWDED_SUITE: &str = include_str!("../suites/crowded.toml");
 
+/// The suite written to be got wrong.
+///
+/// A third corpus, sharing no vocabulary with the other two, in which every
+/// question has some other page as the better literal match. It was frozen
+/// before it was run once, and nothing is ever tuned against it: a case that
+/// fails here is a finding about retrieval, not a threshold to lower.
+pub const ADVERSARIAL_SUITE: &str = include_str!("../suites/adversarial.toml");
+
 /// The suites built into this binary, by name.
 pub fn builtin_suites() -> Vec<(&'static str, &'static str)> {
-    vec![("retrieval", RETRIEVAL_SUITE), ("crowded", CROWDED_SUITE)]
+    vec![
+        ("retrieval", RETRIEVAL_SUITE),
+        ("crowded", CROWDED_SUITE),
+        ("adversarial", ADVERSARIAL_SUITE),
+    ]
 }
 
 /// Something an eval could not do.
