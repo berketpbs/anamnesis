@@ -218,6 +218,7 @@ fn main() -> anyhow::Result<()> {
             streams,
             sweep,
             k_sensitivity,
+            compare,
             embed,
         } => {
             cmd_eval(
@@ -228,6 +229,7 @@ fn main() -> anyhow::Result<()> {
                     streams,
                     sweep,
                     k_sensitivity,
+                    compare,
                     embed,
                 },
                 cli.data_dir.clone(),

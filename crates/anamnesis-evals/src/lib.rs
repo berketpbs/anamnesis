@@ -34,6 +34,7 @@
 #![warn(missing_docs)]
 
 pub mod ablation;
+pub mod compare;
 pub mod corpus;
 pub mod run;
 pub mod score;
@@ -42,6 +43,7 @@ pub mod suite;
 pub mod sweep;
 
 pub use ablation::{Ablation, StreamScore, ablate, ablate_with};
+pub use compare::{Comparison, Moved, ScoreRow, compare, parse_variant};
 pub use corpus::Corpus;
 pub use run::{CaseOutcome, CategoryScore, Report, run, run_embedded, run_on};
 pub use score::{CaseScore, hit_at_one, mean_reciprocal_rank, ndcg_at, recall, score_case};

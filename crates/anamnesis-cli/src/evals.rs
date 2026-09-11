@@ -23,7 +23,7 @@ use jiff::Timestamp;
 /// a caller that transposed two of them would compile and quietly score the
 /// wrong thing — and the list had grown long enough that clippy said so before
 /// anybody did.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct EvalOptions {
     /// Print every case with the rank its answer came back at.
     pub verbose: bool,
@@ -35,6 +35,8 @@ pub struct EvalOptions {
     pub sweep: bool,
     /// Score once per `rrf_k`, and say what moved.
     pub k_sensitivity: bool,
+    /// Score what ships against a variant, as `name=value` pairs.
+    pub compare: Option<String>,
     /// Score with the embedding stream switched on.
     pub embed: bool,
 }
@@ -50,6 +52,7 @@ pub fn cmd_eval(
         streams,
         sweep,
         k_sensitivity,
+        compare,
         embed,
     } = options;
     // Held still on purpose. Freshness is an input to nothing a suite scores,
@@ -90,6 +93,31 @@ pub fn cmd_eval(
     let embed = embedder
         .as_deref()
         .map(|embedder| embedder as &dyn anamnesis_core::embedding::Embed);
+
+    if let Some(spec) = compare.as_deref() {
+        let (variant, described) = anamnesis_evals::parse_variant(spec)?;
+        println!(
+            "Comparing what ships against {described}, over {} suite(s). \
+             Nothing here changes what ships.",
+            suites.len()
+        );
+        println!();
+        let mut traded = 0usize;
+        for (_, suite) in &suites {
+            let measured = anamnesis_evals::compare(suite, now, &variant, &described, embed)?;
+            if !measured.clean() {
+                traded += 1;
+            }
+            print_comparison(&measured, verbose);
+        }
+        if traded > 0 && check {
+            anyhow::bail!(
+                "{traded} of {} suites lost ground on at least one question",
+                suites.len()
+            );
+        }
+        return Ok(());
+    }
 
     if k_sensitivity {
         println!(
@@ -140,6 +168,90 @@ pub fn cmd_eval(
         );
     }
     Ok(())
+}
+
+/// What one variant did to one suite, question by question.
+///
+/// The two aggregate rows are printed first because they are what somebody
+/// came for, and the lists are printed under them because they are what
+/// decides. A regression is never folded into the summary line: the whole
+/// reason this command exists is that a mean can absorb one.
+fn print_comparison(measured: &anamnesis_evals::Comparison, verbose: bool) {
+    println!(
+        "⚖️  {} — {} pages, {} questions",
+        measured.suite, measured.pages, measured.cases
+    );
+    println!();
+    println!(
+        "   {:<10}  {:>6}  {:>6}  {:>6}  {:>6}",
+        "", "Hit@1", "MRR", "NDCG", "Recall"
+    );
+    for (label, row) in [
+        ("ships", &measured.baseline),
+        (measured.variant.as_str(), &measured.after),
+    ] {
+        println!(
+            "   {:<10}  {:>6.3}  {:>6.3}  {:>6.3}  {:>6.3}",
+            truncate(label, 10),
+            row.hit1,
+            row.mrr,
+            row.ndcg,
+            row.recall
+        );
+    }
+    println!(
+        "   {:<10}  {:>+6.3}  {:>+6.3}",
+        "delta",
+        measured.hit1_delta(),
+        measured.mrr_delta()
+    );
+    println!();
+    println!(
+        "   {} improved · {} regressed · {} unchanged",
+        measured.improved.len(),
+        measured.regressed.len(),
+        measured.unchanged
+    );
+    println!();
+
+    // Regressions always, improvements only when asked. A change is argued
+    // for by what it cost, and the cost is the half nobody goes looking for.
+    print_moves("Lost ground:", &measured.regressed);
+    if verbose {
+        print_moves("Gained ground:", &measured.improved);
+    }
+
+    if measured.clean() {
+        println!("   → nothing lost ground on this suite.");
+    } else {
+        println!(
+            "   → {} question(s) got worse. A mean would have absorbed that.",
+            measured.regressed.len()
+        );
+    }
+    println!();
+}
+
+/// One list of moved questions, with where each one went.
+fn print_moves(heading: &str, moved: &[anamnesis_evals::Moved]) {
+    if moved.is_empty() {
+        return;
+    }
+    println!("   {heading}");
+    for move_ in moved {
+        let rank = |at: Option<usize>| match at {
+            Some(rank) => rank.to_string(),
+            None => "—".to_owned(),
+        };
+        println!(
+            "     {} → {}  [{}]  {}",
+            rank(move_.before),
+            rank(move_.after),
+            truncate(&move_.category, 10),
+            move_.query
+        );
+    }
+    println!();
 }
 
 /// What varying `rrf_k` did to one suite, and whether it did anything.
