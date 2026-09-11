@@ -2158,4 +2158,141 @@ mod tests {
         assert!(!body.contains(r"\n"), "{body:?}");
         assert!(body.contains("the PR.\n\nOpen"), "{body:?}");
     }
+
+    /// A reply exercising every field [`schema`] declares, so that removing
+    /// any one of them has something to change.
+    fn reply_using_every_declared_field() -> Value {
+        json!({
+            "title": "The provider was added",
+            "body": "## What happened\n\nThe provider crate was written.",
+            "handoff": "The provider exists; `cargo test` failed once and was not rerun.",
+            "entities": ["anamnesis-llm", "openai.rs"],
+            "notes": [{
+                "kind": "gotcha",
+                "title": "A refusal is not a transport failure",
+                "body": "## Why\n\nRetrying one costs money and changes nothing.",
+            }],
+        })
+    }
+
+    /// **The #667 constraint, as a test rather than a comment.**
+    ///
+    /// ai-memory asked their model for typed relations in the prompt, had no
+    /// field on the struct to hold them, and dropped every edge before the
+    /// wiki write — silently, because a request that succeeds while losing
+    /// what it asked for looks exactly like a request that succeeded.
+    ///
+    /// The same fault is available here and would be quieter: replies are read
+    /// field by field with `value.get(name)` rather than deserialized into a
+    /// struct, so nothing at all fails when the schema asks for something no
+    /// reader reads. This asserts the property that would have caught it —
+    /// **every field the schema declares must be load-bearing** — by removing
+    /// each one in turn and requiring the outcome to change. A field nothing
+    /// reads is a field whose absence nothing notices.
+    #[test]
+    fn every_field_the_schema_asks_for_changes_what_is_produced() {
+        let full = reply_using_every_declared_field();
+        let declared: Vec<String> = schema()["properties"]
+            .as_object()
+            .expect("the schema declares properties")
+            .keys()
+            .cloned()
+            .collect();
+        assert!(
+            declared.len() >= 5,
+            "the schema stopped declaring the fields this test was written against: {declared:?}"
+        );
+
+        let with_everything = digest_from_json(&full, &session())
+            .expect("a reply using every declared field is valid");
+
+        for name in &declared {
+            let mut without = full.clone();
+            without
+                .as_object_mut()
+                .expect("the reply is an object")
+                .remove(name);
+
+            // Either the field is required and its absence is refused, or it
+            // is optional and its absence shows. Both are "something noticed".
+            match digest_from_json(&without, &session()) {
+                Err(_) => {}
+                Ok(reduced) => assert_ne!(
+                    reduced, with_everything,
+                    "the schema asks the model for {name:?} and nothing reads it: dropping it \
+                     produced an identical digest. Either give it a reader, or stop asking."
+                ),
+            }
+        }
+    }
+
+    /// The reduced schema is the same promise one field shorter, so it has to
+    /// keep the same property — a request that trades `notes` away to fit must
+    /// not quietly trade anything else.
+    #[test]
+    fn the_reduced_schema_asks_for_nothing_it_does_not_read_either() {
+        let declared: Vec<String> = schema_without_notes()["properties"]
+            .as_object()
+            .expect("the reduced schema declares properties")
+            .keys()
+            .cloned()
+            .collect();
+        assert!(!declared.contains(&"notes".to_owned()));
+
+        let mut full = reply_using_every_declared_field();
+        full.as_object_mut().expect("object").remove("notes");
+        let with_everything =
+            digest_from_json(&full, &session()).expect("valid without the notes field");
+
+        for name in &declared {
+            let mut without = full.clone();
+            without.as_object_mut().expect("object").remove(name);
+            match digest_from_json(&without, &session()) {
+                Err(_) => {}
+                Ok(reduced) => assert_ne!(
+                    reduced, with_everything,
+                    "the reduced schema asks for {name:?} and nothing reads it"
+                ),
+            }
+        }
+    }
+
+    /// The other half of #667, and the half a removal test cannot reach: the
+    /// reduced schema must stay a *subset* of the full one. A field spelled
+    /// one way in `schema` and another in `schema_without_notes` is a request
+    /// the model answers and the reader looks for under a name it never sent.
+    #[test]
+    fn the_reduced_schema_is_the_full_one_minus_exactly_notes() {
+        let full = schema();
+        let reduced = schema_without_notes();
+
+        let mut expected = full["properties"].clone();
+        expected
+            .as_object_mut()
+            .expect("object")
+            .remove("notes")
+            .expect("the full schema declares notes");
+        assert_eq!(reduced["properties"], expected);
+
+        let required: Vec<&str> = full["required"]
+            .as_array()
+            .expect("array")
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|name| *name != "notes")
+            .collect();
+        assert_eq!(
+            reduced["required"]
+                .as_array()
+                .expect("array")
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>(),
+            required
+        );
+        assert_eq!(
+            reduced["additionalProperties"],
+            full["additionalProperties"]
+        );
+    }
 }

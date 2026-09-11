@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The consolidation schema can no longer **ask the model for something nothing
+  reads**. This is ai-memory's #667 turned into a test instead of a note: they
+  asked their model for typed relations in the prompt, had no field on the
+  struct to hold them, and dropped every edge before the wiki write — silently,
+  because a request that succeeds while losing what it asked for is
+  indistinguishable from a request that succeeded. The same fault is available
+  here and would be quieter, because replies are read field by field with
+  `value.get(name)` rather than deserialized into a struct, so *nothing at all*
+  fails when a schema property has no reader. The test asserts the property that
+  would have caught it — every field the schema declares must be load-bearing —
+  by removing each declared field in turn and requiring the outcome to change,
+  either by being refused or by producing a different digest. A field whose
+  absence nothing notices is a field nothing reads. It was verified the only way
+  such a test can be: by adding a `relations` property that nothing reads and
+  confirming it goes red. Two more hold the surrounding shape — the reduced
+  schema used when a session will not fit keeps the same property, and is
+  checked to be the full schema minus exactly `notes`, since a field spelled one
+  way in one and another way in the other is a request the model answers under a
+  name the reader never looks for
 - A page whose embedding failed **says so**, in a table and in `anamnesis
   doctor`, instead of in a log line nobody reads on the day it is written. The
   trade itself was right and is unchanged: a failed embedding costs the page one
