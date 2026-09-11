@@ -171,7 +171,10 @@ Small, and everything after it depends on it.
   difficult part; nothing connects it to the evals crate.
 - Grow the question set and **freeze it before evaluating**, with category
   labels — fact-keyword, fact-NL, session-recall, temporal — plus a small
-  deliberately adversarial set.
+  deliberately adversarial set. *Category labels have landed*, on all
+  twenty-five existing cases, and the first table they printed found that the
+  whole of `crowded`'s shortfall is `paraphrase`: hit@1 0.750 there against
+  1.000 in every other kind. Growing the set and freezing it is still open.
 - Add an explicit baseline-versus-variant mode, and adopt the rule: **a
   retrieval change without a paired measurement does not land.**
 

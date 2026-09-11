@@ -42,7 +42,7 @@ pub mod sweep;
 
 pub use ablation::{Ablation, StreamScore, ablate, ablate_with};
 pub use corpus::Corpus;
-pub use run::{CaseOutcome, Report, run, run_embedded, run_on};
+pub use run::{CaseOutcome, CategoryScore, Report, run, run_embedded, run_on};
 pub use score::{CaseScore, hit_at_one, mean_reciprocal_rank, ndcg_at, recall, score_case};
 pub use suite::{Case, FixturePage, Suite, Thresholds};
 pub use sweep::{SuiteScore, SweepPoint, SweepReport, default_grid, sweep};

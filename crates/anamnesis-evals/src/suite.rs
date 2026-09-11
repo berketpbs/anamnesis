@@ -28,6 +28,18 @@ pub struct Suite {
     /// The bar this suite has to clear for `--check` to pass.
     #[serde(default)]
     pub thresholds: Thresholds,
+    /// The kinds of question this suite asks, in the order they are reported.
+    ///
+    /// Declared up front rather than collected from the cases, because a
+    /// category is a label and a label collected from whatever was typed is a
+    /// taxonomy with `paraprase` in it. A case naming an undeclared category is
+    /// refused, and a declared category no case uses is refused too — the
+    /// second is the typo in the other direction, or a suite that claims to
+    /// measure something it stopped measuring.
+    ///
+    /// Optional. A suite that labels nothing is scored exactly as it was.
+    #[serde(default)]
+    pub categories: Vec<String>,
     /// The pages the questions are asked of.
     #[serde(default, rename = "page")]
     pub pages: Vec<FixturePage>,
@@ -153,6 +165,15 @@ pub struct Case {
     /// Why this case is here, for whoever reads a failure.
     #[serde(default)]
     pub note: String,
+    /// What kind of question this is, from the suite's declared list.
+    ///
+    /// The point of the label is that a total hides the trade. A change that
+    /// teaches retrieval to match a paraphrase can cost it a bare keyword, and
+    /// a single mean over both says only that nothing much happened. It is a
+    /// property of the *question* — how somebody phrased it — not of the trick
+    /// the corpus is playing on the ranker.
+    #[serde(default)]
+    pub category: String,
 }
 
 /// Results are scored over this many hits when a suite does not say.
@@ -224,6 +245,36 @@ impl Suite {
                     page.path,
                     target.as_str()
                 )));
+            }
+        }
+
+        // Either the suite labels its questions or it does not. A case wearing
+        // a label the suite never declared is the typo this exists to catch,
+        // and a suite that declares nothing while its cases do is the same typo
+        // one level up — nothing would check the spelling of any of them.
+        if self.categories.is_empty() {
+            if let Some(case) = self.cases.iter().find(|case| !case.category.is_empty()) {
+                return Err(EvalError::Suite(format!(
+                    "case {:?} is in category {:?}, but the suite declares no categories",
+                    case.query, case.category
+                )));
+            }
+        } else {
+            for case in &self.cases {
+                if !self.categories.contains(&case.category) {
+                    return Err(EvalError::Suite(format!(
+                        "case {:?} is in category {:?}, which the suite does not declare",
+                        case.query, case.category
+                    )));
+                }
+            }
+            for category in &self.categories {
+                if !self.cases.iter().any(|case| &case.category == category) {
+                    return Err(EvalError::Suite(format!(
+                        "suite {:?} declares category {category:?} and asks no question in it",
+                        self.name
+                    )));
+                }
             }
         }
 
@@ -314,6 +365,72 @@ relevant = ["decisions/0001-sqlite.md"]
         let error = Suite::from_toml(&source).expect_err("should refuse");
         assert!(error.to_string().contains("does not contain"), "{error}");
         assert!(error.to_string().contains("0000-postgres.md"), "{error}");
+    }
+
+    /// The typo this catches. `paraprase` would otherwise be a sixth kind of
+    /// question with one case in it, reported at 0.000 or 1.000 forever, and
+    /// the category it was meant to join would be quietly one case short.
+    #[test]
+    fn a_case_in_an_undeclared_category_is_refused() {
+        let source = MINIMAL
+            .replace(
+                "name = \"tiny\"",
+                "name = \"tiny\"\ncategories = [\"keyword\"]",
+            )
+            .replace(
+                "relevant = [\"decisions/0001-sqlite.md\"]",
+                "relevant = [\"decisions/0001-sqlite.md\"]\ncategory = \"keywrod\"",
+            );
+        let error = Suite::from_toml(&source).expect_err("should refuse");
+        assert!(error.to_string().contains("keywrod"), "{error}");
+        assert!(error.to_string().contains("does not declare"), "{error}");
+    }
+
+    /// The same typo in the other direction, and the reason it is worth
+    /// refusing: a suite that declares a kind of question and asks none of them
+    /// prints a row of zeroes over zero cases and reads as a failure.
+    #[test]
+    fn a_declared_category_nobody_asks_is_refused() {
+        let source = MINIMAL
+            .replace(
+                "name = \"tiny\"",
+                "name = \"tiny\"\ncategories = [\"keyword\", \"temporal\"]",
+            )
+            .replace(
+                "relevant = [\"decisions/0001-sqlite.md\"]",
+                "relevant = [\"decisions/0001-sqlite.md\"]\ncategory = \"keyword\"",
+            );
+        let error = Suite::from_toml(&source).expect_err("should refuse");
+        assert!(error.to_string().contains("temporal"), "{error}");
+        assert!(
+            error.to_string().contains("asks no question in it"),
+            "{error}"
+        );
+    }
+
+    /// Labels only mean anything if something checks their spelling, and the
+    /// thing that checks them is the declared list. A case wearing one in a
+    /// suite that declares none is a label nothing can check.
+    #[test]
+    fn a_labelled_case_in_an_unlabelled_suite_is_refused() {
+        let source = MINIMAL.replace(
+            "relevant = [\"decisions/0001-sqlite.md\"]",
+            "relevant = [\"decisions/0001-sqlite.md\"]\ncategory = \"keyword\"",
+        );
+        let error = Suite::from_toml(&source).expect_err("should refuse");
+        assert!(
+            error.to_string().contains("declares no categories"),
+            "{error}"
+        );
+    }
+
+    /// And a suite from before categories existed goes on loading and goes on
+    /// meaning what it meant.
+    #[test]
+    fn an_unlabelled_suite_still_parses() {
+        let suite = Suite::from_toml(MINIMAL).expect("parse");
+        assert!(suite.categories.is_empty());
+        assert!(suite.cases[0].category.is_empty());
     }
 
     #[test]

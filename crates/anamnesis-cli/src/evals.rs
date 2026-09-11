@@ -140,6 +140,8 @@ fn print_report(report: &anamnesis_evals::Report, source: &str, verbose: bool) {
         println!("   {label:<8}{value:.3}  {}", describe_bar(value, bar));
     }
 
+    print_categories(report);
+
     // Printed whether or not anyone asked, and in two lists rather than one.
     // A suite that passes on average while a question goes unanswered is the
     // result most likely to be read as "fine" — and so is one whose answers
@@ -148,14 +150,27 @@ fn print_report(report: &anamnesis_evals::Report, source: &str, verbose: bool) {
     print_cases("Answered, but not near the top:", report.ranked_low());
 
     if verbose {
+        let labelled = !report.by_category.is_empty();
         println!();
-        println!("   rank  query");
+        if labelled {
+            println!("   rank  category    query");
+        } else {
+            println!("   rank  query");
+        }
         for case in &report.cases {
             let rank = match case.score.rank {
                 Some(rank) => format!("{rank:>4}"),
                 None => "   —".to_owned(),
             };
-            println!("   {rank}  {}", case.query);
+            if labelled {
+                println!(
+                    "   {rank}  {:<10}  {}",
+                    truncate(&case.category, 10),
+                    case.query
+                );
+            } else {
+                println!("   {rank}  {}", case.query);
+            }
         }
     }
 
@@ -278,6 +293,34 @@ fn print_ablation(ablation: &anamnesis_evals::Ablation) {
         }
     }
     println!();
+}
+
+/// The same four numbers per kind of question.
+///
+/// A total is where a trade goes to hide. Teaching retrieval to match a
+/// paraphrase can cost it a bare keyword, and the mean over both reports that
+/// nothing much happened — which is exactly the change worth arguing about.
+///
+/// The count is a column rather than a footnote because it is what says whether
+/// a rate is a finding: over four questions a rate moves in quarters.
+fn print_categories(report: &anamnesis_evals::Report) {
+    if report.by_category.is_empty() {
+        return;
+    }
+
+    println!();
+    println!("   category      n   Hit@1    MRR   NDCG  Recall");
+    for category in &report.by_category {
+        println!(
+            "   {:<10}  {:>3}   {:.3}  {:.3}  {:.3}   {:.3}",
+            truncate(&category.name, 10),
+            category.cases,
+            category.hit1,
+            category.mrr,
+            category.ndcg,
+            category.recall
+        );
+    }
 }
 
 /// One list of cases, with the reason each is in the suite.

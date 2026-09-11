@@ -818,6 +818,13 @@ anamnesis eval --streams   # what each stream contributes on its own
    MRR     0.967  (bar 0.960) ok
    NDCG@5  0.975  (bar 0.970) ok
    Recall  1.000  (bar 1.000) ok
+
+   category      n   Hit@1    MRR   NDCG  Recall
+   keyword       5   1.000  1.000  1.000   1.000
+   natural       1   1.000  1.000  1.000   1.000
+   paraphrase    4   0.750  0.875  0.908   1.000
+   symptom       4   1.000  1.000  1.000   1.000
+   temporal      1   1.000  1.000  1.000   1.000
 ```
 
 Four numbers because they fail differently. **Hit@1** is what the agent is
@@ -826,6 +833,18 @@ answer sliding from first place to third while hit@1 has already written it off.
 **NDCG@5** is the one another project's published figure can be held against,
 discounted over however many results the suite scores (the `@5` travels with it
 for that reason). **Recall** says only whether the page came back at all.
+
+The second table is the same four numbers per **kind of question**, and it is
+where a trade stops being able to hide. The 0.933 above averages to nothing much;
+the row below it says the whole shortfall is `paraphrase` — questions whose
+words are not on the page that answers them — while bare keywords, symptom
+descriptions and everything else come back first every time. A change that helps
+one kind and costs another reads as "no change" in a total and as a trade in the
+table. Read the `n` column first: over four questions a rate moves in quarters.
+
+A suite declares its own categories, and a case in one it did not declare is
+refused rather than filed under a new label; a suite that labels nothing is
+scored exactly as before.
 
 Two more lists print when they have anything in them: questions nothing relevant
 came back for, and questions answered so far down the page nobody would scroll

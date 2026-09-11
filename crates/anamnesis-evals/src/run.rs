@@ -21,6 +21,8 @@ pub const LOW_RANK: usize = 3;
 pub struct CaseOutcome {
     /// The question as it was asked.
     pub query: String,
+    /// What kind of question it is, or empty in a suite that labels none.
+    pub category: String,
     /// Why the case is in the suite.
     pub note: String,
     /// Pages that would have answered it.
@@ -56,8 +58,37 @@ pub struct Report {
     pub ndcg: f64,
     /// Share of cases whose answer appeared at all.
     pub recall: f64,
+    /// The same four numbers per kind of question, in the suite's own order.
+    ///
+    /// Empty for a suite that labels nothing.
+    pub by_category: Vec<CategoryScore>,
     /// The bar the suite set for itself.
     pub thresholds: crate::suite::Thresholds,
+}
+
+/// One kind of question, scored on its own.
+///
+/// The reason a total is not enough: a change that teaches retrieval to match
+/// a paraphrase can cost it a bare keyword, and a single mean over both reports
+/// that nothing much happened. Published beside the total so a trade has to be
+/// stated rather than netted out.
+#[derive(Debug, Clone)]
+pub struct CategoryScore {
+    /// The label, as the suite declared it.
+    pub name: String,
+    /// How many questions carry it.
+    ///
+    /// Read this before the rates. Over four questions a rate moves in
+    /// quarters, and a quarter is not a finding.
+    pub cases: usize,
+    /// Share answered in first place.
+    pub hit1: f64,
+    /// Mean reciprocal rank.
+    pub mrr: f64,
+    /// Normalised discounted cumulative gain over the scored window.
+    pub ndcg: f64,
+    /// Share whose answer appeared at all.
+    pub recall: f64,
 }
 
 impl Report {
@@ -134,6 +165,7 @@ pub fn run_on(
     }
 
     let scores: Vec<CaseScore> = cases.iter().map(|case| case.score.clone()).collect();
+    let by_category = score_by_category(&suite.categories, &cases, suite.limit);
 
     Ok(Report {
         name: suite.name.clone(),
@@ -144,9 +176,41 @@ pub fn run_on(
         mrr: mean_reciprocal_rank(&scores),
         ndcg: ndcg_at(&scores, suite.limit),
         recall: recall(&scores),
+        by_category,
         thresholds: suite.thresholds,
         cases,
     })
+}
+
+/// Slice the outcomes by the labels the suite declared, in the order it
+/// declared them.
+///
+/// The suite's order rather than a sort: whoever wrote the list put the kinds
+/// in the order they wanted them read, and alphabetising it would put
+/// `keyword` above `paraphrase` for reasons that are about the alphabet.
+fn score_by_category(
+    categories: &[String],
+    cases: &[CaseOutcome],
+    limit: usize,
+) -> Vec<CategoryScore> {
+    categories
+        .iter()
+        .map(|name| {
+            let scores: Vec<CaseScore> = cases
+                .iter()
+                .filter(|case| &case.category == name)
+                .map(|case| case.score.clone())
+                .collect();
+            CategoryScore {
+                name: name.clone(),
+                cases: scores.len(),
+                hit1: hit_at_one(&scores),
+                mrr: mean_reciprocal_rank(&scores),
+                ndcg: ndcg_at(&scores, limit),
+                recall: recall(&scores),
+            }
+        })
+        .collect()
 }
 
 /// Ask one question of a built corpus.
@@ -191,6 +255,7 @@ fn run_case(
 
     Ok(CaseOutcome {
         query: case.query.clone(),
+        category: case.category.clone(),
         note: case.note.clone(),
         relevant: case.relevant.clone(),
         score: score_case(&returned, &case.relevant),
@@ -310,6 +375,79 @@ relevant = ["notes/windows.md"]
         assert_eq!(report.limit, suite.limit);
     }
 
+    /// The thing a per-category table is for: one kind of question failing
+    /// while the total stays respectable. Here one of two categories misses
+    /// entirely, the suite still reports 0.500 overall, and the row says which
+    /// half it was.
+    #[test]
+    fn a_category_that_fails_is_named_while_the_total_stays_respectable() {
+        let source = SUITE
+            .replace(
+                "limit = 3",
+                "limit = 3\ncategories = [\"keyword\", \"paraphrase\"]",
+            )
+            .replace(
+                "query = \"sqlite\"",
+                "query = \"sqlite\"\ncategory = \"keyword\"",
+            )
+            .replace(
+                "query = \"byte order mark\"",
+                "query = \"kubernetes ingress\"\ncategory = \"paraphrase\"",
+            );
+        let suite = Suite::from_toml(&source).expect("suite");
+        let report = run(&suite, now()).expect("run");
+
+        assert_eq!(report.recall, 0.5);
+        assert_eq!(report.by_category.len(), 2);
+
+        let keyword = &report.by_category[0];
+        assert_eq!(keyword.name, "keyword");
+        assert_eq!(keyword.cases, 1);
+        assert_eq!(keyword.hit1, 1.0);
+
+        let paraphrase = &report.by_category[1];
+        assert_eq!(paraphrase.name, "paraphrase");
+        assert_eq!(paraphrase.cases, 1);
+        assert_eq!(paraphrase.recall, 0.0, "the half that failed");
+    }
+
+    /// The order is the suite's, not the alphabet's: whoever wrote the list put
+    /// the kinds in the order they wanted them read.
+    #[test]
+    fn categories_are_reported_in_the_order_the_suite_declares_them() {
+        let source = SUITE
+            .replace(
+                "limit = 3",
+                "limit = 3\ncategories = [\"paraphrase\", \"keyword\"]",
+            )
+            .replace(
+                "query = \"sqlite\"",
+                "query = \"sqlite\"\ncategory = \"keyword\"",
+            )
+            .replace(
+                "query = \"byte order mark\"",
+                "query = \"byte order mark\"\ncategory = \"paraphrase\"",
+            );
+        let suite = Suite::from_toml(&source).expect("suite");
+        let report = run(&suite, now()).expect("run");
+
+        let names: Vec<&str> = report
+            .by_category
+            .iter()
+            .map(|category| category.name.as_str())
+            .collect();
+        assert_eq!(names, ["paraphrase", "keyword"]);
+    }
+
+    /// A suite that labels nothing reports nothing, rather than one row called
+    /// "uncategorised" that is the total written twice.
+    #[test]
+    fn an_unlabelled_suite_reports_no_categories() {
+        let suite = Suite::from_toml(SUITE).expect("suite");
+        let report = run(&suite, now()).expect("run");
+        assert!(report.by_category.is_empty());
+    }
+
     /// Two runs of one suite have to agree, or no number it prints means
     /// anything from one day to the next.
     #[test]
@@ -337,6 +475,7 @@ relevant = ["notes/windows.md"]
 
         let outcome = CaseOutcome {
             query: "buried".to_owned(),
+            category: String::new(),
             note: String::new(),
             relevant: vec!["a.md".to_owned()],
             returned: vec!["x.md".into(), "y.md".into(), "a.md".into()],
