@@ -25,11 +25,12 @@ use std::sync::Arc;
 use anamnesis_core::handoff::Slot;
 use anamnesis_core::ids::SessionId;
 use anamnesis_core::page::{Entity, Frontmatter, Page, PagePath, PageStatus, Tier};
+use anamnesis_core::retrieval::Tuning;
 use anamnesis_core::scope::{OperatorName, ResolvedScope};
 use anamnesis_core::session::AgentKind;
 use anamnesis_core::workstream::{Workstream, WorkstreamSlug};
 use anamnesis_llm::Embedder;
-use anamnesis_store::{Store, new_session};
+use anamnesis_store::{Store, StreamBreakdown, new_session};
 use anamnesis_wiki::Wiki;
 use jiff::Timestamp;
 use parking_lot::Mutex;
@@ -65,6 +66,11 @@ pub struct QueryRequest {
     pub text: String,
     /// Maximum number of pages to return. Defaults to 10, capped at 50.
     pub limit: Option<u32>,
+    /// Show the working behind each score: which streams found the page, where
+    /// it ranked in each, and what that was worth. Defaults to false. Costs a
+    /// second pass over the streams, so it is worth asking for when a ranking
+    /// looks wrong and not otherwise.
+    pub explain: Option<bool>,
 }
 
 /// One page in a [`QueryResponse`].
@@ -90,6 +96,54 @@ pub struct QueryHit {
     /// rather than this project: something held to be true of every project
     /// here, not only of this one.
     pub global: bool,
+    /// The working behind `score`, when the request asked for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explain: Option<QueryExplain>,
+}
+
+/// Where one page landed in one retrieval stream, and what that was worth.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct StreamRank {
+    /// 1-based rank in this stream. Absent when the stream did not find the
+    /// page at all, which is the more interesting half of the answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rank: Option<usize>,
+    /// What that rank contributed to the fused score: `weight / (k + rank)`,
+    /// and zero when the stream missed.
+    pub contribution: f64,
+}
+
+/// The working behind one hit's score.
+///
+/// Scoring happens in two stages and this reports the first one, because the
+/// first is where the arguable numbers live. Within a scope, four streams are
+/// fused by weighted reciprocal rank and the total is multiplied by the page's
+/// standing. Across scopes — this project and the workspace's shared one —
+/// those two rankings are fused again, by plain RRF over rank alone, and
+/// *that* is what `score` on the hit reports. So `within_scope` below is not
+/// `score` and is not meant to be: it is the number that decided this page's
+/// place in its own scope's ranking, which is the number a weight argument is
+/// actually about.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct QueryExplain {
+    /// Which scope's streams these ranks come from: `project` or `global`.
+    pub scope: String,
+    /// Full-text (BM25) stream.
+    pub fts: StreamRank,
+    /// Declared-entity stream, ordered by inverse document frequency.
+    pub entity: StreamRank,
+    /// Link-neighbour stream, seeded from what full-text and entities found.
+    pub links: StreamRank,
+    /// Vector-cosine stream. Always a miss when no embedder is configured.
+    pub vectors: StreamRank,
+    /// Sum of the four contributions: the fused score before standing.
+    pub fused: f64,
+    /// Multiplier for the page's standing — authoritative namespace, canonical,
+    /// pinned — applied after fusion. `1.0` means it was considered and left
+    /// alone. A page no stream found is never surfaced however high this is.
+    pub authority: f64,
+    /// `fused * authority`: what ordered this page within its own scope.
+    pub within_scope: f64,
 }
 
 /// Response for [`AnamnesisMcp::memory_query`].
@@ -97,6 +151,61 @@ pub struct QueryHit {
 pub struct QueryResponse {
     /// Matching pages, best match first.
     pub hits: Vec<QueryHit>,
+}
+
+/// Both scopes' streams, unfused, with the tuning that fused them.
+///
+/// Private: this is the raw material an explain is computed from, not
+/// something a caller is handed.
+struct StreamWorking {
+    tuning: Tuning,
+    project: StreamBreakdown,
+    shared: StreamBreakdown,
+}
+
+impl StreamWorking {
+    /// The working for one hit, read out of the scope it came from.
+    fn for_hit(&self, hit: &anamnesis_store::PageHit, from_global: bool) -> QueryExplain {
+        let streams = if from_global {
+            &self.shared
+        } else {
+            &self.project
+        };
+        let weights = self.tuning.weights();
+        let rank_in = |stream: &[anamnesis_core::ids::PageId], weight: f64| {
+            let rank = stream
+                .iter()
+                .position(|id| *id == hit.page_id)
+                .map(|index| index + 1);
+            StreamRank {
+                rank,
+                contribution: rank
+                    .map(|rank| weight / (self.tuning.rrf_k + rank as f64))
+                    .unwrap_or(0.0),
+            }
+        };
+
+        let fts = rank_in(&streams.fts, weights[0]);
+        let entity = rank_in(&streams.entity, weights[1]);
+        let links = rank_in(&streams.links, weights[2]);
+        let vectors = rank_in(&streams.vectors, weights[3]);
+        let fused =
+            fts.contribution + entity.contribution + links.contribution + vectors.contribution;
+        let authority =
+            self.tuning
+                .authority(hit.pinned, hit.canonical, hit.path.is_authoritative());
+
+        QueryExplain {
+            scope: if from_global { "global" } else { "project" }.to_owned(),
+            fts,
+            entity,
+            links,
+            vectors,
+            fused,
+            authority,
+            within_scope: fused * authority,
+        }
+    }
 }
 
 /// Request for [`AnamnesisMcp::memory_write_page`].
@@ -481,31 +590,90 @@ impl AnamnesisMcp {
         // The workspace's shared scope is searched alongside this project's,
         // so a policy written once is answerable from every project under it.
         let global = self.global_scope();
+        let embedding = query_vector
+            .as_ref()
+            .map(|(model, vector)| (model.as_str(), vector.as_slice()));
         let hits = self.store.query_pages_across(
             self.scope.project_id,
             &[global.project_id],
             &request.text,
             limit,
             Timestamp::now(),
-            query_vector
-                .as_ref()
-                .map(|(model, vector)| (model.as_str(), vector.as_slice())),
+            embedding,
         )?;
+
+        // Re-run the streams unfused, only when asked. `query_streams` is the
+        // diagnostic path precisely because it records no access: asking which
+        // stream *would have* found a page is not the same as handing the page
+        // over, and the decay sweep reads those counters.
+        let working = if request.explain.unwrap_or(false) {
+            Some(self.stream_working(&request.text, embedding, &global)?)
+        } else {
+            None
+        };
+
         Ok(QueryResponse {
             hits: hits
                 .into_iter()
-                .map(|hit| QueryHit {
-                    path: hit.path.as_str().to_owned(),
-                    title: hit.title,
-                    tier: hit.tier.as_str().to_owned(),
-                    status: hit.status.as_str().to_owned(),
-                    pinned: hit.pinned,
-                    canonical: hit.canonical,
-                    score: hit.score,
-                    snippet: hit.snippet,
-                    global: hit.project_id == global.project_id,
+                .map(|hit| {
+                    let from_global = hit.project_id == global.project_id;
+                    let explain = working
+                        .as_ref()
+                        .map(|working| working.for_hit(&hit, from_global));
+                    QueryHit {
+                        path: hit.path.as_str().to_owned(),
+                        title: hit.title,
+                        tier: hit.tier.as_str().to_owned(),
+                        status: hit.status.as_str().to_owned(),
+                        pinned: hit.pinned,
+                        canonical: hit.canonical,
+                        score: hit.score,
+                        snippet: hit.snippet,
+                        global: from_global,
+                        explain,
+                    }
                 })
                 .collect(),
+        })
+    }
+
+    /// Run both scopes' streams unfused, at the depth the real search uses.
+    ///
+    /// Depth is `tuning.candidates` rather than the caller's `limit`: the
+    /// ranking being explained was fused from that many candidates per stream,
+    /// and a shallower re-run would report a page as "not found by full text"
+    /// when full text found it twelfth.
+    fn stream_working(
+        &self,
+        text: &str,
+        embedding: Option<(&str, &[f32])>,
+        global: &ResolvedScope,
+    ) -> Result<StreamWorking, McpError> {
+        let tuning = Tuning::default();
+        let project = self.store.query_streams(
+            self.scope.project_id,
+            text,
+            tuning.candidates,
+            embedding,
+            &tuning,
+        )?;
+        // The shared scope is skipped when this server *is* it, exactly as the
+        // search itself skips it, so the two cannot disagree about what ran.
+        let shared = if global.project_id == self.scope.project_id {
+            StreamBreakdown::default()
+        } else {
+            self.store.query_streams(
+                global.project_id,
+                text,
+                tuning.candidates,
+                embedding,
+                &tuning,
+            )?
+        };
+        Ok(StreamWorking {
+            tuning,
+            project,
+            shared,
         })
     }
 
@@ -920,6 +1088,7 @@ mod tests {
             .query(QueryRequest {
                 text: "sqlite".to_owned(),
                 limit: None,
+                explain: None,
             })
             .expect("query");
         assert_eq!(found.hits.len(), 1);
@@ -1229,6 +1398,7 @@ mod tests {
             .query(QueryRequest {
                 text: "quarterly filing paperwork".to_owned(),
                 limit: None,
+                explain: None,
             })
             .expect("query");
         assert_eq!(found.hits.len(), 1);
@@ -1247,6 +1417,7 @@ mod tests {
             .query(QueryRequest {
                 text: "sqlite".to_owned(),
                 limit: None,
+                explain: None,
             })
             .expect("query should still succeed via the other streams");
         assert_eq!(found.hits.len(), 1);
@@ -1270,6 +1441,7 @@ mod tests {
             .query(QueryRequest {
                 text: "rebuildable".to_owned(),
                 limit: None,
+                explain: None,
             })
             .expect("query");
         let snippet = &hit.hits[0].snippet;
@@ -1427,6 +1599,223 @@ mod tests {
             .expect("page is indexed");
         assert_eq!(after.facts.access_count, 1);
         assert!(after.facts.last_accessed_at.is_some());
+    }
+
+    /// The default is silence: a caller that did not ask for the working does
+    /// not get a field it has to learn to ignore.
+    #[test]
+    fn the_working_is_absent_unless_it_is_asked_for() {
+        let (_repo, _data, server) = harness();
+        write_page(&server, "notes/a.md", "A", "sqlite content");
+
+        let quiet = server
+            .query(QueryRequest {
+                text: "sqlite".to_owned(),
+                limit: None,
+                explain: None,
+            })
+            .expect("query");
+        assert!(quiet.hits[0].explain.is_none());
+
+        let loud = server
+            .query(QueryRequest {
+                text: "sqlite".to_owned(),
+                limit: None,
+                explain: Some(true),
+            })
+            .expect("query");
+        assert!(loud.hits[0].explain.is_some());
+    }
+
+    /// A stream that found the page reports a rank and a contribution; one
+    /// that missed reports neither, and the miss is the more useful half —
+    /// it is what a weight argument is made of.
+    #[test]
+    fn the_working_names_the_streams_that_found_the_page_and_the_ones_that_did_not() {
+        let (_repo, _data, server) = harness();
+        server
+            .write_page(WritePageRequest {
+                path: "decisions/0001-storage.md".to_owned(),
+                title: "Storage engine".to_owned(),
+                body: "We chose SQLite because the index is rebuildable.".to_owned(),
+                tier: None,
+                status: None,
+                pinned: None,
+                canonical: None,
+                entities: Some(vec!["SQLite".to_owned()]),
+                expires_at: None,
+                supersedes: None,
+                salience: None,
+            })
+            .expect("write");
+
+        let found = server
+            .query(QueryRequest {
+                text: "sqlite".to_owned(),
+                limit: None,
+                explain: Some(true),
+            })
+            .expect("query");
+        let working = found.hits[0].explain.as_ref().expect("explain");
+
+        assert_eq!(working.scope, "project");
+        assert_eq!(working.fts.rank, Some(1), "full text found it first");
+        assert!(working.fts.contribution > 0.0);
+        assert_eq!(
+            working.entity.rank,
+            Some(1),
+            "the page declares SQLite as an entity"
+        );
+        // No embedder is configured in this harness, so that stream is empty
+        // for every query — and says so rather than reporting a rank of zero.
+        assert_eq!(working.vectors.rank, None);
+        assert_eq!(working.vectors.contribution, 0.0);
+    }
+
+    /// `fused` is the sum of what the streams contributed, and `within_scope`
+    /// is that times the page's standing. Both are checkable from the same
+    /// response, which is the point of printing them.
+    #[test]
+    fn the_working_adds_up() {
+        let (_repo, _data, server) = harness();
+        write_page(&server, "notes/a.md", "A", "sqlite content");
+
+        let found = server
+            .query(QueryRequest {
+                text: "sqlite".to_owned(),
+                limit: None,
+                explain: Some(true),
+            })
+            .expect("query");
+        let working = found.hits[0].explain.as_ref().expect("explain");
+
+        let summed = working.fts.contribution
+            + working.entity.contribution
+            + working.links.contribution
+            + working.vectors.contribution;
+        assert!((working.fused - summed).abs() < 1e-12, "{working:?}");
+        assert!(
+            (working.within_scope - working.fused * working.authority).abs() < 1e-12,
+            "{working:?}"
+        );
+        // `notes/` is not an authoritative namespace and the page is neither
+        // pinned nor canonical, so there is nothing for standing to adjust.
+        assert_eq!(working.authority, 1.0);
+    }
+
+    /// Standing is a multiplier on relevance a stream already found, so an
+    /// authoritative page reports one above 1.0 — and the explain is where
+    /// that claim becomes checkable instead of documented.
+    #[test]
+    fn the_working_shows_standing_as_the_multiplier_it_is() {
+        let (_repo, _data, server) = harness();
+        server
+            .write_page(WritePageRequest {
+                path: "decisions/0001-storage.md".to_owned(),
+                title: "Storage engine".to_owned(),
+                body: "We chose SQLite.".to_owned(),
+                tier: None,
+                status: None,
+                pinned: Some(true),
+                canonical: Some(true),
+                entities: None,
+                expires_at: None,
+                supersedes: None,
+                salience: None,
+            })
+            .expect("write");
+
+        let found = server
+            .query(QueryRequest {
+                text: "sqlite".to_owned(),
+                limit: None,
+                explain: Some(true),
+            })
+            .expect("query");
+        let working = found.hits[0].explain.as_ref().expect("explain");
+
+        assert!(
+            working.authority > 1.0,
+            "an authoritative, canonical, pinned page: {working:?}"
+        );
+        assert!(working.within_scope > working.fused);
+    }
+
+    /// Asking which stream *would have* found a page is not the same as being
+    /// handed the page, and the decay sweep reads those counters — so the
+    /// explain pass must not inflate them.
+    #[test]
+    fn asking_for_the_working_does_not_count_as_a_second_read() {
+        let (_repo, _data, server) = harness();
+        write_page(&server, "notes/a.md", "A", "sqlite content");
+        let path = PagePath::parse("notes/a.md").expect("path");
+
+        server
+            .query(QueryRequest {
+                text: "sqlite".to_owned(),
+                limit: None,
+                explain: Some(true),
+            })
+            .expect("query");
+
+        let row = server
+            .store
+            .sweep_row(server.scope.project_id, &path)
+            .expect("sweep row")
+            .expect("page is indexed");
+        assert_eq!(
+            row.facts.access_count, 1,
+            "the search counts once; the explain pass adds nothing"
+        );
+    }
+
+    /// A hit from the shared scope has its ranks read out of the shared
+    /// scope's streams, not this project's — where it does not appear at all.
+    #[test]
+    fn the_working_reads_the_scope_the_hit_came_from() {
+        let (_repo, _data, server) = harness();
+
+        let global = server.global_scope();
+        let page = anamnesis_wiki::page(
+            global.project_id,
+            PagePath::parse("_rules/style.md").expect("path"),
+            Frontmatter::new("House style", Vec::new()).expect("frontmatter"),
+            "Every project here wraps at eighty columns.",
+        );
+        server
+            .wiki
+            .lock()
+            .write_page(&global.scope, &page, "test: shared page")
+            .expect("write");
+        server
+            .store
+            .upsert_project(&global, Timestamp::now())
+            .expect("shared project row");
+        server
+            .store
+            .index_page(global.project_id, &page, &[], None, Timestamp::now())
+            .expect("index the shared page");
+
+        let found = server
+            .query(QueryRequest {
+                text: "eighty columns".to_owned(),
+                limit: None,
+                explain: Some(true),
+            })
+            .expect("query");
+        let hit = found
+            .hits
+            .iter()
+            .find(|hit| hit.path == "_rules/style.md")
+            .expect("the shared page is searched alongside this project");
+        let working = hit.explain.as_ref().expect("explain");
+
+        assert!(hit.global);
+        assert_eq!(working.scope, "global");
+        assert!(
+            working.fts.rank.is_some(),
+            "read out of the shared scope's streams, where it exists: {working:?}"
+        );
     }
 
     /// The error says where it looked, because "not found" with one scope
