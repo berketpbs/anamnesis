@@ -146,9 +146,16 @@ fn builtin_rules() -> &'static [Rule] {
                 // same APIs, and a rule that stops recognising a credential
                 // the day it stops being handed out protects nobody who has
                 // one. The replacement is `google-auth-key`, two rules down.
+                //
+                // The end is a character that cannot continue the key, taken
+                // and put back, rather than `\b`. A key's alphabet includes
+                // `-`, a word boundary needs a word character on one side, and
+                // `-` followed by a space has none — so a key ending in `-`,
+                // about one in sixty-four of them, matched nothing and went
+                // through whole. Found by a property test, not by a leak.
                 "google-api-key",
-                r"\bAIza[0-9A-Za-z_\-]{35}\b",
-                "[redacted:google-api-key]",
+                r"\bAIza[0-9A-Za-z_\-]{35}(?P<tail>[^0-9A-Za-z_\-]|$)",
+                "[redacted:google-api-key]${tail}",
             ),
             rule(
                 // The API key above is not the only Google credential that
@@ -248,9 +255,33 @@ fn builtin_rules() -> &'static [Rule] {
                 "${head}[redacted]",
             ),
             rule(
+                // Up to the *last* `@` before the path, not the first. A
+                // password typed into a connection string by hand often holds
+                // an `@`, and so does a username that is an email address; the
+                // drivers that read such strings split at the last one, and a
+                // rule that split at the first left the rest of the password —
+                // or, with a leading `@`, all of it — in the text.
                 "url-credentials",
-                r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*://)[^/\s:@]+:[^/\s@]+@",
+                r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*://)[^/\s:]+:[^/\s]*@",
                 "${scheme}[redacted]@",
+            ),
+            rule(
+                // A quoted value is everything between its quotes. The
+                // unquoted rule below stops at a space, a comma or a
+                // semicolon, which is right for `KEY=value` and wrong for
+                // `password = "correct horse battery"`: it kept the whole value
+                // when the first word was under six characters, and the rest
+                // of it when it was not. Two rules, one per quote, because the
+                // pattern language has no backreference to say "the same
+                // quote again".
+                "assignment",
+                r#"(?i)(?P<head>[A-Za-z0-9_.\-]*(?:api[_\-]?key|access[_\-]?key|secret|token|password|passwd|pwd|credential|passphrase)[A-Za-z0-9_.\-]*["']?\s*[:=]\s*)"[^"\n]{6,}""#,
+                "${head}\"[redacted]\"",
+            ),
+            rule(
+                "assignment",
+                r#"(?i)(?P<head>[A-Za-z0-9_.\-]*(?:api[_\-]?key|access[_\-]?key|secret|token|password|passwd|pwd|credential|passphrase)[A-Za-z0-9_.\-]*["']?\s*[:=]\s*)'[^'\n]{6,}'"#,
+                "${head}'[redacted]'",
             ),
             rule(
                 "assignment",
@@ -469,6 +500,59 @@ mod tests {
         let result = redact("https://someone:s3cr3t-token@github.com/acme/api.git");
         assert!(!result.text().contains("s3cr3t-token"));
         assert!(result.text().contains("github.com/acme/api.git"));
+    }
+
+    /// The three leaks the property tests found, pinned as examples so each has
+    /// a name when it comes back.
+    #[test]
+    fn a_password_holding_an_at_sign_is_removed_whole() {
+        for (url, password) in [
+            ("postgres://app:p@ssw0rd@db.internal/prod", "ssw0rd"),
+            ("https://aaa:@a^**^@aaa.example/db", "a^**^"),
+            (
+                "redis://me@corp.example:hunter2secret@cache:6379",
+                "hunter2secret",
+            ),
+        ] {
+            let result = redact(url);
+            assert!(
+                !result.text().contains(password),
+                "{url} → {}",
+                result.text()
+            );
+        }
+
+        // And a URL with an `@` but no password is not mistaken for one.
+        let untouched = "ssh://git@github.com/acme/api.git and https://host:8080/a@b";
+        assert_eq!(redact(untouched).text(), untouched);
+    }
+
+    #[test]
+    fn a_google_key_ending_in_a_dash_is_removed() {
+        let key = format!("AIza{}-", "a".repeat(34));
+        let result = redact(&format!("GOOGLE_KEY {key} rest"));
+        assert!(!result.text().contains(&key), "{}", result.text());
+        assert!(
+            result.text().ends_with(" rest"),
+            "the character after the key is put back: {}",
+            result.text()
+        );
+    }
+
+    #[test]
+    fn a_quoted_value_is_removed_between_its_quotes() {
+        for (text, kept) in [
+            (r#"password = "correct horse battery""#, "horse"),
+            (r#"password="00a aaa""#, "aaa"),
+            ("api_key: 'ab, cd; ef'", "cd"),
+            (r#"{"clientSecret": "two words here", "id": 7}"#, "words"),
+        ] {
+            let result = redact(text);
+            assert!(!result.text().contains(kept), "{text} → {}", result.text());
+        }
+
+        let json = redact(r#"{"clientSecret": "two words here", "id": 7}"#);
+        assert!(json.text().contains(r#""id": 7"#), "{}", json.text());
     }
 
     #[test]

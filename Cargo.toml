@@ -125,6 +125,10 @@ tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
 
 # Testing.
 tempfile = "3"
+# Properties rather than examples, for the functions whose inputs arrive from
+# outside: paths an agent names, text a hook captures, queries somebody types.
+# Default features minus the fork/timeout machinery, which nothing here uses.
+proptest = { version = "1", default-features = false, features = ["std", "bit-set"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
