@@ -430,6 +430,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session produced, which is the opposite of what this is for
 
 ### Changed
+- **`target/` no longer grows with every edit.** It reached 27.6 GB on this
+  machine with dependency debug info already off, and 17.7 GB of that was
+  `target/debug/incremental`: 365 cache directories, one per distinct build of
+  a crate, none of them ever removed. The dev profile now builds this
+  workspace's crates with `debug = "line-tables-only"` and without incremental
+  compilation. Measured from clean — test build, clippy, then one edit and the
+  test build again — the tree is 1.88 GB where it was 4.09 GB, one edit adds
+  nothing where it added 0.74 GB, and the clean build takes 66 s where it took
+  77 s. The cost is about three seconds on a rebuild after an edit to a crate
+  most of the workspace depends on; backtraces keep their files and lines. The
+  measurements and the one line to revert are in `Cargo.toml`
 - `reconsolidate` says what else it wrote. Recompiling can now create pages in
   the three namespaces that outrank everything during retrieval, and the
   command reported one path per session — so a run that also wrote eleven
