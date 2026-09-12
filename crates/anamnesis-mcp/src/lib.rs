@@ -1429,10 +1429,7 @@ mod tests {
             "flaky-embed-1"
         }
         fn embed(&self, _text: &str) -> Result<Vec<f32>, String> {
-            match self
-                .calls
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            {
+            match self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
                 0 => Err("the model was still loading".to_owned()),
                 _ => Ok(vec![1.0, 0.0]),
             }
