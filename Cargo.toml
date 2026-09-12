@@ -138,9 +138,37 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"
 
+# The dev profile is tuned for how big `target/` gets, because on this project
+# that has been the problem twice: 40 GB on 2026-08-30, and 27.6 GB on
+# 2026-09-12 with the dependency setting below already in place. The second
+# time, 17.7 GB of it was `target/debug/incremental` — 365 cache directories,
+# 48 of them for `anamnesis-core` alone. Rustc keeps one per distinct build of a
+# crate (check, clippy, test, one per feature set a `-p` selection unifies to,
+# one per dependency bump) and nothing ever removes one that stops being used.
+#
+# Measured from clean on 2026-09-12, as `cargo test --workspace --no-run`, then
+# `cargo clippy --workspace --all-targets`, then one edit to
+# `anamnesis-store/src/query.rs` and the test build again:
+#
+#                                      test build     +clippy   after one edit
+#   debug = true, incremental           77 s 2.92 GB  3.35 GB   9 s  4.09 GB
+#   debug = "line-tables-only"          72 s 2.18 GB  2.61 GB   8 s  2.98 GB
+#   line-tables-only, no incremental    66 s 1.67 GB  1.88 GB  11 s  1.88 GB
+#
+# The last row is what ships. One edit grew the first tree by 0.74 GB and the
+# last by nothing, and the clean build is faster, not slower. What it costs is
+# about three seconds on a rebuild after touching a crate most of the workspace
+# depends on. If that ever matters more than the disk, `incremental = true` is
+# the one line to change back — and `cargo sweep` (see the note below) is then
+# what keeps the directory from growing without end.
+#
+# `line-tables-only` keeps what a backtrace needs, a file and a line for every
+# frame of this repository's code. What it drops is variable inspection in a
+# debugger, which is not how anything here has been debugged.
 [profile.dev]
 opt-level = 0
-debug = true
+debug = "line-tables-only"
+incremental = false
 
 # Dependencies build without debug info, which this project's own crates keep.
 # Measured on a clean build: `target/debug/deps` was 3.3 GB of a 4.2 GB tree,
@@ -154,5 +182,9 @@ debug = true
 # a file and a line. What is given up is inspecting a variable inside a
 # dependency, which is not how anything here has ever been debugged. CI gets
 # it too: every job saves and restores this tree through `rust-cache`.
+#
+# Neither setting removes artifacts a dependency bump leaves behind in
+# `target/debug/deps`. `cargo install cargo-sweep`, then `cargo sweep --time 14`
+# from the repository root, does.
 [profile.dev.package."*"]
 debug = false
