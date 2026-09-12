@@ -742,6 +742,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `Referrer-Policy: no-referrer`. The one visible change: an image a page
   links from somewhere else is no longer fetched when the page is opened in
   `/ui`, since that request would tell its owner which page was read, and when
+- **Three shapes of secret went through redaction untouched**, and every one
+  of them was found by a property test rather than a leak. Redaction runs
+  before anything is written to `raw/`, the append-only copy that outlives the
+  index, so a miss there is permanent. A quoted value stopped at its first
+  space: `password="00a aaa"` matched nothing at all, because the first word
+  was under the six-character floor, and `password = "correct horse battery"`
+  kept everything after `correct`. A Google API key ending in `-` — about one
+  in sixty-four — failed the rule's closing word boundary and passed whole. And
+  a URL password was cut at its first `@`, so `postgres://app:p@ssw0rd@db` kept
+  `ssw0rd`, and a password beginning with `@` kept all of itself. Quoted values
+  are now redacted between their quotes, the key's end is a character that
+  cannot continue it, and URL credentials run to the last `@` before the host
 
 ## [1.0.0] - 2026-09-06
 
