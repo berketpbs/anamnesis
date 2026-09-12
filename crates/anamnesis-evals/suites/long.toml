@@ -50,6 +50,34 @@ limit = 5
 # The labels are defined in `retrieval.toml`.
 categories = ["keyword", "natural", "paraphrase", "symptom"]
 
+# Measured on the first run, without vectors, then rounded down. A floor, not a
+# target — and a low one, which is the point of the suite rather than a problem
+# with it.
+#
+# The first run scored **hit@1 0.500, MRR 0.562, NDCG@5 0.593, recall 0.688**.
+# Every `keyword` question came back first; full text reads a whole page, and a
+# word two hundred words down is as findable as one in the title. The shortfall
+# is everywhere else, and worst where the vector stream was supposed to help:
+# `paraphrase` answered none of its four in first place and found one at all.
+# Nothing came back for five questions — three of the four deep paraphrases,
+# the dawn resets, and one guard.
+#
+# **With vectors it scored lower: hit@1 0.312, MRR 0.414, NDCG@5 0.466, recall
+# 0.625.** Nine of the seventeen pages were truncated, the least-read embedded
+# from 24% of its 537 tokens. `--compare vectors=0` under `--embed` says what
+# the stream is worth here: removing it improved six questions and cost none.
+# On its own it scored MRR 0.052. On pages like these
+# the truncated vector is not a weak signal but a wrong one: it ranks each long
+# page by an opening that is about something else, and every one of those votes
+# goes to a page that is not the answer.
+#
+# The bar is set on the run without vectors because that is the run CI makes.
+[thresholds]
+min_hit1 = 0.5
+min_mrr = 0.56
+min_ndcg = 0.59
+min_recall = 0.68
+
 # ---------------------------------------------------------------------------
 # The corpus. Seventeen pages: nine long, eight short.
 #

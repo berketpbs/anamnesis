@@ -189,8 +189,9 @@ Small, and everything after it depends on it.
   scored hit@1 0.938 / MRR 0.969 / NDCG@5 0.977 / recall 1.000, and its whole
   shortfall is `keyword` (0.800) — the opposite of `crowded`, where the whole
   shortfall is `paraphrase`. Two corpora disagreeing about which kind of
-  question is hard is worth more than either figure on its own. Growing the set
-  beyond forty-one questions is still open.
+  question is hard is worth more than either figure on its own. *A fourth
+  frozen suite, `long`, brings the set to fifty-seven* — see Phase 3 for why it
+  was written and what its first run found. Growing it further is still open.
 - ~~Make the fused score **show its working**.~~ **Landed** in #179.
   `memory_query` takes `explain` and reports, per hit, each stream's rank, what
   that rank contributed, the summed fusion, and the standing multiplier. Every
@@ -313,6 +314,32 @@ What has to come first is a suite whose answers sit past the first 128 tokens of
 long pages, frozen before it is scored — or the restored-snapshot run from
 Phase 1, which would bring 43 such pages with it.
 
+*That suite now exists*: `long.toml`, sixteen questions over seventeen pages of
+a field-station fleet, committed before its first run. Twelve questions are
+deep — the answer is a long page, and a test holds every one of them to naming
+nothing that appears in the part of that page the model reads. Four are guards,
+where a short page answers and a long one says the same words further down,
+because anything that helps retrieval see the bottom of long pages will also
+teach it to prefer long pages, and those four are where that shows.
+
+Its first run is the baseline this phase was missing, and it is lower than the
+argument above expected in a specific way. Without vectors: hit@1 0.500, MRR
+0.562, recall 0.688, with every keyword question answered first and `paraphrase`
+answering none. **With vectors, worse: hit@1 0.312, MRR 0.414.** Removing the
+stream improves six questions and costs none. The truncated vector is not a weak
+signal on these pages but a wrong one — it scores each long page by an opening
+that is about something else — and at weight 1.0 it outvotes full text, which
+had the answers.
+
+That reorders the options. An abstract stream is still the fix the argument
+names, and it is now measurable in both directions. But it is not the only
+candidate, and the cheapest is not a new stream at all: a vector that
+`page_embed_failures` already records as standing for 24% of its page could
+count for less than one that stands for all of it. Any of them lands only with
+`--compare` against `long` *and* the three suites of short pages beside it,
+since the guards here are one half of the cost and the short suites are the
+other.
+
 The same run said something about the weight, too. `vectors = 1.0` is the one
 `Tuning` value still marked as standing on an argument, and `--compare
 vectors=0` under `--embed` is its first paired measurement: level on `retrieval`
@@ -321,7 +348,9 @@ stream on, `customer came back signed out after paying` falls 1 → 3 — that n
 to MRR 0.969 → 0.958 and takes the suite below its own bar of 0.960. One trade
 on sixteen questions is not a verdict on the weight. It is a reason not to call
 the weight settled, and a warning that the adversarial bars were set on runs
-without vectors.
+without vectors. `long` since added the other half of the evidence: six
+questions up and none down with the stream removed. On short pages the weight
+is a trade; on long ones it is a cost.
 
 **Session-recall routing: probably never**, for the reason in finding 2.
 

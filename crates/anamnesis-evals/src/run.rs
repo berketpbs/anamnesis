@@ -74,11 +74,12 @@ pub struct Report {
 ///
 /// On the report because a vector score is a claim about two things at once —
 /// the stream, and what the stream was given — and a suite whose pages all fit
-/// the model's window cannot say anything about pages that do not. On
-/// 2026-09-12 every page in all three shipped suites fit, while 43 of the 49
-/// pages in this project's own wiki did not. A change to how long pages are
-/// embedded would have scored identically before and after on every suite
-/// here, and read as a change that did nothing.
+/// the model's window cannot say anything about pages that do not. When this
+/// was added, every page in the three suites that then shipped fit, while 43 of
+/// the 49 pages in this project's own wiki did not. A change to how long pages
+/// are embedded would have scored identically before and after on every one of
+/// them, and read as a change that did nothing — which is why `long.toml`
+/// exists.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VectorCoverage {
     /// The model that embedded the corpus.

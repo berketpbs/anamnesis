@@ -414,7 +414,7 @@ Everything else in the workspace is tested for being *correct*. This is the
 only thing that asks whether memory is any *good*: whether the page that
 answers a question comes back, and comes back near the top.
 
-Three suites ship. `retrieval` asks whether an answer is *reachable*: ten
+Four suites ship. `retrieval` asks whether an answer is *reachable*: ten
 pages, sparse links, mostly one right answer. `crowded` asks whether it *wins*:
 twenty-two pages, a plausible competitor for most questions, half the answers
 on pages with no authority at all, and a link cluster dense enough to offer
@@ -435,6 +435,17 @@ the sound reasoning that a second corpus makes a fitted gain visible — a
 defensible trade that still cost that set some of its independence. This one
 keeps all of it, so a case that fails here is a finding about retrieval rather
 than a threshold to lower.
+
+`long` asks what the other three structurally cannot: what happens when the
+answer is past the part of a page the embedding model reads. Every page in the
+first three is shorter than the default model's 128-token window, so their
+vector stream always sees pages whole; a real wiki's does not. Seventeen pages
+of a field-station fleet, nine of them long in the shapes the consolidator
+writes — a session page that reaches its decision halfway down, a postmortem
+that opens on the timeline — and sixteen questions. Twelve are deep, and a test
+holds each to naming nothing in the part of its answer the model reads; four
+are guards, answered by a short page that a long one echoes. Frozen before it
+was scored, like `adversarial`.
 
 It earned that role immediately. Under the constants retrieval shipped with,
 `crowded` scored MRR 0.436 / recall 0.533 while plain full-text search alone

@@ -183,8 +183,7 @@ mod tests {
 
         let mut deep = 0;
         for case in &suite.cases {
-            let answers: Vec<&FixturePage> =
-                case.relevant.iter().map(|path| page(path)).collect();
+            let answers: Vec<&FixturePage> = case.relevant.iter().map(|path| page(path)).collect();
             if !answers.iter().all(|answer| words(answer).len() > WINDOW) {
                 continue;
             }
