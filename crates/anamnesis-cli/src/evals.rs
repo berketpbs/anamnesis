@@ -359,6 +359,10 @@ fn print_report(report: &anamnesis_evals::Report, source: &str, verbose: bool) {
         println!("   {label:<8}{value:.3}  {}", describe_bar(value, bar));
     }
 
+    if let Some(vectors) = &report.vectors {
+        print_vector_coverage(vectors);
+    }
+
     print_categories(report);
 
     // Printed whether or not anyone asked, and in two lists rather than one.
@@ -394,6 +398,45 @@ fn print_report(report: &anamnesis_evals::Report, source: &str, verbose: bool) {
     }
 
     println!();
+}
+
+/// What the vector stream was given to score.
+///
+/// Printed beside the numbers rather than under `--verbose`, because it changes
+/// what they mean. A suite whose pages all fit the model's window scored a
+/// stream that saw every page whole, which is not the stream a real wiki runs —
+/// and a run that does not say so invites exactly the reading that it is.
+fn print_vector_coverage(vectors: &anamnesis_evals::VectorCoverage) {
+    println!();
+    let mut line = format!(
+        "   Vectors {} of {} pages read whole by {}",
+        vectors.whole(),
+        vectors.pages,
+        vectors.model
+    );
+    if vectors.reaches_the_window() {
+        line.push_str(&format!(" · {} truncated", vectors.truncated.len()));
+    }
+    if vectors.failed > 0 {
+        line.push_str(&format!(" · {} without a vector", vectors.failed));
+    }
+    println!("{line}");
+
+    match vectors.truncated.first() {
+        Some(least) => println!(
+            "           least read: {} ({:.0}% of {} tokens)",
+            least.path,
+            least.overflow.covered() * 100.0,
+            least.overflow.tokens
+        ),
+        // Only when every page got a vector. A page that failed was never
+        // measured, so nothing is known about whether it would have fit.
+        None if vectors.failed == 0 => println!(
+            "   → no page here is longer than the model reads, so this suite cannot\n      \
+             measure anything about how long pages are embedded."
+        ),
+        None => {}
+    }
 }
 
 /// Every setting tried, best mean rank first.

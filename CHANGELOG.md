@@ -42,6 +42,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pages in the corpus both under 12%. `docs/DIRECTION.md` argued for a fifth
   retrieval stream on the strength of the wrong number; it now argues from the
   right one, which is four times stronger
+- `anamnesis eval --embed` now says **how much of the corpus the vectors read**:
+  `Vectors 22 of 22 pages read whole by …`, the least-read page when any was
+  truncated, and — when none was — that the suite cannot measure anything about
+  how long pages are embedded. It is the report the previous entry needed and
+  did not have. Run against the real model, **all fifty pages in the three
+  shipped suites fit its window**, against 43 of 49 in this project's wiki: a
+  change to how long pages are embedded (an abstract, chunking, a longer model)
+  would have scored identically before and after on every suite here, and read
+  as a change that did nothing. Read back from the rows indexing wrote rather
+  than counted again, so what is reported is what retrieval ran on
 - `anamnesis eval --compare rrf_k=5,links=0.5` scores what ships against a
   variant and **names every question that moved**. `docs/DIRECTION.md` adopts
   the rule that a retrieval change without a paired measurement does not land,
