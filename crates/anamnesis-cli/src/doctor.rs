@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use anamnesis_core::datadir::DataDir;
 use anamnesis_core::observation::{EventKind, RESULT_MARKER};
 use anamnesis_core::scope::resolve_scope;
-use anamnesis_store::{EmbedFailure, Store, SummarySource};
+use anamnesis_store::{EmbedFailure, EmbedFault, Store, SummarySource};
 
 use crate::hooks;
 
@@ -145,33 +145,54 @@ pub fn diagnose(symptoms: &Symptoms) -> Vec<Finding> {
     findings
 }
 
-/// Whether every page that should carry a vector does.
+/// Whether every page that should carry a vector carries a whole one.
 ///
 /// Silent by design when there is nothing wrong. An embedder is opt-in, and a
-/// project that never switched one on has no vectors, no failures, and no
+/// project that never switched one on has no vectors, no complaints, and no
 /// business being told about either — printing "0 pages failed to embed" to
 /// somebody who is not embedding is noise that trains people to skim.
+///
+/// Two faults, reported separately, because they are not the same news.
+///
+/// A page with no vector is absent from a stream — `Broken`, by the enum's own
+/// reading of "something is not being recorded at all". A page embedded from
+/// its first five hundred tokens is present in every stream and answering with
+/// part of itself, which is `Thin`: working, producing less than it could.
+/// Folding them together would rank the quieter one as an emergency and, worse,
+/// let one remedy stand in for two that share nothing.
 fn judge_embeddings(symptoms: &Symptoms) -> Vec<Finding> {
-    if symptoms.embed_failures.is_empty() {
-        return Vec::new();
-    }
+    let (truncated, failed): (Vec<&EmbedFailure>, Vec<&EmbedFailure>) = symptoms
+        .embed_failures
+        .iter()
+        .partition(|failure| failure.kind == EmbedFault::Truncated);
 
+    let mut findings = Vec::new();
+    if !failed.is_empty() {
+        findings.push(judge_failed(&failed));
+    }
+    if !truncated.is_empty() {
+        findings.push(judge_truncated(&truncated));
+    }
+    findings
+}
+
+/// Pages the embedder refused outright.
+fn judge_failed(failed: &[&EmbedFailure]) -> Finding {
     // One reason or several changes what to do next, so the verdict says which
     // rather than leaving it to be guessed from a count. A single recurring
     // error is a broken embedder; a spread of them is more likely the pages.
-    let mut reasons: Vec<&str> = symptoms
-        .embed_failures
+    let mut reasons: Vec<&str> = failed
         .iter()
         .map(|failure| failure.reason.as_str())
         .collect();
     reasons.sort_unstable();
     reasons.dedup();
 
-    let count = symptoms.embed_failures.len();
+    let count = failed.len();
     let pages = if count == 1 { "page" } else { "pages" };
-    let first = &symptoms.embed_failures[0];
+    let first = failed[0];
 
-    vec![Finding {
+    Finding {
         severity: Severity::Broken,
         subject: "embeddings",
         verdict: format!(
@@ -190,7 +211,49 @@ fn judge_embeddings(symptoms: &Symptoms) -> Vec<Finding> {
                 first.reason
             ),
         }),
-    }]
+    }
+}
+
+/// Pages longer than the model that embedded them.
+///
+/// The verdict leads with the *worst* page rather than the first, because the
+/// question somebody has is how bad this gets, and a list ordered by when it
+/// happened answers a different one.
+fn judge_truncated(truncated: &[&EmbedFailure]) -> Finding {
+    let count = truncated.len();
+    let pages = if count == 1 { "page" } else { "pages" };
+
+    let worst = truncated
+        .iter()
+        .max_by_key(|failure| failure.tokens.unwrap_or(0))
+        .expect("the caller checked this is not empty");
+    let budget = worst.budget.unwrap_or(0);
+    let detail = match (worst.tokens, worst.budget) {
+        (Some(tokens), Some(budget)) if tokens > budget => format!(
+            "worst is {} at {tokens} tokens against {budget}, so {} of it is outside its own vector",
+            worst.path,
+            tokens - budget
+        ),
+        _ => format!("worst is {}", worst.path),
+    };
+
+    Finding {
+        // Thin, not Broken. These pages have vectors and are whole in full
+        // text, entities and links; what they are is a fourth stream answering
+        // about part of them. Calling that broken would spend the word.
+        severity: Severity::Thin,
+        subject: "embeddings",
+        verdict: format!(
+            "{count} {pages} are embedded from only as much of themselves as the model \
+             could read ({detail})"
+        ),
+        remedy: Some(format!(
+            "nothing is lost from full-text, entity or link retrieval — only the vector \
+             stream sees part of these pages. A model with a longer window, or shorter \
+             pages, is the fix; `{}`-token inputs are what the current one reads",
+            budget
+        )),
+    }
 }
 
 /// Whether the harnesses are wired for every moment anamnesis records.
@@ -632,11 +695,23 @@ mod tests {
 
     fn embed_failure(path: &str, reason: &str) -> EmbedFailure {
         EmbedFailure {
+            kind: EmbedFault::Failed,
+            tokens: None,
+            budget: None,
             path: anamnesis_core::page::PagePath::parse(path).expect("path"),
             title: "A page".to_owned(),
             model: "all-MiniLM-L6-v2".to_owned(),
             at: "2026-09-11T12:00:00Z".to_owned(),
             reason: reason.to_owned(),
+        }
+    }
+
+    fn embed_truncation(path: &str, tokens: usize) -> EmbedFailure {
+        EmbedFailure {
+            kind: EmbedFault::Truncated,
+            tokens: Some(tokens),
+            budget: Some(512),
+            ..embed_failure(path, "longer than the window")
         }
     }
 
@@ -833,6 +908,78 @@ mod tests {
             "{embeddings:#?}"
         );
         assert!(embeddings.verdict.contains("1 page"), "{embeddings:#?}");
+    }
+
+    /// A page embedded from its first five hundred tokens is in every stream
+    /// and answering with part of itself. That is `Thin` — working, producing
+    /// less than it could — and calling it `Broken` would spend the word that
+    /// means a page is absent.
+    #[test]
+    fn a_truncated_page_is_thin_rather_than_broken() {
+        let mut symptoms = wired("claude-code", &EVERY_MOMENT);
+        symptoms.embed_failures = vec![embed_truncation("gotchas/long.md", 1341)];
+
+        let finding = diagnose(&symptoms)
+            .into_iter()
+            .find(|f| f.subject == "embeddings")
+            .expect("an embeddings finding");
+
+        assert_eq!(finding.severity, Severity::Thin);
+        assert!(finding.verdict.contains("gotchas/long.md"), "{finding:#?}");
+        assert!(finding.verdict.contains("1341"), "{finding:#?}");
+        // 1341 − 512: the part of the page outside its own vector, which is
+        // the number the reader is actually asking for.
+        assert!(finding.verdict.contains("829"), "{finding:#?}");
+        let remedy = finding.remedy.as_deref().expect("a remedy");
+        assert!(
+            remedy.contains("full-text"),
+            "the remedy has to say what is *not* lost: {remedy}"
+        );
+    }
+
+    /// Both faults at once is the interesting case, and the one a single
+    /// finding would have flattened: a project can have a page the embedder
+    /// refused and another it merely halved, and they share no remedy.
+    #[test]
+    fn a_failure_and_a_truncation_are_two_findings() {
+        let mut symptoms = wired("claude-code", &EVERY_MOMENT);
+        symptoms.embed_failures = vec![
+            embed_failure("notes/a.md", "no model loaded"),
+            embed_truncation("gotchas/long.md", 900),
+        ];
+
+        let found: Vec<Finding> = diagnose(&symptoms)
+            .into_iter()
+            .filter(|f| f.subject == "embeddings")
+            .collect();
+
+        assert_eq!(found.len(), 2, "{found:#?}");
+        assert!(found.iter().any(|f| f.severity == Severity::Broken));
+        assert!(found.iter().any(|f| f.severity == Severity::Thin));
+    }
+
+    /// The worst page, not the first one recorded. Somebody reading this is
+    /// asking how bad it gets, and a list ordered by when it happened answers
+    /// a different question.
+    #[test]
+    fn the_truncation_verdict_leads_with_the_worst_page() {
+        let mut symptoms = wired("claude-code", &EVERY_MOMENT);
+        symptoms.embed_failures = vec![
+            embed_truncation("notes/slightly-long.md", 600),
+            embed_truncation("gotchas/very-long.md", 2000),
+            embed_truncation("notes/also-long.md", 700),
+        ];
+
+        let finding = diagnose(&symptoms)
+            .into_iter()
+            .find(|f| f.subject == "embeddings")
+            .expect("finding");
+
+        assert!(finding.verdict.contains("3 pages"), "{finding:#?}");
+        assert!(
+            finding.verdict.contains("gotchas/very-long.md"),
+            "{finding:#?}"
+        );
     }
 
     /// One recurring error is a broken embedder; a spread of them is more

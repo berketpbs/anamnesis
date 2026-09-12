@@ -105,6 +105,10 @@ const SOURCES: &[(&str, &str)] = &[
         "V15__page_embed_failures",
         include_str!("../migrations/V15__page_embed_failures.sql"),
     ),
+    (
+        "V16__embed_failure_kind",
+        include_str!("../migrations/V16__embed_failure_kind.sql"),
+    ),
 ];
 
 /// The name refinery gives its own bookkeeping table.

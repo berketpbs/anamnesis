@@ -285,11 +285,23 @@ Then #672's two ideas become testable rather than fashionable.
 
 The **abstract stream** first. It contributes nothing until pages carry an
 abstract, it has no measured adversarial cost, and its rationale applies to us
-*more strongly* than to them: we embed `title + "\n\n" + body` as a single
-vector, and the default MiniLM embedder **silently truncates at 512 tokens**
-(`crates/anamnesis-llm/src/embed.rs`). A one-line summary would embed sharply
-where a long page currently embeds its first half and drops the rest without a
-word.
+*more strongly* than to them: we embed the title and body as a single vector,
+and the default MiniLM embedder silently truncates.
+
+**The number in this paragraph was wrong by a factor of four, and the correction
+makes the argument much stronger.** It said 512 tokens, taken from
+`config.json`'s `max_position_embeddings`. But `tokenizer.json` carries its own
+`truncation.max_length` of **128**, applied by `encode` before the clamp in
+`embed.rs` is ever reached — so that clamp is dead code for this model, and a
+page is read to its first 128 tokens. Measured against this project's own wiki
+once the counting was fixed: **43 of 49 pages truncated**, the longest embedded
+from about **8%** of itself, and the two most authoritative pages in the corpus
+— one `gotchas/`, one `decisions/` — both under 12%.
+
+So the vector stream, weighted 1.0 in the fusion, is answering about a tenth of
+most pages. A one-line abstract would embed sharply where a long page currently
+contributes its opening paragraph and drops the rest without a word. That is no
+longer an argument from a plausible mechanism; it is an argument from a count.
 
 **Session-recall routing: probably never**, for the reason in finding 2.
 

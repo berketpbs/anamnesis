@@ -17,7 +17,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anamnesis_core::embedding::Embed;
+use anamnesis_core::embedding::{Embed, Overflow};
 use candle_core::{Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config, DTYPE};
@@ -76,7 +76,31 @@ pub struct LocalEmbedder {
     /// The model's positional embedding table has exactly this many rows;
     /// tokenizing more text than this and handing it to `forward` would index
     /// past the end of that table rather than degrade gracefully.
+    ///
+    /// A backstop, and usually not the binding limit. See [`Self::window`].
     max_tokens: usize,
+    /// Tokens that actually reach the encoder.
+    ///
+    /// Two limits exist and only one of them bites. The positional table above
+    /// is one; the other is the `truncation` block inside `tokenizer.json`,
+    /// which for `all-MiniLM-L6-v2` says **128** — a quarter of the positional
+    /// limit, and applied by `encode` before anything here sees the ids. So
+    /// the clamp in `embed` is a backstop that never fires for this model, and
+    /// a page is read to its first 128 tokens rather than its first 512.
+    ///
+    /// Worth stating loudly because the number was wrong in this repository's
+    /// own documentation, by a factor of four, in the paragraph arguing for a
+    /// feature on the strength of it.
+    window: usize,
+    /// The same tokenizer with truncation switched off, kept only to count.
+    ///
+    /// [`Self::tokenizer`] cannot answer "how long was this really": it cuts
+    /// to `window` and reports the cut length, so asking it whether a text
+    /// overflowed gets `window` back every time and the answer is always no.
+    /// That is not a hypothetical — it is what the first version of
+    /// [`Embed::overflow`] here did, and it reported nothing on a wiki where
+    /// forty-three pages in forty-nine are over the line.
+    counter: Tokenizer,
 }
 
 impl LocalEmbedder {
@@ -115,6 +139,18 @@ impl LocalEmbedder {
             .map_err(|e| load(e.to_string()))?;
         let model = BertModel::load(vb, &config).map_err(|e| load(e.to_string()))?;
 
+        // Whichever of the two limits is smaller is the one a page meets.
+        let window = tokenizer
+            .get_truncation()
+            .map(|truncation| truncation.max_length)
+            .unwrap_or(config.max_position_embeddings)
+            .min(config.max_position_embeddings);
+
+        let mut counter = tokenizer.clone();
+        counter
+            .with_truncation(None)
+            .map_err(|e| load(e.to_string()))?;
+
         Ok(Self {
             model,
             tokenizer,
@@ -122,6 +158,8 @@ impl LocalEmbedder {
             model_id: model_id.to_owned(),
             dim: config.hidden_size,
             max_tokens: config.max_position_embeddings,
+            window,
+            counter,
         })
     }
 }
@@ -200,6 +238,23 @@ impl Embed for LocalEmbedder {
             .encode(text, true)
             .map_err(|error| EmbedError::Tokenize(error.to_string()).to_string())?;
 
+        // Said out loud at the moment it happens. The vector this returns is
+        // an ordinary vector and nothing downstream can tell that it stands
+        // for half a page, so the log is the first of two witnesses — the
+        // second is the row `Store::embed_page` writes from `overflow`.
+        // `encoding` has already been cut to `window`, so its length cannot
+        // report the overflow — `overflow` counts with the untruncated
+        // tokenizer, and this asks it rather than reinventing the comparison
+        // against a limit that never binds.
+        if let Some(over) = self.overflow(text) {
+            tracing::warn!(
+                tokens = over.tokens,
+                budget = over.budget,
+                model = %self.model_id,
+                "text is longer than the model can read; the vector stands for its first part only"
+            );
+        }
+
         let inference = || -> candle_core::Result<Tensor> {
             let ids = &encoding.get_ids()[..encoding.get_ids().len().min(self.max_tokens)];
             let input_ids = Tensor::new(ids, &self.device)?.unsqueeze(0)?;
@@ -222,6 +277,29 @@ impl Embed for LocalEmbedder {
         inference()
             .and_then(|tensor| tensor.to_vec1::<f32>())
             .map_err(|error| EmbedError::Inference(error.to_string()).to_string())
+    }
+
+    /// Counted with the tokenizer that will do the encoding, not estimated.
+    ///
+    /// The same `encode` call `embed` makes, so the number reported is the
+    /// number that was cut rather than a guess about it — a page of file
+    /// paths and identifiers tokenizes far denser than prose, and a
+    /// characters-over-three rule would quietly under-report exactly the
+    /// pages this codebase writes.
+    ///
+    /// A tokenizer that fails here is `None` rather than an error: this is
+    /// asked beside a successful embedding, and refusing to report an
+    /// overflow is not a reason to fail a write that already happened.
+    fn overflow(&self, text: &str) -> Option<Overflow> {
+        // The counting tokenizer, not the embedding one. The embedding
+        // tokenizer truncates and then reports the truncated length, so asking
+        // it how long the text was answers `window` for every text that
+        // overflowed and the comparison can never be true.
+        let tokens = self.counter.encode(text, true).ok()?.get_ids().len();
+        (tokens > self.window).then_some(Overflow {
+            tokens,
+            budget: self.window,
+        })
     }
 }
 
@@ -528,5 +606,28 @@ mod tests {
         let huge = "the quick brown fox jumps over the lazy dog. ".repeat(200);
         let vector = embedder.embed(&huge).expect("embed a too-long input");
         assert_eq!(vector.len(), 384);
+
+        // And it must say so. For most of this crate's life the assertion
+        // above was the whole story, which made "the vector is fine" and "the
+        // vector stands for a fifth of the text" the same observation.
+        let over = embedder
+            .overflow(&huge)
+            .expect("a text this long does not fit");
+        assert_eq!(over.budget, 512);
+        assert!(over.tokens > over.budget, "{over:?}");
+        assert!(over.dropped() > 0);
+        assert!(over.covered() < 1.0);
+
+        // Counted with the real tokenizer, so the number is what was cut
+        // rather than a guess about it.
+        let encoded = embedder
+            .tokenizer
+            .encode(huge.as_str(), true)
+            .expect("tokenize");
+        assert_eq!(over.tokens, encoded.get_ids().len());
+
+        // A text that fits reports nothing, which is what makes the report
+        // above mean something.
+        assert!(embedder.overflow("a short page").is_none());
     }
 }

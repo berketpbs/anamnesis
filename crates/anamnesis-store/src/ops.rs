@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use anamnesis_core::embedding::{Embed, page_text};
+use anamnesis_core::embedding::{Embed, Overflow, page_text};
 use anamnesis_core::handoff::{Handoff, HandoffState, Slot};
 use anamnesis_core::ids::{HandoffId, ObservationId, PageId, ProjectId, SessionId, WorkstreamId};
 use anamnesis_core::observation::{BoundedBody, EventKind, Observation, ToolRef};
@@ -74,6 +74,41 @@ impl SummarySource {
     }
 }
 
+/// What is wrong with a page's vector.
+///
+/// Two kinds rather than one table each, because the question they answer is
+/// the same — is this page's vector what the page says? — and a reader who had
+/// to look in two places for that would look in one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbedFault {
+    /// No vector at all: the embedder refused, or could not be reached.
+    Failed,
+    /// A vector, standing for only as much of the page as the model could read.
+    Truncated,
+}
+
+impl EmbedFault {
+    /// How the kind is spelled in the database.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Failed => "failed",
+            Self::Truncated => "truncated",
+        }
+    }
+
+    /// Read a kind back, treating anything unrecognised as a plain failure.
+    ///
+    /// A row written by a newer build naming a kind this one has never heard
+    /// of is still a complaint about a vector, and reporting it as the older
+    /// kind says less than the truth rather than something false.
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            "truncated" => Self::Truncated,
+            _ => Self::Failed,
+        }
+    }
+}
+
 /// A page that was meant to have a vector and does not.
 ///
 /// The row exists because the alternative was a log line. A page whose
@@ -83,6 +118,8 @@ impl SummarySource {
 /// exists to make loud.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbedFailure {
+    /// Whether the page has no vector, or one that stands for part of it.
+    pub kind: EmbedFault,
     /// Which page.
     pub path: PagePath,
     /// Its title, so a report can name it the way a person would.
@@ -96,6 +133,12 @@ pub struct EmbedFailure {
     /// between a model that would not load and a page that would not fit, and
     /// a count alone cannot tell those apart.
     pub reason: String,
+    /// What the page tokenized to, on a `Truncated` row. `None` on a failure:
+    /// a page that never reached the model has no length the model would
+    /// recognise, and a guess here is a number somebody later quotes.
+    pub tokens: Option<usize>,
+    /// What the model could read, on a `Truncated` row.
+    pub budget: Option<usize>,
 }
 
 /// One row of `anamnesis sessions`: what a session was, without its
@@ -442,11 +485,26 @@ impl Store {
         match embedder.embed(&text) {
             Ok(vector) => {
                 self.set_page_embedding(page.id, embedder.model(), &vector)?;
-                // The page has a vector now, so whatever was recorded about it
-                // not having one is no longer true. Clearing here is what keeps
-                // this table the negative of `page_embeddings` rather than a
-                // log of everything that ever went wrong.
+                // A vector exists, so whatever was recorded about there being
+                // none is no longer true — and it has to go before the line
+                // below can write a different complaint about the same page.
                 self.clear_embed_failure(page.id, embedder.model())?;
+
+                // Then the harder question, which an `Ok` alone cannot answer:
+                // does that vector stand for the whole page? A model with a
+                // fixed window does not refuse a long page, it embeds the part
+                // it can reach, and what comes back is an ordinary vector. The
+                // embedder is asked rather than the length guessed here,
+                // because only it knows its own tokenizer and its own limit.
+                if let Some(over) = embedder.overflow(&text) {
+                    tracing::warn!(
+                        path = %page.path,
+                        tokens = over.tokens,
+                        budget = over.budget,
+                        "page is longer than the model can read; its vector stands for the first part only"
+                    );
+                    self.record_embed_truncation(page.id, embedder.model(), over)?;
+                }
             }
             Err(error) => {
                 tracing::warn!(
@@ -470,16 +528,53 @@ impl Store {
     /// and an unbounded attempt log would make one unreachable embedder look
     /// like a growing catastrophe.
     pub fn record_embed_failure(&self, page_id: PageId, model: &str, reason: &str) -> Result<()> {
+        self.write_embed_complaint(page_id, model, EmbedFault::Failed, reason, None)
+    }
+
+    /// Record that a page was embedded from only as much of itself as fit.
+    ///
+    /// Not a failure and filed beside one anyway, because the question both
+    /// answer is the same: is this page's vector what the page says? A caller
+    /// that had to look in two places for that would look in one.
+    pub fn record_embed_truncation(
+        &self,
+        page_id: PageId,
+        model: &str,
+        over: Overflow,
+    ) -> Result<()> {
+        let reason = format!(
+            "{} tokens against a {}-token window; {} did not reach the model ({:.0}% of the page is in the vector)",
+            over.tokens,
+            over.budget,
+            over.dropped(),
+            over.covered() * 100.0
+        );
+        self.write_embed_complaint(page_id, model, EmbedFault::Truncated, &reason, Some(over))
+    }
+
+    /// The one writer both complaints go through.
+    fn write_embed_complaint(
+        &self,
+        page_id: PageId,
+        model: &str,
+        kind: EmbedFault,
+        reason: &str,
+        over: Option<Overflow>,
+    ) -> Result<()> {
         let conn = self.connection();
         conn.execute(
-            "INSERT INTO page_embed_failures (page_id, model, at, reason)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT (page_id, model) DO UPDATE SET at = ?3, reason = ?4",
+            "INSERT INTO page_embed_failures (page_id, model, at, reason, kind, tokens, budget)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT (page_id, model) DO UPDATE SET
+                 at = ?3, reason = ?4, kind = ?5, tokens = ?6, budget = ?7",
             params![
                 page_id.to_string(),
                 model,
                 Timestamp::now().to_string(),
-                reason
+                reason,
+                kind.as_str(),
+                over.map(|over| over.tokens as i64),
+                over.map(|over| over.budget as i64),
             ],
         )?;
         Ok(())
@@ -503,7 +598,7 @@ impl Store {
     pub fn embed_failures(&self, project_id: ProjectId) -> Result<Vec<EmbedFailure>> {
         let conn = self.connection();
         let mut statement = conn.prepare(
-            "SELECT p.path, p.title, f.model, f.at, f.reason
+            "SELECT p.path, p.title, f.model, f.at, f.reason, f.kind, f.tokens, f.budget
              FROM page_embed_failures f
              JOIN pages p ON p.id = f.page_id
              WHERE p.project_id = ?1
@@ -516,13 +611,19 @@ impl Store {
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+                row.get::<_, Option<i64>>(7)?,
             ))
         })?;
 
         let mut failures = Vec::new();
         for row in rows {
-            let (path, title, model, at, reason) = row?;
+            let (path, title, model, at, reason, kind, tokens, budget) = row?;
             failures.push(EmbedFailure {
+                kind: EmbedFault::parse(&kind),
+                tokens: tokens.map(|n| n as usize),
+                budget: budget.map(|n| n as usize),
                 path: crate::convert::parse_page_path(&path),
                 title,
                 model,
@@ -1971,6 +2072,135 @@ mod tests {
         let failures = store.embed_failures(project).expect("failures");
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].model, "broken");
+    }
+
+    /// An embedder with a window, which is every real one.
+    ///
+    /// Succeeds at embedding — that is the point. The vector comes back
+    /// ordinary and nothing about it says it stands for a third of the page.
+    struct NarrowEmbedder {
+        budget: usize,
+    }
+
+    impl anamnesis_core::embedding::Embed for NarrowEmbedder {
+        fn model(&self) -> &str {
+            "narrow-1"
+        }
+        fn embed(&self, _text: &str) -> std::result::Result<Vec<f32>, String> {
+            Ok(vec![1.0, 0.0])
+        }
+        fn overflow(&self, text: &str) -> Option<Overflow> {
+            // One token per whitespace-separated word: enough to be a real
+            // count rather than a constant, and nothing here is testing a
+            // tokenizer.
+            let tokens = text.split_whitespace().count();
+            (tokens > self.budget).then_some(Overflow {
+                tokens,
+                budget: self.budget,
+            })
+        }
+    }
+
+    /// The fault this migration exists for: the page is embedded, the vector
+    /// is fine to look at, and it stands for part of the page. Before this,
+    /// nothing anywhere said so.
+    #[test]
+    fn a_page_longer_than_the_model_is_recorded_as_truncated() {
+        let (_dir, store, project, _workspace) = fixture();
+        let mut page = indexable_page(project);
+        page.body = "word ".repeat(50);
+
+        store
+            .index_page(
+                project,
+                &page,
+                &[],
+                Some(&NarrowEmbedder { budget: 10 }),
+                now(),
+            )
+            .expect("index");
+
+        let complaints = store.embed_failures(project).expect("failures");
+        assert_eq!(complaints.len(), 1);
+        assert_eq!(complaints[0].kind, EmbedFault::Truncated);
+        assert_eq!(complaints[0].budget, Some(10));
+        assert!(complaints[0].tokens.is_some_and(|tokens| tokens > 10));
+        assert!(
+            complaints[0].reason.contains("did not reach the model"),
+            "{:?}",
+            complaints[0].reason
+        );
+    }
+
+    /// And the vector is still there. A truncation is a report about a page
+    /// that was embedded, not a reason to have refused it.
+    #[test]
+    fn a_truncated_page_still_has_its_vector() {
+        let (_dir, store, project, _workspace) = fixture();
+        let mut page = indexable_page(project);
+        page.body = "word ".repeat(50);
+
+        store
+            .index_page(
+                project,
+                &page,
+                &[],
+                Some(&NarrowEmbedder { budget: 10 }),
+                now(),
+            )
+            .expect("index");
+
+        let conn = store.connection();
+        let vectors: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM page_embeddings WHERE page_id = ?1",
+                params![page.id.to_string()],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(vectors, 1, "the page has a vector and a complaint at once");
+    }
+
+    /// A page that shrinks below the window stops being reported, the same way
+    /// a page that starts embedding cleanly does.
+    #[test]
+    fn a_page_that_comes_back_within_the_window_stops_being_reported() {
+        let (_dir, store, project, _workspace) = fixture();
+        let mut page = indexable_page(project);
+        page.body = "word ".repeat(50);
+        store.upsert_page(&page, now()).expect("row");
+
+        store
+            .embed_page(&page, Some(&NarrowEmbedder { budget: 10 }))
+            .expect("embed");
+        assert_eq!(store.embed_failures(project).expect("f").len(), 1);
+
+        page.body = "short".to_owned();
+        store
+            .embed_page(&page, Some(&NarrowEmbedder { budget: 10 }))
+            .expect("embed");
+        assert!(
+            store.embed_failures(project).expect("f").is_empty(),
+            "the page fits now, so the complaint about it not fitting is false"
+        );
+    }
+
+    /// An embedder that does not know its own limit reports nothing, and that
+    /// silence must not be read as "it fits" — but it also must not invent a
+    /// complaint. Nothing is the honest answer, and the default gives it.
+    #[test]
+    fn an_embedder_that_cannot_say_reports_nothing() {
+        let (_dir, store, project, _workspace) = fixture();
+        let mut page = indexable_page(project);
+        page.body = "word ".repeat(5_000);
+
+        // `FakeEmbedder` never implemented `overflow`, so it takes the trait's
+        // default.
+        store
+            .index_page(project, &page, &[], Some(&FakeEmbedder), now())
+            .expect("index");
+
+        assert!(store.embed_failures(project).expect("f").is_empty());
     }
 
     /// Nothing to report is the normal state, and has to be distinguishable
