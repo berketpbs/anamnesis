@@ -65,6 +65,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   costs none: on pages like these the truncated vector scores an opening that is
   about something else, and at weight 1.0 it outvotes the full-text stream that
   had the answers
+- `memory_query` with `explain` reports **how much of a page its vector
+  stood for**: a `coverage` beside the vector stream's rank, `1.0` for a page
+  the model read whole and less for one it truncated. A vector rank of one on a
+  page embedded from a quarter of itself is a different fact from the same rank
+  on a page read in full, and the working said nothing to tell them apart. The
+  same share is behind a new tuning, `vector_coverage`, which scales each
+  page's vector contribution by it — and which ships at `0`, because
+  measuring it said to. Under `anamnesis eval --embed --compare
+  vector_coverage=1`, the `long` suite fell from hit@1 0.312 to 0.188 with seven
+  questions worse and none better, every one of them answered by a long page:
+  a partial vector was supporting its own page, not undermining it. What the
+  suite loses to vectors is the full-weight vote for short pages read whole,
+  and that is recorded in `docs/DIRECTION.md` as what the next attempt has to
+  address
 - `anamnesis eval --compare rrf_k=5,links=0.5` scores what ships against a
   variant and **names every question that moved**. `docs/DIRECTION.md` adopts
   the rule that a retrieval change without a paired measurement does not land,

@@ -109,8 +109,14 @@ pub struct StreamRank {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rank: Option<usize>,
     /// What that rank contributed to the fused score: `weight / (k + rank)`,
-    /// and zero when the stream missed.
+    /// and zero when the stream missed. For the vector stream, also multiplied
+    /// by `coverage` raised to the tuning's `vector_coverage` exponent.
     pub contribution: f64,
+    /// Vector stream only: the share of the page its vector was embedded from.
+    /// `1.0` for a page that fit the model; less for one it truncated, whose
+    /// vector stands for its opening and not for the rest of it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<f64>,
 }
 
 /// The working behind one hit's score.
@@ -182,13 +188,30 @@ impl StreamWorking {
                 contribution: rank
                     .map(|rank| weight / (self.tuning.rrf_k + rank as f64))
                     .unwrap_or(0.0),
+                coverage: None,
             }
         };
 
         let fts = rank_in(&streams.fts, weights[0]);
         let entity = rank_in(&streams.entity, weights[1]);
         let links = rank_in(&streams.links, weights[2]);
-        let vectors = rank_in(&streams.vectors, weights[3]);
+        // The vector stream is the one whose ranks are not all worth the same:
+        // fusion scales each by how much of its page the vector read, and an
+        // explanation that left that out would report a contribution the
+        // ranking never used.
+        let vectors = {
+            let mut vectors = rank_in(&streams.vectors, weights[3]);
+            if let Some(rank) = vectors.rank {
+                let coverage = streams
+                    .vector_coverage
+                    .get(rank - 1)
+                    .copied()
+                    .unwrap_or(1.0);
+                vectors.contribution *= self.tuning.vector_scale(coverage);
+                vectors.coverage = Some(coverage);
+            }
+            vectors
+        };
         let fused =
             fts.contribution + entity.contribution + links.contribution + vectors.contribution;
         let authority =
@@ -1343,6 +1366,76 @@ mod tests {
         fn embed(&self, _text: &str) -> Result<Vec<f32>, String> {
             Ok(vec![1.0, 0.0])
         }
+    }
+
+    /// Reads a fixed number of words and says so, the way the local model
+    /// reads a fixed number of tokens.
+    struct NarrowEmbedder {
+        budget: usize,
+    }
+
+    impl Embedder for NarrowEmbedder {
+        fn dimension(&self) -> usize {
+            2
+        }
+    }
+
+    impl anamnesis_core::embedding::Embed for NarrowEmbedder {
+        fn model(&self) -> &str {
+            "narrow-embed-1"
+        }
+        fn embed(&self, _text: &str) -> Result<Vec<f32>, String> {
+            Ok(vec![1.0, 0.0])
+        }
+        fn overflow(&self, text: &str) -> Option<anamnesis_core::embedding::Overflow> {
+            let tokens = text.split_whitespace().count();
+            (tokens > self.budget).then_some(anamnesis_core::embedding::Overflow {
+                tokens,
+                budget: self.budget,
+            })
+        }
+    }
+
+    /// The explanation reports what the ranking used, or it is a second
+    /// opinion about the ranking. A vector embedded from a quarter of its page
+    /// is scaled by fusion; the working has to carry the same quarter and the
+    /// same scaled contribution, whatever the shipped exponent is.
+    #[test]
+    fn the_working_reports_what_a_partial_vector_was_worth() {
+        let (_repo, _data, server) = harness();
+        let server = server.with_embedder(Some(
+            Arc::new(NarrowEmbedder { budget: 10 }) as Arc<dyn Embedder>
+        ));
+        // One word of title and thirty-nine of body: forty words, ten read.
+        write_page(&server, "notes/long.md", "Long", &"word ".repeat(39));
+
+        let found = server
+            .query(QueryRequest {
+                text: "quarterly filing paperwork".to_owned(),
+                limit: None,
+                explain: Some(true),
+            })
+            .expect("query");
+        let working = found.hits[0].explain.as_ref().expect("explain");
+
+        assert_eq!(working.vectors.rank, Some(1));
+        let coverage = working
+            .vectors
+            .coverage
+            .expect("a vector rank carries the share its vector read");
+        assert!((coverage - 0.25).abs() < 1e-12, "{coverage}");
+
+        let tuning = Tuning::default();
+        let expected = tuning.vectors * tuning.vector_scale(coverage) / (tuning.rrf_k + 1.0);
+        assert!(
+            (working.vectors.contribution - expected).abs() < 1e-12,
+            "{working:?}"
+        );
+        assert!(
+            (working.fused - working.vectors.contribution).abs() < 1e-12,
+            "only the vector stream found this page: {working:?}"
+        );
+        assert_eq!(working.fts.coverage, None, "only the vector stream has one");
     }
 
     struct BrokenEmbedder;

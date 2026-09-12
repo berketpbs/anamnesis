@@ -17,7 +17,7 @@ use std::collections::HashMap;
 
 use anamnesis_core::ids::{PageId, ProjectId};
 use anamnesis_core::page::{Entity, PagePath, PageStatus, Tier};
-use anamnesis_core::retrieval::{RRF_K, Tuning, fuse_and_rank, fuse_weighted, tokenize};
+use anamnesis_core::retrieval::{RRF_K, Tuning, fuse_and_rank, fuse_scaled, tokenize};
 use jiff::Timestamp;
 use rusqlite::types::Value;
 use rusqlite::{OptionalExtension, params, params_from_iter};
@@ -88,7 +88,7 @@ pub struct PageHit {
 /// entity stream earns its place, whether link neighbours help or just add
 /// noise — and none of those questions can be answered from a fused list,
 /// where a page found by three streams and a page found by one look the same.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct StreamBreakdown {
     /// Full-text matches, best first.
     pub fts: Vec<PageId>,
@@ -98,6 +98,11 @@ pub struct StreamBreakdown {
     pub links: Vec<PageId>,
     /// Cosine neighbours of the query vector. Empty without an embedding.
     pub vectors: Vec<PageId>,
+    /// For each page in `vectors`, in the same order, the share of the page
+    /// its vector was embedded from: `1.0` for a page that fit the model, less
+    /// for one it truncated. What an explanation needs to say what a vector
+    /// rank was actually worth under [`Tuning::vector_coverage`].
+    pub vector_coverage: Vec<f64>,
 }
 
 impl StreamBreakdown {
@@ -182,20 +187,25 @@ impl Store {
         seeds.truncate(depth);
         let links = self.link_stream(project_id, &seeds, depth, tuning.rrf_k)?;
 
-        let vectors = match embedding {
-            Some((model, vector)) if !vector.is_empty() => {
-                self.vector_stream(project_id, model, vector, depth)?
-            }
-            _ => Vec::new(),
+        let (vectors, coverage): (Vec<PageId>, Vec<f64>) = match embedding {
+            Some((model, vector)) if !vector.is_empty() => self
+                .vector_stream(project_id, model, vector, depth)?
+                .into_iter()
+                .unzip(),
+            _ => (Vec::new(), Vec::new()),
         };
+        let vector_scales: Vec<f64> = coverage
+            .iter()
+            .map(|share| tuning.vector_scale(*share))
+            .collect();
 
         let weights = tuning.weights();
-        let fused = fuse_weighted(
+        let fused = fuse_scaled(
             &[
-                (fts.as_slice(), weights[0]),
-                (entity.as_slice(), weights[1]),
-                (links.as_slice(), weights[2]),
-                (vectors.as_slice(), weights[3]),
+                (fts.as_slice(), weights[0], &[][..]),
+                (entity.as_slice(), weights[1], &[][..]),
+                (links.as_slice(), weights[2], &[][..]),
+                (vectors.as_slice(), weights[3], vector_scales.as_slice()),
             ],
             tuning.rrf_k,
         );
@@ -280,11 +290,12 @@ impl Store {
         seeds.truncate(tuning.candidates);
         let links = self.link_stream(project_id, &seeds, limit, tuning.rrf_k)?;
 
-        let vectors = match embedding {
-            Some((model, vector)) if !vector.is_empty() => {
-                self.vector_stream(project_id, model, vector, limit)?
-            }
-            _ => Vec::new(),
+        let (vectors, vector_coverage): (Vec<PageId>, Vec<f64>) = match embedding {
+            Some((model, vector)) if !vector.is_empty() => self
+                .vector_stream(project_id, model, vector, limit)?
+                .into_iter()
+                .unzip(),
+            _ => (Vec::new(), Vec::new()),
         };
 
         Ok(StreamBreakdown {
@@ -292,6 +303,7 @@ impl Store {
             entity,
             links,
             vectors,
+            vector_coverage,
         })
     }
 
@@ -395,7 +407,13 @@ impl Store {
     }
 
     /// Vector stream: pages embedded under `model`, ranked by cosine
-    /// similarity to `query_vector`.
+    /// similarity to `query_vector`, each with the share of the page its
+    /// vector was embedded from.
+    ///
+    /// The share comes from the truncation `index_page` recorded for that page
+    /// under that model, and is `1.0` where none was — a page that fit, or one
+    /// written before anything recorded truncation, which is read as whole
+    /// rather than guessed at.
     ///
     /// Brute force — every embedded page in the project is scored on every
     /// call. Fine at the scale this system targets (a project's wiki, not a
@@ -407,27 +425,41 @@ impl Store {
         model: &str,
         query_vector: &[f32],
         limit: usize,
-    ) -> Result<Vec<PageId>> {
+    ) -> Result<Vec<(PageId, f64)>> {
         let conn = self.connection();
         let mut statement = conn.prepare(
-            "SELECT pe.page_id, pe.vector FROM page_embeddings pe
+            "SELECT pe.page_id, pe.vector, f.tokens, f.budget FROM page_embeddings pe
              JOIN pages p ON p.id = pe.page_id
+             LEFT JOIN page_embed_failures f
+               ON f.page_id = pe.page_id AND f.model = pe.model AND f.kind = 'truncated'
              WHERE pe.model = ?1 AND p.project_id = ?2
                AND p.is_latest = 1 AND p.status != 'superseded'",
         )?;
         let rows = statement.query_map(params![model, project_id.to_string()], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
         })?;
 
-        let mut scored: Vec<(PageId, f32)> = Vec::new();
+        let mut scored: Vec<(PageId, f32, f64)> = Vec::new();
         for row in rows {
-            let (id, bytes) = row?;
+            let (id, bytes, tokens, budget) = row?;
             let vector = bytes_to_vector(&bytes);
-            scored.push((parse_id(id), cosine_similarity(query_vector, &vector)));
+            scored.push((
+                parse_id(id),
+                cosine_similarity(query_vector, &vector),
+                coverage_of(tokens, budget),
+            ));
         }
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(limit);
-        Ok(scored.into_iter().map(|(id, _)| id).collect())
+        Ok(scored
+            .into_iter()
+            .map(|(id, _, coverage)| (id, coverage))
+            .collect())
     }
 
     /// Replace a page's declared entities, creating any new to the project.
@@ -776,6 +808,22 @@ fn snippet_of(body: &str) -> String {
     } else {
         let head: String = trimmed.chars().take(SNIPPET_LEN).collect();
         format!("{head}…")
+    }
+}
+
+/// The share of a page its vector stands for, from a truncation row's counts.
+///
+/// Anything that is not a truncation with sensible numbers — no row, a
+/// negative count, a budget at or above the page's length — is read as the
+/// whole page. The failure worth avoiding is a vector silenced by a row
+/// nothing here could have written; counting it in full is what happened
+/// before this was measured at all.
+fn coverage_of(tokens: Option<i64>, budget: Option<i64>) -> f64 {
+    match (tokens, budget) {
+        (Some(tokens), Some(budget)) if tokens > 0 && budget > 0 && budget < tokens => {
+            budget as f64 / tokens as f64
+        }
+        _ => 1.0,
     }
 }
 
@@ -1444,6 +1492,98 @@ mod tests {
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].title, "Automobile");
+    }
+
+    /// Two pages whose vectors are equally close to the question, one embedded
+    /// whole and one from a quarter of itself. With the coverage exponent at
+    /// one the whole page wins whichever order the stream happened to put them
+    /// in; the breakdown carries each page's share beside its rank.
+    #[test]
+    fn a_vector_read_from_part_of_its_page_counts_for_that_part() {
+        let (_dir, store, project, _workspace) = fixture();
+        let whole = write_page(
+            &store,
+            project,
+            "notes/short.md",
+            "Short",
+            "a short page",
+            Vec::new(),
+        );
+        let partial = write_page(
+            &store,
+            project,
+            "notes/long.md",
+            "Long",
+            "a long page",
+            Vec::new(),
+        );
+        for page in [whole, partial] {
+            store
+                .set_page_embedding(page, "test-model", &[1.0, 0.0])
+                .expect("embed");
+        }
+        store
+            .record_embed_truncation(
+                partial,
+                "test-model",
+                anamnesis_core::embedding::Overflow {
+                    tokens: 400,
+                    budget: 100,
+                },
+            )
+            .expect("truncation");
+
+        let proportional = Tuning {
+            vector_coverage: 1.0,
+            ..Tuning::default()
+        };
+        let hits = store
+            .query_pages_with(
+                project,
+                "nothing in common",
+                5,
+                now(),
+                Some(("test-model", &[1.0, 0.0])),
+                &proportional,
+            )
+            .expect("query");
+        assert_eq!(hits[0].title, "Short", "{hits:?}");
+        assert_eq!(
+            hits.len(),
+            2,
+            "the partial page is counted for less, not dropped"
+        );
+
+        let streams = store
+            .query_streams(
+                project,
+                "nothing in common",
+                5,
+                Some(("test-model", &[1.0, 0.0])),
+                &proportional,
+            )
+            .expect("streams");
+        assert_eq!(streams.vectors.len(), streams.vector_coverage.len());
+        for (page, share) in streams.vectors.iter().zip(&streams.vector_coverage) {
+            let expected = if *page == partial { 0.25 } else { 1.0 };
+            assert!((share - expected).abs() < 1e-12, "{page:?}: {share}");
+        }
+    }
+
+    /// A truncation row whose numbers nothing here could have written is read
+    /// as a whole page, never as a vector silenced to nothing.
+    #[test]
+    fn a_coverage_row_that_makes_no_sense_counts_the_vector_in_full() {
+        assert_eq!(coverage_of(None, None), 1.0);
+        assert_eq!(coverage_of(Some(400), Some(100)), 0.25);
+        assert_eq!(
+            coverage_of(Some(100), Some(400)),
+            1.0,
+            "a budget above the page"
+        );
+        assert_eq!(coverage_of(Some(0), Some(0)), 1.0);
+        assert_eq!(coverage_of(Some(-5), Some(10)), 1.0);
+        assert_eq!(coverage_of(Some(10), Some(-5)), 1.0);
     }
 
     #[test]

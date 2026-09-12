@@ -227,12 +227,13 @@ pub fn parse_variant(spec: &str) -> Result<(Tuning, String), EvalError> {
             "entity" => tuning.entity = number,
             "links" => tuning.links = number,
             "vectors" => tuning.vectors = number,
+            "vector_coverage" => tuning.vector_coverage = number,
             "authority_exponent" => tuning.authority_exponent = number,
             "entity_coverage" => tuning.entity_coverage = number,
             other => {
                 return Err(EvalError::Corpus(format!(
                     "no tuning called {other:?}. Try one of: rrf_k, fts, entity, links, \
-                     vectors, authority_exponent, entity_coverage, candidates"
+                     vectors, vector_coverage, authority_exponent, entity_coverage, candidates"
                 )));
             }
         }
