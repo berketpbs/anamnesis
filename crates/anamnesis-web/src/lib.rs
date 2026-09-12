@@ -252,7 +252,7 @@ const MAX_HOOK_BODY: usize = 16 * 1024 * 1024;
 /// credential a browser attaches on its own cannot read memory from a page on
 /// somebody else's site.
 ///
-/// Everything but the two probes also sits behind [`boundary::refuse_cross_site`],
+/// Everything but the two probes also sits behind `boundary::refuse_cross_site`,
 /// which runs before the token guard: a page on another site is refused whether
 /// or not this server asks for tokens, because on the default install it does
 /// not, and a token check that is never made cannot be what stops it.
@@ -290,8 +290,8 @@ pub fn router(state: AppState, ui: bool) -> Router {
 /// Adds the one rule that depends on where the server listens: a loopback
 /// server that asks nobody for a token refuses requests naming any host but a
 /// loopback one, which is how a page whose DNS was rebound to `127.0.0.1`
-/// would arrive. See [`boundary`] for why the rule stands down once tokens are
-/// required.
+/// would arrive. `boundary.rs` explains why the rule stands down once tokens
+/// are required.
 pub fn app(state: AppState, ui: bool, bind: SocketAddr) -> Router {
     let guard_host = bind.ip().is_loopback() && state.auth.is_open();
     let router = router(state, ui);
