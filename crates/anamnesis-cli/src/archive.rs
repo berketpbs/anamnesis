@@ -284,7 +284,15 @@ fn read_manifest(archive: &Path) -> anyhow::Result<Manifest> {
 }
 
 /// Unpack every entry the manifest promised, and nothing outside the root.
+///
+/// Every entry is vetted before the first one is written. A refusal found
+/// halfway through used to leave a data directory holding the half of an
+/// archive that came before it — an index from one backup beside no wiki at
+/// all — which is a worse state to be in than either the memory that was
+/// there or the one being restored.
 fn unpack(archive: &Path, root: &Path) -> anyhow::Result<usize> {
+    vet(archive)?;
+
     let file = std::fs::File::open(archive)?;
     let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(file));
     let mut count = 0usize;
@@ -295,24 +303,63 @@ fn unpack(archive: &Path, root: &Path) -> anyhow::Result<usize> {
         if path.as_os_str() == MANIFEST {
             continue;
         }
-        // An archive is a file from anywhere, and the name of an entry inside
-        // one is the oldest way to write outside the directory it was told to
-        // unpack into. Checked here rather than left to the tar crate, which
-        // skips such an entry and reports success: a restore that silently
-        // dropped part of itself is the failure this whole module exists to
-        // prevent, so it is an error and it says which entry.
-        if escapes_root(&path) {
-            anyhow::bail!(
-                "refusing an archive entry that points outside the data directory: {}",
-                path.display()
-            );
-        }
         if !entry.unpack_in(root)? {
             anyhow::bail!("could not restore {} from the archive", path.display());
         }
         count += 1;
     }
     Ok(count)
+}
+
+/// Refuse an archive holding anything a backup does not write.
+///
+/// Two checks, both on every entry, before anything is unpacked:
+///
+/// * The name. An archive is a file from anywhere, and the name of an entry
+///   inside one is the oldest way to write outside the directory it was told
+///   to unpack into. Checked here rather than left to the tar crate, which
+///   skips such an entry and reports success: a restore that silently dropped
+///   part of itself is the failure this whole module exists to prevent.
+/// * The kind. `backup` follows links and writes regular files and
+///   directories, nothing else, so a link, a device or a FIFO in an archive
+///   was put there by something other than `backup`. A symbolic link is the
+///   dangerous one: unpacked first, it turns a later, ordinary-looking name
+///   into a write through it.
+fn vet(archive: &Path) -> anyhow::Result<()> {
+    let file = std::fs::File::open(archive)?;
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(file));
+
+    for entry in tar.entries()? {
+        let entry = entry?;
+        let path = entry.path()?.into_owned();
+        if escapes_root(&path) {
+            anyhow::bail!(
+                "refusing an archive entry that points outside the data directory: {}",
+                path.display()
+            );
+        }
+        let kind = entry.header().entry_type();
+        if !(kind.is_file() || kind.is_dir()) {
+            anyhow::bail!(
+                "refusing an archive entry that is a {} rather than a file or a directory: {} \
+                 — `anamnesis backup` never writes one",
+                describe_kind(kind),
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A tar entry kind as a person would name it.
+fn describe_kind(kind: tar::EntryType) -> &'static str {
+    match kind {
+        tar::EntryType::Symlink => "symbolic link",
+        tar::EntryType::Link => "hard link",
+        tar::EntryType::Char | tar::EntryType::Block => "device",
+        tar::EntryType::Fifo => "named pipe",
+        _ => "special entry",
+    }
 }
 
 /// Whether an entry name would leave the directory it is unpacked into.
@@ -560,6 +607,122 @@ mod tests {
             !dir.path().join("escaped.md").exists(),
             "an escaping entry landed outside the data directory"
         );
+    }
+
+    /// An archive with a valid manifest and whatever else `write` puts in it.
+    fn hand_built(
+        dir: &Path,
+        write: impl FnOnce(&mut tar::Builder<flate2::write::GzEncoder<std::fs::File>>),
+    ) -> PathBuf {
+        let archive = dir.join("hand-built.tar.gz");
+        let file = std::fs::File::create(&archive).expect("create");
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+
+        let manifest = serde_json::to_vec(&Manifest {
+            format: FORMAT_VERSION,
+            written_by: "0.0.0".to_owned(),
+            written_at: "2026-09-01T00:00:00Z".to_owned(),
+            schema: None,
+            contents: vec!["wiki".to_owned()],
+        })
+        .expect("manifest");
+        let mut header = tar::Header::new_gnu();
+        header.set_size(manifest.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, MANIFEST, manifest.as_slice())
+            .expect("append manifest");
+
+        write(&mut builder);
+        builder.into_inner().expect("tar").finish().expect("gz");
+        archive
+    }
+
+    /// A regular file entry, as `backup` writes them.
+    fn append_file(
+        builder: &mut tar::Builder<flate2::write::GzEncoder<std::fs::File>>,
+        name: &str,
+        payload: &[u8],
+    ) {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(payload.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, name, payload)
+            .expect("append file");
+    }
+
+    /// A link unpacked before an ordinary name turns that name into a write
+    /// through the link. `backup` follows links rather than storing them, so an
+    /// archive holding one was made by something else, and the whole archive
+    /// is refused before any of it is written.
+    #[test]
+    fn an_archive_holding_a_link_is_refused_before_anything_is_written() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let archive = hand_built(dir.path(), |builder| {
+            append_file(builder, "wiki/default/widget/a.md", b"# A\n");
+
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_size(0);
+            header.set_mode(0o777);
+            builder
+                .append_link(&mut header, "wiki/default/widget/outside", "../../../..")
+                .expect("append link");
+        });
+
+        let target = tempfile::tempdir().expect("target");
+        let message = cmd_restore(&archive, true, false, Some(target.path().to_path_buf()))
+            .expect_err("a link was unpacked")
+            .to_string();
+
+        assert!(message.contains("symbolic link"), "{message}");
+        assert!(message.contains("wiki/default/widget/outside"), "{message}");
+        assert!(
+            !target.path().join("wiki/default/widget/a.md").exists(),
+            "the entry before the link was written anyway"
+        );
+    }
+
+    /// The same all-or-nothing for a name that escapes: the ordinary entry
+    /// before it must not be left behind on its own.
+    #[test]
+    fn a_refused_archive_leaves_none_of_itself_behind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let archive = hand_built(dir.path(), |builder| {
+            append_file(builder, "raw/2026-09-01.jsonl", b"{}\n");
+
+            let payload = b"somewhere else\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(payload.len() as u64);
+            header.set_mode(0o644);
+            let name = b"wiki/../../escaped.md";
+            header.as_old_mut().name[..name.len()].copy_from_slice(name);
+            header.set_cksum();
+            builder
+                .append(&header, payload.as_slice())
+                .expect("append entry");
+        });
+
+        let target = tempfile::tempdir().expect("target");
+        let refused = cmd_restore(&archive, true, false, Some(target.path().to_path_buf()));
+
+        assert!(refused.is_err());
+        assert!(
+            !target.path().join("raw/2026-09-01.jsonl").exists(),
+            "half an archive was restored"
+        );
+    }
+
+    #[test]
+    fn every_kind_of_entry_backup_never_writes_has_a_name() {
+        assert_eq!(describe_kind(tar::EntryType::Symlink), "symbolic link");
+        assert_eq!(describe_kind(tar::EntryType::Link), "hard link");
+        assert_eq!(describe_kind(tar::EntryType::Fifo), "named pipe");
+        assert_eq!(describe_kind(tar::EntryType::Block), "device");
     }
 
     /// The rule on its own, including the shape that hides a `..` behind
