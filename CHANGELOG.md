@@ -52,6 +52,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would have scored identically before and after on every suite here, and read
   as a change that did nothing. Read back from the rows indexing wrote rather
   than counted again, so what is reported is what retrieval ran on
+- A fourth built-in eval suite, **`long`**, whose answers sit where the
+  embedding model does not read: sixteen questions over seventeen pages, frozen
+  in its own commit before it was scored once. Twelve questions are deep — the
+  answer is a long page, and a test holds each to naming nothing that appears
+  in the first 128 words of that page, which is stricter than the first 128
+  tokens. Four are guards, where a short page answers and a long one repeats its
+  words further down, so a change that helps long pages has to show what it
+  costs. The first run, without vectors: hit@1 0.500, MRR 0.562, every keyword
+  question first and no paraphrase first. **With vectors it scores lower**
+  (hit@1 0.312, MRR 0.414), and `--compare vectors=0` improves six questions and
+  costs none: on pages like these the truncated vector scores an opening that is
+  about something else, and at weight 1.0 it outvotes the full-text stream that
+  had the answers
 - `anamnesis eval --compare rrf_k=5,links=0.5` scores what ships against a
   variant and **names every question that moved**. `docs/DIRECTION.md` adopts
   the rule that a retrieval change without a paired measurement does not land,

@@ -29,12 +29,16 @@
 //!
 //! - **`k = 1` and `k = 2` are indistinguishable on all three suites**, to
 //!   three decimal places on every measure. What is measured is "≤ 2", and the
-//!   2 is a choice within that, not a result.
+//!   2 is a choice within that, not a result. The fourth suite, `long`, added
+//!   later, agrees.
 //! - **The penalty for a high `k` grows with the corpus**, 0.300 at ten pages
 //!   against 0.533 at twenty-two. That is the opposite of the direction the
 //!   worry ran, though `crowded` is crowded by construction, so this is at
 //!   least as likely to be about confusability as about size. Which of the two
 //!   it is, is the question a bigger corpus is still needed to answer.
+//!
+//!   `long` is some evidence on that question, and it points away from size:
+//!   seventeen pages, and a spread of 0.188 — smaller than the ten-page suite's.
 //!
 //! Nothing here changes a default. It is an instrument.
 
@@ -281,7 +285,7 @@ mod tests {
     /// is a claim with teeth rather than a tautology over a flat table.
     ///
     /// Deliberately *not* an equality against the best: `k = 1` and `k = 2`
-    /// score identically on all three suites today, and a test that demanded
+    /// score identically on every shipped suite today, and a test that demanded
     /// the shipped value be uniquely best would fail on a tie it has no
     /// opinion about. What must not happen is the shipped value being beaten.
     #[test]

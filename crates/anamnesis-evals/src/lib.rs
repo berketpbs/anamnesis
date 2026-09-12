@@ -75,12 +75,22 @@ pub const CROWDED_SUITE: &str = include_str!("../suites/crowded.toml");
 /// fails here is a finding about retrieval, not a threshold to lower.
 pub const ADVERSARIAL_SUITE: &str = include_str!("../suites/adversarial.toml");
 
+/// The suite whose answers the embedding model never reads.
+///
+/// Every page in the other three fits inside the default model's window, so
+/// none of them can say anything about how a long page is embedded. Here the
+/// answer to most questions sits past the first 128 tokens of a long page, and
+/// the rest are short pages a long one competes with. Frozen before it was run,
+/// like the adversarial suite, and for the same reason.
+pub const LONG_SUITE: &str = include_str!("../suites/long.toml");
+
 /// The suites built into this binary, by name.
 pub fn builtin_suites() -> Vec<(&'static str, &'static str)> {
     vec![
         ("retrieval", RETRIEVAL_SUITE),
         ("crowded", CROWDED_SUITE),
         ("adversarial", ADVERSARIAL_SUITE),
+        ("long", LONG_SUITE),
     ]
 }
 
@@ -122,6 +132,84 @@ mod tests {
                 .unwrap_or_else(|error| panic!("builtin suite {name} does not load: {error}"));
             assert_eq!(suite.name, name);
         }
+    }
+
+    /// The claim `long.toml` is built on, checked rather than trusted.
+    ///
+    /// A deep question — one whose answers are all longer than the window —
+    /// must not name anything that appears in the part of the page the model
+    /// reads. Otherwise the suite is measuring what it says it is not: a page
+    /// whose opening already says the question's words is one the truncated
+    /// vector can find, and a change to how long pages are embedded would get
+    /// credit for an answer that was reachable all along.
+    ///
+    /// Counted in words rather than tokens, because this crate has no
+    /// tokenizer and should not grow one for a test. A word is never fewer than
+    /// one token, so the first 128 words cover at least the first 128 tokens,
+    /// and the check is stricter than the window rather than looser. What it
+    /// cannot check is meaning: a paraphrase shares no words with its answer
+    /// by construction, so for those the guarantee is only that the words are
+    /// not there, which is the part a check can make.
+    #[test]
+    fn the_long_suite_asks_about_what_the_window_cannot_see() {
+        /// Tokens the default embedding model reads, `[CLS]` and `[SEP]`
+        /// included.
+        const WINDOW: usize = 128;
+        /// Words a question can share with any English page without saying
+        /// what it is about.
+        const FUNCTION_WORDS: &[&str] = &[
+            "a", "about", "after", "all", "an", "and", "are", "as", "at", "be", "before", "but",
+            "by", "can", "did", "do", "does", "every", "for", "from", "has", "have", "how", "i",
+            "if", "in", "is", "it", "its", "of", "on", "or", "out", "over", "rather", "than",
+            "that", "the", "this", "to", "up", "was", "we", "what", "when", "where", "whose",
+            "why", "with",
+        ];
+
+        let suite = Suite::from_toml(LONG_SUITE).expect("suite");
+        let words = |page: &FixturePage| -> Vec<String> {
+            anamnesis_core::embedding::page_text(&page.title, &page.body)
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|word| !word.is_empty())
+                .map(str::to_lowercase)
+                .collect()
+        };
+        let page = |path: &str| -> &FixturePage {
+            suite
+                .pages
+                .iter()
+                .find(|page| page.path == path)
+                .expect("the suite validated its own paths")
+        };
+
+        let mut deep = 0;
+        for case in &suite.cases {
+            let answers: Vec<&FixturePage> = case.relevant.iter().map(|path| page(path)).collect();
+            if !answers.iter().all(|answer| words(answer).len() > WINDOW) {
+                continue;
+            }
+            deep += 1;
+
+            for answer in answers {
+                let words = words(answer);
+                let opening = &words[..WINDOW];
+                for token in anamnesis_core::retrieval::tokenize(&case.query) {
+                    if FUNCTION_WORDS.contains(&token.as_str()) {
+                        continue;
+                    }
+                    assert!(
+                        !opening.contains(&token),
+                        "{:?} asks about {token:?}, which {} says in the part the model reads",
+                        case.query,
+                        answer.path
+                    );
+                }
+            }
+        }
+
+        // Twelve deep questions were written. A page shortened below the
+        // window would quietly turn one into a question the check skips, and
+        // the suite would go on claiming a depth it no longer has.
+        assert_eq!(deep, 12, "the suite was written with twelve deep questions");
     }
 
     /// And has to clear the bar it sets for itself, or the thresholds are
