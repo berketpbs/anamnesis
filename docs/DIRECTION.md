@@ -340,6 +340,25 @@ count for less than one that stands for all of it. Any of them lands only with
 since the guards here are one half of the cost and the short suites are the
 other.
 
+**The cheapest candidate was measured, and it made things worse.**
+`Tuning::vector_coverage` scales each page's vector contribution by the share of
+the page its vector read. Under `--embed`, exponent 1 took `long` from hit@1
+0.312 / MRR 0.414 to 0.188 / 0.301 — seven questions lost ground and none gained
+— and exponent 0.5 lost six. Every question that moved was answered by a long
+page. The three suites of short pages did not move at all, as they cannot: every
+page there fits the window and scales by one. The knob ships at 0.
+
+What that says is more useful than the knob. A truncated vector was not voting
+against its own page; it was giving that page what little support its opening
+could, and scaling it down took that away. The damage `vectors = 0` removes is
+somewhere else: the full-weight votes for *short* pages the model read whole,
+which are the decoys in `long` and which nothing that discounts partial vectors
+can touch. So the remedy has to make a long page's vector stand for the page —
+an abstract, or one vector per section — rather than make it count for less. The
+abstract stream is back to being the candidate, with one more thing it has to be
+measured against: whether a long page that finally has a representative vector
+wins back the questions its decoys take.
+
 The same run said something about the weight, too. `vectors = 1.0` is the one
 `Tuning` value still marked as standing on an argument, and `--compare
 vectors=0` under `--embed` is its first paired measurement: level on `retrieval`

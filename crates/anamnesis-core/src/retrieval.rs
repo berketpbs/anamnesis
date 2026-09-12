@@ -75,6 +75,20 @@ pub struct Tuning {
     pub links: f64,
     /// Weight of the embedding stream.
     pub vectors: f64,
+    /// How much a page's vector counts for the share of the page it was
+    /// embedded from.
+    ///
+    /// A model with a fixed window embeds the start of a long page and returns
+    /// an ordinary vector, and `page_embed_failures` records how much of the
+    /// page that start was. Each page's vector contribution is multiplied by
+    /// that share raised to this exponent: `0.0` ignores it, and every vector
+    /// counts in full however little of its page it stands for; `1.0` makes a
+    /// vector that read a quarter of its page count for a quarter.
+    ///
+    /// Scales what a rank contributes, not the rank itself: the stream still
+    /// orders pages by how close their vectors are, because that closeness is
+    /// a true fact about the part of the page that was read.
+    pub vector_coverage: f64,
     /// Exponent applied to [`authority_multiplier`]. `1.0` leaves it as it is,
     /// `0.0` switches it off, and anything between softens it.
     pub authority_exponent: f64,
@@ -128,6 +142,22 @@ impl Default for Tuning {
             // Unmeasured — the stream is opt-in and neither suite runs a
             // model, so this is the one weight still standing on an argument.
             vectors: 1.0,
+            // Off, and measured off. The argument for it was that a vector
+            // standing for a quarter of its page should count for a quarter,
+            // and `long` — the suite whose answers sit past the window — said
+            // the opposite on 2026-09-13. Under `--embed`, exponent 1 took it
+            // from hit@1 0.312 / MRR 0.414 to 0.188 / 0.301, and 0.5 to
+            // 0.188 / 0.309: seven questions and six lost ground, none gained,
+            // and every one that moved was answered by a long page.
+            //
+            // So a partial vector was helping its own page, not hurting it.
+            // What costs `long` its answers (removing the stream entirely
+            // gains six questions) is the full-weight vote for short pages
+            // the model read whole — which this cannot touch, and which
+            // scaling the long pages down only makes relatively stronger.
+            // The three suites of short pages cannot see the knob at all:
+            // every page fits, and a whole page scales by one.
+            vector_coverage: 0.0,
             // A quarter, so the full 2.34x multiplier becomes about 1.24x.
             // Authority is a preference between comparably relevant pages,
             // and applied whole it was larger than the entire spread of the
@@ -165,6 +195,15 @@ impl Tuning {
     /// The stream weights in the order the streams are fused.
     pub fn weights(&self) -> [f64; 4] {
         [self.fts, self.entity, self.links, self.vectors]
+    }
+
+    /// What a page's vector contribution is multiplied by, for a vector that
+    /// was embedded from `coverage` of its page.
+    ///
+    /// `coverage` is clamped to `[0, 1]`; a page that fit its window whole is
+    /// `1.0` and scales by exactly one under any exponent.
+    pub fn vector_scale(&self, coverage: f64) -> f64 {
+        coverage.clamp(0.0, 1.0).powf(self.vector_coverage)
     }
 
     /// The authority multiplier this tuning applies.
@@ -226,13 +265,29 @@ pub fn reciprocal_rank_fusion(streams: &[Vec<PageId>], k: f64) -> HashMap<PageId
 /// stream contributing nothing to it are the same ranking, but only one of
 /// them can be turned back on to see what it was worth.
 pub fn fuse_weighted(streams: &[(&[PageId], f64)], k: f64) -> Vec<(PageId, f64)> {
+    let scaled: Vec<(&[PageId], f64, &[f64])> = streams
+        .iter()
+        .map(|(stream, weight)| (*stream, *weight, &[][..]))
+        .collect();
+    fuse_scaled(&scaled, k)
+}
+
+/// Fuse weighted streams in which each page's contribution can also be scaled
+/// on its own, best-first.
+///
+/// `scales[i]` multiplies what the page at rank `i` contributes; a stream whose
+/// scales are empty contributes in full. The one stream that uses this is the
+/// vector stream, where a page embedded from part of itself counts for part —
+/// see [`Tuning::vector_coverage`].
+pub fn fuse_scaled(streams: &[(&[PageId], f64, &[f64])], k: f64) -> Vec<(PageId, f64)> {
     let mut scores: HashMap<PageId, f64> = HashMap::new();
-    for (stream, weight) in streams {
+    for (stream, weight, scales) in streams {
         if *weight == 0.0 {
             continue;
         }
         for (rank, id) in stream.iter().enumerate() {
-            *scores.entry(*id).or_insert(0.0) += weight / (k + rank as f64 + 1.0);
+            let scale = scales.get(rank).copied().unwrap_or(1.0);
+            *scores.entry(*id).or_insert(0.0) += weight * scale / (k + rank as f64 + 1.0);
         }
     }
     sorted(scores)
@@ -435,6 +490,74 @@ mod tests {
             RRF_K,
         );
         assert_eq!(damped[0].0, id(1), "the confident stream should now lead");
+    }
+
+    /// A scale of one everywhere is no scale at all, so the generalisation has
+    /// to agree with the fusion it generalises.
+    #[test]
+    fn unit_scales_reproduce_the_weighted_fusion() {
+        let fts = vec![id(2), id(1), id(3)];
+        let vectors = vec![id(3), id(2)];
+
+        let weighted = fuse_weighted(&[(fts.as_slice(), 1.0), (vectors.as_slice(), 1.0)], RRF_K);
+        let scaled = fuse_scaled(
+            &[
+                (fts.as_slice(), 1.0, &[][..]),
+                (vectors.as_slice(), 1.0, &[1.0, 1.0][..]),
+            ],
+            RRF_K,
+        );
+
+        assert_eq!(weighted, scaled);
+    }
+
+    /// What the scale is for: the vector stream's favourite was read from a
+    /// quarter of itself, and counting it for a quarter lets the page full
+    /// text put first keep its place.
+    #[test]
+    fn a_page_scaled_down_in_one_stream_loses_the_tie_it_won_there() {
+        let fts = vec![id(1), id(2)];
+        let vectors = vec![id(2), id(1)];
+
+        let whole = fuse_scaled(
+            &[
+                (fts.as_slice(), 1.0, &[][..]),
+                (vectors.as_slice(), 1.5, &[1.0, 1.0][..]),
+            ],
+            RRF_K,
+        );
+        assert_eq!(whole[0].0, id(2), "a heavier vector stream decides the tie");
+
+        let partial = fuse_scaled(
+            &[
+                (fts.as_slice(), 1.0, &[][..]),
+                (vectors.as_slice(), 1.5, &[0.25, 1.0][..]),
+            ],
+            RRF_K,
+        );
+        assert_eq!(partial[0].0, id(1), "a quarter of a vector does not");
+    }
+
+    #[test]
+    fn the_coverage_exponent_spans_off_and_proportional() {
+        let with = |vector_coverage: f64| Tuning {
+            vector_coverage,
+            ..Tuning::default()
+        };
+
+        assert_eq!(
+            with(0.0).vector_scale(0.25),
+            1.0,
+            "off counts every vector in full"
+        );
+        assert_eq!(with(1.0).vector_scale(0.25), 0.25);
+        assert!((with(0.5).vector_scale(0.25) - 0.5).abs() < 1e-12);
+
+        // A page that fit is untouched at any exponent, and a coverage outside
+        // `[0, 1]` — a row nothing here wrote — is read as the nearest end.
+        assert_eq!(with(1.0).vector_scale(1.0), 1.0);
+        assert_eq!(with(1.0).vector_scale(7.0), 1.0);
+        assert_eq!(with(1.0).vector_scale(-1.0), 0.0);
     }
 
     #[test]

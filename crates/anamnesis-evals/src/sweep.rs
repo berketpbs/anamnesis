@@ -177,6 +177,11 @@ pub fn default_grid() -> Vec<Tuning> {
                                     entity,
                                     links,
                                     vectors,
+                                    // Not a dimension of the grid. It moves
+                                    // nothing on a suite whose pages all fit
+                                    // the model, and `--compare` is how it is
+                                    // measured on the one that does not.
+                                    vector_coverage: Tuning::default().vector_coverage,
                                     authority_exponent,
                                     entity_coverage,
                                     candidates,
