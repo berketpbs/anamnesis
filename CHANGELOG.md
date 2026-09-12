@@ -719,6 +719,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose paragraphs were perfectly intact, and that guard would have repaired
   none of them
 
+### Security
+- **A web page could write to memory.** The server asks nobody for a token by
+  default, on the reasoning that loopback is the boundary — but every page the
+  person running it opens can send requests to `127.0.0.1:8080` too. A `POST`
+  with a `text/plain` body goes out without the browser asking first, and
+  `/hook` read its body as a string whatever the type, so a page on any site
+  could record a prompt, which consolidation turns into a page and the next
+  session is handed. An `<img>` pointing at `/handoff` spent the note the next
+  session was owed. And a page whose domain was rebound to `127.0.0.1` could
+  read `/api/v1` and `/ui`, which is the whole of memory. Every route but
+  `/health` and `/version` now refuses a request a browser marks as coming
+  from another site (`Sec-Fetch-Site`, or `Origin` where that is missing),
+  except a person following a link to the wiki browser; and a loopback server
+  with no tokens refuses any `Host` that is not a loopback name. Nothing that
+  is not a browser sends those headers, so hooks, `status` and scripts see no
+  difference. The host rule stands down once tokens are required, because
+  the documented shared setup forwards the public name from a proxy and a
+  rebound page has no token to present
+- Every response now carries a content security policy under which no script
+  runs, no page is framed and nothing loads from another host, plus `nosniff`
+  and `Referrer-Policy: no-referrer`. The one visible change: an image a page
+  links from somewhere else is no longer fetched when the page is opened in
+  `/ui`, since that request would tell its owner which page was read, and when
+
 ## [1.0.0] - 2026-09-06
 
 What 1.0 commits to: the command line and the shapes on disk. A wiki, a raw

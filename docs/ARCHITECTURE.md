@@ -178,6 +178,14 @@ The HTTP server hooks deliver to.
   and the proposals auto-improve is waiting on a person about are listed with
   the command that carries each one out. Read-only, and `serve --no-ui`
   leaves it out
+- A browser boundary in front of all of it but `/health` and `/version`
+  (`boundary.rs`). A page on another site can make the person's browser send
+  requests to a loopback server, and on an open server no token check stands in
+  the way, so a request the browser marks as cross-site (`Sec-Fetch-Site`, or
+  `Origin` where that is missing) is refused — apart from a link followed to
+  `/ui`. A loopback server with no tokens also refuses a `Host` that is not a
+  loopback name, which is how a DNS-rebound page arrives. Every response carries
+  a script-free content security policy
 - The consolidation pipeline, which runs *after* the response is sent
 - Nothing that touches the index, the wiki, or a model runs on a runtime
   thread. Tokio has one worker per core and all of that work blocks, so a

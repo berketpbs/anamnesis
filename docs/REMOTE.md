@@ -94,6 +94,13 @@ server {
 }
 ```
 
+Both forward the public name as `Host`, and that only works because tokens are
+set. A loopback server with no tokens refuses any `Host` that is not a loopback
+name — it is how a page whose DNS was rebound to `127.0.0.1` would arrive — so
+an open server behind a proxy has to be sent `Host: 127.0.0.1` instead. Every
+server, open or not, refuses requests a browser marks as coming from another
+site, apart from somebody following a link to `/ui`.
+
 With the proxy holding the address, the server itself stays on loopback:
 
 ```bash
