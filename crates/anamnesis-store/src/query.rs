@@ -28,6 +28,30 @@ use crate::{Result, Store};
 /// Longest snippet returned with a hit, in characters.
 const SNIPPET_LEN: usize = 240;
 
+/// The most distinct words a query is searched for; the rest are ignored.
+///
+/// Every word is one `OR` term in the full-text match and two bound parameters
+/// in the entity stream, so a query's cost is its length. Measured on
+/// 2026-09-12: 300 distinct words took 4 ms, 5,000 took 181 ms, and 20,000 was
+/// refused outright by SQLite for binding too many parameters — an error whose
+/// text carried the whole statement back to the caller. An agent pasting a log
+/// into `memory_query` is an ordinary thing to happen, and it should get an
+/// answer about the start of what it pasted rather than a failure about all of
+/// it.
+///
+/// A hundred and twenty-eight is several times any question a person types,
+/// and the words kept are the first ones, since those are what a query is
+/// about.
+pub const MAX_QUERY_TOKENS: usize = 128;
+
+/// The words a query is searched for: [`tokenize`], then at most
+/// [`MAX_QUERY_TOKENS`] of them.
+fn query_tokens(query: &str) -> Vec<String> {
+    let mut tokens = tokenize(query);
+    tokens.truncate(MAX_QUERY_TOKENS);
+    tokens
+}
+
 /// A page returned by [`Store::query_pages`], ranked by fused relevance.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PageHit {
@@ -140,7 +164,7 @@ impl Store {
         embedding: Option<(&str, &[f32])>,
         tuning: &Tuning,
     ) -> Result<Vec<PageHit>> {
-        let tokens = tokenize(query);
+        let tokens = query_tokens(query);
         if tokens.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
@@ -237,7 +261,7 @@ impl Store {
         embedding: Option<(&str, &[f32])>,
         tuning: &Tuning,
     ) -> Result<StreamBreakdown> {
-        let tokens = tokenize(query);
+        let tokens = query_tokens(query);
         if tokens.is_empty() || limit == 0 {
             return Ok(StreamBreakdown::default());
         }
@@ -824,6 +848,68 @@ mod tests {
             .set_page_entities(project_id, page.id, &entities)
             .expect("entities");
         page.id
+    }
+
+    /// The failure the cap exists for, measured before it was added: a query of
+    /// 20,000 distinct words made the entity stream bind 40,000 parameters,
+    /// SQLite refused the statement, and the error carried the whole of it —
+    /// about 80 KB of placeholders — back to whoever asked. An agent pasting a
+    /// log into `memory_query` is an ordinary thing to happen.
+    #[test]
+    fn a_query_longer_than_sqlite_will_bind_still_answers() {
+        let (_dir, store, project, _workspace) = fixture();
+        write_page(
+            &store,
+            project,
+            "notes/a.md",
+            "Alpha",
+            "word7 is somewhere in here",
+            Vec::new(),
+        );
+
+        let query: Vec<String> = (0..20_000).map(|i| format!("word{i}")).collect();
+        let hits = store
+            .query_pages(project, &query.join(" "), 10, now(), None)
+            .expect("a long query is an ordinary query");
+        assert_eq!(hits.len(), 1);
+
+        let streams = store
+            .query_streams(project, &query.join(" "), 10, None, &Tuning::default())
+            .expect("and so is explaining one");
+        assert_eq!(streams.fts.len(), 1);
+    }
+
+    /// What is kept is the start of the question. The words a person typed
+    /// first are the ones a query is about; a pasted log trails.
+    #[test]
+    fn a_long_query_keeps_its_first_words() {
+        let (_dir, store, project, _workspace) = fixture();
+        write_page(
+            &store,
+            project,
+            "notes/early.md",
+            "Early",
+            "the first word is here",
+            Vec::new(),
+        );
+        write_page(
+            &store,
+            project,
+            "notes/late.md",
+            "Late",
+            "the last word is here",
+            Vec::new(),
+        );
+
+        let mut words = vec!["first".to_owned()];
+        words.extend((0..MAX_QUERY_TOKENS).map(|i| format!("filler{i}")));
+        words.push("last".to_owned());
+        let hits = store
+            .query_pages(project, &words.join(" "), 10, now(), None)
+            .expect("query");
+        let titles: Vec<&str> = hits.iter().map(|hit| hit.title.as_str()).collect();
+
+        assert_eq!(titles, ["Early"], "the trailing word is past the cap");
     }
 
     #[test]

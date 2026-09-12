@@ -622,8 +622,11 @@ impl Store {
             let (path, title, model, at, reason, kind, tokens, budget) = row?;
             failures.push(EmbedFailure {
                 kind: EmbedFault::parse(&kind),
-                tokens: tokens.map(|n| n as usize),
-                budget: budget.map(|n| n as usize),
+                // `try_from` rather than `as`: a negative count in a row is
+                // a row nothing here wrote, and `as` would report it as a page
+                // eighteen quintillion tokens long.
+                tokens: tokens.and_then(|n| usize::try_from(n).ok()),
+                budget: budget.and_then(|n| usize::try_from(n).ok()),
                 path: crate::convert::parse_page_path(&path),
                 title,
                 model,
@@ -2130,6 +2133,36 @@ mod tests {
             "{:?}",
             complaints[0].reason
         );
+    }
+
+    /// A count nothing here could have written is read as no count at all,
+    /// rather than cast. `-1 as usize` is eighteen quintillion, and `doctor`
+    /// would have led its verdict with that page as the worst in the project.
+    #[test]
+    fn a_negative_count_in_a_row_is_not_read_as_an_enormous_one() {
+        let (_dir, store, project, _workspace) = fixture();
+        let mut page = indexable_page(project);
+        page.body = "word ".repeat(50);
+        store
+            .index_page(
+                project,
+                &page,
+                &[],
+                Some(&NarrowEmbedder { budget: 10 }),
+                now(),
+            )
+            .expect("index");
+        store
+            .connection()
+            .execute(
+                "UPDATE page_embed_failures SET tokens = -1, budget = -5",
+                [],
+            )
+            .expect("corrupt the row");
+
+        let complaints = store.embed_failures(project).expect("failures");
+        assert_eq!(complaints[0].tokens, None);
+        assert_eq!(complaints[0].budget, None);
     }
 
     /// And the vector is still there. A truncation is a report about a page

@@ -469,6 +469,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly what must not be lost
 
 ### Fixed
+- **An anchored `ignore_paths` pattern could silently exclude nothing** when
+  the project's path held a letter whose lowercase is a different number of
+  bytes. The path was compared with the root lowercased and then cut at the
+  byte length of the root as written: under a directory named `STRAẞE` a
+  reported `straße/target/…` came out as `arget/…`, `target/**` matched
+  nothing, and the events it was written to keep out of memory went in. The
+  same cut landing inside a character — a Kelvin sign in the root, a `ğ` in the
+  path — was a panic in the hook. The cut is now found by walking the path
+  itself
+- `anamnesis restore` refuses an archive holding a link, a device or a pipe,
+  and checks every entry before it writes the first. `backup` follows links
+  and writes nothing but files and directories, so such an entry was put there
+  by something else, and a symbolic link unpacked early turns a later
+  ordinary name into a write through it. Checking up front also ends a refusal
+  halfway through leaving half an archive in the data directory
+- A query of 20,000 distinct words no longer fails. Each word was two bound
+  parameters in the entity stream, SQLite refused the statement, and the error
+  carried all 80 KB of it back to the caller. Queries are now searched for
+  their first 128 distinct words; 5,000 had taken 181 ms, 300 take 4
+- A negative token count in `page_embed_failures` is read as no count rather
+  than cast to eighteen quintillion
 - `anamnesis eval --streams` no longer reports questions **nothing** answered as
   questions **fusion** answered. Its one list — "No single stream answered these
   — fusion is doing the work" — held every question no stream found within the

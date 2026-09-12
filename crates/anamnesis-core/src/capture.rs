@@ -164,20 +164,39 @@ fn normalize(path: &str) -> String {
 ///
 /// Compared case-insensitively for the same reason the globs are: a project
 /// at `C:\Repo` reporting `c:\repo\.env` must still match `.env`.
+///
+/// The cut is found by walking `path` itself, a character at a time, until its
+/// lowered form has spelled out the lowered root. It used to be taken at the
+/// byte length of the root as written, which is only the same place when
+/// lowering keeps every character's length — and it does not: `ẞ` lowers from
+/// three bytes to two, the Kelvin sign from three to one. The result was a
+/// relative path that started mid-name, so an anchored pattern silently
+/// excluded nothing, or a cut inside a character and a panic in the hook.
+///
+/// Both sides are lowered one character at a time rather than as strings,
+/// because `str::to_lowercase` lowers a final `Σ` differently from the same
+/// letter elsewhere and a root and a path would then disagree about a name.
 fn relative_to<'a>(root: &Path, path: &'a str) -> Option<&'a str> {
     let root = normalize(&root.to_string_lossy());
     let root = root.trim_end_matches('/');
     if root.is_empty() {
         return None;
     }
+    let lower_root: String = root.chars().flat_map(char::to_lowercase).collect();
 
-    let lower_path = path.to_lowercase();
-    let lower_root = root.to_lowercase();
-    let rest = lower_path.strip_prefix(&lower_root)?;
-    if !rest.starts_with('/') {
-        return None;
+    let mut folded = String::with_capacity(lower_root.len());
+    for (index, character) in path.char_indices() {
+        if folded.len() == lower_root.len() {
+            // The root is spelled out exactly; what follows has to be a
+            // separator, or `/repo` would claim `/repository`.
+            return (character == '/').then(|| &path[index + 1..]);
+        }
+        folded.extend(character.to_lowercase());
+        if !lower_root.starts_with(folded.as_str()) {
+            return None;
+        }
     }
-    Some(&path[root.len() + 1..])
+    None
 }
 
 /// Keep a message alive for an error type that holds `&'static str`.
@@ -274,5 +293,49 @@ mod tests {
 
         assert!(!anchored.excludes("/elsewhere/target/debug/app"));
         assert!(floating.excludes("/elsewhere/target"));
+    }
+
+    /// The fault this caught. The root and the path were compared lowercased,
+    /// and the path was then cut at the byte length of the root as it was
+    /// written. Lowercasing does not keep a length: `ẞ` is three bytes and
+    /// `ß` two, so a project under `STRAẞE` reporting `straße/target/...` was
+    /// cut one byte late, the relative path came out as `arget/...`, and the
+    /// anchored pattern quietly matched nothing — the events it was written to
+    /// keep out of memory went in.
+    #[test]
+    fn a_root_whose_letters_change_length_when_lowered_still_anchors() {
+        let filter = filter(&["target/**"], "/home/STRAẞE/repo");
+
+        assert!(filter.excludes("/home/straße/repo/target/debug/app"));
+        assert!(filter.excludes("/home/STRAẞE/repo/target/debug/app"));
+        assert!(!filter.excludes("/home/straße/repo/src/target.rs"));
+    }
+
+    /// The same cut landing inside a character is a panic, not a miss. The
+    /// Kelvin sign is three bytes and lowers to a one-byte `k`, which puts the
+    /// old cut two bytes late: in `/k/xğ/…` that is the middle of the `ğ`.
+    ///
+    /// Written as an escape on purpose. Typed, the sign is indistinguishable
+    /// from a `K`, and the first draft of this test was a `K` that tested
+    /// nothing.
+    #[test]
+    fn a_cut_that_would_land_inside_a_character_does_not_panic() {
+        let kelvin = "/\u{212A}";
+        assert_eq!(kelvin.len(), 4, "the root has to be the three-byte sign");
+        let filter = filter(&["target/**"], kelvin);
+
+        assert!(!filter.excludes("/k/x\u{011F}/target"));
+        assert!(filter.excludes("/k/target/x"));
+    }
+
+    /// Relative matching needs a separator after the root, or `/repo` would
+    /// claim `/repository` as its own.
+    #[test]
+    fn a_path_that_only_starts_with_the_root_is_not_below_it() {
+        let filter = filter(&["target/**"], "/repo");
+
+        assert!(!filter.excludes("/repository/target/x"));
+        assert!(!filter.excludes("/repo"));
+        assert_eq!(relative_to(Path::new("/repo"), "/repo/"), Some(""));
     }
 }
