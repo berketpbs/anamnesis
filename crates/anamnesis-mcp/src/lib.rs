@@ -753,7 +753,13 @@ impl AnamnesisMcp {
         let now = Timestamp::now();
         self.store.upsert_project(&self.scope, now)?;
         // Row, entities, links and — when one is configured — the vector, in
-        // the one call every writer makes.
+        // the one call every writer makes. That call also records a failed or
+        // truncated embedding, and an embedding failure costs the page its
+        // place in the vector stream rather than the write. There used to be a
+        // second embedding here, after it, which recorded nothing: every write
+        // paid the model twice, and a first attempt that failed followed by a
+        // second that did not left a vector beside the complaint that there
+        // was none.
         let links = anamnesis_wiki::extract_links(&request.body);
         self.store.index_page(
             self.scope.project_id,
@@ -764,22 +770,6 @@ impl AnamnesisMcp {
                 .map(|embedder| embedder as &dyn anamnesis_core::embedding::Embed),
             now,
         )?;
-
-        // Embedding failure costs this page its place in the vector stream,
-        // not the write itself — the page is already committed to the wiki
-        // and indexed by the time this runs.
-        if let Some(embedder) = &self.embedder {
-            let text = format!("{}\n\n{}", request.title, request.body);
-            match embedder.embed(&text) {
-                Ok(vector) => {
-                    self.store
-                        .set_page_embedding(page.id, embedder.model(), &vector)?;
-                }
-                Err(error) => {
-                    tracing::warn!(%error, %path, "page embedding failed; page was still written");
-                }
-            }
-        }
 
         Ok(WritePageResponse {
             path: path.as_str().to_owned(),
@@ -1421,6 +1411,71 @@ mod tests {
             })
             .expect("query should still succeed via the other streams");
         assert_eq!(found.hits.len(), 1);
+    }
+
+    /// Fails its first call and succeeds after that, counting every call.
+    struct FlakyEmbedder {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Embedder for FlakyEmbedder {
+        fn dimension(&self) -> usize {
+            2
+        }
+    }
+
+    impl anamnesis_core::embedding::Embed for FlakyEmbedder {
+        fn model(&self) -> &str {
+            "flaky-embed-1"
+        }
+        fn embed(&self, _text: &str) -> Result<Vec<f32>, String> {
+            match self
+                .calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            {
+                0 => Err("the model was still loading".to_owned()),
+                _ => Ok(vec![1.0, 0.0]),
+            }
+        }
+    }
+
+    /// A page written through this tool used to be embedded twice: once by
+    /// `index_page`, which records what happened, and again by a block after
+    /// it, which recorded nothing. Twice the model's time on every write, and
+    /// when the first attempt failed and the second did not, a page holding a
+    /// vector *and* the complaint that it had none — which `doctor` reports as
+    /// broken. One call, and whatever it says is what the index says.
+    #[test]
+    fn a_written_page_is_embedded_once_and_the_index_agrees_with_it() {
+        let (_repo, _data, server) = harness();
+        let embedder = Arc::new(FlakyEmbedder {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let server = server.with_embedder(Some(embedder.clone() as Arc<dyn Embedder>));
+
+        write_page(&server, "notes/a.md", "A", "sqlite content");
+
+        assert_eq!(
+            embedder.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one write, one embedding"
+        );
+        let complaints = server
+            .store
+            .embed_failures(server.scope.project_id)
+            .expect("failures");
+        assert_eq!(complaints.len(), 1, "the failed attempt is on record");
+        let found = server
+            .query(QueryRequest {
+                text: "an unrelated question".to_owned(),
+                limit: None,
+                explain: None,
+            })
+            .expect("query");
+        assert!(
+            found.hits.is_empty(),
+            "a page recorded as having no vector must not be found by one"
+        );
     }
 
     /// The body the tool returns is the whole file, not the prefix a query

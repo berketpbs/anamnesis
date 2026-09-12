@@ -469,6 +469,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly what must not be lost
 
 ### Fixed
+- A page written through `memory_write_page` is embedded **once**. The tool
+  called `index_page`, which embeds the page and records a failure or a
+  truncation, and then embedded the same text again in a block that recorded
+  nothing. Every write paid the model twice, and when the first attempt failed
+  and the second succeeded the page kept a vector beside the complaint that it
+  had none — which `anamnesis doctor` reports as broken. No other writer had
+  the second call
 - **An anchored `ignore_paths` pattern could silently exclude nothing** when
   the project's path held a letter whose lowercase is a different number of
   bytes. The path was compared with the root lowercased and then cut at the
