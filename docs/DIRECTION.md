@@ -303,6 +303,26 @@ most pages. A one-line abstract would embed sharply where a long page currently
 contributes its opening paragraph and drops the rest without a word. That is no
 longer an argument from a plausible mechanism; it is an argument from a count.
 
+**And no suite here can see it.** `anamnesis eval --embed` now reports how much
+of each corpus the vectors read, and against the real model every one of the
+fifty pages in the three shipped suites fits the window — the longest is about
+a hundred words. So the abstract stream cannot be measured yet, in either
+direction: the page it would help does not exist in any corpus the rule "a
+retrieval change without a paired measurement does not land" can be applied to.
+What has to come first is a suite whose answers sit past the first 128 tokens of
+long pages, frozen before it is scored — or the restored-snapshot run from
+Phase 1, which would bring 43 such pages with it.
+
+The same run said something about the weight, too. `vectors = 1.0` is the one
+`Tuning` value still marked as standing on an argument, and `--compare
+vectors=0` under `--embed` is its first paired measurement: level on `retrieval`
+and `crowded`, and on `adversarial` a trade — `argon2id` rises 2 → 1 with the
+stream on, `customer came back signed out after paying` falls 1 → 3 — that nets
+to MRR 0.969 → 0.958 and takes the suite below its own bar of 0.960. One trade
+on sixteen questions is not a verdict on the weight. It is a reason not to call
+the weight settled, and a warning that the adversarial bars were set on runs
+without vectors.
+
 **Session-recall routing: probably never**, for the reason in finding 2.
 
 ### Phase 4 — typed edges, if the graph is non-empty

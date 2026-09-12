@@ -1,8 +1,9 @@
 //! Running a suite and reporting what happened.
 
-use anamnesis_core::embedding::Embed;
+use anamnesis_core::embedding::{Embed, Overflow};
 use anamnesis_core::page::PagePath;
 use anamnesis_core::retrieval::Tuning;
+use anamnesis_store::EmbedFault;
 use jiff::Timestamp;
 
 use crate::EvalError;
@@ -64,6 +65,95 @@ pub struct Report {
     pub by_category: Vec<CategoryScore>,
     /// The bar the suite set for itself.
     pub thresholds: crate::suite::Thresholds,
+    /// How much of the corpus the vector stream actually read, when there was
+    /// one. `None` on a run without an embedder.
+    pub vectors: Option<VectorCoverage>,
+}
+
+/// How much of a corpus its vectors stand for.
+///
+/// On the report because a vector score is a claim about two things at once —
+/// the stream, and what the stream was given — and a suite whose pages all fit
+/// the model's window cannot say anything about pages that do not. On
+/// 2026-09-12 every page in all three shipped suites fit, while 43 of the 49
+/// pages in this project's own wiki did not. A change to how long pages are
+/// embedded would have scored identically before and after on every suite
+/// here, and read as a change that did nothing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VectorCoverage {
+    /// The model that embedded the corpus.
+    pub model: String,
+    /// Pages in the corpus.
+    pub pages: usize,
+    /// Pages that got no vector at all.
+    pub failed: usize,
+    /// Pages whose vector stands for only part of them, least read first.
+    pub truncated: Vec<Truncated>,
+}
+
+/// One page the model read only the start of.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Truncated {
+    /// The page, as the suite names it.
+    pub path: String,
+    /// What the page came to, and what the model read.
+    pub overflow: Overflow,
+}
+
+impl VectorCoverage {
+    /// Pages the vector stream saw whole.
+    pub fn whole(&self) -> usize {
+        self.pages
+            .saturating_sub(self.failed)
+            .saturating_sub(self.truncated.len())
+    }
+
+    /// Whether any page in the corpus is longer than the model reads.
+    ///
+    /// When this is false the suite is silent on long pages by construction,
+    /// whatever it scores, and a comparison that changes how they are embedded
+    /// measures nothing.
+    pub fn reaches_the_window(&self) -> bool {
+        !self.truncated.is_empty()
+    }
+
+    /// Read back from the index a corpus was built into.
+    ///
+    /// From the complaint rows the write path records, rather than by asking
+    /// the embedder again: what is being reported is what indexing did, and a
+    /// second count taken here could disagree with it without anyone knowing
+    /// which one retrieval ran on.
+    fn of(corpus: &Corpus, model: &str, pages: usize) -> Result<Self, EvalError> {
+        let mut failed = 0;
+        let mut truncated = Vec::new();
+        for complaint in corpus.store.embed_failures(corpus.project_id)? {
+            if complaint.model != model {
+                continue;
+            }
+            match (complaint.kind, complaint.tokens, complaint.budget) {
+                (EmbedFault::Truncated, Some(tokens), Some(budget)) => truncated.push(Truncated {
+                    path: complaint.path.as_str().to_owned(),
+                    overflow: Overflow { tokens, budget },
+                }),
+                // A truncation row without its numbers still says the vector
+                // is partial; it is counted as a failure rather than dropped,
+                // since "whole" is the one thing it certainly is not.
+                _ => failed += 1,
+            }
+        }
+        truncated.sort_by(|a, b| {
+            a.overflow
+                .covered()
+                .total_cmp(&b.overflow.covered())
+                .then_with(|| a.path.cmp(&b.path))
+        });
+        Ok(Self {
+            model: model.to_owned(),
+            pages,
+            failed,
+            truncated,
+        })
+    }
 }
 
 /// One kind of question, scored on its own.
@@ -166,6 +256,9 @@ pub fn run_on(
 
     let scores: Vec<CaseScore> = cases.iter().map(|case| case.score.clone()).collect();
     let by_category = score_by_category(&suite.categories, &cases, suite.limit);
+    let vectors = embedder
+        .map(|embedder| VectorCoverage::of(corpus, embedder.model(), suite.pages.len()))
+        .transpose()?;
 
     Ok(Report {
         name: suite.name.clone(),
@@ -178,6 +271,7 @@ pub fn run_on(
         recall: recall(&scores),
         by_category,
         thresholds: suite.thresholds,
+        vectors,
         cases,
     })
 }
@@ -462,6 +556,96 @@ relevant = ["notes/windows.md"]
             report.cases.iter().map(|case| case.score.rank).collect()
         };
         assert_eq!(ranks(&first), ranks(&second));
+    }
+
+    /// An embedder that reads a fixed number of words and knows it.
+    struct Narrow {
+        budget: usize,
+    }
+
+    impl Embed for Narrow {
+        fn model(&self) -> &str {
+            "narrow-1"
+        }
+        fn embed(&self, text: &str) -> Result<Vec<f32>, String> {
+            // Direction is irrelevant here; only what indexing records is.
+            Ok(vec![text.len() as f32, 1.0])
+        }
+        fn overflow(&self, text: &str) -> Option<Overflow> {
+            let tokens = text.split_whitespace().count();
+            (tokens > self.budget).then_some(Overflow {
+                tokens,
+                budget: self.budget,
+            })
+        }
+    }
+
+    /// No embedder, no claim about vectors — rather than a row of zeroes that
+    /// reads as a stream which saw nothing.
+    #[test]
+    fn a_run_without_vectors_says_nothing_about_them() {
+        let suite = Suite::from_toml(SUITE).expect("suite");
+        let report = run(&suite, now()).expect("run");
+        assert_eq!(report.vectors, None);
+    }
+
+    /// The thing the field is for. Both pages here fit a generous window, and
+    /// the report has to be able to say so: a suite like that is silent on long
+    /// pages however well it scores.
+    #[test]
+    fn a_corpus_that_fits_the_window_is_reported_as_not_reaching_it() {
+        let suite = Suite::from_toml(SUITE).expect("suite");
+        let report = run_embedded(&suite, now(), &Narrow { budget: 1000 }).expect("run");
+
+        let vectors = report.vectors.expect("an embedded run reports coverage");
+        assert_eq!(vectors.model, "narrow-1");
+        assert_eq!(vectors.pages, 2);
+        assert_eq!(vectors.whole(), 2);
+        assert!(!vectors.reaches_the_window());
+    }
+
+    /// And the other way: a page longer than the model reads is named, with
+    /// how much of it the vector stands for, and the least-read page comes
+    /// first because that is the question somebody reading this has.
+    #[test]
+    fn a_page_longer_than_the_window_is_named_least_read_first() {
+        // Title and body are embedded together, so the SQLite page comes to
+        // thirteen words and the Windows page to ten. A window of ten reads
+        // one of them whole.
+        let suite = Suite::from_toml(SUITE).expect("suite");
+        let report = run_embedded(&suite, now(), &Narrow { budget: 10 }).expect("run");
+
+        let vectors = report.vectors.expect("coverage");
+        assert!(vectors.reaches_the_window());
+        assert_eq!(vectors.failed, 0);
+        assert_eq!(vectors.whole(), 1, "{vectors:?}");
+        assert_eq!(vectors.truncated.len(), 1, "{vectors:?}");
+
+        let least = &vectors.truncated[0];
+        assert_eq!(least.path, "decisions/0001-sqlite.md");
+        assert_eq!(least.overflow.tokens, 13);
+        assert_eq!(least.overflow.budget, 10);
+
+        // Lower the window until both overflow, and the order has to follow
+        // coverage rather than the order the suite lists them in.
+        let report = run_embedded(&suite, now(), &Narrow { budget: 5 }).expect("run");
+        let vectors = report.vectors.expect("coverage");
+        let order: Vec<&str> = vectors
+            .truncated
+            .iter()
+            .map(|page| page.path.as_str())
+            .collect();
+        assert_eq!(order, ["decisions/0001-sqlite.md", "notes/windows.md"]);
+
+        // Now swap which page is longer, and the order has to swap with it.
+        let swapped = SUITE.replace(
+            "body = \"PowerShell prepends a byte order mark when piping.\"",
+            "body = \"PowerShell prepends a byte order mark when piping a string to a file on disk.\"",
+        );
+        let suite = Suite::from_toml(&swapped).expect("suite");
+        let report = run_embedded(&suite, now(), &Narrow { budget: 5 }).expect("run");
+        let vectors = report.vectors.expect("coverage");
+        assert_eq!(vectors.truncated[0].path, "notes/windows.md", "{vectors:?}");
     }
 
     /// Perfect recall with the answer at the bottom of the page is the result

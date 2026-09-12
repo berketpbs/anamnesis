@@ -156,8 +156,9 @@ pub fn diagnose(symptoms: &Symptoms) -> Vec<Finding> {
 ///
 /// A page with no vector is absent from a stream — `Broken`, by the enum's own
 /// reading of "something is not being recorded at all". A page embedded from
-/// its first five hundred tokens is present in every stream and answering with
-/// part of itself, which is `Thin`: working, producing less than it could.
+/// only its opening tokens — 128 of them, for the default model — is present in
+/// every stream and answering with part of itself, which is `Thin`: working,
+/// producing less than it could.
 /// Folding them together would rank the quieter one as an emergency and, worse,
 /// let one remedy stand in for two that share nothing.
 fn judge_embeddings(symptoms: &Symptoms) -> Vec<Finding> {
@@ -910,8 +911,8 @@ mod tests {
         assert!(embeddings.verdict.contains("1 page"), "{embeddings:#?}");
     }
 
-    /// A page embedded from its first five hundred tokens is in every stream
-    /// and answering with part of itself. That is `Thin` — working, producing
+    /// A page embedded from only its opening tokens is in every stream and
+    /// answering with part of itself. That is `Thin` — working, producing
     /// less than it could — and calling it `Broken` would spend the word that
     /// means a page is absent.
     #[test]
