@@ -445,6 +445,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly what must not be lost
 
 ### Fixed
+- `anamnesis eval --streams` no longer reports questions **nothing** answered as
+  questions **fusion** answered. Its one list — "No single stream answered these
+  — fusion is doing the work" — held every question no stream found within the
+  suite's window, and never asked whether the fused ranking had found them
+  either. Every question in the older suites is answered, so the list only ever
+  held fusion's real successes and the fault never showed; on a suite with
+  misses it printed all of them under the heading that fusion was answering
+  them. The questions are now split three ways: no stream and fusion did, some
+  stream did and fusion **lost it**, and nothing did. The middle one is new and
+  the most useful: the answer was in hand and the weighing of streams dropped
+  it, which is exactly the fault the 2026-08-29 sweep was run to fix, and until
+  now nothing named the question it happened to
 - An `error` field that is present and empty is no longer read as a failure. A
   JSON-RPC reply — which is what a tool answering over MCP sends — carries
   `error: null` on every successful call, and the outcome reader treated the

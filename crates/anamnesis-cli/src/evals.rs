@@ -547,10 +547,26 @@ fn print_ablation(ablation: &anamnesis_evals::Ablation) {
         }
     }
 
-    if !ablation.found_by_none.is_empty() {
+    // Three lists rather than one, because they are three findings. The one
+    // list this replaced printed questions nothing had answered under the
+    // heading that fusion was answering them.
+    for (heading, queries) in [
+        (
+            "No single stream answered these, and fusion did:",
+            &ablation.fusion_only,
+        ),
+        (
+            "A stream answered these, and fusion lost them:",
+            &ablation.lost_in_fusion,
+        ),
+        ("Nothing answered these, alone or fused:", &ablation.missed),
+    ] {
+        if queries.is_empty() {
+            continue;
+        }
         println!();
-        println!("   No single stream answered these — fusion is doing the work:");
-        for query in &ablation.found_by_none {
+        println!("   {heading}");
+        for query in queries {
             println!("     {query:?}");
         }
     }
