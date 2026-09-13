@@ -437,6 +437,37 @@ property of the embedder as much as of fusion — a model that reads 512 tokens
 instead of 128 truncates a different set of pages — so the next measurement is
 of a longer window, and the weight is chosen under whichever model that leaves.
 
+**A longer window was measured, and one model fixes `long` without touching the
+weight.** Four models against the MiniLM that ships, each over all four suites
+under `--embed` at the shipped tuning (`vectors = 1.0`), hit@1 / MRR. The local
+ones load through the same candle path and mean pooling MiniLM uses; nomic runs
+in Ollama and is reached through the OpenAI-compatible embedder, with no task
+prefix on either side:
+
+| model (window)                  | retrieval     | crowded       | adversarial   | long          |
+|---------------------------------|---------------|---------------|---------------|---------------|
+| all-MiniLM-L6-v2 (128), ships   | 1.000 / 1.000 | 0.933 / 0.967 | 0.938 / 0.958 | 0.312 / 0.414 |
+| thenlper/gte-small (512)        | 0.900 / 0.950 | 0.800 / 0.900 | 0.812 / 0.906 | 0.375 / 0.445 |
+| BAAI/bge-small-en-v1.5 (512)    | 0.900 / 0.950 | 0.933 / 0.967 | 0.938 / 0.969 | 0.438 / 0.562 |
+| thenlper/gte-base (512)         | 0.900 / 0.950 | 1.000 / 1.000 | 1.000 / 1.000 | 0.375 / 0.486 |
+| nomic-embed-text (8192, Ollama) | 0.900 / 0.950 | 1.000 / 1.000 | 1.000 / 1.000 | 0.500 / 0.578 |
+| no vectors (`vectors=0`)        | 1.000 / 1.000 | 0.933 / 0.967 | 0.938 / 0.969 | 0.500 / 0.562 |
+
+nomic-embed-text is the first vector stream to score above no vectors at all on
+`long`, and it does so at full weight while taking `crowded` and `adversarial`
+to 1.000. Under it a quarter weight *loses* both of those back (`can i deploy
+on friday`, `argon2id`), so the weight question the MiniLM grid raised does not
+survive the change of model — which is the argument for choosing the model
+first. A longer window alone is not what did it: gte-base and bge-small read
+every page in this corpus whole too, and both stay below no vectors on `long`.
+
+What every longer model costs is the same one question: `retrieval`'s bare
+keyword `sqlite` falls from first to second. `long`'s paraphrases are still its
+weakest category under nomic (hit@1 0.000, MRR 0.125). And the candidate is
+chosen off the same frozen suites as the quarter weight was, so it is held to
+the same rule: before it becomes anything but an option, questions nobody has
+scored, over pages nobody wrote for a suite.
+
 The same run said something about the weight, too. `vectors = 1.0` is the one
 `Tuning` value still marked as standing on an argument, and `--compare
 vectors=0` under `--embed` is its first paired measurement: level on `retrieval`

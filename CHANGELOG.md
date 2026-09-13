@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Embedding models with a longer window were measured against MiniLM**, over
+  all four suites at the shipped tuning. `nomic-embed-text` through Ollama is
+  the first vector stream to beat no vectors on `long` (hit@1 / MRR 0.500 /
+  0.578 against 0.312 / 0.414 shipping and 0.500 / 0.562 without vectors) and
+  takes `crowded` and `adversarial` to 1.000, at full weight; gte-small,
+  gte-base and bge-small read every page whole too and stay below no vectors
+  on `long`. Every longer model costs `retrieval` its `sqlite` keyword (first
+  to second). Nothing ships from this: the default stays MiniLM, and the
+  candidate waits on questions nobody has scored. `docs/DIRECTION.md` has the
+  table, `docs/measurements/2026-09-13-embedding-models.md` how to run it again
 - **The abstract stream was measured, and stays at weight zero.** `long` was
   given abstracts by two writers that were shown each page and never the
   questions — gemini-3.6-flash, and qwen2.5:7b-instruct run locally through
