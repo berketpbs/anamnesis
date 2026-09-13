@@ -743,6 +743,14 @@ impl Store {
     /// pages in either order produces the same index — a page can name its
     /// predecessor before the index has seen it, and a rebuild visits paths in
     /// an order nobody chose.
+    ///
+    /// The session a page names is linked only when the index holds that
+    /// session, and is left unlinked otherwise. The column is a foreign key, and
+    /// a page can outlive its session in two ordinary ways: `forget-session`
+    /// removes the session while the page's frontmatter still names it, and a
+    /// rebuild into an empty index can reach a page before the spool has given
+    /// back its session. Both used to fail the whole write — the second one made
+    /// `reindex` from an empty index stop at its first model-written page.
     pub fn upsert_page(&self, page: &Page, now: Timestamp) -> Result<()> {
         let fm = &page.frontmatter;
         let target = fm.supersedes.as_ref().map(|path| path.as_str().to_owned());
@@ -768,7 +776,8 @@ impl Store {
                  (id, project_id, path, title, body, tier, status, pinned, canonical,
                   salience, expires_at, git_commit, supersedes_target, session_id,
                   created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                     (SELECT id FROM sessions WHERE id = ?14), ?15, ?15)
              ON CONFLICT (id) DO UPDATE SET
                  title             = excluded.title,
                  body              = excluded.body,
@@ -1149,10 +1158,15 @@ impl Store {
         let conn = self.connection();
         let found = conn
             .query_row(
+                // The session is compared as `upsert_page` would store it —
+                // linked only if the index holds it — or a page naming a
+                // forgotten session would never look current, and every
+                // rebuild would rewrite it and renew its decay clock.
                 "SELECT title, body, tier, status, pinned, canonical, salience,
-                        expires_at, supersedes_target, session_id
+                        expires_at, supersedes_target, session_id,
+                        (SELECT id FROM sessions WHERE id = ?2)
                  FROM pages WHERE id = ?1",
-                params![page.id.to_string()],
+                params![page.id.to_string(), fm.session.map(|id| id.to_string())],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -1165,28 +1179,43 @@ impl Store {
                         row.get::<_, Option<String>>(7)?,
                         row.get::<_, Option<String>>(8)?,
                         row.get::<_, Option<String>>(9)?,
+                        row.get::<_, Option<String>>(10)?,
                     ))
                 },
             )
             .optional()?;
 
-        let Some(stored) = found else {
+        let Some((
+            title,
+            body,
+            tier,
+            status,
+            pinned,
+            canonical,
+            salience,
+            expires,
+            target,
+            session,
+            linkable,
+        )) = found
+        else {
             return Ok(false);
         };
 
-        Ok(stored
-            == (
-                fm.title.clone(),
-                page.body.clone(),
-                fm.tier.as_str().to_owned(),
-                fm.status.as_str().to_owned(),
-                fm.pinned,
-                fm.canonical,
-                fm.salience,
-                fm.expires_at.map(|at| at.to_string()),
-                fm.supersedes.as_ref().map(|p| p.as_str().to_owned()),
-                fm.session.map(|id| id.to_string()),
-            ))
+        Ok((
+            title, body, tier, status, pinned, canonical, salience, expires, target, session,
+        ) == (
+            fm.title.clone(),
+            page.body.clone(),
+            fm.tier.as_str().to_owned(),
+            fm.status.as_str().to_owned(),
+            fm.pinned,
+            fm.canonical,
+            fm.salience,
+            fm.expires_at.map(|at| at.to_string()),
+            fm.supersedes.as_ref().map(|p| p.as_str().to_owned()),
+            linkable,
+        ))
     }
 
     /// Every page the index holds for a project, by id and authored path.

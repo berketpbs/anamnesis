@@ -27,6 +27,7 @@ use anamnesis_core::session::Session;
 use anamnesis_store::{RawRecord, RawSpool, Store};
 use anamnesis_wiki::Wiki;
 use jiff::Timestamp;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use anamnesis_core::datadir::DataDir;
@@ -70,14 +71,19 @@ pub fn rebuild(
     let mut report = Rebuilt::default();
     store.upsert_project(scope, now)?;
 
-    let pages = rebuild_pages(store, wiki, scope, embedder, now)?;
-    report.pages = pages.indexed;
-    report.removed = pages.removed;
-    report.skipped_removal = pages.skipped_removal;
+    // Sessions before pages. A page names the session that wrote it, and into
+    // an empty index a page reached first had no session to link to — which
+    // failed the whole rebuild at the first model-written page, the one case
+    // this command exists for. Written in this order, a rebuilt page links to
+    // its session exactly as the live page did.
     let (sessions, observations, orphaned) = rebuild_sessions(store, raw, scope)?;
     report.sessions = sessions;
     report.observations = observations;
     report.orphaned_files = orphaned;
+    let pages = rebuild_pages(store, wiki, scope, embedder, now)?;
+    report.pages = pages.indexed;
+    report.removed = pages.removed;
+    report.skipped_removal = pages.skipped_removal;
 
     Ok(report)
 }
@@ -201,7 +207,9 @@ fn rebuild_sessions(
     raw: &RawSpool,
     scope: &ResolvedScope,
 ) -> anyhow::Result<(usize, usize, usize)> {
-    let mut sessions = 0;
+    // Counted by identity, not by file: the spool starts a new file each day,
+    // so a session that ran past midnight is spread over two of them.
+    let mut sessions = HashSet::new();
     let mut observations = 0;
     let mut orphaned = 0;
 
@@ -227,7 +235,7 @@ fn rebuild_sessions(
         }
 
         store.ensure_session(&reopened(&session))?;
-        sessions += 1;
+        sessions.insert(session.id);
 
         // The header is written once, when the file is created, and the
         // spool is append-only — so it always says the session was open,
@@ -252,7 +260,7 @@ fn rebuild_sessions(
         }
     }
 
-    Ok((sessions, observations, orphaned))
+    Ok((sessions.len(), observations, orphaned))
 }
 
 /// A session as it should be inserted during a rebuild.
@@ -462,6 +470,121 @@ mod tests {
             .expect("query");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].title, "Storage engine");
+    }
+
+    /// The case this command exists for, and the one it could not do: an
+    /// index gone entirely, a wiki whose pages name the sessions that wrote
+    /// them. Pages were rebuilt before sessions, so the first page naming one
+    /// failed a foreign key and the rebuild stopped there. A page naming a
+    /// session nothing holds any more — forgotten, or never spooled — is
+    /// rebuilt unlinked rather than failing, and a second rebuild leaves both
+    /// pages alone instead of rewriting them.
+    #[test]
+    fn a_rebuild_into_an_empty_index_links_pages_to_their_sessions() {
+        let harness = harness();
+        let session = spool_session(&harness, "session-1", &["what did we decide"]);
+
+        let write = |path: &str, names: anamnesis_core::ids::SessionId| {
+            let mut frontmatter = Frontmatter::new("A session page", Vec::new()).expect("fm");
+            frontmatter.session = Some(names);
+            let page = Page::new(
+                harness.scope.project_id,
+                PagePath::parse(path).expect("path"),
+                frontmatter,
+                "body",
+            );
+            harness
+                .wiki
+                .write_page(&harness.scope.scope, &page, "write")
+                .expect("write");
+        };
+        write("sessions/2026-08-25-spooled.md", session.id);
+        let forgotten = anamnesis_core::ids::SessionId::derive(harness.scope.project_id, "gone");
+        write("sessions/2026-08-24-forgotten.md", forgotten);
+
+        let report = rebuild(
+            &harness.store,
+            &harness.wiki,
+            &harness.raw,
+            &harness.scope,
+            None,
+            now(),
+        )
+        .expect("a rebuild into an empty index");
+        assert_eq!((report.pages, report.sessions), (2, 1));
+
+        let linked = |path: &str| -> (Option<String>, String) {
+            harness
+                .store
+                .connection()
+                .query_row(
+                    "SELECT session_id, updated_at FROM pages WHERE path = ?1",
+                    [path],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("page row")
+        };
+        let (spooled, first_write) = linked("sessions/2026-08-25-spooled.md");
+        assert_eq!(spooled, Some(session.id.to_string()));
+        let (unlinked, _) = linked("sessions/2026-08-24-forgotten.md");
+        assert_eq!(unlinked, None, "a session nothing holds is left unlinked");
+
+        let later: Timestamp = "2026-09-01T09:00:00Z".parse().expect("later");
+        rebuild(
+            &harness.store,
+            &harness.wiki,
+            &harness.raw,
+            &harness.scope,
+            None,
+            later,
+        )
+        .expect("second rebuild");
+        assert_eq!(linked("sessions/2026-08-25-spooled.md").1, first_write);
+        assert_eq!(
+            linked("sessions/2026-08-24-forgotten.md").1,
+            first_write,
+            "a page naming a forgotten session is current, not rewritten every time"
+        );
+    }
+
+    /// Before capture wrote its header from the stored session, one that ran
+    /// past midnight was filed under two dates. Both files are recovered, and
+    /// the report counts the session they belong to once.
+    #[test]
+    fn a_session_filed_under_two_dates_is_counted_once() {
+        let harness = harness();
+        let mut session = spool_session(&harness, "session-1", &["before midnight"]);
+        session.started_at = "2026-08-26T00:10:00Z".parse().expect("next day");
+        let observation = new_observation(
+            session.id,
+            EventKind::UserPrompt,
+            None,
+            BoundedBody::truncating("after midnight", 1024),
+            session.started_at,
+        );
+        harness
+            .raw
+            .append(&harness.scope.scope, &session, &observation)
+            .expect("spool");
+        assert_eq!(
+            harness
+                .raw
+                .locate_all(&harness.scope.scope, session.id)
+                .len(),
+            2
+        );
+
+        let report = rebuild(
+            &harness.store,
+            &harness.wiki,
+            &harness.raw,
+            &harness.scope,
+            None,
+            now(),
+        )
+        .expect("rebuild");
+
+        assert_eq!((report.sessions, report.observations), (1, 2));
     }
 
     #[test]
