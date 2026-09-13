@@ -488,6 +488,42 @@ without vectors. `long` since added the other half of the evidence: six
 questions up and none down with the stream removed. On short pages the weight
 is a trade; on long ones it is a cost.
 
+**The unscored questions were asked, and nomic-embed-text is the recommended
+embedder.** `docs/measurements/2026-09-13-live-validation.md` records a set
+frozen before its first run: 24 questions, six per kind, over the 56 pages of
+this project's live memory, in English and Turkish, with the file's SHA-256
+committed first. Against it (hit@1 / MRR / NDCG@5, recall 1.000 throughout):
+
+| configuration                  | hit@1 | MRR   | NDCG@5 |
+|--------------------------------|-------|-------|--------|
+| all-MiniLM-L6-v2, ships        | 0.833 | 0.903 | 0.928  |
+| MiniLM at `vectors = 0.25`     | 0.833 | 0.910 | 0.933  |
+| no vectors                     | 0.833 | 0.910 | 0.933  |
+| nomic-embed-text               | 0.875 | 0.931 | 0.948  |
+
+Every difference is in `paraphrase`; `keyword` and `natural` answered all
+twelve first under every configuration, and `symptom` did not move between the
+two models. MiniLM truncated 50 of the 56 pages and nomic read all 56 whole.
+The rule the candidate was held to — that it must not lose to what ships on
+questions nobody scored — is met. How much better it is, one question in
+twenty-four on a set half of which saturates, the set cannot say.
+
+What that changes and what it does not:
+
+- **The default stays MiniLM.** nomic runs in Ollama, and a default that needs a
+  second server to be running is a default that silently loses the vector
+  stream the day that server is not — `memory_query` carries on without it, and
+  pages written meanwhile record an embedding failure. The candle model is in
+  the binary's own process and needs nothing.
+- **Where Ollama runs, nomic-embed-text is the recommendation**, and
+  `GETTING_STARTED.md` gives it as the first example of an embedding endpoint.
+  This project's own install moved to it on 2026-09-13: `reindex` gave all 56
+  pages a whole nomic vector with no failures, and `doctor` needed #202 to stop
+  judging the MiniLM rows the index still holds.
+- **The quarter weight is not confirmed.** It scored exactly as no vectors did,
+  on this set a switch rather than a middle ground, and under nomic it loses
+  `crowded` and `adversarial` back. `vectors` stays 1.0.
+
 **Session-recall routing: probably never**, for the reason in finding 2.
 
 ### Phase 4 — typed edges, if the graph is non-empty

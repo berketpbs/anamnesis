@@ -957,6 +957,42 @@ Local stays the default, and a misspelled provider name is local rather than
 an error: this setting is how you opt *into* sending every page and every
 query to somebody else, and a typo must not be a way to end up doing that.
 
+#### Recommended where Ollama runs: nomic-embed-text
+
+The built-in model reads the first 128 tokens of a page. Most pages a
+consolidator writes are longer than that — on this project's own memory, 50 of
+56 — so the vector stream answers from each page's opening and nothing below
+it. `nomic-embed-text` reads 8192 tokens, and on a question set frozen before
+it was run over that memory it scored hit@1 0.875 / MRR 0.931 against MiniLM's
+0.833 / 0.903, losing nothing on keyword or natural-language questions
+(`docs/DIRECTION.md` has the measurement). It runs in Ollama, on the same
+machine, with no key and nothing leaving it:
+
+```bash
+ollama pull nomic-embed-text
+
+export ANAMNESIS_EMBED_ENABLED=1
+export ANAMNESIS_EMBED_PROVIDER=openai
+export ANAMNESIS_EMBED_URL=http://127.0.0.1:11434/v1/embeddings
+export ANAMNESIS_EMBED_MODEL=nomic-embed-text
+
+anamnesis reindex          # every page gets a nomic vector beside its old one
+```
+
+It is not the default for one reason: it needs Ollama to be running. When it is
+not, queries carry on without the vector stream and a page written meanwhile
+records an embedding failure that `anamnesis doctor` reports. So start Ollama
+with whatever keeps the server running — before it, in the same script — rather
+than from a terminal that will be closed.
+
+Two places need these variables, not one: the **server's** environment, and
+the MCP registration, since the agent's `memory_query` embeds the question in
+its own process. `anamnesis install-mcp` deliberately writes no hosted
+embedder into a harness's config (a key does not belong in one), so for
+Claude Code add the three variables to the `env` block of `.mcp.json` by hand —
+and note that running `install-mcp --write` again rewrites that block without
+them.
+
 The server checks the endpoint while it starts, by embedding one short string
 — so a wrong key or a model that does not exist is an error you see at startup
 rather than a log line hours later, after sessions have been summarised
