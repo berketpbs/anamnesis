@@ -279,6 +279,21 @@ pub enum Commands {
         operator: Option<String>,
     },
 
+    /// Give an eval suite's pages abstracts, written by the configured model
+    ///
+    /// Each page without an `abstract` is sent to the model alone — its title
+    /// and body, never the suite's questions — and the one sentence that comes
+    /// back is checked before it is kept. Pages that already have one are left
+    /// as they are, so a run a quota cut short is finished by running it again.
+    Abstracts {
+        /// Suite file whose pages to write abstracts for
+        suite: PathBuf,
+
+        /// Write the abstracts into the suite file, instead of only printing them
+        #[arg(long)]
+        write: bool,
+    },
+
     /// Score retrieval against a checked-in corpus and its questions
     ///
     /// Answers the question the test suite cannot: not "is this correct" but

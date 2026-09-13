@@ -7,6 +7,7 @@
 //! — so that reading this file tells you what anamnesis can be asked to do,
 //! and reading one module tells you how one answer is arrived at.
 
+mod abstracts;
 mod archive;
 mod audit;
 mod bench;
@@ -36,6 +37,7 @@ mod status;
 mod sweep;
 mod uninstall;
 
+use abstracts::cmd_abstracts;
 use archive::{cmd_backup, cmd_restore};
 use audit::cmd_audit;
 use bench::cmd_bench;
@@ -240,6 +242,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::ForgetSession { sessions, apply } => {
             cmd_forget_session(&sessions, apply, cli.data_dir.clone())?;
+        }
+        Commands::Abstracts { suite, write } => {
+            cmd_abstracts(&suite, write)?;
         }
         Commands::Reconsolidate {
             sessions,
