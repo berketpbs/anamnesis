@@ -544,6 +544,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session produced, which is the opposite of what this is for
 
 ### Changed
+- **nomic-embed-text through Ollama is the recommended embedder where Ollama
+  runs**, and the first example `GETTING_STARTED.md` gives of an embedding
+  endpoint. On a question set frozen over this project's live memory before
+  its first run it scored hit@1 0.875 / MRR 0.931 against MiniLM's 0.833 /
+  0.903, every difference in paraphrase and none on keyword or natural
+  questions, and read all 56 pages whole where MiniLM truncated 50. The default
+  stays the built-in MiniLM, because nomic needs a second server running and
+  the vector stream is lost the day it is not. The section says so, and that
+  the MCP registration needs the same three variables by hand, since
+  `install-mcp` writes no hosted embedder into a harness's config.
+  `docs/DIRECTION.md` records the table and why the quarter weight is not
+  confirmed
+- The fallback chain's documentation says **every link is sent the prompt the
+  configured input budget built**. A local fallback with a smaller window than
+  that budget has the prompt cut by Ollama without a refusal, and writes a page
+  from part of the session that does not say so; on the machine this was found
+  on, the local model's window was 12,288 tokens against a 64,000-token budget
 - **`target/` no longer grows with every edit.** It reached 27.6 GB on this
   machine with dependency debug info already off, and 17.7 GB of that was
   `target/debug/incremental`: 365 cache directories, one per distinct build of

@@ -156,8 +156,8 @@ Three things learned pointing this at a real Ollama, all worth knowing before
 you conclude the setup is broken:
 
 **Ollama's default context is smaller than the prompt anamnesis sends.** A
-session goes out at up to `ANAMNESIS_LLM_MAX_INPUT_TOKENS` (6500) and the reply
-budget is 2000 on top; Ollama serves 4096 unless the model says otherwise, and
+session goes out at up to `ANAMNESIS_LLM_MAX_INPUT_TOKENS` (64000 by default)
+and the reply ceiling is on top; Ollama serves 4096 unless the model says otherwise, and
 what does not fit is dropped rather than refused. The page comes back valid,
 readable, and quietly missing the middle of the session. Give the model a
 window that holds both — a `Modelfile` is the durable way, since it travels
@@ -166,16 +166,21 @@ variable:
 
 ```
 FROM qwen2.5:7b-instruct
-PARAMETER num_ctx 12288
+PARAMETER num_ctx 32768
 ```
 
 ```bash
 ollama create anamnesis-qwen -f Modelfile
 export ANAMNESIS_LLM_MODEL=anamnesis-qwen
+export ANAMNESIS_LLM_MAX_INPUT_TOKENS=24000   # what the window holds after the reply
 ```
 
+The window is the model's to give — 32768 is qwen2.5's own — and the budget is
+yours to fit inside it: a larger budget than the window is the silent failure
+above, not a fuller page.
+
 Measured rather than assumed: a 123-observation session reported 7394 input
-tokens, comfortably past both 4096 and the 6500 the budget estimated.
+tokens, comfortably past both 4096 and the 6500 the budget then allowed.
 
 **A reasoning model can spend the whole reply budget thinking.** It comes back
 as HTTP 200 with a full `reasoning` field and an empty answer, and anamnesis
@@ -220,6 +225,17 @@ backend's own key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`),
 never `ANAMNESIS_LLM_API_KEY`, which belongs to the configured provider. Every
 link shares the configured budgets, timeout and effort, and a chain that cannot
 be built is refused at startup like any other setting.
+
+**Every link is sent the prompt the configured budget built.** The transcript
+is fitted to `ANAMNESIS_LLM_MAX_INPUT_TOKENS` once, before the first link is
+asked, and a fallback gets that same text. A hosted model with a large window
+takes it whole. A local one may not: Ollama serves 4096 tokens unless the model
+says otherwise, and what does not fit is dropped rather than refused, so the
+fallback's page would read fine and be written from part of the session with
+nothing on it saying so. Before putting a local model in a chain, give it a
+window that holds the input budget and the reply (see *A model on this
+machine* for the `Modelfile`), or lower the budget to what it holds — or keep
+the chain to hosted models on separate quotas.
 
 A page a fallback wrote says so at the bottom — `Written by qwen2.5:7b-instruct,
 standing in for gemini-3.5-flash, which did not answer.` — and its session is
@@ -956,6 +972,42 @@ export ANAMNESIS_EMBED_API_KEY=sk-...        # or OPENAI_API_KEY, which it falls
 Local stays the default, and a misspelled provider name is local rather than
 an error: this setting is how you opt *into* sending every page and every
 query to somebody else, and a typo must not be a way to end up doing that.
+
+#### Recommended where Ollama runs: nomic-embed-text
+
+The built-in model reads the first 128 tokens of a page. Most pages a
+consolidator writes are longer than that — on this project's own memory, 50 of
+56 — so the vector stream answers from each page's opening and nothing below
+it. `nomic-embed-text` reads 8192 tokens, and on a question set frozen before
+it was run over that memory it scored hit@1 0.875 / MRR 0.931 against MiniLM's
+0.833 / 0.903, losing nothing on keyword or natural-language questions
+(`docs/DIRECTION.md` has the measurement). It runs in Ollama, on the same
+machine, with no key and nothing leaving it:
+
+```bash
+ollama pull nomic-embed-text
+
+export ANAMNESIS_EMBED_ENABLED=1
+export ANAMNESIS_EMBED_PROVIDER=openai
+export ANAMNESIS_EMBED_URL=http://127.0.0.1:11434/v1/embeddings
+export ANAMNESIS_EMBED_MODEL=nomic-embed-text
+
+anamnesis reindex          # every page gets a nomic vector beside its old one
+```
+
+It is not the default for one reason: it needs Ollama to be running. When it is
+not, queries carry on without the vector stream and a page written meanwhile
+records an embedding failure that `anamnesis doctor` reports. So start Ollama
+with whatever keeps the server running — before it, in the same script — rather
+than from a terminal that will be closed.
+
+Two places need these variables, not one: the **server's** environment, and
+the MCP registration, since the agent's `memory_query` embeds the question in
+its own process. `anamnesis install-mcp` deliberately writes no hosted
+embedder into a harness's config (a key does not belong in one), so for
+Claude Code add the three variables to the `env` block of `.mcp.json` by hand —
+and note that running `install-mcp --write` again rewrites that block without
+them.
 
 The server checks the endpoint while it starts, by embedding one short string
 — so a wrong key or a model that does not exist is an error you see at startup
