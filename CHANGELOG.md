@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The abstract stream was measured, and stays at weight zero.** `long` was
+  given abstracts by two writers that were shown each page and never the
+  questions — gemini-3.6-flash, and qwen2.5:7b-instruct run locally through
+  Ollama — and neither gained: `abstracts=1` scored hit@1 / MRR 0.312 / 0.417
+  and 0.250 / 0.417 against 0.312 / 0.414, and replacing body vectors with
+  abstracts scored below removing vectors outright under both. The two sets
+  are kept as suite copies in `docs/measurements/` so the run can be repeated;
+  the frozen `long.toml` was not edited. The same session measured the vector
+  weight across all four suites: at 0.25 nothing lost ground anywhere,
+  `adversarial` reached 1.000 / 1.000 and `long` 0.438 / 0.521 — and it is not
+  shipped, because that grid was read off the two suites whose rule is that no
+  knob is tuned against them. `docs/DIRECTION.md` has both tables and what
+  comes next: a longer embedding window, then the weight under it, checked on
+  questions nobody has scored
 - **`anamnesis abstracts <suite.toml> [--write]`** gives an eval suite's pages
   abstracts written by the configured model, which is sent each page's title
   and body and nothing else. A suite file holds its questions beside its pages,

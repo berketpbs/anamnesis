@@ -1,0 +1,724 @@
+# MEASUREMENT COPY, not a built-in suite. `crates/anamnesis-evals/suites/long.toml`
+# as of #198, with an `abstract` on every page written by qwen2.5:7b-instruct
+# (local, through Ollama) on 2026-09-13 through `anamnesis abstracts --write`,
+# which sends the model one page's title and body and nothing else — never the
+# questions below. Five pages were refused on the first pass (four openings
+# about the page, one over forty words) and written on later ones. Kept so the
+# result in docs/DIRECTION.md can be run again:
+#
+#   ANAMNESIS_EMBED_ENABLED=1 anamnesis eval --embed --compare abstracts=1 \
+#     --suite docs/measurements/2026-09-13-long-abstracts-qwen2.5-7b.toml
+#
+# The long suite: answers the embedding model never reads.
+#
+# The other three suites ask about pages of forty to a hundred words. Every one
+# of their fifty pages fits inside the 128 tokens the default embedding model
+# reads, so the vector stream in those suites always sees a page whole. A real
+# wiki is not like that: on 2026-09-11, 43 of the 49 pages in this project's own
+# memory were longer than the window, the longest embedded from about 8% of
+# itself. Anything that changes how long pages are embedded — an abstract, a
+# second vector per section, a model with a longer window — scores identically
+# before and after on a corpus with no long pages in it.
+#
+# This suite is that corpus. It asks two kinds of question:
+#
+#   * **Deep questions**, twelve of them. The answer is a long page, and nothing
+#     the question names appears anywhere in the part of that page the model
+#     reads. That is not a claim to take on trust: `lib.rs` checks, for every
+#     case whose answers are all long, that no word of the question other than
+#     a function word occurs in the first 128 words of title and body. A word is
+#     never fewer tokens than one, so the first 128 words cover at least the
+#     first 128 tokens, and the check is stricter than the window.
+#   * **Guard questions**, four of them. The answer is a short page, and a long
+#     page says the same words further down. These are the cost side. A change
+#     that teaches retrieval to see the bottom of long pages will also teach it
+#     to prefer long pages, which mention everything, and these are where that
+#     shows. A gain on the deep questions paid for here is a trade, and has to
+#     be reported as one.
+#
+# The long pages are the kinds this project's consolidator writes: session
+# pages that start with the errands and reach the decision halfway down,
+# postmortems that open on the timeline, a runbook whose critical step is the
+# ninth, a decision page whose first half is context. That is not a trick
+# played on the ranker. It is the shape of the pages that are truncated today.
+#
+# The rules `adversarial.toml` keeps, kept here:
+#
+#   1. **It was frozen before it was run.** The corpus and all sixteen
+#      questions were written, and their answers fixed, before the suite was
+#      scored once — with or without vectors.
+#   2. **No knob is ever tuned against it, and no case is edited to make it
+#      pass.**
+#
+# The corpus is a fleet of field weather and soil stations, so none of its
+# vocabulary is shared with queues and deploys, identity, or this project.
+
+name = "long"
+description = "Answers past the embedding window: long pages whose opening is about something else"
+
+limit = 5
+
+# The labels are defined in `retrieval.toml`.
+categories = ["keyword", "natural", "paraphrase", "symptom"]
+
+# Measured on the first run, without vectors, then rounded down. A floor, not a
+# target — and a low one, which is the point of the suite rather than a problem
+# with it.
+#
+# The first run scored **hit@1 0.500, MRR 0.562, NDCG@5 0.593, recall 0.688**.
+# Every `keyword` question came back first; full text reads a whole page, and a
+# word two hundred words down is as findable as one in the title. The shortfall
+# is everywhere else, and worst where the vector stream was supposed to help:
+# `paraphrase` answered none of its four in first place and found one at all.
+# Nothing came back for five questions — three of the four deep paraphrases,
+# the dawn resets, and one guard.
+#
+# **With vectors it scored lower: hit@1 0.312, MRR 0.414, NDCG@5 0.466, recall
+# 0.625.** Nine of the seventeen pages were truncated, the least-read embedded
+# from 24% of its 537 tokens. `--compare vectors=0` under `--embed` says what
+# the stream is worth here: removing it improved six questions and cost none.
+# On its own it scored MRR 0.052. On pages like these
+# the truncated vector is not a weak signal but a wrong one: it ranks each long
+# page by an opening that is about something else, and every one of those votes
+# goes to a page that is not the answer.
+#
+# The bar is set on the run without vectors because that is the run CI makes.
+[thresholds]
+min_hit1 = 0.5
+min_mrr = 0.56
+min_ndcg = 0.59
+min_recall = 0.68
+
+# ---------------------------------------------------------------------------
+# The corpus. Seventeen pages: nine long, eight short.
+#
+# Four of the short pages exist mainly to be wrong about a deep question:
+# `notes/spreading-factor.md` says SF12 and airtime in about fifty words,
+# `notes/boot-report.md` has the words boot report in its title,
+# `decisions/0003-join-server.md` is canonical and says network server, and
+# `gotchas/ingestion-drops-repeats.md` ends on data that never arrives. The
+# ninth long page, the planning call, answers nothing and mentions a great deal.
+# ---------------------------------------------------------------------------
+
+[[page]]
+path = "sessions/2026-03-04-4be1c9d0.md"
+title = "Session: the Ridgeline site visit"
+abstract = "Visit to the Ridgeline site, including inspection and maintenance of stations 12 through 16, analysis of station resets, and implementation of modifications to prevent future resets."
+tier = "episodic"
+entities = ["Ridgeline", "brownout detector"]
+body = """
+Drove up to Ridgeline with the spare parts box and the ladder. The access road
+was passable as far as the second gate; walked the last stretch to stations 12
+through 16.
+
+Station 12: the gasket on the enclosure lid had split along the hinge side and
+there was condensation inside. Replaced the gasket, dried the board with the
+heat gun on low, added two fresh desiccant packs. Station 13: nothing wrong,
+photographed the mast for the insurance file. Station 14: the antenna connector
+had worked loose in the wind and was hanging by the cable tie; re-seated it,
+wrapped it in self-amalgamating tape, and checked the signal from the handheld.
+Station 15: rain gauge funnel packed with pine needles, which explains the flat
+line on the dashboard since February. Cleared it and fitted the mesh cap from
+the spares box. Station 16: moved the solar panel twenty degrees west so the
+ridge stops shading it in the afternoon.
+
+Took battery readings at all five: between 3.9 and 4.1 volts, which is healthy
+for the time of year.
+
+## The resets
+
+Pulled the logs off station 14 while the laptop was out, and they explained the
+gaps nobody had been able to account for. It has been restarting once a day,
+always between 06:10 and 06:40, for three weeks.
+
+The sequence is the same every time. When the sun is low and the battery is
+cold the panel supplies almost nothing, and the rail sits just above the
+brownout detector's 2.7 V threshold. The station wakes, keys the radio for its
+scheduled transmission, and the transmit burst drags the rail under 2.7 V. The
+MCU resets, boots, and immediately tries to send a boot report — which is
+another transmit burst, so it resets again. It loops like that for twenty or
+thirty minutes until the panel output climbs enough to hold the rail up.
+
+Stations 12, 13, 15 and 16 do the same, less often. The rest of the fleet does
+not, as far as the logs show, because nothing else is on a north slope.
+
+Decided: the boot report now waits until the storage capacitor reads above
+3.3 V, and a station that resets from brownout twice within an hour skips
+transmitting until the panel voltage is above 5 V. That turns a thirty-minute
+loop into one reset and a late report. The change is in the next build. The
+brownout threshold itself stays where it is, because raising it would only make
+the loop start earlier.
+"""
+
+[[page]]
+path = "notes/postmortem-2026-01-forty-quiet.md"
+title = "Postmortem: forty stations went quiet"
+abstract = "A postmortem of a 2.14 rollout to cohort three, where forty valley units went silent, detailing the faults, recovery process, and changes made to prevent future issues."
+tier = "semantic"
+entities = ["bootloader", "rev-B board"]
+body = """
+Summary for anyone who was not on the call.
+
+At 14:00 on the Monday we started the 2.14 rollout to cohort three, which is the
+valley cluster and two hillside farms. Dashboards stayed green for a little over
+two hours. At 16:20 the uplink count from the valley dropped by forty and stayed
+there. The on-call engineer assumed the valley gateway's modem again and waited
+for it to come back; by 18:00 it clearly was not the modem, because the gateway
+itself was still reporting and still hearing the hillside farms.
+
+Nobody could reach the forty remotely. Two of us drove out at six the following
+morning. Every unit we opened was showing the same LED pattern, two short and
+one long, over and over. We brought them back one at a time with the SWD
+programmer and the previous release, which took until mid-afternoon on the
+Wednesday. No readings were lost from the stations themselves, since they
+buffer, but the customer dashboard had a two-day hole in it that we had to
+explain to the co-op.
+
+The hillside farms were fine throughout.
+
+## Why it happened
+
+Two faults, and the second is the one that matters.
+
+The first was ordinary: 2.14 initialised the humidity sensor at a bus address
+that only exists on rev-C boards. Every rev-B board in the cohort hard-faulted
+during startup. Cohort three was the first cohort with rev-B boards in it; one
+and two were entirely rev-C, so they told us nothing.
+
+The second is why a bad image became a bricked unit. The updater marked a newly
+written image as confirmed as soon as its checksum matched — before it had ever
+run. So the bootloader, seeing a confirmed image in the active slot, booted it,
+watched it fault, and booted it again. The previous image was sitting intact in
+the other slot the whole time, and nothing would ever choose it.
+
+## What changed
+
+A freshly written image now boots in a trial state. The bootloader runs it
+once; if the device resets before the application confirms it, the bootloader
+abandons it and falls back to the other slot. The application confirms only
+after its first uplink is acknowledged by the network — not after startup, and
+not after a self-test, because a self-test is exactly the thing that passed on
+rev-C.
+
+Separately, [[_rules/cohorts.md]] now requires every board revision in every
+cohort.
+"""
+
+[[page]]
+path = "decisions/0005-reporting-cadence.md"
+title = "How often a station talks"
+abstract = "Describes the rationale behind the reading cadence and frequency of transmissions for a weather station network operating on EU868, including considerations of battery life, radio limitations, and customer requests for faster data."
+tier = "semantic"
+canonical = true
+entities = ["EU868", "SF12"]
+body = """
+The question comes up every few months, usually from a customer who wants
+readings more often, so this page is the whole argument in one place.
+
+The fleet runs on EU868 through our own gateways, plus the community network
+where we have no coverage. A station takes a reading every five minutes and
+has, since the beginning, sent one frame every fifteen minutes carrying the last
+three readings. That cadence was set by the battery, not by the radio: a station
+with a 3,000 mAh cell and a 2 W panel breaks even in a northern winter at
+roughly four transmissions an hour, and we wanted margin.
+
+Faster reporting was tried on the demo farm in 2024, at five minutes. The
+battery curve went down in a straight line through December and two stations
+went flat before February. That is why the demo farm is back on fifteen.
+
+Customers who want faster readings are told the readings are already taken
+every five minutes. What they are asking for is lower latency, which is a
+different request with a different price.
+
+## The radio limit
+
+Under EU868 each sub-band is limited to a one per cent duty cycle, measured
+over an hour: thirty-six seconds of airtime. At SF7 our frame takes about 60 ms
+on air and the limit is irrelevant. At SF12, which ADR pushes a node to when it
+is far from any gateway or behind a hill, the same frame takes about 1.5
+seconds, and four an hour plus the occasional confirmed uplink and
+retransmission starts to press against it.
+
+## Decision
+
+A node that ADR has moved to SF11 or SF12 halves its cadence to one frame every
+thirty minutes and packs six readings into it instead of three. Nothing is lost,
+latency doubles, and airtime stays under a third of the allowance. Confirmed
+uplinks are limited to one every six hours at any spreading factor. ADR stays
+on: turning it off to keep nodes at fast data rates would cost range on exactly
+the nodes that need it.
+"""
+
+[[page]]
+path = "procedures/bench-bring-up.md"
+title = "Bringing a board up on the bench"
+abstract = "Inspect, program, label, test, and prepare each board following specific steps on the bench laptop to ensure proper setup and readiness for shipment."
+tier = "procedural"
+entities = ["join server", "AppKey"]
+body = """
+Every board that leaves the workshop goes through these steps, in this order,
+on the bench laptop. Tick them on the traveller card as you go.
+
+1. Inspect the board under the lamp for solder bridges on the radio module and
+   the sensor header. Anything doubtful goes in the rework tray.
+2. Connect the SWD programmer and write the bootloader. The bench laptop has the
+   only copy of the production bootloader build; do not use one from a
+   developer machine.
+3. Print the serial number label and program the same number into the
+   information block. Scan the label back and compare; a mismatch means start
+   again with a fresh label.
+4. Fit the humidity sensor and the soil probe connector, and run the sensor
+   check script. It should print three readings within range for the workshop.
+5. Install the application release that the rollout page names as current.
+6. Leave the board on the burn-in shelf for twelve hours with the bench supply
+   cycling every twenty minutes. Anything that fails to come back is rework.
+7. Enclosure: fit the gasket, the desiccant pack and the cable gland, and torque
+   the lid screws to the value on the card.
+8. Generate the device keys. The key script runs on the bench laptop, writes the
+   DevEUI and AppKey into the secure element, and exports them to a file in the
+   laptop's encrypted folder. The key is never written anywhere else.
+9. Import that file into the join server and wait for the confirmation line.
+
+If the import fails, or the confirmation never comes back, **the board is not
+re-keyed.** Put a red sticker on it, write "keys not registered" on the
+traveller card, and put it in the quarantine box. Somebody who is not on the
+bench that day registers the exported file by hand. Re-running the key script
+would give the board a second AppKey while the first may already be half
+registered, and two credentials for one DevEUI is how a board ends up joining
+with a key the network does not expect — which looks exactly like a dead radio
+once it is in the field.
+
+10. Pack the board with its traveller card in an anti-static bag.
+"""
+
+[[page]]
+path = "sessions/2026-04-22-77c0e2aa.md"
+title = "Session: Tuesday odds and ends"
+abstract = "Updates and maintenance tasks for a farm monitoring system, including timezone and label fixes, support responses, inventory updates, and firmware analysis to improve longevity."
+tier = "episodic"
+entities = ["log partition"]
+body = """
+A day of small things.
+
+Fixed the dashboard's timezone label, which said UTC while showing local time
+for the farms in Portugal. Renamed the soil_vwc series to "soil moisture (%)"
+everywhere a customer can see it, and left the internal name alone. Updated the
+charting library to the release that fixes the tooltip flicker; no other change
+in behaviour that anyone noticed.
+
+Answered the support mail from the Almeida farm: they moved station 31 from the
+olive grove to the vineyard and wanted its history split at the move. Did it by
+hand in the admin screen and wrote up how, since it will happen again.
+
+Went through the returned-units shelf. Three are the rev-B humidity problem and
+go back to the rework tray; one has a cracked panel and goes to the parts bin.
+
+Spent an hour on the build script so that release artefacts carry the git hash
+in their file name, then another half hour making the same change to the
+script that uploads them.
+
+## The flash question
+
+While looking at a returned unit's dump, noticed that the log partition was far
+more worn than a board that age should be. Worked it through.
+
+The firmware appends a reading to the on-board NOR log every minute. Each append
+touches the sector's header as well as the record, so even with the
+filesystem's wear levelling the partition sees roughly one full sector erase
+every four hours. The part is rated for 100,000 erase cycles per sector and the
+log partition is 64 sectors. That comes out at a little under four years before
+the first sectors start failing — and the stations are sold with a ten-year
+service life.
+
+Decided: readings are buffered in RAM and written to the log in one batch every
+fifteen minutes, which is when the station transmits anyway. A reset loses at
+most fifteen minutes of readings that have not yet been sent, which is
+acceptable; a flash that dies in year four is not. At fifteen-minute batches the
+same arithmetic gives well over fifty years.
+"""
+
+[[page]]
+path = "notes/postmortem-2026-02-missing-thursday.md"
+title = "Postmortem: the missing Thursday"
+abstract = "Postmortem analysis of a Thursday data missing issue affecting 212 stations after the 2.15 software release, detailing the investigation, cause, and fixes."
+tier = "semantic"
+entities = ["frame counter"]
+body = """
+Written on the Monday after, for the account managers as much as for us.
+
+On Friday morning the co-op's agronomist emailed to say Thursday was blank for
+every station on her farms. She was right. Looking across the fleet, 212
+stations had no rows for Thursday from about 09:00 onwards, and they were all on
+the 2.15 release, which had gone out to cohorts four and five on Wednesday
+evening.
+
+The first hours of the investigation went into the ingestion pipeline, because
+it had been deployed on Wednesday too. It was not the pipeline: replaying
+Thursday's broker logs showed nothing had been handed to it for those stations
+at all.
+
+By Friday lunchtime the stations had started appearing again on their own, one
+by one, and by Saturday all 212 were back. The Thursday hole was partly filled
+from the stations' own buffers; about six hours of it is gone for good, which
+the account managers have explained to the three farms that noticed.
+
+## Cause
+
+The gateways heard every one of those frames. RSSI and SNR were normal in the
+gateway logs, the packets were forwarded, and the network server discarded
+them.
+
+2.15 moved the uplink frame counter from the old EEPROM emulation into the new
+settings store, and did not migrate it. Every updated station started counting
+from zero again. The network server has frame-counter checking on, as it
+should, and a frame whose counter is lower than the last one it accepted from
+that device is treated as a replay and dropped silently. The stations only came
+back as their counters climbed past where they had been before the update —
+which for a station sending four frames an hour took anywhere from a day to a
+day and a half.
+
+## Fixes
+
+The counter is persisted every 64 frames and advanced by 64 on boot, so a reset
+can skip counter values but never reuse one. Any release that touches the
+settings store now has a migration test that reads the previous layout.
+"""
+
+[[page]]
+path = "decisions/0006-who-can-ship.md"
+title = "Who can ship firmware"
+abstract = "Describes the process and security measures implemented to control firmware release and ensure code execution on agricultural co-op stations, including the shift to a CI pipeline and manual signing with offline keys."
+tier = "semantic"
+canonical = true
+entities = ["Ed25519", "hardware token"]
+body = """
+Until this spring anybody with commit access could produce a release that the
+fleet would install. The build ran on a developer laptop, the artefact was
+uploaded to the rollout bucket by hand, and the stations accepted whatever the
+bucket served. For a team of four that was convenient and, in hindsight, the
+riskiest thing about the product.
+
+The agricultural co-op's procurement audit asked the question directly: who can
+cause code to run on a station on our land, and how would you know? We did not
+have a good answer, and the contract renewal depended on having one.
+
+Options considered: keep building on laptops but require a second reviewer on
+the release tag; build in CI and trust CI's credentials; build in CI and sign
+separately, offline. The first changes nothing about what a stolen laptop can
+do. The second moves the problem to whoever can edit the CI configuration. The
+third costs a manual step on every release, and that cost was accepted.
+
+## Decision
+
+CI builds release artefacts but cannot sign them. Signing is a manual step on an
+offline machine, using an Ed25519 key that lives only on a hardware token kept
+in the office safe, and it takes two people: one to open the safe and one to
+enter the token PIN. The bootloader refuses any image without a valid signature.
+
+The public half of the key is written into the bootloader at bench bring-up and
+cannot be changed in the field. That is deliberate — a key that can be replaced
+over the air is a key an attacker can replace over the air — and it has one
+serious consequence: if the token is lost or destroyed, no station will ever
+accept another update, and the only recovery is to visit every unit with a
+programmer. So there are two tokens holding the same key, and the second is in
+a bank deposit box.
+"""
+
+[[page]]
+path = "sessions/2026-05-09-c1d8e4f3.md"
+title = "Session: back at the workshop"
+abstract = "Describes activities following a workshop trip, including inventory management, customer meetings, expense reporting, and addressing probe drift issues."
+tier = "episodic"
+entities = ["soil probe", "gravimetric sample"]
+body = """
+Back from three days on the road. Unpacked the van, logged the returned units
+against their RMA numbers, and put the two water-damaged boards in the rework
+tray with notes on where the water got in.
+
+Restocked the spares box for the next trip: gaskets, desiccant, cable glands,
+two antennas, a spare panel, mesh caps for the rain gauges. We are down to four
+lid gaskets, so ordered fifty.
+
+Swept the workshop and emptied the enclosure offcuts into the recycling.
+
+Met with the agronomist from the co-op for an hour. She wants the moisture
+numbers her team sees in the field app to agree with the handheld meter they
+carry, and at present they disagree by eight to twelve points on the older
+installations. Promised an answer by the end of the month.
+
+Wrote the travel expenses up and sent them to the office.
+
+## Probe drift
+
+Pulled the history for the twenty oldest installations. The capacitive soil
+probes read steadily wetter over time — about three points a year — and the
+drift follows the probe, not the location: a probe moved between stations takes
+its offset with it, and a fresh probe at an old site reads correctly. It is
+mineral build-up on the sensing surface, and cleaning removes only some of it.
+
+Decided: every spring, each probe is checked against a gravimetric sample taken
+beside it, and the correction is stored against the probe's serial number
+rather than against the station. Probes are swapped between stations often
+enough in repairs that a per-station offset would be wrong the day after every
+repair. The field app applies the offset for whichever probe is fitted, looked
+up by the serial the station reports.
+"""
+
+[[page]]
+path = "sessions/2026-02-12-5f3a90b1.md"
+title = "Session: planning call for the spring"
+abstract = "A planning call for the spring session covering site visits, stock management, contract renewals, hiring, firmware updates, and technical discussions regarding watchdog behavior and recovery procedures."
+tier = "episodic"
+body = """
+Planning call with the whole team, ninety minutes. Notes as they came.
+
+Site visits: Ridgeline in the first week of March, the valley cluster and the
+hillside farms in the second, Portugal at the end of April once the olive
+harvest traffic has cleared. Two people per trip, never one, because of the
+ladders.
+
+Stock: order gaskets before March, since the supplier quotes six weeks. Order
+mesh caps for every rain gauge in the fleet rather than replacing them one by
+one as they clog.
+
+The co-op contract renewal is in June and the audit questions arrived this
+week. Somebody needs to own them; agreed it would be whoever is not travelling
+that week.
+
+Hiring: the part-time bench technician role is still open. The agency has sent
+two candidates; interviews next Thursday.
+
+Firmware for spring, in no particular order.
+
+The watchdog came up again. Someone asked whether the watchdog could fire in the
+middle of an erase on the log flash, and it can — see
+[[gotchas/watchdog-during-flash-erase.md]]. Agreed that the erase path is the
+first thing to review in the watchdog code, and that any change to the watchdog
+period needs the erase timing measured on a cold board first, since a warm board
+on the bench erases much faster and will say the watchdog is fine.
+
+The recovery procedure with the SWD programmer needs its photographs redone for
+the new cable, which has the tab on the other side. Until then, whoever recovers
+a dead unit should check the tab against the radio module before powering up.
+
+The valley gateway went silent again overnight on Tuesday and came back on its
+own. Nobody thinks it is anything but the modem; nobody has yet asked the
+operator for the maintenance calendar.
+
+The reset cause field in the boot report reads "pin" on some rev-B boards after
+a brownout. Probably a quirk of the older MCU's reset register rather than a
+real pin reset; parked until somebody has a rev-B on the bench.
+"""
+
+[[page]]
+path = "gotchas/watchdog-during-flash-erase.md"
+title = "Watchdog fires during a sector erase"
+abstract = "Describes the procedure for safely erasing a 64 KB sector to prevent a watchdog timer reset."
+tier = "procedural"
+entities = ["watchdog"]
+body = """
+Erasing one 64 KB sector of the log flash takes up to 1.8 seconds on a cold
+board, and the watchdog period is one second. Kick the watchdog immediately
+before an erase and erase in 4 KB pages, kicking between them — otherwise the
+station resets halfway through and leaves a half-erased sector behind.
+"""
+
+[[page]]
+path = "notes/spreading-factor.md"
+title = "Spreading factors, briefly"
+abstract = "Spreading factors in LoRa, ranging from SF7 to SF12, affect speed and range, with SF12 providing the longest range but slower throughput, and automatic data rate (ADR) adjusts node settings based on gateway reception."
+tier = "semantic"
+entities = ["SF12"]
+body = """
+LoRa trades speed for range with the spreading factor. SF7 is the fastest and
+shortest-range; SF12 is the slowest and reaches furthest, and each step up
+roughly doubles airtime. ADR moves a node between them according to how well the
+gateways hear it. What we do about SF12 is in
+[[decisions/0005-reporting-cadence.md]].
+"""
+
+[[page]]
+path = "gotchas/valley-gateway-backhaul.md"
+title = "The valley gateway's backhaul is a 4G modem"
+abstract = "The valley gateway's backhaul uses a 4G modem for connecting to the stations; maintenance interruptions cause brief signal losses, but data is buffered and delivered later."
+tier = "procedural"
+entities = ["valley gateway"]
+body = """
+The gateway serving the valley cluster has no fixed line; it reaches us over a
+4G modem. The mobile operator takes that tower down for maintenance most weeks
+somewhere between 02:00 and 03:30, and every station behind the gateway goes
+silent at the same moment. Nothing is wrong with the stations. The gateway
+buffers for three days and forwards everything when the modem reconnects, so the
+readings arrive late rather than not at all.
+"""
+
+[[page]]
+path = "_rules/cohorts.md"
+title = "Every rollout goes out in cohorts"
+abstract = "A release is rolled out to five cohorts, each containing a hardware revision, with stations monitored 24 hours apart until all stations in a cohort are accounted for."
+tier = "procedural"
+canonical = true
+pinned = true
+body = """
+A release goes to five cohorts, twenty-four hours apart, and does not advance
+while any station in the current cohort is unaccounted for. Every cohort
+contains at least one board of every hardware revision in the fleet. Cohort one
+is the workshop's own test stations.
+"""
+
+[[page]]
+path = "notes/boot-report.md"
+title = "What a station sends when it boots"
+abstract = "Describes the boot report frame sent by a station on restart, including firmware version, reset cause, battery voltage, and boot slot, which the dashboard uses to track restarts."
+tier = "semantic"
+body = """
+The first frame after any restart is the boot report: the firmware version, the
+reset cause as the MCU recorded it (power-on, brownout, watchdog, software or
+pin), the battery voltage, and the slot it booted from. The dashboard's restarts
+panel is built from these frames.
+"""
+
+[[page]]
+path = "gotchas/ingestion-drops-repeats.md"
+title = "Ingestion drops readings it has already seen"
+abstract = "Readings from a station with a misaligned clock can be dropped as duplicates even if they occur after a power loss, giving the impression that the data never arrived."
+tier = "procedural"
+body = """
+Readings are deduplicated on station and timestamp. A station whose clock is
+wrong after a power loss can stamp fresh readings with times it has already
+used, and those are dropped as repeats — which from the dashboard looks like
+data that never arrives.
+"""
+
+[[page]]
+path = "procedures/recover-with-programmer.md"
+title = "Recovering a unit with the SWD programmer"
+abstract = "Guides on using the SWD programmer to recover a non-booting unit by connecting to the SWD header, writing the current release to both slots, and verifying the LED blinking pattern."
+tier = "procedural"
+body = """
+For a station that will not boot or cannot be reached over the air. Open the
+enclosure, disconnect the battery, connect the programmer's cable to the SWD
+header with the tab facing the radio module, reconnect the battery, and write
+the current release to both slots with the recovery script. Check that the LED
+shows a single long blink before closing the lid.
+"""
+
+[[page]]
+path = "decisions/0003-join-server.md"
+title = "Device keys live in our own join server"
+abstract = "Device keys are stored on the organization's join server, allowing devices to be transferred between networks without re-keying, and the network server requests keys from the join server without ever seeing the AppKey."
+tier = "semantic"
+canonical = true
+entities = ["join server"]
+body = """
+Device credentials are held by our own join server rather than by the network
+operator, so moving a station between networks does not mean re-keying it. The
+network server asks the join server when a device joins and never sees the
+AppKey.
+"""
+
+# ---------------------------------------------------------------------------
+# Deep questions. The answer is a long page and nothing the question names is
+# in the part of it the model reads.
+# ---------------------------------------------------------------------------
+
+[[case]]
+query = "units reboot every morning at first light"
+category = "symptom"
+relevant = ["sessions/2026-03-04-4be1c9d0.md"]
+note = "The page opens on five stations' worth of gaskets and pine needles. The resets, and the dawn window they happen in, start nearly two hundred words down, and the page never says reboot, morning or light."
+
+[[case]]
+query = "what has to happen before the boot report goes out"
+category = "natural"
+relevant = ["sessions/2026-03-04-4be1c9d0.md"]
+note = "The trap is notes/boot-report.md, whose title is the query's subject and which fits the window whole. The rule — wait for the storage capacitor — is at the bottom of a session page about a site visit."
+
+[[case]]
+query = "when is new firmware trusted to keep running"
+category = "paraphrase"
+relevant = ["notes/postmortem-2026-01-forty-quiet.md"]
+note = "The postmortem opens on the timeline of the outage. The rule it produced — trial state, confirm after the first acknowledged uplink — is in its last section, in words the question does not use."
+
+[[case]]
+query = "trial state"
+category = "keyword"
+relevant = ["notes/postmortem-2026-01-forty-quiet.md"]
+note = "Both words appear once, near the end of a long page. Full text can find them; bm25 charges the page for its length, and the pinned canonical cohort rule shares the page's subject."
+
+[[case]]
+query = "sf12 airtime"
+category = "keyword"
+relevant = ["decisions/0005-reporting-cadence.md"]
+note = "notes/spreading-factor.md says both words in about fifty words and links to the answer. The decision says each twice, past a long opening about batteries. The short page is the better literal match and the wrong answer."
+
+[[case]]
+query = "what changes for a node stuck on the slowest data rate"
+category = "paraphrase"
+relevant = ["decisions/0005-reporting-cadence.md"]
+note = "The answer is the decision's last paragraph: SF11 and SF12 halve their cadence. The opening is about batteries and demo farms."
+
+[[case]]
+query = "what do we do with a unit whose secret never reached the network server"
+category = "paraphrase"
+relevant = ["procedures/bench-bring-up.md"]
+note = "The answer is what follows step nine of a ten-step runbook. decisions/0003-join-server.md is canonical, short, and says network server and never."
+
+[[case]]
+query = "memory chip wearing out after a few years"
+category = "symptom"
+relevant = ["sessions/2026-04-22-77c0e2aa.md"]
+note = "A session page titled odds and ends, whose first half is a timezone label, a charting library and a support mail."
+
+[[case]]
+query = "wear levelling"
+category = "keyword"
+relevant = ["sessions/2026-04-22-77c0e2aa.md"]
+note = "Once, deep in a long session page. The control case for keyword retrieval at depth: full text reads the whole page, so if this misses, it is not the vector's fault."
+
+[[case]]
+query = "radio packets heard but the data never shows up"
+category = "symptom"
+relevant = ["notes/postmortem-2026-02-missing-thursday.md"]
+note = "The postmortem opens with the missing rows and the ingestion pipeline. The cause — gateways heard the frames, the server dropped them as replays — is in its second half. gotchas/ingestion-drops-repeats.md is short and ends on data that never arrives."
+
+[[case]]
+query = "what if the signing key is lost"
+category = "natural"
+relevant = ["decisions/0006-who-can-ship.md"]
+note = "The consequence of losing the token is the last paragraph of a decision whose first half is the audit that caused it."
+
+[[case]]
+query = "why is the adjustment tied to the part instead of where it is installed"
+category = "paraphrase"
+relevant = ["sessions/2026-05-09-c1d8e4f3.md"]
+note = "The per-probe correction is decided in the second half of a session page that starts with unpacking a van."
+
+# ---------------------------------------------------------------------------
+# Guard questions. The answer is a short page; a long page says the same words
+# further down. These are what a change that favours long pages costs.
+# ---------------------------------------------------------------------------
+
+[[case]]
+query = "watchdog erase"
+category = "keyword"
+relevant = ["gotchas/watchdog-during-flash-erase.md"]
+note = "The planning call says watchdog six times and erase four, counting the link, in a paragraph of its own. The gotcha is the page that answers."
+
+[[case]]
+query = "whole cluster stops reporting together in the small hours"
+category = "symptom"
+relevant = ["gotchas/valley-gateway-backhaul.md"]
+note = "The January postmortem opens with the valley cluster going quiet and suspects the modem. The planning call mentions the gateway going silent overnight. The short gotcha is the explanation."
+
+[[case]]
+query = "reset cause"
+category = "keyword"
+relevant = ["notes/boot-report.md"]
+note = "The Ridgeline session says reset and resets throughout, and the planning call says reset cause outright. The boot report note defines the field."
+
+[[case]]
+query = "how do I reflash a dead unit over the cable"
+category = "natural"
+relevant = ["procedures/recover-with-programmer.md"]
+note = "The planning call talks about the recovery procedure, the new cable and dead units; the January postmortem recovered forty units with the programmer; the bench runbook uses it in step two. The procedure is the short page."
