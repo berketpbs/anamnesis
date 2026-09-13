@@ -1778,6 +1778,7 @@ mod tests {
                     model: "fake-1".to_owned(),
                     input_tokens: 0,
                     output_tokens: 0,
+                    instead_of: None,
                 }),
                 None => Err(anamnesis_llm::LlmError::Config("no model".to_owned())),
             }

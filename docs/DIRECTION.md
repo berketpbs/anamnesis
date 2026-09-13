@@ -508,6 +508,14 @@ Silently substituting a weaker writer is the failure this project exists to
 prevent — see `sessions.summary_source` (#145) for the shape the answer should
 take.
 
+**Landed.** `ANAMNESIS_LLM_FALLBACK_PROVIDERS` names the chain; a link is asked
+only after the one before fails transiently and spends its retries. The
+constraint held in two places: a page a fallback wrote ends by naming the model
+that wrote it and the one it stood in for, and the session row records the
+writer, not the configured model. `reconsolidate` and `abstracts` do not use
+the chain — one replaces pages that usually already had a good one, the other
+is measured as one writer's.
+
 ## What we deliberately do not follow
 
 Stated so that the reasoning does not have to be rediscovered.

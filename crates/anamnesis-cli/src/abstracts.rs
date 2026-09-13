@@ -111,7 +111,9 @@ pub fn cmd_abstracts(suite: &Path, write: bool, pace: std::time::Duration) -> an
 
     println!("📝 Abstracts for {} ({})", parsed.name, suite.display());
 
-    let config = anamnesis_llm::LlmConfig::from_env()?;
+    // Without fallbacks: a set of abstracts is measured as one writer's, and a
+    // stand-in quietly taking over half the requests would make it two.
+    let config = anamnesis_llm::LlmConfig::from_env()?.without_fallbacks();
     let Some(provider) = config.build()? else {
         println!();
         println!("  No model is configured in this shell, so nothing was asked.");

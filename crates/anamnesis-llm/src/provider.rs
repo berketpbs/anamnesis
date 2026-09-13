@@ -47,6 +47,15 @@ pub struct CompletionOutput {
 
     /// Tokens billed on the way out.
     pub output_tokens: u32,
+
+    /// The model that was asked first and did not answer, when a fallback did.
+    ///
+    /// `None` on every reply the configured model gave. Set only by a
+    /// [`Chain`](crate::Chain), because only the chain knows the reply came from
+    /// somewhere other than what was configured — and a page written by a
+    /// weaker stand-in that does not say so is the silent substitution this
+    /// project exists to prevent.
+    pub instead_of: Option<String>,
 }
 
 /// A language model anamnesis can ask for one structured answer.
@@ -61,6 +70,15 @@ pub trait Provider: Send + Sync {
 
     /// The model that will be asked, for logs and for the page footer.
     fn model(&self) -> &str;
+
+    /// One line naming what will be asked, for a banner a person reads.
+    ///
+    /// Separate from [`Provider::model`], which is the one model a reply is
+    /// attributed to: a chain asks several, and a banner that named only the
+    /// first would hide the rest from the one person who configured them.
+    fn describe(&self) -> String {
+        format!("{} ({})", self.model(), self.name())
+    }
 
     /// Ask once. Retries, if any, are the implementation's business.
     async fn complete(&self, request: &Completion) -> Result<CompletionOutput, LlmError>;

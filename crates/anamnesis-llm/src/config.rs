@@ -275,6 +275,12 @@ pub struct LlmConfig {
     pub max_retries: u32,
     /// Whether to let the API re-run a declined request on another model.
     pub server_side_fallbacks: bool,
+    /// Providers asked in order when this one fails transiently.
+    ///
+    /// Empty unless `ANAMNESIS_LLM_FALLBACK_PROVIDERS` names some. Each entry
+    /// is a whole configuration of its own, sharing this one's budgets,
+    /// timeout, effort and retries; see [`crate::Chain`] for when one is asked.
+    pub fallbacks: Vec<LlmConfig>,
 }
 
 impl Default for LlmConfig {
@@ -290,6 +296,7 @@ impl Default for LlmConfig {
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             max_retries: DEFAULT_MAX_RETRIES,
             server_side_fallbacks: true,
+            fallbacks: Vec::new(),
         }
     }
 }
@@ -353,18 +360,9 @@ impl LlmConfig {
         // overrides below so that an explicit `ANAMNESIS_LLM_BASE_URL` still
         // wins. Without this, choosing `ollama` would inherit Anthropic's
         // address and fail in a way that names neither.
-        match config.provider {
-            ProviderKind::OpenAi => config.base_url = DEFAULT_OPENAI_BASE_URL.to_owned(),
-            ProviderKind::Ollama => {
-                config.base_url = DEFAULT_OLLAMA_BASE_URL.to_owned();
-                config.model = DEFAULT_OLLAMA_MODEL.to_owned();
-            }
-            ProviderKind::Google => {
-                config.base_url = DEFAULT_GOOGLE_BASE_URL.to_owned();
-                config.model = DEFAULT_GOOGLE_MODEL.to_owned();
-            }
-            ProviderKind::Anthropic | ProviderKind::None => {}
-        }
+        let (base_url, model) = provider_defaults(config.provider);
+        config.base_url = base_url.to_owned();
+        config.model = model.to_owned();
 
         // Google's own variable names, read only once Google has been asked
         // for by name. Deliberately not part of the chain above: a Gemini key
@@ -425,15 +423,47 @@ impl LlmConfig {
                 "0" | "off" | "false" | "no"
             );
         }
+        if let Some(value) = var("ANAMNESIS_LLM_FALLBACK_PROVIDERS") {
+            config.fallbacks = fallbacks(&config, &value, &var)?;
+        }
 
         Ok(config)
+    }
+
+    /// This configuration with its fallbacks removed.
+    ///
+    /// For work whose worth depends on knowing which model did it — a
+    /// measurement comparing writers is not a measurement once a stand-in can
+    /// quietly take a request over.
+    #[must_use]
+    pub fn without_fallbacks(&self) -> Self {
+        Self {
+            fallbacks: Vec::new(),
+            ..self.clone()
+        }
     }
 
     /// Build the provider this configuration describes.
     ///
     /// `None` is a successful outcome, not a failure: it is what "run without
-    /// a model" looks like.
+    /// a model" looks like. With fallbacks configured, the provider is a
+    /// [`Chain`](crate::Chain) whose first link is this configuration.
     pub fn build(&self) -> Result<Option<Arc<dyn Provider>>, LlmError> {
+        let Some(first) = self.build_one()? else {
+            return Ok(None);
+        };
+        if self.fallbacks.is_empty() {
+            return Ok(Some(first));
+        }
+        let mut links = vec![first];
+        for fallback in &self.fallbacks {
+            links.extend(fallback.build_one()?);
+        }
+        Ok(Some(Arc::new(crate::Chain::new(links))))
+    }
+
+    /// The one provider this configuration names, ignoring its fallbacks.
+    fn build_one(&self) -> Result<Option<Arc<dyn Provider>>, LlmError> {
         match self.provider {
             ProviderKind::None => Ok(None),
             ProviderKind::Anthropic => Ok(Some(Arc::new(Anthropic::new(self)?))),
@@ -449,6 +479,117 @@ impl LlmConfig {
 /// Read the environment and build a provider, or none.
 pub fn provider_from_env() -> Result<Option<Arc<dyn Provider>>, LlmError> {
     LlmConfig::from_env()?.build()
+}
+
+/// The address and model a provider gets when nothing names them.
+fn provider_defaults(provider: ProviderKind) -> (&'static str, &'static str) {
+    match provider {
+        ProviderKind::Anthropic | ProviderKind::None => (DEFAULT_BASE_URL, DEFAULT_MODEL),
+        ProviderKind::OpenAi => (DEFAULT_OPENAI_BASE_URL, DEFAULT_MODEL),
+        ProviderKind::Ollama => (DEFAULT_OLLAMA_BASE_URL, DEFAULT_OLLAMA_MODEL),
+        ProviderKind::Google => (DEFAULT_GOOGLE_BASE_URL, DEFAULT_GOOGLE_MODEL),
+    }
+}
+
+/// Read `ANAMNESIS_LLM_FALLBACK_PROVIDERS`: `provider[:model]`, comma-separated.
+///
+/// Split at the first colon only, because local model names carry their own —
+/// `ollama:qwen2.5:7b-instruct` is Ollama's `qwen2.5:7b-instruct`.
+///
+/// Each link starts as a copy of the configured provider, so budgets, timeout,
+/// effort and retries mean the same thing whichever link answers. What a link
+/// does *not* inherit is anything that belongs to another provider: a link to a
+/// different backend gets that backend's address and default model, and its
+/// key from that backend's own variable — never from `ANAMNESIS_LLM_API_KEY`,
+/// which is the configured provider's, and sending it to a second company is
+/// how a key leaks. A link to the *same* backend keeps the address and key,
+/// which is the common case: another model on a separate quota.
+///
+/// Every mistake is refused at load time, like the rest of this file. A chain
+/// that dropped the link it could not build would say nothing until the one
+/// afternoon it was needed.
+fn fallbacks(
+    primary: &LlmConfig,
+    value: &str,
+    var: &impl Fn(&str) -> Option<String>,
+) -> Result<Vec<LlmConfig>, LlmError> {
+    let entries: Vec<&str> = value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    if primary.provider == ProviderKind::None {
+        return Err(LlmError::Config(
+            "ANAMNESIS_LLM_FALLBACK_PROVIDERS is set but no model is configured to fall back from"
+                .to_owned(),
+        ));
+    }
+
+    let mut links = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let (provider, model) = match entry.split_once(':') {
+            Some((provider, model)) => (provider, Some(model.trim()).filter(|m| !m.is_empty())),
+            None => (entry, None),
+        };
+        let provider: ProviderKind = provider.parse()?;
+        if provider == ProviderKind::None {
+            return Err(LlmError::Config(format!(
+                "fallback {entry:?} names no model; leave it out of ANAMNESIS_LLM_FALLBACK_PROVIDERS"
+            )));
+        }
+
+        let mut link = LlmConfig {
+            provider,
+            fallbacks: Vec::new(),
+            ..primary.clone()
+        };
+        if provider != primary.provider {
+            let (base_url, default_model) = provider_defaults(provider);
+            link.base_url = base_url.to_owned();
+            link.model = default_model.to_owned();
+            link.api_key = match provider {
+                ProviderKind::Anthropic => var("ANTHROPIC_API_KEY"),
+                ProviderKind::OpenAi => var("OPENAI_API_KEY"),
+                ProviderKind::Google => var("GEMINI_API_KEY").or_else(|| var("GOOGLE_API_KEY")),
+                ProviderKind::Ollama | ProviderKind::None => None,
+            }
+            .filter(|key| !key.trim().is_empty())
+            .map(SecretString::from);
+        }
+        match model {
+            Some(model) => link.model = model.to_owned(),
+            None if provider == primary.provider => {
+                return Err(LlmError::Config(format!(
+                    "fallback {entry:?} is the configured provider with no other model; \
+                     name one, as in {entry}:<model>"
+                )));
+            }
+            None if provider == ProviderKind::OpenAi => {
+                return Err(LlmError::Config(format!(
+                    "fallback {entry:?} needs a model, as in openai:<model>"
+                )));
+            }
+            None => {}
+        }
+        if link.api_key.is_none() {
+            let wanted = match provider {
+                ProviderKind::Anthropic => Some("ANTHROPIC_API_KEY"),
+                ProviderKind::OpenAi => Some("OPENAI_API_KEY"),
+                ProviderKind::Google => Some("GEMINI_API_KEY (or GOOGLE_API_KEY)"),
+                ProviderKind::Ollama | ProviderKind::None => None,
+            };
+            if let Some(wanted) = wanted {
+                return Err(LlmError::Config(format!(
+                    "fallback {entry:?} needs a key and {wanted} is not set"
+                )));
+            }
+        }
+        links.push(link);
+    }
+    Ok(links)
 }
 
 /// Parse a numeric setting, naming the variable when it does not parse.
@@ -739,6 +880,139 @@ mod tests {
 
             assert_eq!(config.max_retries, 1, "starting from {start}");
         }
+    }
+
+    /// The configuration this machine would run: a second Gemini model on its
+    /// own quota, then a local model with no quota at all.
+    #[test]
+    fn a_chain_is_read_in_order_and_each_link_knows_where_it_lives() {
+        let config = LlmConfig::from_vars(vars(&[
+            ("ANAMNESIS_LLM_PROVIDER", "google"),
+            ("GEMINI_API_KEY", "AQ.test-key"),
+            ("ANAMNESIS_LLM_MODEL", "gemini-3.5-flash"),
+            ("ANAMNESIS_LLM_MAX_OUTPUT_TOKENS", "8000"),
+            (
+                "ANAMNESIS_LLM_FALLBACK_PROVIDERS",
+                " google:gemini-3.6-flash , ollama:qwen2.5:7b-instruct ,",
+            ),
+        ]))
+        .expect("config");
+
+        let [same, local] = &config.fallbacks[..] else {
+            panic!("two links, got {:?}", config.fallbacks);
+        };
+        assert_eq!(same.provider, ProviderKind::Google);
+        assert_eq!(same.model, "gemini-3.6-flash");
+        assert_eq!(
+            same.base_url, config.base_url,
+            "the same backend keeps its address"
+        );
+        assert_eq!(
+            same.api_key.as_ref().map(ExposeSecret::expose_secret),
+            Some("AQ.test-key"),
+            "and its key"
+        );
+
+        assert_eq!(local.provider, ProviderKind::Ollama);
+        assert_eq!(
+            local.model, "qwen2.5:7b-instruct",
+            "split at the first colon only"
+        );
+        assert_eq!(local.base_url, "http://127.0.0.1:11434/v1");
+        assert!(
+            local.api_key.is_none(),
+            "a key never follows to another backend"
+        );
+        assert_eq!(
+            local.max_output_tokens, 8000,
+            "budgets mean the same whichever link answers"
+        );
+
+        let provider = config.build().expect("builds").expect("a provider");
+        assert_eq!(provider.model(), "gemini-3.5-flash");
+        assert_eq!(
+            provider.describe(),
+            "gemini-3.5-flash (google), then gemini-3.6-flash (google), \
+             then qwen2.5:7b-instruct (ollama)"
+        );
+    }
+
+    /// `ANAMNESIS_LLM_API_KEY` is the configured provider's. Sending it to a
+    /// second company because a fallback named one is how a key leaks.
+    #[test]
+    fn a_fallback_to_another_backend_takes_only_that_backends_key() {
+        let error = LlmConfig::from_vars(vars(&[
+            ("ANAMNESIS_LLM_PROVIDER", "google"),
+            ("ANAMNESIS_LLM_API_KEY", "AQ.google-key"),
+            ("ANAMNESIS_LLM_FALLBACK_PROVIDERS", "anthropic"),
+        ]))
+        .expect_err("no anthropic key");
+        assert!(error.to_string().contains("ANTHROPIC_API_KEY"), "{error}");
+
+        let config = LlmConfig::from_vars(vars(&[
+            ("ANAMNESIS_LLM_PROVIDER", "google"),
+            ("ANAMNESIS_LLM_API_KEY", "AQ.google-key"),
+            ("ANTHROPIC_API_KEY", "sk-ant-own"),
+            ("ANAMNESIS_LLM_FALLBACK_PROVIDERS", "anthropic"),
+        ]))
+        .expect("config");
+        assert_eq!(
+            config.fallbacks[0]
+                .api_key
+                .as_ref()
+                .map(ExposeSecret::expose_secret),
+            Some("sk-ant-own")
+        );
+        assert_eq!(config.fallbacks[0].model, DEFAULT_MODEL);
+    }
+
+    /// Each of these is somebody who tried and got it wrong, and a chain that
+    /// dropped the link would say so on the one afternoon it was needed.
+    #[test]
+    fn a_chain_that_cannot_be_built_is_refused_at_load_time() {
+        let refused = |fallbacks: &str, extra: &[(&'static str, &'static str)]| {
+            let mut pairs = vec![
+                ("ANAMNESIS_LLM_PROVIDER", "google"),
+                ("GEMINI_API_KEY", "AQ.test-key"),
+                ("ANAMNESIS_LLM_FALLBACK_PROVIDERS", fallbacks),
+            ];
+            pairs.extend_from_slice(extra);
+            LlmConfig::from_vars(vars(&pairs))
+                .expect_err(fallbacks)
+                .to_string()
+        };
+
+        assert!(refused("olama:qwen", &[]).contains("olama"));
+        assert!(refused("none", &[]).contains("names no model"));
+        assert!(refused("google", &[]).contains("no other model"));
+        assert!(refused("openai", &[("OPENAI_API_KEY", "sk")]).contains("needs a model"));
+        assert!(refused("openai:gpt-5", &[]).contains("OPENAI_API_KEY"));
+
+        let nothing_to_fall_from = LlmConfig::from_vars(vars(&[(
+            "ANAMNESIS_LLM_FALLBACK_PROVIDERS",
+            "ollama:qwen2.5",
+        )]))
+        .expect_err("no primary");
+        assert!(
+            nothing_to_fall_from
+                .to_string()
+                .contains("no model is configured")
+        );
+    }
+
+    #[test]
+    fn no_fallbacks_builds_the_provider_itself_and_without_fallbacks_drops_them() {
+        let config = LlmConfig::from_vars(vars(&[
+            ("ANAMNESIS_LLM_PROVIDER", "ollama"),
+            ("ANAMNESIS_LLM_FALLBACK_PROVIDERS", "ollama:qwen2.5"),
+        ]))
+        .expect("config");
+        assert_eq!(config.fallbacks.len(), 1);
+
+        let alone = config.without_fallbacks();
+        assert!(alone.fallbacks.is_empty());
+        let provider = alone.build().expect("builds").expect("a provider");
+        assert_eq!(provider.describe(), "llama3.2 (ollama)");
     }
 
     /// Nothing else about the two paths differs. If a later edit gives them

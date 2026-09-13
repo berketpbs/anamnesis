@@ -234,6 +234,7 @@ fn parse_response(payload: &Value) -> Result<CompletionOutput, LlmError> {
             .to_owned(),
         input_tokens: http::usage(payload, "input_tokens"),
         output_tokens: http::usage(payload, "output_tokens"),
+        instead_of: None,
     })
 }
 

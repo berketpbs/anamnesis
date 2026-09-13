@@ -285,6 +285,58 @@ pub async fn consolidate_with_source(
     max_input_tokens: usize,
     max_output_tokens: u32,
 ) -> Option<(SessionDigest, DigestSource)> {
+    consolidate_attributed(
+        provider,
+        session,
+        observations,
+        surroundings,
+        max_input_tokens,
+        max_output_tokens,
+    )
+    .await
+    .map(|attributed| (attributed.digest, attributed.source))
+}
+
+/// A digest, what produced it, and which model wrote it.
+#[derive(Debug, Clone)]
+pub struct Attributed {
+    /// The page, handoff and notes.
+    pub digest: SessionDigest,
+    /// Whether a model wrote it or it was counted.
+    pub source: DigestSource,
+    /// The model that wrote it, when that was not the configured one.
+    ///
+    /// `None` both when the configured model wrote the page and when nobody
+    /// did, so a caller recording provenance writes the configured model's
+    /// name in either case — as it did before a chain could answer — and a
+    /// stand-in's name only when there was one.
+    pub stood_in: Option<String>,
+}
+
+impl Attributed {
+    /// The model a caller should record against this digest.
+    ///
+    /// The stand-in that wrote it, if one did; otherwise the configured model,
+    /// which either wrote it or is the model that did not answer.
+    #[must_use]
+    pub fn model<'a>(&'a self, provider: &'a dyn Provider) -> &'a str {
+        self.stood_in.as_deref().unwrap_or_else(|| provider.model())
+    }
+}
+
+/// The same again, saying which model wrote the page.
+///
+/// For callers that record provenance. A provider that is a chain can have a
+/// reply written by a link other than the one it is named after, and the
+/// session row is what `status` reads to say which model has been writing.
+pub async fn consolidate_attributed(
+    provider: &dyn Provider,
+    session: &Session,
+    observations: &[Observation],
+    surroundings: Surroundings<'_>,
+    max_input_tokens: usize,
+    max_output_tokens: u32,
+) -> Option<Attributed> {
     // The deterministic digest is computed first and unconditionally. It costs
     // microseconds, it decides whether this session is worth a page at all,
     // and holding it means the fallback below is a value rather than another
@@ -334,25 +386,55 @@ pub async fn consolidate_with_source(
                 tracing::info!(
                     provider = provider.name(),
                     model = %output.model,
+                    instead_of = output.instead_of.as_deref(),
                     input_tokens = output.input_tokens,
                     output_tokens = output.output_tokens,
                     "session consolidated by model"
                 );
-                Some((
-                    disclosing(digest, observations.len(), omitted),
-                    DigestSource::Model,
-                ))
+                let digest = disclosing(digest, observations.len(), omitted);
+                let stood_in = output.instead_of.as_ref().map(|_| output.model.clone());
+                Some(Attributed {
+                    digest: naming_the_stand_in(digest, &output),
+                    source: DigestSource::Model,
+                    stood_in,
+                })
             }
             Err(reason) => {
                 tracing::warn!(%reason, "model reply was not a page; using the counted summary");
-                Some((fallback, DigestSource::Counted))
+                Some(Attributed {
+                    digest: fallback,
+                    source: DigestSource::Counted,
+                    stood_in: None,
+                })
             }
         },
         Err(error) => {
             tracing::warn!(%error, "model unavailable; using the counted summary");
-            Some((fallback, DigestSource::Counted))
+            Some(Attributed {
+                digest: fallback,
+                source: DigestSource::Counted,
+                stood_in: None,
+            })
         }
     }
+}
+
+/// Say, on the page, that a fallback wrote it.
+///
+/// On the page rather than only in the session row, for the reason
+/// [`disclosing`] gives: the page is what is read a month later, by someone
+/// weighing how much to trust it, and a smaller local model writing where a
+/// hosted one was configured is exactly what that reader would want to know.
+fn naming_the_stand_in(mut digest: SessionDigest, output: &CompletionOutput) -> SessionDigest {
+    let Some(configured) = &output.instead_of else {
+        return digest;
+    };
+    digest.body = format!(
+        "{}\n\nWritten by {}, standing in for {configured}, which did not answer.\n",
+        digest.body.trim_end(),
+        output.model
+    );
+    digest
 }
 
 /// Fewest damaged letters that make a reply worth asking for again.
@@ -1208,6 +1290,7 @@ mod tests {
                     model: "fake-1".to_owned(),
                     input_tokens: 1,
                     output_tokens: 1,
+                    instead_of: None,
                 }),
                 Err(()) => Err(LlmError::Config("no".to_owned())),
             }
@@ -2075,6 +2158,7 @@ mod tests {
                 model: "cramped-1".to_owned(),
                 input_tokens: 1,
                 output_tokens: 1,
+                instead_of: None,
             })
         }
     }
@@ -2163,6 +2247,7 @@ mod tests {
                 model: "scripted-1".to_owned(),
                 input_tokens: 1,
                 output_tokens: 1,
+                instead_of: None,
             })
         }
     }
@@ -2300,6 +2385,78 @@ mod tests {
         assert_eq!(provider.asked(), 2, "asked again once, not more");
         assert_eq!(source, DigestSource::Model);
         assert_eq!(digest.body, DAMAGED);
+    }
+
+    /// A chain whose configured model did not answer, and whose local
+    /// fallback did.
+    struct StoodIn;
+
+    #[async_trait]
+    impl Provider for StoodIn {
+        fn name(&self) -> &'static str {
+            "google"
+        }
+        fn model(&self) -> &str {
+            "gemini-3.5-flash"
+        }
+        async fn complete(&self, _: &Completion) -> Result<CompletionOutput, LlmError> {
+            Ok(CompletionOutput {
+                json: good_reply(),
+                model: "qwen2.5:7b-instruct".to_owned(),
+                input_tokens: 1,
+                output_tokens: 1,
+                instead_of: Some("gemini-3.5-flash".to_owned()),
+            })
+        }
+    }
+
+    /// A page a stand-in wrote says so where it is read, and the session is
+    /// recorded against the model that wrote it rather than the one the
+    /// provider is named after.
+    #[tokio::test]
+    async fn a_page_a_fallback_wrote_names_it_and_is_attributed_to_it() {
+        let attributed = consolidate_attributed(
+            &StoodIn,
+            &session(),
+            &working_session(),
+            Surroundings::default(),
+            64_000,
+            1_000,
+        )
+        .await
+        .expect("a digest");
+
+        assert_eq!(attributed.source, DigestSource::Model);
+        assert_eq!(attributed.stood_in.as_deref(), Some("qwen2.5:7b-instruct"));
+        assert_eq!(attributed.model(&StoodIn), "qwen2.5:7b-instruct");
+        assert!(
+            attributed.digest.body.ends_with(
+                "Written by qwen2.5:7b-instruct, standing in for gemini-3.5-flash, \
+                 which did not answer.\n"
+            ),
+            "{:?}",
+            attributed.digest.body
+        );
+    }
+
+    /// The ordinary page carries no such line, and is attributed as before.
+    #[tokio::test]
+    async fn a_page_the_configured_model_wrote_says_nothing_about_standing_in() {
+        let provider = Fake(Ok(good_reply()));
+        let attributed = consolidate_attributed(
+            &provider,
+            &session(),
+            &working_session(),
+            Surroundings::default(),
+            64_000,
+            1_000,
+        )
+        .await
+        .expect("a digest");
+
+        assert_eq!(attributed.stood_in, None);
+        assert_eq!(attributed.model(&provider), "fake-1");
+        assert!(!attributed.digest.body.contains("standing in"));
     }
 
     #[tokio::test]
