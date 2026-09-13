@@ -18,9 +18,14 @@ use anamnesis_core::observation::{EventKind, Observation};
 use anamnesis_core::page::{Entity, PagePath, Tier};
 use anamnesis_core::session::Session;
 
+mod abstracts;
 mod files;
 mod llm;
 
+pub use abstracts::{
+    AbstractError, MAX_ABSTRACT_WORDS, abstract_prompt, abstract_schema, check_abstract,
+    write_abstract,
+};
 pub use files::{changed_files, mentioned_files};
 pub use llm::{
     DigestSource, PREFERENCES_PAGE, Surroundings, consolidate_with_llm, consolidate_with_source,
