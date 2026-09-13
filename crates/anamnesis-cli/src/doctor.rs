@@ -109,6 +109,15 @@ pub struct Symptoms {
     /// whether a truncated page with sections is thin at all: compared, its
     /// sections stand for all of it.
     pub sections_compared: bool,
+    /// The embedding model the server said it uses, when it said.
+    ///
+    /// A complaint row is about a vector under one model, and the index keeps
+    /// every model's rows: a machine that moved from MiniLM to another embedder
+    /// still holds MiniLM's truncations, which describe vectors no query
+    /// compares any more. Judging those would report a fault the running
+    /// system does not have. `None` — nothing answered, or a server too old to
+    /// say — judges every row, as before, rather than guessing which is live.
+    pub server_embedding: Option<String>,
 }
 
 /// What one recent session shows about what capture is producing.
@@ -173,6 +182,12 @@ fn judge_embeddings(symptoms: &Symptoms) -> Vec<Finding> {
     let (truncated, failed): (Vec<&EmbedFailure>, Vec<&EmbedFailure>) = symptoms
         .embed_failures
         .iter()
+        .filter(|failure| {
+            symptoms
+                .server_embedding
+                .as_ref()
+                .is_none_or(|model| failure.model == *model)
+        })
         .partition(|failure| failure.kind == EmbedFault::Truncated);
 
     let mut findings = Vec::new();
@@ -595,6 +610,7 @@ pub fn cmd_doctor(server: &str, data_dir: Option<PathBuf>) -> anyhow::Result<()>
             .filter(|value| !value.trim().is_empty()),
         server_answered: server_answers(server),
         server_build: server_build(server),
+        server_embedding: server_embedding(server),
         this_build: anamnesis_core::build::IDENTITY.to_owned(),
         ..Symptoms::default()
     };
@@ -696,6 +712,28 @@ fn server_build(server: &str) -> Option<String> {
     }
     let body: serde_json::Value = response.json().ok()?;
     body.get("identity")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+/// Ask the server which model it embeds with.
+///
+/// From `/whoami`, the answer `status` prints as `Vectors:`. A token is sent
+/// when this shell has one, since a server that requires tokens answers
+/// nothing without it; any failure, and a server that says it has no
+/// embedder, is `None` — which judges every complaint row rather than none.
+fn server_embedding(server: &str) -> Option<String> {
+    let client = probe_client().ok()?;
+    let mut request = client.get(format!("{server}/whoami"));
+    if let Ok(token) = std::env::var(anamnesis_web::auth::TOKEN_ENV) {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = response.json().ok()?;
+    body.get("embedding")
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
 }
@@ -1100,6 +1138,35 @@ mod tests {
         let remedy = finding.remedy.as_deref().expect("a remedy");
         assert!(remedy.contains("It has no sections"), "{remedy}");
         assert!(!remedy.contains("does not compare"), "{remedy}");
+    }
+
+    /// Found on the live install the day it moved from MiniLM to
+    /// nomic-embed-text: every page had a whole nomic vector, and doctor still
+    /// reported four pages "embedded from 128 tokens", from MiniLM rows no
+    /// query compares any more. A complaint is about the model it names, and
+    /// only the model the server embeds with is the running system.
+    #[test]
+    fn complaints_under_a_model_the_server_no_longer_uses_are_not_judged() {
+        let mut symptoms = wired("claude-code", &EVERY_MOMENT);
+        symptoms.embed_failures = vec![embed_truncation("sessions/long.md", 905)];
+
+        symptoms.server_embedding = Some("nomic-embed-text".to_owned());
+        assert!(
+            embeddings_finding(&symptoms).is_none(),
+            "a MiniLM truncation says nothing about a server embedding with nomic"
+        );
+
+        symptoms.server_embedding = Some("all-MiniLM-L6-v2".to_owned());
+        assert!(
+            embeddings_finding(&symptoms).is_some(),
+            "under the model that wrote it, it is still the fault it was"
+        );
+
+        symptoms.server_embedding = None;
+        assert!(
+            embeddings_finding(&symptoms).is_some(),
+            "a server that did not say which model is not a reason to hide every row"
+        );
     }
 
     /// The worst page, not the first one recorded. Somebody reading this is
