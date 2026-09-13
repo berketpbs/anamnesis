@@ -69,6 +69,13 @@ secrecy = { version = "0.10", features = ["serde"] }
 subtle = "2"
 getrandom = "0.3"
 base64 = "0.22"
+# The operating system's credential store, for model keys a server started at
+# login has to find: Credential Manager on Windows, the Keychain on macOS. No
+# default features — each target turns on its own store, and Linux turns on
+# none (see anamnesis-cli's manifest).
+keyring = { version = "3.6", default-features = false }
+# A key typed at a terminal without being echoed to it.
+rpassword = "7"
 
 # Storage.
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }

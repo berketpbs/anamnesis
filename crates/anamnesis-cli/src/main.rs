@@ -19,6 +19,7 @@ mod evals;
 mod format;
 mod hooks;
 mod improve;
+mod keys;
 mod lint;
 mod mcp_config;
 mod opencode;
@@ -64,7 +65,29 @@ use anamnesis_core::datadir::DataDir;
 use clap::Parser;
 use std::path::PathBuf;
 
+/// Stack for the thread every command runs on.
+///
+/// In a debug build `run`'s frame holds the locals of every command's arm at
+/// once, and Windows gives a program's main thread one megabyte. Adding the
+/// `key` command took the frame past it: every command, `--version` included,
+/// died with a stack overflow before an argument was parsed. A release build
+/// fits, CI never runs `main`, and a debug build on Windows is what somebody
+/// working on this runs — so the stack is chosen here rather than by the
+/// platform, with room for the commands still to come.
+const STACK: usize = 16 * 1024 * 1024;
+
 fn main() -> anyhow::Result<()> {
+    let worker = std::thread::Builder::new()
+        .name("anamnesis".to_owned())
+        .stack_size(STACK)
+        .spawn(run)?;
+    match worker.join() {
+        Ok(result) => result,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Logging is always on, at info, because consolidation now happens after
@@ -242,6 +265,11 @@ fn main() -> anyhow::Result<()> {
         Commands::Token { operator } => {
             cmd_token(operator.as_deref())?;
         }
+        Commands::Key { action } => match action {
+            cli::KeyAction::Set { name, stdin } => keys::cmd_key_set(&name, stdin)?,
+            cli::KeyAction::List => keys::cmd_key_list()?,
+            cli::KeyAction::Forget { name } => keys::cmd_key_forget(&name)?,
+        },
         Commands::Eval {
             suite,
             pages_from,

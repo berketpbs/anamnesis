@@ -130,6 +130,26 @@ every command, `status --verbose` lists what the file set and how many lines it
 did not, and `serve` will not start while any line is refused. The file is not
 part of `anamnesis backup`: it describes one machine.
 
+The key goes in this account's credential store — Credential Manager on
+Windows, the Keychain on macOS — typed without being shown:
+
+```bash
+anamnesis key set GEMINI_API_KEY          # or ANAMNESIS_LLM_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY
+anamnesis key list                        # which are stored or in this shell, never the values
+anamnesis key forget GEMINI_API_KEY
+```
+
+It is read under the name of the variable it stands for, after the environment
+and the settings file, by every command. `--stdin` takes the key from one line
+of standard input, for moving it out of somewhere else without it ever being an
+argument. Server tokens (`ANAMNESIS_TOKEN`) are not stored this way: the hook
+reads its token from the environment it runs in, on every tool call.
+
+Linux gets no store. Secret Service needs D-Bus and a running keyring, which
+servers and containers do not have, and kernel keyutils forgets at reboot, so
+`anamnesis key` says so and the environment is the answer there: an
+`EnvironmentFile=` in the unit, readable only by its owner.
+
 #### Google AI Studio
 
 Gemini publishes an OpenAI-compatible surface, so it is the same client again —

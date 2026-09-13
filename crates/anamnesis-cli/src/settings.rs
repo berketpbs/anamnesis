@@ -20,9 +20,9 @@
 //! key in a plain file sits unencrypted beside the memory, and goes wherever
 //! anything that copies the directory takes it; the credential store exists for
 //! that. The file is not in `anamnesis backup` either, for the reason `models/`
-//! and `logs/` are not: an address like a local Ollama's is one machine's. **No `ANAMNESIS_DATA_DIR`**: the
-//! file is found through the data directory, so a line naming another one could
-//! only ever be ignored. A refused or unreadable line is reported, and `serve`
+//! and `logs/` are not: an address like a local Ollama's is one machine's.
+//! **No `ANAMNESIS_DATA_DIR`**: the file is found through the data directory, so
+//! a line naming another one could only ever be ignored. A refused or unreadable line is reported, and `serve`
 //! will not start with one, because a setting that was typed and silently not
 //! applied is the failure this file is here to end.
 
@@ -39,7 +39,7 @@ pub const FILE: &str = "settings.env";
 ///
 /// Matched by name rather than by looking at values: a value cannot say whether
 /// it is a key, and a name can.
-const SECRET_NAMES: &[&str] = &[
+pub(crate) const SECRET_NAMES: &[&str] = &[
     "ANAMNESIS_LLM_API_KEY",
     "ANAMNESIS_EMBED_API_KEY",
     "ANTHROPIC_API_KEY",
@@ -81,16 +81,27 @@ pub fn loaded() -> Option<&'static Settings> {
     LOADED.get()
 }
 
-/// One setting: the environment's value, or else the file's.
+/// One setting: the environment's value, or else the file's, or — for a
+/// secret — the credential store's.
 ///
 /// The shape `LlmConfig::from_vars` and `EmbedConfig::from_vars` take, so every
-/// command reads the same two places in the same order.
+/// command reads the same places in the same order.
 pub fn var(name: &str) -> Option<String> {
-    std::env::var(name).ok().or_else(|| {
-        LOADED
-            .get()
-            .and_then(|settings| settings.values.get(name).cloned())
-    })
+    std::env::var(name)
+        .ok()
+        .or_else(|| {
+            LOADED
+                .get()
+                .and_then(|settings| settings.values.get(name).cloned())
+        })
+        // Last, and for secrets only: the file refuses them, so the store is
+        // where one set for an unattended server lives.
+        .or_else(|| {
+            crate::keys::KEY_NAMES
+                .contains(&name)
+                .then(|| crate::keys::stored(name))
+                .flatten()
+        })
 }
 
 /// Read and check one settings file.
