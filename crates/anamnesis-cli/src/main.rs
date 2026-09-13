@@ -22,6 +22,7 @@ mod improve;
 mod keys;
 mod lint;
 mod mcp_config;
+mod onboard;
 mod opencode;
 mod pages;
 mod project;
@@ -238,6 +239,26 @@ fn run() -> anyhow::Result<()> {
         Commands::Init => {
             cmd_init(cli.data_dir.clone())?;
         }
+        Commands::Setup {
+            agents,
+            server,
+            port,
+            no_service,
+            no_seed,
+            write,
+        } => {
+            onboard::cmd_setup(
+                onboard::Options {
+                    agents,
+                    server,
+                    port,
+                    no_service,
+                    no_seed,
+                    write,
+                },
+                cli.data_dir.clone(),
+            )?;
+        }
         Commands::Mcp { repo } => {
             cmd_mcp(&repo, cli.data_dir.clone())?;
         }
@@ -292,7 +313,7 @@ fn run() -> anyhow::Result<()> {
             config,
             repo,
         } => {
-            cmd_install_mcp(&agent, write, config, repo)?;
+            cmd_install_mcp(&agent, write, config, repo, cli.data_dir.clone())?;
         }
         Commands::Token { operator } => {
             cmd_token(operator.as_deref())?;

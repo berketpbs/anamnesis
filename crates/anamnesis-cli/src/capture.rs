@@ -47,8 +47,17 @@ use crate::spool;
 ///   to prove memory works would consume the note the next session was owed —
 ///   a diagnostic that has already cost this project one.
 pub fn cmd_probe(agent: &str, server: &str, token: Option<&str>) -> anyhow::Result<()> {
-    let payload = probe_payload(agent)?;
+    probe(agent, server, token, probe_payload(agent)?)
+}
 
+/// [`cmd_probe`] with the payload already chosen, for a caller that must not
+/// read stdin — `setup`, which may be run with a pipe nobody closes.
+pub fn probe(
+    agent: &str,
+    server: &str,
+    token: Option<&str>,
+    payload: String,
+) -> anyhow::Result<()> {
     println!("🔎 Probing memory at {server}");
     println!();
 
@@ -167,6 +176,11 @@ fn probe_payload(agent: &str) -> anyhow::Result<String> {
         }
     }
 
+    made_up_payload(agent)
+}
+
+/// The payload a probe sends when nothing was piped in.
+pub fn made_up_payload(agent: &str) -> anyhow::Result<String> {
     let cwd = std::env::current_dir()?;
     // Named rather than random: a probe should be recognisable as one in a
     // log, and deriving the same session identifier every time means repeated

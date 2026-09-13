@@ -79,7 +79,7 @@ impl Launch {
     /// `serve`, with the data directory and the port when they are not the
     /// defaults — a service starts with none of the environment that chose
     /// them.
-    fn new(binary: PathBuf, data_dir: Option<&Path>, port: u16) -> Self {
+    pub(crate) fn new(binary: PathBuf, data_dir: Option<&Path>, port: u16) -> Self {
         let mut args = Vec::new();
         if let Some(dir) = data_dir {
             args.push("--data-dir".to_owned());
@@ -281,7 +281,7 @@ fn launchd_plist(launch: &Launch, data: &DataDir) -> String {
 /// A service pointed there runs whatever the last build left, and on Windows
 /// holds the file open so the next `cargo build` cannot replace it — which is
 /// how the first server on the machine this was written on stopped a build.
-fn in_build_dir(binary: &Path) -> bool {
+pub(crate) fn in_build_dir(binary: &Path) -> bool {
     // Split on both separators rather than by `Path::components`, which only
     // knows the platform's own: on Linux a Windows path is one component, and
     // the check passed on Windows and failed in CI.
@@ -313,8 +313,73 @@ fn run(program: &str, args: &[&str]) -> anyhow::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// What the service manager holds, measured against what `install` would
+/// register for a launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Registered {
+    /// Nothing is registered.
+    Absent,
+    /// What is registered is what `install` would write.
+    Same,
+    /// Something is registered and `install` would change it; what it runs.
+    Different(String),
+}
+
+/// Whether this machine's service manager holds the registration `install`
+/// would write for `launch`, or `None` where there is no service manager
+/// anamnesis knows.
+///
+/// Compared with the definition rather than checked for existence: a task
+/// that exists and starts a server on another port, or from another binary,
+/// is not keeping this one running. Registration, not health — whether a
+/// server answers is [`server_answers`].
+pub(crate) fn registration(launch: &Launch, data: &DataDir) -> Option<Registered> {
+    let compare = |path: Option<PathBuf>, wanted: String, runs: &dyn Fn(&str) -> String| match path
+        .and_then(|path| std::fs::read_to_string(path).ok())
+    {
+        None => Registered::Absent,
+        Some(existing) if existing == wanted => Registered::Same,
+        Some(existing) => Registered::Different(runs(&existing)),
+    };
+    Some(match Manager::here()? {
+        Manager::TaskScheduler => match run("schtasks", &["/Query", "/TN", TASK_NAME, "/XML"]) {
+            Err(_) => Registered::Absent,
+            Ok(registered) => {
+                let runs = unescape_xml(
+                    between(&registered, "<Arguments>", "</Arguments>").unwrap_or_default(),
+                );
+                if runs == format!("--headless {}", launch.windows_command_line())
+                    && task_is_sound(&registered).is_empty()
+                {
+                    Registered::Same
+                } else {
+                    Registered::Different(runs)
+                }
+            }
+        },
+        Manager::Systemd => compare(
+            dirs::config_dir().map(|dir| dir.join("systemd/user").join(UNIT_NAME)),
+            systemd_unit(launch, data),
+            &|unit| {
+                unit.lines()
+                    .find_map(|line| line.strip_prefix("ExecStart="))
+                    .unwrap_or("a unit `install` did not write")
+                    .to_owned()
+            },
+        ),
+        Manager::Launchd => compare(
+            dirs::home_dir().map(|home| {
+                home.join("Library/LaunchAgents")
+                    .join(format!("{AGENT_LABEL}.plist"))
+            }),
+            launchd_plist(launch, data),
+            &|_| format!("an agent {AGENT_LABEL} that `install` would rewrite"),
+        ),
+    })
+}
+
 /// Whether a server answers on this machine at `port`.
-fn server_answers(port: u16) -> bool {
+pub(crate) fn server_answers(port: u16) -> bool {
     reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()
@@ -333,7 +398,7 @@ fn server_answers(port: u16) -> bool {
 /// The failure this is written against is a service that runs perfectly and
 /// summarises every session by counting, because the environment that had the
 /// model in it was a terminal's.
-fn describe_readiness(launch: &Launch, data: &DataDir) {
+pub(crate) fn describe_readiness(launch: &Launch, data: &DataDir) {
     println!("  Binary:    {}", launch.binary.display());
     let settings = crate::settings::read(&data.root().join(crate::settings::FILE));
     println!(

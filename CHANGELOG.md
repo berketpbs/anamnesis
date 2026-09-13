@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`anamnesis setup [--write]`** wires a project in one command. Getting
+  memory to work took five commands in an order `GETTING_STARTED.md` spread
+  over several hundred lines, and each had a way to be done wrongly that looked
+  like being done. `setup` asks each part — the project's memory, every
+  `--agent`'s hooks and MCP registration, a server the service manager keeps
+  running, seed pages for an empty memory — whether it is done, and prints one
+  line per part. A part is done only when the command behind it would change
+  nothing, asked with that command's own inputs, so a hook pointing at another
+  binary or a task running another port reads as not done. `--write` runs the
+  rest with those same commands, then probes the server so the last line says
+  whether an event would be recorded. It refuses `--write` from a cargo build
+  directory, and names files from the project root when run from a
+  subdirectory. `install-mcp` now carries a data directory that is not the
+  default into the registration as `ANAMNESIS_DATA_DIR`: the hooks delivered to
+  a server started with it, while the registered MCP server opened the default
 - **`status` and `service status` say why nothing answers**, from what the
   server last wrote to `logs/`: the error a start failed with, a panic, the
   cause of a clean stop, or a log that ends with the server running — which is

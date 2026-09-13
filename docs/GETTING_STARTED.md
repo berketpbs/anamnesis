@@ -21,7 +21,9 @@ tar -xzf anamnesis-v1.1.0-x86_64-unknown-linux-gnu.tar.gz
 ./anamnesis-v1.1.0-x86_64-unknown-linux-gnu/anamnesis --version
 ```
 
-Put the binary somewhere on `PATH`, then `anamnesis init`.
+Put the binary where it will stay — on `PATH`, or beside the data directory —
+before wiring anything: hooks, the MCP registration and the service all name
+the binary by its path. Then `anamnesis setup` inside a repository.
 
 ### From Source
 
@@ -34,6 +36,40 @@ cargo build --release
 The binary will be available at `target/release/anamnesis`.
 
 ## Quick Start
+
+### In one command
+
+Inside the repository you want remembered:
+
+```bash
+cd my-project
+anamnesis setup            # says what is done and what is not
+anamnesis setup --write    # does the rest
+```
+
+`setup` looks at five things and prints one line for each:
+
+```
+  ✓ memory  default/my-project is registered in ~/.local/share/anamnesis
+  → hooks   claude-code: wire 8 event(s) to http://127.0.0.1:8080, in .claude/settings.local.json
+  → mcp     claude-code: register the memory tools in .mcp.json
+  → server  nothing answers on port 8080; register the service and start it
+  → seed    memory is empty; seed bootstrap/ pages from git history
+```
+
+With `--write` it runs the steps marked `→` — the same `init`,
+`install-hooks --write`, `install-mcp --write`, `service install --write` and
+`bootstrap` the sections below describe one at a time — and then probes the
+server, so the last thing it says is whether an event would be recorded. A
+step is only ever marked done when the command behind it would change nothing,
+so running `setup` again is how to check a project later.
+
+`--agent codex` (repeatable) wires another harness, `--no-service` leaves the
+service manager alone, `--no-seed` leaves an empty memory empty. A model is not
+something `setup` configures, since it needs a key; the `Model:` line it prints
+says what the server would use, and step 2 below is how to change it.
+
+The rest of this section is the same ground one command at a time.
 
 ### 1. Initialize a Project
 

@@ -160,6 +160,40 @@ pub enum Commands {
         global: bool,
     },
 
+    /// Wire this project for memory, in one command
+    ///
+    /// Asks each part of the wiring whether it is done — the project's memory,
+    /// each harness's hooks and MCP registration, a server kept running by the
+    /// service manager, and seed pages for an empty memory — and prints one
+    /// line for each. `--write` does the parts that are not, with the same
+    /// commands that do each on its own, and then probes the server so the last
+    /// thing said is whether the next session will be recorded.
+    Setup {
+        /// Harness to wire; repeat for more than one
+        #[arg(long = "agent", value_name = "AGENT", default_value = "claude-code")]
+        agents: Vec<String>,
+
+        /// Server the hooks deliver to; follows --port when not given
+        #[arg(long)]
+        server: Option<String>,
+
+        /// Port the service's server listens on
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+
+        /// Leave the service manager alone
+        #[arg(long)]
+        no_service: bool,
+
+        /// Leave an empty memory empty rather than seeding it from git history
+        #[arg(long)]
+        no_seed: bool,
+
+        /// Do what is not done, instead of only saying what it is
+        #[arg(long)]
+        write: bool,
+    },
+
     /// Create the data directory and register this project
     Init,
 
