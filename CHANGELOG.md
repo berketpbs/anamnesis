@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-13
+
+What changed since 1.0 is mostly what a page is written *from*. A session page
+used to be the model's reading of which tools ran; it now carries what they
+returned, which calls failed on harnesses that never say so, what the agent said
+it had done, what its subagents found, and — once the prompt budget stopped
+throwing most of a long session away — says on the page how much of the session
+it saw. A session can leave durable pages beside its own, decisions, gotchas
+and procedures, linked to pages memory already holds. When the model does not
+answer, a chain of fallbacks can write the page, and the page names the model
+that did.
+
+The rest is making faults visible. `status` says when the configured model has
+stopped answering, `doctor` says why a memory is thinner than the work behind
+it and when the server runs another build, and a page embedded from part of
+itself says so. Retrieval is measured rather than argued: hit@1 and NDCG, a
+label per kind of question, two suites frozen before their first run, paired
+`--compare`, `explain` on `memory_query`, and questions asked of a copy of real
+memory. Those measurements are why nomic-embed-text is the recommended
+embedder where Ollama runs, and why the abstract stream and the quarter vector
+weight ship switched off.
+
+The promise 1.0 made holds: the index migrates itself on startup, from schema
+11 to 18 in this release, and nothing written by 1.0 needs converting.
+
 ### Added
 - `anamnesis eval --pages-from <archive or data dir>` **asks a questions file
   of a copy of real memory**. The wiki pages of a `backup` archive, or of a data
