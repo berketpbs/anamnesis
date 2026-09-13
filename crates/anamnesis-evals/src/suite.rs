@@ -113,6 +113,14 @@ pub struct FixturePage {
     /// still says what it said, and must stop being offered.
     #[serde(default)]
     pub supersedes: String,
+    /// One line saying what the page is about, written to its frontmatter as
+    /// `abstract:`.
+    ///
+    /// Whoever writes one for a suite must not have read its questions: a line
+    /// that names what a question asks about is an answer placed where only
+    /// the abstract stream can see it, and the score would measure that.
+    #[serde(default, rename = "abstract")]
+    pub page_abstract: String,
 }
 
 impl FixturePage {

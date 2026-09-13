@@ -424,6 +424,9 @@ fn print_vector_coverage(vectors: &anamnesis_evals::VectorCoverage) {
     if vectors.failed > 0 {
         line.push_str(&format!(" · {} without a vector", vectors.failed));
     }
+    if vectors.abstracts > 0 {
+        line.push_str(&format!(" · {} with an abstract", vectors.abstracts));
+    }
     println!("{line}");
 
     match vectors.truncated.first() {

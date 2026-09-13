@@ -243,14 +243,15 @@ pub fn parse_variant(spec: &str) -> Result<(Tuning, String), EvalError> {
             "entity" => tuning.entity = number,
             "links" => tuning.links = number,
             "vectors" => tuning.vectors = number,
+            "abstracts" => tuning.abstracts = number,
             "vector_coverage" => tuning.vector_coverage = number,
             "authority_exponent" => tuning.authority_exponent = number,
             "entity_coverage" => tuning.entity_coverage = number,
             other => {
                 return Err(EvalError::Corpus(format!(
                     "no tuning called {other:?}. Try one of: rrf_k, fts, entity, links, \
-                     vectors, vector_coverage, vector_sections, authority_exponent, \
-                     entity_coverage, candidates"
+                     vectors, abstracts, vector_coverage, vector_sections, \
+                     authority_exponent, entity_coverage, candidates"
                 )));
             }
         }
@@ -377,6 +378,16 @@ mod tests {
             assert!(!tuning.vector_sections, "{off}");
         }
         parse_variant("vector_sections=2").expect_err("not a switch value");
+    }
+
+    /// The abstract stream ships at weight zero, so the comparison that
+    /// decides it has to be able to give it one.
+    #[test]
+    fn the_abstract_stream_can_be_given_weight() {
+        assert_eq!(Tuning::default().abstracts, 0.0);
+        let (tuning, described) = parse_variant("abstracts=1").expect("parse");
+        assert_eq!(tuning.abstracts, 1.0);
+        assert_eq!(described, "abstracts=1");
     }
 
     #[test]

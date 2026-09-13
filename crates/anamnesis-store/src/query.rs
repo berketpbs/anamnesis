@@ -12,6 +12,8 @@
 //! embedding, because computing one means loading a local model this crate
 //! knows nothing about (see `anamnesis_llm::embed`). Without one, relevance
 //! comes from the other three signals, same as before this stream existed.
+//! The abstract stream compares the same query vector with each page's
+//! one-line abstract, and is silent unless a tuning gives it weight.
 
 use std::collections::HashMap;
 
@@ -103,16 +105,20 @@ pub struct StreamBreakdown {
     /// for one it truncated. What an explanation needs to say what a vector
     /// rank was actually worth under [`Tuning::vector_coverage`].
     pub vector_coverage: Vec<f64>,
+    /// Pages whose abstract is closest to the query vector. Empty without an
+    /// embedding, and without abstracts.
+    pub abstracts: Vec<PageId>,
 }
 
 impl StreamBreakdown {
     /// Each stream with the name it goes by, in the order they are fused.
-    pub fn named(&self) -> [(&'static str, &[PageId]); 4] {
+    pub fn named(&self) -> [(&'static str, &[PageId]); 5] {
         [
             ("fts", &self.fts),
             ("entity", &self.entity),
             ("links", &self.links),
             ("vectors", &self.vectors),
+            ("abstracts", &self.abstracts),
         ]
     }
 }
@@ -198,6 +204,14 @@ impl Store {
             .iter()
             .map(|share| tuning.vector_scale(*share))
             .collect();
+        // Not run at weight zero, which is how it ships: fusion would discard
+        // every rank it produced, and it would score every abstract to do so.
+        let abstracts = match embedding {
+            Some((model, vector)) if !vector.is_empty() && tuning.abstracts != 0.0 => {
+                self.abstract_stream(project_id, model, vector, depth)?
+            }
+            _ => Vec::new(),
+        };
 
         let weights = tuning.weights();
         let fused = fuse_scaled(
@@ -206,6 +220,7 @@ impl Store {
                 (entity.as_slice(), weights[1], &[][..]),
                 (links.as_slice(), weights[2], &[][..]),
                 (vectors.as_slice(), weights[3], vector_scales.as_slice()),
+                (abstracts.as_slice(), weights[4], &[][..]),
             ],
             tuning.rrf_k,
         );
@@ -297,6 +312,15 @@ impl Store {
                 .unzip(),
             _ => (Vec::new(), Vec::new()),
         };
+        // Run whatever its weight: this is the call that asks what a stream
+        // would have found, and a stream switched off is one somebody is
+        // deciding whether to switch on.
+        let abstracts = match embedding {
+            Some((model, vector)) if !vector.is_empty() => {
+                self.abstract_stream(project_id, model, vector, limit)?
+            }
+            _ => Vec::new(),
+        };
 
         Ok(StreamBreakdown {
             fts,
@@ -304,6 +328,7 @@ impl Store {
             links,
             vectors,
             vector_coverage,
+            abstracts,
         })
     }
 
@@ -446,6 +471,95 @@ impl Store {
     /// whole-page vector.
     pub fn clear_page_sections(&self, page_id: PageId, model: &str) -> Result<()> {
         self.set_page_sections(page_id, model, &[])
+    }
+
+    /// Store (or replace) the vector of a page's abstract under one model.
+    pub fn set_abstract_embedding(
+        &self,
+        page_id: PageId,
+        model: &str,
+        vector: &[f32],
+    ) -> Result<()> {
+        let conn = self.connection();
+        conn.execute(
+            "INSERT INTO page_abstract_embeddings (page_id, model, dim, vector) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (page_id, model) DO UPDATE SET dim = excluded.dim, vector = excluded.vector",
+            params![page_id.to_string(), model, vector.len() as i64, vector_to_bytes(vector)],
+        )?;
+        Ok(())
+    }
+
+    /// Remove the vector of a page's abstract under one model.
+    ///
+    /// For a page whose abstract was taken out or could not be embedded: a
+    /// vector left behind would rank the page by a line it no longer carries.
+    pub fn clear_abstract_embedding(&self, page_id: PageId, model: &str) -> Result<()> {
+        let conn = self.connection();
+        conn.execute(
+            "DELETE FROM page_abstract_embeddings WHERE page_id = ?1 AND model = ?2",
+            params![page_id.to_string(), model],
+        )?;
+        Ok(())
+    }
+
+    /// How many of a project's current pages carry an abstract vector under
+    /// one model.
+    ///
+    /// What a comparison of the abstract stream has to be read beside: a
+    /// corpus with none scores the same with the stream on and off, and that
+    /// is not the stream doing nothing.
+    pub fn abstract_embedding_count(&self, project_id: ProjectId, model: &str) -> Result<usize> {
+        let conn = self.connection();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM page_abstract_embeddings a
+             JOIN pages p ON p.id = a.page_id
+             WHERE a.model = ?1 AND p.project_id = ?2
+               AND p.is_latest = 1 AND p.status != 'superseded'",
+            params![model, project_id.to_string()],
+            |row| row.get(0),
+        )?;
+        Ok(usize::try_from(count).unwrap_or(0))
+    }
+
+    /// Abstract stream: pages whose abstract was embedded under `model`,
+    /// ranked by how close that one line is to `query_vector`.
+    ///
+    /// A page without an abstract is not in this stream at all. It is not
+    /// compared by its body instead — that is the vector stream's ranking, and
+    /// counting it twice would give every page a second vote for having no
+    /// abstract. Brute force, as the vector stream is, for the same reason.
+    fn abstract_stream(
+        &self,
+        project_id: ProjectId,
+        model: &str,
+        query_vector: &[f32],
+        limit: usize,
+    ) -> Result<Vec<PageId>> {
+        let conn = self.connection();
+        let mut statement = conn.prepare(
+            "SELECT a.page_id, a.vector FROM page_abstract_embeddings a
+             JOIN pages p ON p.id = a.page_id
+             WHERE a.model = ?1 AND p.project_id = ?2
+               AND p.is_latest = 1 AND p.status != 'superseded'",
+        )?;
+        let rows = statement.query_map(params![model, project_id.to_string()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+
+        let mut scored: Vec<(PageId, f32)> = Vec::new();
+        for row in rows {
+            let (id, bytes) = row?;
+            let similarity = cosine_similarity(query_vector, &bytes_to_vector(&bytes));
+            scored.push((parse_id(id), similarity));
+        }
+        // Ties by id, so two runs over the same index agree on an order.
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        scored.truncate(limit);
+        Ok(scored.into_iter().map(|(id, _)| id).collect())
     }
 
     /// Vector stream: pages embedded under `model`, ranked by cosine
@@ -1707,6 +1821,108 @@ mod tests {
         let on = streams(true);
         assert_eq!(on.vectors, [long, short]);
         assert_eq!(on.vector_coverage, [1.0, 1.0]);
+    }
+
+    /// A page whose body vector is further from the question than another
+    /// page's, but whose abstract is the question. What ships does not look at
+    /// the abstract, and ranks by bodies; given weight, the abstract stream's
+    /// vote reorders them. The breakdown reports the stream either way, since
+    /// it is how somebody deciding whether to switch it on sees what it finds.
+    #[test]
+    fn the_abstract_stream_is_silent_until_it_is_given_weight() {
+        let (_dir, store, project, _workspace) = fixture();
+        let near = write_page(&store, project, "notes/near.md", "Near", "b", Vec::new());
+        let summarised = write_page(
+            &store,
+            project,
+            "notes/summarised.md",
+            "Summarised",
+            "b",
+            Vec::new(),
+        );
+        store
+            .set_page_embedding(near, "test-model", &[0.9, 0.1])
+            .expect("embed");
+        store
+            .set_page_embedding(summarised, "test-model", &[0.5, 0.5])
+            .expect("embed");
+        store
+            .set_abstract_embedding(summarised, "test-model", &[1.0, 0.0])
+            .expect("abstract");
+
+        let question: &[f32] = &[1.0, 0.0];
+        let ranked = |tuning: &Tuning| -> Vec<String> {
+            store
+                .query_pages_with(
+                    project,
+                    "nothing in common",
+                    5,
+                    now(),
+                    Some(("test-model", question)),
+                    tuning,
+                )
+                .expect("query")
+                .into_iter()
+                .map(|hit| hit.title)
+                .collect()
+        };
+
+        assert_eq!(ranked(&Tuning::default()), ["Near", "Summarised"]);
+        let weighted = Tuning {
+            abstracts: 1.0,
+            ..Tuning::default()
+        };
+        assert_eq!(ranked(&weighted), ["Summarised", "Near"]);
+
+        let streams = store
+            .query_streams(
+                project,
+                "nothing in common",
+                5,
+                Some(("test-model", question)),
+                &Tuning::default(),
+            )
+            .expect("streams");
+        assert_eq!(
+            streams.abstracts,
+            [summarised],
+            "a page with no abstract is absent from the stream, not ranked by its body"
+        );
+    }
+
+    /// An abstract under one model is not a vote under another: the query
+    /// vector and the page's vector have to come from the same embedder to be
+    /// compared at all, as in the vector stream.
+    #[test]
+    fn an_abstract_is_only_compared_under_the_model_that_embedded_it() {
+        let (_dir, store, project, _workspace) = fixture();
+        let page = write_page(&store, project, "notes/p.md", "P", "body", Vec::new());
+        store
+            .set_abstract_embedding(page, "old-model", &[1.0, 0.0])
+            .expect("abstract");
+
+        let streams = store
+            .query_streams(
+                project,
+                "nothing in common",
+                5,
+                Some(("new-model", &[1.0, 0.0])),
+                &Tuning::default(),
+            )
+            .expect("streams");
+        assert!(streams.abstracts.is_empty(), "{streams:?}");
+        assert_eq!(
+            store
+                .abstract_embedding_count(project, "old-model")
+                .expect("count"),
+            1
+        );
+        assert_eq!(
+            store
+                .abstract_embedding_count(project, "new-model")
+                .expect("count"),
+            0
+        );
     }
 
     /// A page edited from three sections to one keeps one. Rows left over from

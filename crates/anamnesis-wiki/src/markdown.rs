@@ -255,6 +255,34 @@ mod tests {
         assert_eq!(parsed.frontmatter.session, Some(id));
     }
 
+    /// The abstract is in the file under the key ai-memory reads, so a page
+    /// carried between the two keeps it, and it comes back as it went in —
+    /// `reindex` builds the abstract stream from nothing else.
+    #[test]
+    fn an_abstract_survives_the_round_trip_under_its_own_key() {
+        let mut fm = frontmatter();
+        fm.page_abstract = Some("Why the index lives in SQLite.".to_owned());
+        let text = render_document(&fm, "Body").unwrap();
+
+        assert!(
+            text.contains("abstract: Why the index lives in SQLite."),
+            "{text}"
+        );
+        let parsed = parse_document("x.md", &text).unwrap();
+        assert_eq!(
+            parsed.frontmatter.abstract_text(),
+            Some("Why the index lives in SQLite.")
+        );
+    }
+
+    /// Almost every page predates the field. Rewriting one must not add a line
+    /// saying it has none.
+    #[test]
+    fn a_page_without_an_abstract_does_not_gain_the_key() {
+        let text = render_document(&frontmatter(), "Body").unwrap();
+        assert!(!text.contains("abstract"), "{text}");
+    }
+
     /// A page written before this field existed, and every page a person types
     /// by hand, reads as "no session wrote this" rather than failing to parse.
     #[test]

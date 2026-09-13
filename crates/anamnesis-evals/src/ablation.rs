@@ -255,7 +255,7 @@ relevant = ["notes/windows.md"]
         let suite = Suite::from_toml(SUITE).expect("suite");
         let ablation = ablate(&suite, now()).expect("ablate");
 
-        assert_eq!(ablation.streams.len(), 4);
+        assert_eq!(ablation.streams.len(), 5);
         let vectors = ablation
             .streams
             .iter()
@@ -264,6 +264,12 @@ relevant = ["notes/windows.md"]
         // No embedder here, which is the ordinary case: it is opt-in.
         assert_eq!(vectors.recall, 0.0);
         assert!(vectors.only_stream_to_find.is_empty());
+        let abstracts = ablation
+            .streams
+            .iter()
+            .find(|stream| stream.name == "abstracts")
+            .expect("the abstract stream is scored though it ships silent");
+        assert_eq!(abstracts.recall, 0.0);
     }
 
     /// The fault the three lists replaced. A question nothing answers used to
@@ -371,6 +377,6 @@ relevant = ["notes/storage.md"]
     fn the_builtin_suite_can_be_ablated() {
         let suite = Suite::from_toml(crate::RETRIEVAL_SUITE).expect("suite");
         let ablation = ablate(&suite, now()).expect("ablate");
-        assert_eq!(ablation.streams.len(), 4);
+        assert_eq!(ablation.streams.len(), 5);
     }
 }

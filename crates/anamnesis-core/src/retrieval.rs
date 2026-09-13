@@ -101,6 +101,15 @@ pub struct Tuning {
     /// A page that fits its window has no sections, so this changes nothing
     /// about it either way.
     pub vector_sections: bool,
+    /// Weight of the abstract stream: the query vector against each page's
+    /// one-line `abstract:`, embedded on its own.
+    ///
+    /// A fifth stream rather than another vector of the fourth. One line is a
+    /// single vector however long its page, so it cannot reward a page for
+    /// having many parts the way the best of a page's sections does, and a
+    /// page without an abstract is absent from it rather than compared by its
+    /// body a second time. Zero silences it, and the stream is not even run.
+    pub abstracts: f64,
     /// Exponent applied to [`authority_multiplier`]. `1.0` leaves it as it is,
     /// `0.0` switches it off, and anything between softens it.
     pub authority_exponent: f64,
@@ -190,6 +199,14 @@ impl Default for Tuning {
             // page, which is what the coverage measurement said was needed,
             // and it was not enough on its own.
             vector_sections: false,
+            // Off, and not yet measured. ai-memory's #672 found hit@1 0.609 to
+            // 0.746 with this stream and a query router together, on a wiki
+            // whose abstracts came from somewhere other than its own
+            // consolidator, under an eight-billion-parameter embedder. None of
+            // those is true here, and the rule is that a retrieval change
+            // lands with a paired measurement of our own: `--compare
+            // abstracts=1` over `long` once its pages carry abstracts.
+            abstracts: 0.0,
             // A quarter, so the full 2.34x multiplier becomes about 1.24x.
             // Authority is a preference between comparably relevant pages,
             // and applied whole it was larger than the entire spread of the
@@ -225,8 +242,14 @@ impl Default for Tuning {
 
 impl Tuning {
     /// The stream weights in the order the streams are fused.
-    pub fn weights(&self) -> [f64; 4] {
-        [self.fts, self.entity, self.links, self.vectors]
+    pub fn weights(&self) -> [f64; 5] {
+        [
+            self.fts,
+            self.entity,
+            self.links,
+            self.vectors,
+            self.abstracts,
+        ]
     }
 
     /// What a page's vector contribution is multiplied by, for a vector that
