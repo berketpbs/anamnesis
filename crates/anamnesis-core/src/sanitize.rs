@@ -375,7 +375,7 @@ mod tests {
         let cases = [
             ("AIzaSyA0123456789abcdefghijklmnopqrstuv", "google-api-key"),
             ("ya29.a0Ae4lvC0123456789abcdefghij", "google-oauth-token"),
-            ("AQ.Ab0123456789abcdefghijklmnopqrstuvwx", "google-auth-key"),
+            ("AQ.0123456789abcdefghijklmnopqrstuvwxyz", "google-auth-key"),
             ("sk_live_0123456789abcdefghij", "stripe-key"),
             ("npm_0123456789abcdefghijklmnopqrstuvwxyz", "npm-token"),
             (webhook.as_str(), "slack-webhook"),
@@ -420,7 +420,7 @@ mod tests {
         let oauth = redact("token ya29.a0Ae4lvC0123456789abcdefghij here");
         assert_eq!(oauth.hits(), ["google-oauth-token"]);
 
-        let key = redact("key AQ.Ab0123456789abcdefghijklmnopqrstuvwx here");
+        let key = redact("key AQ.0123456789abcdefghijklmnopqrstuvwxyz here");
         assert_eq!(key.hits(), ["google-auth-key"]);
         assert!(
             key.text().contains("[redacted:google-auth-key]"),
