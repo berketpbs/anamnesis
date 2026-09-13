@@ -14,10 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so an abstract written by hand is written by someone who has read what will
   be asked; asking page by page keeps the questions out of the one place the
   line is made. The reply is checked before it is kept — one line, at most 40
-  words, not a heading, a bullet or the title again — and a page that is
-  refused is left without one, so a run a daily quota cut short is finished by
-  running it again. The key lands after `title`, and comments and questions are
-  left as they were
+  words, not a heading, a bullet, the title again, or an opening about the page
+  ("This page details…", which eight of eight did on the first run) — and a
+  page that is refused is left without one, so a run cut short is finished by
+  running it again. A rate limit or an overloaded model stops the run and names
+  the pages not asked, instead of spending a request per page to hear it again;
+  `--pace` spaces requests for a per-minute limit. The key lands after `title`,
+  and comments and questions are left as they were
 - A page can carry an **`abstract:`** — one line saying what it is about — and
   that line gets a vector of its own (`V18`, `page_abstract_embeddings`), at
   write time and on `reindex`, whatever became of the body's. It feeds a fifth
