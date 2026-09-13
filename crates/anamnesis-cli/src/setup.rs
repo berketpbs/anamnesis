@@ -302,23 +302,48 @@ pub fn cmd_install_hooks(
 /// The key of a hosted embedder is deliberately not carried. A secret in a
 /// settings file is a different decision from a setting in one, and this
 /// command is not the place to make it on somebody's behalf.
+///
+/// The *settings* of a hosted embedder are carried, which they used not to be.
+/// The rule was "hosted wants a key, so carry none of it", and the most useful
+/// hosted endpoint wants no key at all: nomic-embed-text in Ollama, on this
+/// machine. The registration came out without the vector stream, and running
+/// `install-mcp --write` again to fix anything else quietly removed the three
+/// variables somebody had added by hand. A registered server that cannot reach
+/// its endpoint at startup now starts anyway and asks again later, so carrying
+/// the settings can no longer cost the agent its memory tools.
 fn mcp_environment() -> (Vec<(String, String)>, Option<String>) {
-    let config = anamnesis_llm::EmbedConfig::from_env();
+    mcp_environment_for(&anamnesis_llm::EmbedConfig::from_env())
+}
+
+/// [`mcp_environment`], for a configuration a test can write.
+fn mcp_environment_for(
+    config: &anamnesis_llm::EmbedConfig,
+) -> (Vec<(String, String)>, Option<String>) {
     if !config.enabled {
         return (Vec::new(), None);
     }
 
     if config.provider == anamnesis_llm::embed::EmbedProvider::Hosted {
-        return (
-            Vec::new(),
-            Some(format!(
-                "Embeddings are hosted ({}), so the registration carries none of it:\n  \
-                 the endpoint wants a key, and a key belongs in the environment the\n  \
-                 harness starts in, not in a settings file. Without it the agent's\n  \
+        let env = vec![
+            ("ANAMNESIS_EMBED_ENABLED".to_owned(), "1".to_owned()),
+            ("ANAMNESIS_EMBED_PROVIDER".to_owned(), "openai".to_owned()),
+            ("ANAMNESIS_EMBED_URL".to_owned(), config.url.clone()),
+            ("ANAMNESIS_EMBED_MODEL".to_owned(), config.model.clone()),
+        ];
+        let said = match config.key {
+            None => format!(
+                "Vectors: {} at {} — carried into the registration",
+                config.model, config.url
+            ),
+            Some(_) => format!(
+                "Vectors: {} at {} — carried into the registration without its key:\n  \
+                 a key belongs in the environment the harness starts in, not in a\n  \
+                 settings file. Without ANAMNESIS_EMBED_API_KEY there, the agent's\n  \
                  queries run without the vector stream.",
-                config.model
-            )),
-        );
+                config.model, config.url
+            ),
+        };
+        return (env, Some(said));
     }
 
     let mut env = vec![("ANAMNESIS_EMBED_ENABLED".to_owned(), "1".to_owned())];
@@ -438,4 +463,79 @@ pub fn cmd_install_mcp(
     println!("  This names paths on this machine. Ignore the file, or expect a");
     println!("  colleague's checkout to point at your home directory.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anamnesis_llm::EmbedConfig;
+    use anamnesis_llm::embed::EmbedProvider;
+
+    /// Read through the same parser the command uses, so the test cannot build
+    /// a configuration no environment produces.
+    fn hosted(key: Option<&'static str>) -> EmbedConfig {
+        let config = EmbedConfig::from_vars(|name| {
+            match name {
+                "ANAMNESIS_EMBED_ENABLED" => Some("1"),
+                "ANAMNESIS_EMBED_PROVIDER" => Some("openai"),
+                "ANAMNESIS_EMBED_URL" => Some("http://127.0.0.1:11434/v1/embeddings"),
+                "ANAMNESIS_EMBED_MODEL" => Some("nomic-embed-text"),
+                "ANAMNESIS_EMBED_API_KEY" => key,
+                _ => None,
+            }
+            .map(str::to_owned)
+        });
+        assert_eq!(config.provider, EmbedProvider::Hosted);
+        config
+    }
+
+    fn value<'a>(env: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        env.iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// The case this was written for: Ollama on this machine, no key. The
+    /// registration used to carry nothing, and a harness started the server
+    /// with three of the four streams.
+    #[test]
+    fn a_keyless_hosted_embedder_is_carried_whole() {
+        let (env, said) = mcp_environment_for(&hosted(None));
+
+        assert_eq!(value(&env, "ANAMNESIS_EMBED_ENABLED"), Some("1"));
+        assert_eq!(value(&env, "ANAMNESIS_EMBED_PROVIDER"), Some("openai"));
+        assert_eq!(
+            value(&env, "ANAMNESIS_EMBED_URL"),
+            Some("http://127.0.0.1:11434/v1/embeddings")
+        );
+        assert_eq!(
+            value(&env, "ANAMNESIS_EMBED_MODEL"),
+            Some("nomic-embed-text")
+        );
+        let said = said.expect("a line");
+        assert!(!said.contains("without its key"), "{said}");
+    }
+
+    /// Settings travel, a secret does not, and the line says where the secret
+    /// has to be instead.
+    #[test]
+    fn a_hosted_key_is_never_written_and_the_line_says_so() {
+        let (env, said) = mcp_environment_for(&hosted(Some("sk-embed-secret")));
+
+        assert!(
+            env.iter()
+                .all(|(_, value)| !value.contains("sk-embed-secret")),
+            "the key reached the registration: {env:?}"
+        );
+        assert!(value(&env, "ANAMNESIS_EMBED_API_KEY").is_none());
+        assert!(value(&env, "ANAMNESIS_EMBED_URL").is_some());
+        assert!(said.expect("a line").contains("ANAMNESIS_EMBED_API_KEY"));
+    }
+
+    #[test]
+    fn a_disabled_embedder_carries_nothing() {
+        let mut config = hosted(None);
+        config.enabled = false;
+        assert_eq!(mcp_environment_for(&config), (Vec::new(), None));
+    }
 }

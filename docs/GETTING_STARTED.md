@@ -1003,11 +1003,18 @@ than from a terminal that will be closed.
 
 Two places need these variables, not one: the **server's** environment, and
 the MCP registration, since the agent's `memory_query` embeds the question in
-its own process. `anamnesis install-mcp` deliberately writes no hosted
-embedder into a harness's config (a key does not belong in one), so for
-Claude Code add the three variables to the `env` block of `.mcp.json` by hand —
-and note that running `install-mcp --write` again rewrites that block without
-them.
+its own process. Run `anamnesis install-mcp --write` from a shell that has them
+and it carries them into the registration — every setting, never a key. An
+endpoint that does need one reads it from `ANAMNESIS_EMBED_API_KEY` in the
+environment the harness starts in, and the command says so.
+
+A registered MCP server whose endpoint does not answer when the harness starts
+it — Ollama not up yet after a reboot — starts anyway, says so on stderr, and
+asks the endpoint again when a query needs a vector, at most every thirty
+seconds. Queries in between go without the vector stream rather than the agent
+going without its memory tools. `anamnesis serve` still refuses to start
+without an answer, because it is started by something that restarts it and
+writes the refusal where it can be read.
 
 The server checks the endpoint while it starts, by embedding one short string
 — so a wrong key or a model that does not exist is an error you see at startup
