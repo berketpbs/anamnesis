@@ -156,8 +156,8 @@ Three things learned pointing this at a real Ollama, all worth knowing before
 you conclude the setup is broken:
 
 **Ollama's default context is smaller than the prompt anamnesis sends.** A
-session goes out at up to `ANAMNESIS_LLM_MAX_INPUT_TOKENS` (6500) and the reply
-budget is 2000 on top; Ollama serves 4096 unless the model says otherwise, and
+session goes out at up to `ANAMNESIS_LLM_MAX_INPUT_TOKENS` (64000 by default)
+and the reply ceiling is on top; Ollama serves 4096 unless the model says otherwise, and
 what does not fit is dropped rather than refused. The page comes back valid,
 readable, and quietly missing the middle of the session. Give the model a
 window that holds both — a `Modelfile` is the durable way, since it travels
@@ -166,16 +166,21 @@ variable:
 
 ```
 FROM qwen2.5:7b-instruct
-PARAMETER num_ctx 12288
+PARAMETER num_ctx 32768
 ```
 
 ```bash
 ollama create anamnesis-qwen -f Modelfile
 export ANAMNESIS_LLM_MODEL=anamnesis-qwen
+export ANAMNESIS_LLM_MAX_INPUT_TOKENS=24000   # what the window holds after the reply
 ```
 
+The window is the model's to give — 32768 is qwen2.5's own — and the budget is
+yours to fit inside it: a larger budget than the window is the silent failure
+above, not a fuller page.
+
 Measured rather than assumed: a 123-observation session reported 7394 input
-tokens, comfortably past both 4096 and the 6500 the budget estimated.
+tokens, comfortably past both 4096 and the 6500 the budget then allowed.
 
 **A reasoning model can spend the whole reply budget thinking.** It comes back
 as HTTP 200 with a full `reasoning` field and an empty answer, and anamnesis
