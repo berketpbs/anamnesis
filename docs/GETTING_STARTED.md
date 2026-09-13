@@ -371,6 +371,42 @@ stopped or would:
 - **refuse a second copy**, so a restart attempt against a live server is
   dropped rather than fighting it for the port
 
+One command writes all four for this machine's service manager, from the copy
+of the binary the service should run:
+
+```bash
+anamnesis service install            # show what would be registered, and what the server will start with
+anamnesis service install --write    # register it, read it back, start the server
+anamnesis service status             # registered? what does it run? does a server answer?
+anamnesis service uninstall --write
+```
+
+- **Windows**: a scheduled task, *Anamnesis Memory Server*, for your account —
+  at logon and every minute, `IgnoreNew`, no time limit, both battery settings
+  off. The action is `conhost.exe --headless`, so there is no window and no
+  elevation. What Task Scheduler holds is read back after registering, and a
+  task missing any of those settings is refused rather than reported as
+  installed.
+- **Linux**: a systemd user unit, `Restart=always`, with an optional
+  `EnvironmentFile` in the data directory for keys. `loginctl enable-linger`
+  keeps it past logout.
+- **macOS**: a launchd agent with `RunAtLoad` and `KeepAlive`.
+
+Before anything is registered it says what the server will start with — model,
+vectors, the settings file — read the way the service will read them, from
+`settings.env` and the credential store and not from your shell. A setting
+exported in the shell but missing from the file is named, because that is the
+server that runs perfectly and summarises every session by counting. A binary
+in a cargo `target/` directory is refused: the service would run whatever the
+next build leaves, and on Windows keep that build from replacing it. If a
+server is already answering on the port, the service is registered but not
+started, and it says so.
+
+#### By hand
+
+What the command writes, and why each piece is there, for a machine where it
+cannot be run or a setup that needs something it does not do.
+
 **Windows.** Register it as a logon task for your own account:
 
 ```powershell

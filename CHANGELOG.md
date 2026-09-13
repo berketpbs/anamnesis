@@ -27,6 +27,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   says to use the environment. Server tokens stay environment-only: the hook
   reads its own on every tool call
 
+- **`anamnesis service install|uninstall|status`** keeps the server running
+  without a terminal: a scheduled task on Windows, a systemd user unit on
+  Linux, a launchd agent on macOS. Dry run by default; `--write` registers,
+  reads the registration back and starts the server. The Windows task carries
+  every setting whose default has stopped this server before — logon plus a
+  one-minute restart, `IgnoreNew`, no time limit, battery settings off — and
+  runs `conhost.exe --headless`, so no window and no elevation where the only
+  earlier way was a script host. Before registering it reports the model and
+  vectors the service will start with, read from `settings.env` and the
+  credential store rather than the shell, and names settings exported in the
+  shell that the service will not see. Tried on Windows against a trial task:
+  registered and read back, no visible window, the killed server back in 51
+  seconds, `status` and `uninstall` as described. The first run found that
+  `schtasks` cannot read a temporary file still held open, fixed before commit
+
 ### Changed
 - **`serve` writes a panic to its log file.** The standard hook prints to
   stderr, which belongs to whatever started the process — a closed terminal, or
