@@ -87,6 +87,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retrieval stream that is allowed to be missing. It now starts, says so on
   stderr, and connects on the first query that needs a vector, trying again at
   most every 30 seconds. `serve` still refuses to start without an answer
+- **`anamnesis reindex` rebuilds an index that is gone.** Pages were rebuilt
+  before sessions, so into an empty database the first page a model wrote —
+  which names the session behind it — failed a foreign key and the rebuild
+  stopped there, the one case the command exists for. Sessions now come first,
+  and a page naming a session nothing holds any more (forgotten, or never
+  spooled) is indexed unlinked instead of failing. The report also counts a
+  session filed under two dates once rather than twice
 
 ## [1.1.0] - 2026-09-13
 
