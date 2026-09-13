@@ -92,6 +92,7 @@ min_recall = 0.68
 [[page]]
 path = "sessions/2026-03-04-4be1c9d0.md"
 title = "Session: the Ridgeline site visit"
+abstract = "Maintenance at Ridgeline stations 12 through 16 addressed physical component issues and diagnosed a daily brownout-induced reset loop, resulting in a firmware modification to delay transmissions during low-voltage conditions."
 tier = "episodic"
 entities = ["Ridgeline", "brownout detector"]
 body = """
@@ -141,6 +142,7 @@ the loop start earlier.
 [[page]]
 path = "notes/postmortem-2026-01-forty-quiet.md"
 title = "Postmortem: forty stations went quiet"
+abstract = "A firmware update failure that bricked forty station units due to a hardware incompatibility and a bootloader defect is analyzed, outlining the recovery effort and changes made to the deployment and boot processes."
 tier = "semantic"
 entities = ["bootloader", "rev-B board"]
 body = """
@@ -194,6 +196,7 @@ cohort.
 [[page]]
 path = "decisions/0005-reporting-cadence.md"
 title = "How often a station talks"
+abstract = "Station transmission cadences are set to fifteen minutes due to battery limitations, reducing to thirty minutes at higher spreading factors to comply with EU868 radio duty cycle limits."
 tier = "semantic"
 canonical = true
 entities = ["EU868", "SF12"]
@@ -238,6 +241,7 @@ the nodes that need it.
 [[page]]
 path = "procedures/bench-bring-up.md"
 title = "Bringing a board up on the bench"
+abstract = "The hardware board bench procedure covers the sequential steps for inspecting, programming, testing, enclosing, generating keys, and packaging each unit before it leaves the workshop."
 tier = "procedural"
 entities = ["join server", "AppKey"]
 body = """
@@ -279,6 +283,7 @@ once it is in the field.
 [[page]]
 path = "sessions/2026-04-22-77c0e2aa.md"
 title = "Session: Tuesday odds and ends"
+abstract = "Engineering updates cover dashboard fixes, support ticket resolution, hardware evaluations, build script modifications, and a firmware adjustment to prevent premature flash memory failure on station units."
 tier = "episodic"
 entities = ["log partition"]
 body = """
