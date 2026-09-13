@@ -282,9 +282,13 @@ fn launchd_plist(launch: &Launch, data: &DataDir) -> String {
 /// holds the file open so the next `cargo build` cannot replace it — which is
 /// how the first server on the machine this was written on stopped a build.
 fn in_build_dir(binary: &Path) -> bool {
+    // Split on both separators rather than by `Path::components`, which only
+    // knows the platform's own: on Linux a Windows path is one component, and
+    // the check passed on Windows and failed in CI.
     let parts: Vec<String> = binary
-        .components()
-        .map(|part| part.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .to_string_lossy()
+        .split(['/', '\\'])
+        .map(str::to_ascii_lowercase)
         .collect();
     parts
         .windows(2)
