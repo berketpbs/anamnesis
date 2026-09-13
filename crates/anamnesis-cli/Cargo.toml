@@ -46,6 +46,18 @@ flate2.workspace = true
 # A runtime dependency, not only a test one: `backup` stages the index's
 # consistent copy in a temporary file before it goes into the archive.
 tempfile.workspace = true
+rpassword.workspace = true
+
+# A credential store only where one exists without a daemon or a session bus.
+# Linux has Secret Service, which needs D-Bus at build time and a running
+# keyring at use — neither true of the servers and containers anamnesis runs
+# on there — and kernel keyutils, which forgets everything at reboot. So Linux
+# gets none, and `anamnesis key` says to use the environment instead.
+[target.'cfg(windows)'.dependencies]
+keyring = { workspace = true, features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }
 
 [dev-dependencies]
 tempfile.workspace = true

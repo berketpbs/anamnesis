@@ -17,6 +17,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ANAMNESIS_TOKEN`) and `ANAMNESIS_DATA_DIR` are refused by name, every refused
   line is named on stderr, `status --verbose` lists what the file set, and
   `serve` will not start while a line is refused
+- **`anamnesis key set|list|forget`** keeps a model key in this account's
+  credential store — Credential Manager on Windows, the Keychain on macOS —
+  typed without an echo or read from `--stdin`, never taken as an argument.
+  Every command reads it under the variable's name after the environment and
+  `settings.env`, so a key set once is found by the server, the MCP server and
+  the CLI. `list` names what is stored and never shows a value. Linux has no
+  store that works without D-Bus and survives a reboot, so there the command
+  says to use the environment. Server tokens stay environment-only: the hook
+  reads its own on every tool call
+
+### Changed
+- **Every command runs on a thread with a 16 MB stack.** In a debug build the
+  entry function's frame holds every command's locals at once, Windows gives a
+  main thread 1 MB, and adding one subcommand made every command — `--version`
+  included — overflow before an argument was parsed. Release builds fit and CI
+  never runs `main`, so nothing but running the debug binary would have shown it
 
 ### Fixed
 - `anamnesis install-mcp` **carries a hosted embedder's settings into the

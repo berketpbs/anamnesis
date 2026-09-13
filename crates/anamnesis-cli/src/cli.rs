@@ -279,6 +279,18 @@ pub enum Commands {
         operator: Option<String>,
     },
 
+    /// Keep a model key in this account's credential store
+    ///
+    /// For a server nobody starts by hand. Its environment is empty and
+    /// `settings.env` refuses secrets, so a key set here — Credential Manager
+    /// on Windows, the Keychain on macOS — is what the server, the MCP server
+    /// and the CLI find when the variable is not in their environment.
+    Key {
+        /// What to do
+        #[command(subcommand)]
+        action: KeyAction,
+    },
+
     /// Give an eval suite's pages abstracts, written by the configured model
     ///
     /// Each page without an `abstract` is sent to the model alone — its title
@@ -743,5 +755,25 @@ pub enum Commands {
     ShowPage {
         /// Page path
         path: String,
+    },
+}
+
+/// What `anamnesis key` can do.
+#[derive(Subcommand)]
+pub enum KeyAction {
+    /// Store a key, typed without being shown
+    Set {
+        /// The variable it stands for, e.g. GEMINI_API_KEY or ANAMNESIS_LLM_API_KEY
+        name: String,
+        /// Read the key from one line of standard input instead of a prompt
+        #[arg(long)]
+        stdin: bool,
+    },
+    /// Say which keys are stored or in this shell, never their values
+    List,
+    /// Remove a stored key
+    Forget {
+        /// The variable it stands for
+        name: String,
     },
 }
