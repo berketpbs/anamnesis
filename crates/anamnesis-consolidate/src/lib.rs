@@ -23,7 +23,8 @@ mod files;
 mod llm;
 
 pub use abstracts::{
-    MAX_ABSTRACT_WORDS, abstract_prompt, abstract_schema, check_abstract, write_abstract,
+    AbstractError, MAX_ABSTRACT_WORDS, abstract_prompt, abstract_schema, check_abstract,
+    write_abstract,
 };
 pub use files::{changed_files, mentioned_files};
 pub use llm::{

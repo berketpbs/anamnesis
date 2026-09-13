@@ -243,8 +243,8 @@ fn main() -> anyhow::Result<()> {
         Commands::ForgetSession { sessions, apply } => {
             cmd_forget_session(&sessions, apply, cli.data_dir.clone())?;
         }
-        Commands::Abstracts { suite, write } => {
-            cmd_abstracts(&suite, write)?;
+        Commands::Abstracts { suite, write, pace } => {
+            cmd_abstracts(&suite, write, std::time::Duration::from_secs(pace))?;
         }
         Commands::Reconsolidate {
             sessions,

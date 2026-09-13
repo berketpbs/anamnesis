@@ -25,6 +25,17 @@ struct Filled {
     kept: usize,
     /// Pages the model did not give a usable abstract, and why.
     refused: Vec<(String, String)>,
+    /// Pages not asked about, because an earlier page met a limit that the
+    /// rest would have met too.
+    unasked: Vec<String>,
+}
+
+/// Why `ask` gave no abstract, and whether to go on asking.
+struct Refusal {
+    reason: String,
+    /// The failure was a rate limit or an overloaded model. Every page after
+    /// it would spend a request finding the same thing.
+    stop: bool,
 }
 
 /// Give every `[[page]]` in a suite document without an abstract the one
@@ -36,7 +47,7 @@ struct Filled {
 /// left as it was.
 fn fill(
     document: &mut toml_edit::DocumentMut,
-    mut ask: impl FnMut(&str, &str) -> Result<String, String>,
+    mut ask: impl FnMut(&str, &str) -> Result<String, Refusal>,
 ) -> Filled {
     let mut filled = Filled::default();
     let Some(pages) = document
@@ -46,6 +57,7 @@ fn fill(
         return filled;
     };
 
+    let mut stopped = false;
     for page in pages.iter_mut() {
         let text = |key: &str| {
             page.get(key)
@@ -58,6 +70,10 @@ fn fill(
             filled.kept += 1;
             continue;
         }
+        if stopped {
+            filled.unasked.push(path);
+            continue;
+        }
 
         match ask(&text("title"), &text("body")) {
             Ok(line) => {
@@ -65,7 +81,10 @@ fn fill(
                 page.sort_values_by(|a, _, b, _| rank(a.get()).cmp(&rank(b.get())));
                 filled.added.push((path, line));
             }
-            Err(reason) => filled.refused.push((path, reason)),
+            Err(refusal) => {
+                stopped = refusal.stop;
+                filled.refused.push((path, refusal.reason));
+            }
         }
     }
     filled
@@ -83,7 +102,7 @@ fn rank(key: &str) -> u8 {
 }
 
 /// Write abstracts for a suite's pages.
-pub fn cmd_abstracts(suite: &Path, write: bool) -> anyhow::Result<()> {
+pub fn cmd_abstracts(suite: &Path, write: bool, pace: std::time::Duration) -> anyhow::Result<()> {
     let source = std::fs::read_to_string(suite)?;
     // Loaded as a suite first, so a file that is not one is refused before a
     // single request is spent on it.
@@ -110,13 +129,23 @@ pub fn cmd_abstracts(suite: &Path, write: bool) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
+    let mut asked = 0usize;
     let filled = fill(&mut document, |title, body| {
-        runtime.block_on(write_abstract(
-            provider.as_ref(),
-            title,
-            body,
-            config.max_output_tokens,
-        ))
+        if asked > 0 && !pace.is_zero() {
+            std::thread::sleep(pace);
+        }
+        asked += 1;
+        runtime
+            .block_on(write_abstract(
+                provider.as_ref(),
+                title,
+                body,
+                config.max_output_tokens,
+            ))
+            .map_err(|error| Refusal {
+                stop: error.is_transient(),
+                reason: error.to_string(),
+            })
     });
 
     for (path, line) in &filled.added {
@@ -127,12 +156,19 @@ pub fn cmd_abstracts(suite: &Path, write: bool) -> anyhow::Result<()> {
         println!("  ✗ {path}");
         println!("      {reason}");
     }
+    if !filled.unasked.is_empty() {
+        println!(
+            "  … {} not asked: the model said to wait, and each would have spent a request hearing it again",
+            filled.unasked.len()
+        );
+    }
     println!();
     println!(
-        "  {} written, {} already had one, {} refused",
+        "  {} written, {} already had one, {} refused, {} not asked",
         filled.added.len(),
         filled.kept,
-        filled.refused.len()
+        filled.refused.len(),
+        filled.unasked.len()
     );
 
     if filled.added.is_empty() {
@@ -152,8 +188,8 @@ pub fn cmd_abstracts(suite: &Path, write: bool) -> anyhow::Result<()> {
     std::fs::write(suite, updated)?;
     println!();
     println!("  Written to {}.", suite.display());
-    if !filled.refused.is_empty() {
-        println!("  Run it again to ask for the pages that were refused.");
+    if !filled.refused.is_empty() || !filled.unasked.is_empty() {
+        println!("  Run it again to ask about the pages still without one.");
     }
     Ok(())
 }
@@ -232,19 +268,66 @@ relevant = ["notes/a.md"]
         assert_eq!(suite.pages[1].page_abstract, "Written by somebody already.");
     }
 
-    /// A refusal leaves the page without an abstract, so the next run asks
-    /// about it again, rather than storing whatever came back.
-    #[test]
-    fn a_refused_page_is_left_to_be_asked_again() {
-        let mut document: toml_edit::DocumentMut = SUITE.parse().expect("toml");
-        let filled = fill(&mut document, |_, _| Err("429 quota".to_owned()));
+    /// The same suite with a third page, so there is something after a refusal.
+    fn three_pages() -> toml_edit::DocumentMut {
+        SUITE
+            .replacen(
+                "[[case]]",
+                "[[page]]\npath = \"notes/c.md\"\ntitle = \"Mast\"\nbody = \"The mast is guyed.\"\n\n[[case]]",
+                1,
+            )
+            .parse()
+            .expect("toml")
+    }
 
+    /// A reply that was not an abstract leaves that page without one — so the
+    /// next run asks again rather than storing it — and the next page is still
+    /// asked, since a bad answer about one page says nothing about another.
+    #[test]
+    fn an_unusable_reply_leaves_the_page_to_be_asked_again_and_goes_on() {
+        let mut document = three_pages();
+        let mut asked = 0;
+        let filled = fill(&mut document, |title, _| {
+            asked += 1;
+            if title == "Relay clock" {
+                Err(Refusal {
+                    reason: "a heading".to_owned(),
+                    stop: false,
+                })
+            } else {
+                Ok("What holds the mast up.".to_owned())
+            }
+        });
+
+        assert_eq!(asked, 2);
         assert_eq!(
             filled.refused,
-            [("notes/a.md".to_owned(), "429 quota".to_owned())]
+            [("notes/a.md".to_owned(), "a heading".to_owned())]
         );
-        assert!(filled.added.is_empty());
+        assert_eq!(filled.added.len(), 1);
+        assert!(filled.unasked.is_empty());
         let suite = Suite::from_toml(&document.to_string()).expect("suite");
         assert!(suite.pages[0].page_abstract.is_empty());
+    }
+
+    /// The run this was found on: a per-minute limit of five, and nine pages
+    /// each spending a request to be told so. A limit stops the run; the pages
+    /// after it are reported as not asked, and running again finishes them.
+    #[test]
+    fn a_rate_limit_stops_the_run_and_names_what_was_not_asked() {
+        let mut document = three_pages();
+        let mut asked = 0;
+        let filled = fill(&mut document, |_, _| {
+            asked += 1;
+            Err(Refusal {
+                reason: "the model answered 429".to_owned(),
+                stop: true,
+            })
+        });
+
+        assert_eq!(asked, 1, "one request to learn about the limit, not two");
+        assert_eq!(filled.refused.len(), 1);
+        assert_eq!(filled.unasked, ["notes/c.md"]);
+        assert_eq!(filled.kept, 1);
     }
 }

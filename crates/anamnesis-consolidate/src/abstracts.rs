@@ -14,8 +14,71 @@
 //! said again all embed without complaint and rank a page by something other
 //! than what it is about.
 
-use anamnesis_llm::{Completion, Provider};
+use anamnesis_llm::{Completion, LlmError, Provider};
 use serde_json::{Value, json};
+
+/// Why no abstract came back.
+#[derive(Debug)]
+pub enum AbstractError {
+    /// The model was not reached, or answered with an error.
+    Model(LlmError),
+    /// The model answered, and the answer was not an abstract.
+    Unusable(String),
+}
+
+impl AbstractError {
+    /// Whether asking again later could succeed: a rate limit, an overloaded
+    /// model, a connection that did not complete.
+    ///
+    /// A caller working through many pages stops on this rather than going
+    /// on, since every page after it would meet the same limit and spend a
+    /// request finding that out.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Model(error) => error.is_retryable() && !matches!(error, LlmError::Malformed(_)),
+            Self::Unusable(_) => false,
+        }
+    }
+}
+
+impl std::fmt::Display for AbstractError {
+    /// One line. A provider's error body can run to forty lines of JSON, and
+    /// what somebody reading a list of pages needs from it is the status and
+    /// the sentence.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Model(LlmError::Api {
+                status, message, ..
+            }) => write!(f, "the model answered {status}: {}", brief(message)),
+            Self::Model(error) => write!(f, "{}", brief(&error.to_string())),
+            Self::Unusable(reason) => write!(f, "{reason}"),
+        }
+    }
+}
+
+/// The human sentence out of a provider's error body, or the body's first line.
+fn brief(message: &str) -> String {
+    fn find(value: &Value) -> Option<String> {
+        match value {
+            Value::Object(map) => map
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| map.values().find_map(find)),
+            Value::Array(items) => items.iter().find_map(find),
+            _ => None,
+        }
+    }
+    let text = serde_json::from_str::<Value>(message)
+        .ok()
+        .and_then(|value| find(&value))
+        .unwrap_or_else(|| message.to_owned());
+    let line = text.lines().next().unwrap_or_default().trim();
+    match line.char_indices().nth(200) {
+        Some((end, _)) => format!("{}…", &line[..end]),
+        None => line.to_owned(),
+    }
+}
 
 /// Most words an abstract may run to.
 ///
@@ -24,6 +87,26 @@ use serde_json::{Value, json};
 /// window; a reply longer than this is a summary, and a summary embedded as one
 /// vector is the long-page problem again at a smaller size.
 pub const MAX_ABSTRACT_WORDS: usize = 40;
+
+/// Words that, after "this" or "the", make an opening about the page itself.
+const ABOUT_THE_PAGE: &[&str] = &[
+    "page",
+    "document",
+    "log",
+    "report",
+    "guide",
+    "note",
+    "notes",
+    "entry",
+    "article",
+    "session",
+    "postmortem",
+    "procedure",
+    "runbook",
+    "record",
+    "decision",
+    "file",
+];
 
 /// Longest page body sent, in characters.
 ///
@@ -38,6 +121,8 @@ sentence saying what the page is about, so that someone searching later can \
 tell from that sentence alone whether this is the page they need.\n\n\
 Rules:\n\
 - One sentence, at most 40 words, on one line.\n\
+- Begin with the subject itself. Never begin with words about the page, such \
+as \"This page\", \"This log\", \"This report\" or \"This guide\".\n\
 - Say what the page covers as a whole, including what it reaches further down, \
 not only how it opens.\n\
 - Plain prose. No heading, no bullet, no list, no quotation marks around the \
@@ -83,7 +168,7 @@ pub async fn write_abstract(
     title: &str,
     body: &str,
     max_output_tokens: u32,
-) -> Result<String, String> {
+) -> Result<String, AbstractError> {
     let request = Completion {
         system: SYSTEM.to_owned(),
         user: abstract_prompt(title, body),
@@ -93,13 +178,15 @@ pub async fn write_abstract(
     let reply = provider
         .complete(&request)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(AbstractError::Model)?;
     let text = reply
         .json
         .get("abstract")
         .and_then(Value::as_str)
-        .ok_or_else(|| "the reply has no string field \"abstract\"".to_owned())?;
-    check_abstract(text, title)
+        .ok_or_else(|| {
+            AbstractError::Unusable("the reply has no string field \"abstract\"".to_owned())
+        })?;
+    check_abstract(text, title).map_err(AbstractError::Unusable)
 }
 
 /// Whether a line is an abstract, and the line as it should be stored.
@@ -115,6 +202,24 @@ pub fn check_abstract(text: &str, title: &str) -> Result<String, String> {
     }
     if line.starts_with('#') || line.starts_with("- ") || line.starts_with("* ") {
         return Err(format!("the abstract is a heading or a bullet: {line:?}"));
+    }
+    // Found on the first run over `long`: eight abstracts of eight began "This
+    // page details", "This log details", "This report details". Words every
+    // abstract shares are a component every abstract vector shares, and they
+    // make the lines less distinguishable by exactly the stream built on them.
+    // "This" and not "the": "the log partition wears out" is about a log
+    // partition, while "this log details" is about the page.
+    let lower = line.to_lowercase();
+    let mut words = lower.split(' ');
+    let about_the_page = match (words.next(), words.next()) {
+        (Some("this"), Some(noun)) => ABOUT_THE_PAGE.contains(&noun),
+        (Some("the"), Some("page" | "document")) => true,
+        _ => false,
+    };
+    if about_the_page {
+        return Err(format!(
+            "the abstract begins by talking about the page rather than its subject: {line:?}"
+        ));
     }
     let words = line.split(' ').count();
     if words > MAX_ABSTRACT_WORDS {
@@ -208,7 +313,45 @@ mod tests {
     fn a_reply_without_the_field_is_an_error() {
         let model = scripted(json!({"summary": "How the relay keeps its clock."}));
         let error = run(write_abstract(&model, "t", "b", 500)).expect_err("no field");
-        assert!(error.contains("abstract"), "{error}");
+        assert!(error.to_string().contains("abstract"), "{error}");
+        assert!(
+            !error.is_transient(),
+            "asking again gets the same shape back"
+        );
+    }
+
+    /// A provider's error body is forty lines of JSON; a list of pages needs
+    /// the status and the sentence. And a rate limit is transient — the one
+    /// kind of failure that says to stop asking for now, rather than go on
+    /// spending a request per page to meet it again.
+    #[test]
+    fn a_rate_limit_reads_as_one_line_and_says_to_stop() {
+        let body = r#"[{
+  "error": {
+    "code": 429,
+    "message": "You exceeded your current quota, please check your plan.\n* Quota exceeded for metric: requests, limit: 5",
+    "status": "RESOURCE_EXHAUSTED"
+  }
+}]"#;
+        let error = AbstractError::Model(LlmError::Api {
+            status: 429,
+            kind: "unknown".to_owned(),
+            message: body.to_owned(),
+        });
+
+        assert_eq!(
+            error.to_string(),
+            "the model answered 429: You exceeded your current quota, please check your plan."
+        );
+        assert!(error.is_transient());
+        assert!(
+            !AbstractError::Model(LlmError::Api {
+                status: 401,
+                kind: "auth".to_owned(),
+                message: "bad key".to_owned(),
+            })
+            .is_transient()
+        );
     }
 
     /// Every way an abstract goes wrong embeds without complaint, so each is
@@ -229,6 +372,27 @@ mod tests {
         }
         let long = "word ".repeat(MAX_ABSTRACT_WORDS + 1);
         assert!(check_abstract(&long, "t").is_err());
+    }
+
+    /// Eight of eight on the first real run began by describing the page.
+    /// "The log partition" is a subject; "this log details" is not.
+    #[test]
+    fn an_opening_about_the_page_is_refused_and_a_subject_is_not() {
+        for reply in [
+            "This page details repairs to stations 12 through 16.",
+            "This log details maintenance tasks.",
+            "This report details an incident.",
+            "The page explains the watchdog.",
+        ] {
+            assert!(check_abstract(reply, "t").is_err(), "{reply:?}");
+        }
+        for reply in [
+            "The log partition wears out in eleven years at the old logging rate.",
+            "This winter's brownouts came from cold batteries.",
+            "Stations behind the valley gateway go silent during tower maintenance.",
+        ] {
+            assert!(check_abstract(reply, "t").is_ok(), "{reply:?}");
+        }
     }
 
     /// A line break or surrounding quotes are formatting, not content: the

@@ -292,6 +292,14 @@ pub enum Commands {
         /// Write the abstracts into the suite file, instead of only printing them
         #[arg(long)]
         write: bool,
+
+        /// Seconds to wait between requests
+        ///
+        /// For a model with a per-minute limit: five a minute is a pace of 13.
+        /// A limit that is met anyway stops the run rather than spending a
+        /// request per remaining page to meet it again.
+        #[arg(long, value_name = "SECONDS", default_value_t = 0)]
+        pace: u64,
     },
 
     /// Score retrieval against a checked-in corpus and its questions
