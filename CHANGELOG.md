@@ -506,6 +506,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly what must not be lost
 
 ### Fixed
+- `anamnesis doctor` **tells a truncated page with sections from one without**.
+  Since sections, its count of pages embedded from their opening could not say
+  which of them `anamnesis reindex` would change, and its remedy still named
+  only a longer window or shorter pages. On the machine it was found on, four
+  pages were reported alike: one written after sections already held 51, three
+  written before held none. The finding now says how many hold sections — which
+  retrieval as it ships does not compare, so those stay thin — and how many do
+  not, with `reindex` as the remedy for those and the 64-section limit a rebuild
+  cannot get past. Whether sections are compared is read from the shipped
+  tuning, so a page that has them stops being reported the day they are
 - A page written through `memory_write_page` is embedded **once**. The tool
   called `index_page`, which embeds the page and records a failure or a
   truncation, and then embedded the same text again in a block that recorded

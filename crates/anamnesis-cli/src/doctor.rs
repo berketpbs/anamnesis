@@ -17,7 +17,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use anamnesis_core::datadir::DataDir;
+use anamnesis_core::embedding::MAX_SECTIONS;
 use anamnesis_core::observation::{EventKind, RESULT_MARKER};
+use anamnesis_core::retrieval::Tuning;
 use anamnesis_core::scope::resolve_scope;
 use anamnesis_store::{EmbedFailure, EmbedFault, Store, SummarySource};
 
@@ -101,6 +103,12 @@ pub struct Symptoms {
     /// between a model that would not load and a page that would not fit, and
     /// the reason is only in the rows.
     pub embed_failures: Vec<EmbedFailure>,
+    /// Whether retrieval compares a long page's sections, or only its opening.
+    ///
+    /// Read from the tuning that ships rather than assumed, because it decides
+    /// whether a truncated page with sections is thin at all: compared, its
+    /// sections stand for all of it.
+    pub sections_compared: bool,
 }
 
 /// What one recent session shows about what capture is producing.
@@ -171,9 +179,7 @@ fn judge_embeddings(symptoms: &Symptoms) -> Vec<Finding> {
     if !failed.is_empty() {
         findings.push(judge_failed(&failed));
     }
-    if !truncated.is_empty() {
-        findings.push(judge_truncated(&truncated));
-    }
+    findings.extend(judge_truncated(&truncated, symptoms.sections_compared));
     findings
 }
 
@@ -220,14 +226,25 @@ fn judge_failed(failed: &[&EmbedFailure]) -> Finding {
 /// The verdict leads with the *worst* page rather than the first, because the
 /// question somebody has is how bad this gets, and a list ordered by when it
 /// happened answers a different one.
-fn judge_truncated(truncated: &[&EmbedFailure]) -> Finding {
-    let count = truncated.len();
+///
+/// A page that is also embedded in sections is only whole to a retrieval that
+/// compares them. Where one does, it is not thin and is not counted; where
+/// none does, it is as thin as a page without them, and the remedy says which
+/// pages have sections — so that the one thing `anamnesis reindex` can add is
+/// not recommended for pages that already hold it, nor left unsaid for pages
+/// that do not.
+fn judge_truncated(truncated: &[&EmbedFailure], sections_compared: bool) -> Option<Finding> {
+    let thin: Vec<&EmbedFailure> = truncated
+        .iter()
+        .copied()
+        .filter(|failure| !(sections_compared && failure.sections > 0))
+        .collect();
+    let count = thin.len();
     let pages = if count == 1 { "page" } else { "pages" };
 
-    let worst = truncated
+    let worst = thin
         .iter()
-        .max_by_key(|failure| failure.tokens.unwrap_or(0))
-        .expect("the caller checked this is not empty");
+        .max_by_key(|failure| failure.tokens.unwrap_or(0))?;
     let budget = worst.budget.unwrap_or(0);
     let detail = match (worst.tokens, worst.budget) {
         (Some(tokens), Some(budget)) if tokens > budget => format!(
@@ -238,7 +255,33 @@ fn judge_truncated(truncated: &[&EmbedFailure]) -> Finding {
         _ => format!("worst is {}", worst.path),
     };
 
-    Finding {
+    let mut remedy = format!(
+        "nothing is lost from full-text, entity or link retrieval — only the vector \
+         stream sees part of these pages. A model with a longer window, or shorter \
+         pages, is the fix; `{budget}`-token inputs are what the current one reads"
+    );
+    // Only possible when sections are not compared: otherwise these pages
+    // were filtered out above.
+    let sectioned = thin.iter().filter(|failure| failure.sections > 0).count();
+    if sectioned > 0 {
+        let (who, verb) = which_of(sectioned, count);
+        remedy.push_str(&format!(
+            ". {who} {verb} also embedded in sections that cover the whole page, \
+             which retrieval as it ships does not compare"
+        ));
+    }
+    let unsectioned = count - sectioned;
+    if unsectioned > 0 {
+        let (who, _) = which_of(unsectioned, count);
+        let has = if unsectioned == 1 { "has" } else { "have" };
+        remedy.push_str(&format!(
+            ". {who} {has} no sections: `anamnesis reindex`, with embedding on, gives \
+             them to a page embedded before sections existed, and a page that needs \
+             more than {MAX_SECTIONS} keeps its opening only"
+        ));
+    }
+
+    Some(Finding {
         // Thin, not Broken. These pages have vectors and are whole in full
         // text, entities and links; what they are is a fourth stream answering
         // about part of them. Calling that broken would spend the word.
@@ -248,13 +291,19 @@ fn judge_truncated(truncated: &[&EmbedFailure]) -> Finding {
             "{count} {pages} are embedded from only as much of themselves as the model \
              could read ({detail})"
         ),
-        remedy: Some(format!(
-            "nothing is lost from full-text, entity or link retrieval — only the vector \
-             stream sees part of these pages. A model with a longer window, or shorter \
-             pages, is the fix; `{}`-token inputs are what the current one reads",
-            budget
-        )),
-    }
+        remedy: Some(remedy),
+    })
+}
+
+/// How to name `part` of `whole` pages, with the verb that agrees with it.
+fn which_of(part: usize, whole: usize) -> (String, &'static str) {
+    let verb = if part == 1 { "is" } else { "are" };
+    let who = match (part, whole) {
+        (1, 1) => "It".to_owned(),
+        (part, whole) if part == whole => format!("All {whole}"),
+        (part, _) => format!("{part} of them"),
+    };
+    (who, verb)
 }
 
 /// Whether the harnesses are wired for every moment anamnesis records.
@@ -592,6 +641,7 @@ pub fn cmd_doctor(server: &str, data_dir: Option<PathBuf>) -> anyhow::Result<()>
         symptoms.sessions.push(facts);
     }
     symptoms.embed_failures = store.embed_failures(scope.project_id)?;
+    symptoms.sections_compared = Tuning::default().vector_sections;
 
     println!("🩺 Anamnesis Memory Diagnosis");
     println!();
@@ -958,6 +1008,98 @@ mod tests {
         assert_eq!(found.len(), 2, "{found:#?}");
         assert!(found.iter().any(|f| f.severity == Severity::Broken));
         assert!(found.iter().any(|f| f.severity == Severity::Thin));
+    }
+
+    fn in_sections(mut failure: EmbedFailure, sections: usize) -> EmbedFailure {
+        failure.sections = sections;
+        failure
+    }
+
+    fn embeddings_finding(symptoms: &Symptoms) -> Option<Finding> {
+        diagnose(symptoms)
+            .into_iter()
+            .find(|f| f.subject == "embeddings")
+    }
+
+    /// As retrieval ships, a query compares a long page's opening and not its
+    /// sections, so a page holding sections is still thin. What changes is the
+    /// remedy: the sections `anamnesis reindex` would add are already there,
+    /// and recommending it would send somebody to rebuild an index for nothing.
+    #[test]
+    fn sections_retrieval_does_not_compare_leave_a_page_thin_without_sending_it_to_reindex() {
+        let mut symptoms = wired("claude-code", &EVERY_MOMENT);
+        symptoms.sections_compared = false;
+        symptoms.embed_failures = vec![in_sections(embed_truncation("gotchas/long.md", 3046), 51)];
+
+        let finding = embeddings_finding(&symptoms).expect("still thin");
+
+        assert_eq!(finding.severity, Severity::Thin);
+        assert!(finding.verdict.contains("1 page"), "{finding:#?}");
+        let remedy = finding.remedy.as_deref().expect("a remedy");
+        assert!(remedy.contains("does not compare"), "{remedy}");
+        assert!(
+            !remedy.contains("reindex"),
+            "the sections reindex adds are already there: {remedy}"
+        );
+    }
+
+    /// Pages embedded before sections existed sit beside pages written after,
+    /// and only the first kind is something a rebuild changes. The report is
+    /// the one place that can tell them apart, because the count cannot.
+    #[test]
+    fn pages_with_and_without_sections_are_counted_apart() {
+        let mut symptoms = wired("claude-code", &EVERY_MOMENT);
+        symptoms.sections_compared = false;
+        symptoms.embed_failures = vec![
+            in_sections(embed_truncation("sessions/new.md", 3046), 51),
+            embed_truncation("sessions/old.md", 900),
+            embed_truncation("sessions/older.md", 700),
+        ];
+
+        let finding = embeddings_finding(&symptoms).expect("finding");
+
+        assert!(finding.verdict.contains("3 pages"), "{finding:#?}");
+        let remedy = finding.remedy.as_deref().expect("a remedy");
+        assert!(
+            remedy.contains("1 of them is also embedded in sections"),
+            "{remedy}"
+        );
+        assert!(remedy.contains("2 of them have no sections"), "{remedy}");
+        assert!(remedy.contains("anamnesis reindex"), "{remedy}");
+        assert!(
+            remedy.contains(&MAX_SECTIONS.to_string()),
+            "a page too long for sections is not one a rebuild fixes, and the remedy has to say so: {remedy}"
+        );
+    }
+
+    /// Where retrieval compares sections, a page that has them is read in
+    /// full — reporting it as thin would be describing a retrieval that does
+    /// not run. The page without them still is, and its remedy is the rebuild.
+    #[test]
+    fn a_page_whose_sections_are_compared_is_not_thin() {
+        let mut symptoms = wired("claude-code", &EVERY_MOMENT);
+        symptoms.sections_compared = true;
+
+        symptoms.embed_failures = vec![in_sections(embed_truncation("sessions/new.md", 3046), 51)];
+        assert!(
+            embeddings_finding(&symptoms).is_none(),
+            "a page read in full is not thin"
+        );
+
+        symptoms.embed_failures = vec![
+            in_sections(embed_truncation("sessions/new.md", 3046), 51),
+            embed_truncation("sessions/old.md", 900),
+        ];
+        let finding = embeddings_finding(&symptoms).expect("the page without sections");
+        assert!(finding.verdict.contains("1 page"), "{finding:#?}");
+        assert!(finding.verdict.contains("sessions/old.md"), "{finding:#?}");
+        assert!(
+            !finding.verdict.contains("sessions/new.md"),
+            "the worst page is the worst *thin* page: {finding:#?}"
+        );
+        let remedy = finding.remedy.as_deref().expect("a remedy");
+        assert!(remedy.contains("It has no sections"), "{remedy}");
+        assert!(!remedy.contains("does not compare"), "{remedy}");
     }
 
     /// The worst page, not the first one recorded. Somebody reading this is
