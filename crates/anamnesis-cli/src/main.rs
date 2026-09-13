@@ -247,6 +247,12 @@ fn run() -> anyhow::Result<()> {
             no_ui,
             allow_anonymous,
         } => {
+            // Whatever stops the server with an error is written to the log
+            // file, not only returned. Returned, it reaches stderr, and a
+            // server started by a service manager has nobody reading stderr:
+            // under `conhost --headless` a server that could not start, every
+            // minute, for as long as the cause lasted, left the file untouched
+            // and the task reporting success.
             cmd_serve(
                 &bind,
                 port,
@@ -256,7 +262,8 @@ fn run() -> anyhow::Result<()> {
                 },
                 allow_anonymous,
                 cli.data_dir.clone(),
-            )?;
+            )
+            .inspect_err(|error| tracing::error!(error = %format!("{error:#}"), "serve stopped"))?;
         }
         Commands::Hook {
             agent,

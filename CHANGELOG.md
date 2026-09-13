@@ -96,7 +96,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the whole server fail — every memory tool gone for the session over the one
   retrieval stream that is allowed to be missing. It now starts, says so on
   stderr, and connects on the first query that needs a vector, trying again at
-  most every 30 seconds. `serve` still refuses to start without an answer
+  most every 30 seconds
+- **`serve` starts when its embedding endpoint does not answer, too**, and
+  writes why it stopped to the log file. It refused, on the grounds that a
+  refusal from a scheduled task is written where somebody looks. On this
+  project's own machine, after a reboot with Ollama not started, it was
+  written nowhere: the refusal came before the first log line, `conhost
+  --headless` discarded stderr and reported success, and the one-minute
+  restart tried and failed without a trace while 33 hook events queued. The
+  server now starts without vectors, says so in the log, and connects when a
+  page needs one; pages written meanwhile record the failure that `doctor`
+  reports. The `starting` line now comes before anything that can fail, and
+  any error that stops `serve` is logged as `serve stopped`
 - **`anamnesis reindex` rebuilds an index that is gone.** Pages were rebuilt
   before sessions, so into an empty database the first page a model wrote —
   which names the session behind it — failed a foreign key and the rebuild
