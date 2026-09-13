@@ -142,7 +142,11 @@ pub struct QueryExplain {
     pub links: StreamRank,
     /// Vector-cosine stream. Always a miss when no embedder is configured.
     pub vectors: StreamRank,
-    /// Sum of the four contributions: the fused score before standing.
+    /// The query vector against each page's one-line abstract. A rank here with
+    /// a zero contribution is a stream that found the page and was not given
+    /// weight, which is how it ships.
+    pub abstracts: StreamRank,
+    /// Sum of the contributions: the fused score before standing.
     pub fused: f64,
     /// Multiplier for the page's standing — authoritative namespace, canonical,
     /// pinned — applied after fusion. `1.0` means it was considered and left
@@ -212,8 +216,12 @@ impl StreamWorking {
             }
             vectors
         };
-        let fused =
-            fts.contribution + entity.contribution + links.contribution + vectors.contribution;
+        let abstracts = rank_in(&streams.abstracts, weights[4]);
+        let fused = fts.contribution
+            + entity.contribution
+            + links.contribution
+            + vectors.contribution
+            + abstracts.contribution;
         let authority =
             self.tuning
                 .authority(hit.pinned, hit.canonical, hit.path.is_authoritative());
@@ -224,6 +232,7 @@ impl StreamWorking {
             entity,
             links,
             vectors,
+            abstracts,
             fused,
             authority,
             within_scope: fused * authority,

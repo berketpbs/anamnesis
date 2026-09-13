@@ -90,6 +90,12 @@ pub struct VectorCoverage {
     pub failed: usize,
     /// Pages whose vector stands for only part of them, least read first.
     pub truncated: Vec<Truncated>,
+    /// Pages whose abstract has a vector of its own.
+    ///
+    /// Zero on a suite whose pages carry no abstract, where `--compare
+    /// abstracts=1` has nothing to rank and scores what ships — which must not
+    /// read as the stream having been tried and found to do nothing.
+    pub abstracts: usize,
 }
 
 /// One page the model read only the start of.
@@ -168,6 +174,9 @@ impl VectorCoverage {
             pages,
             failed,
             truncated,
+            abstracts: corpus
+                .store
+                .abstract_embedding_count(corpus.project_id, model)?,
         })
     }
 }

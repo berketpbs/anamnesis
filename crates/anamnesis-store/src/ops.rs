@@ -535,7 +535,43 @@ impl Store {
                 self.clear_page_sections(page.id, embedder.model())?;
             }
         }
-        Ok(())
+        self.embed_abstract(page, embedder)
+    }
+
+    /// Give a page's abstract its own vector, or take away one it no longer
+    /// has a line for.
+    ///
+    /// Whatever became of the body. The two vectors answer different
+    /// questions, and a body the embedder refused says nothing about whether a
+    /// line of plain prose can be read.
+    fn embed_abstract(&self, page: &Page, embedder: &dyn Embed) -> Result<()> {
+        let Some(text) = page.frontmatter.abstract_text() else {
+            return self.clear_abstract_embedding(page.id, embedder.model());
+        };
+        match embedder.embed(text) {
+            Ok(vector) => {
+                if let Some(over) = embedder.overflow(text) {
+                    // An abstract is one line; one longer than the model reads
+                    // is a body in the wrong field, and its vector stands for
+                    // an opening again, which is what this was meant to avoid.
+                    tracing::warn!(
+                        path = %page.path,
+                        tokens = over.tokens,
+                        budget = over.budget,
+                        "page abstract is longer than the model can read; its vector stands for the first part only"
+                    );
+                }
+                self.set_abstract_embedding(page.id, embedder.model(), &vector)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path = %page.path,
+                    "page abstract embedding failed; the page is absent from the abstract stream"
+                );
+                self.clear_abstract_embedding(page.id, embedder.model())
+            }
+        }
     }
 
     /// Embed a page too long for one read in sections the model reads whole.
@@ -2373,6 +2409,65 @@ mod tests {
 
         assert_eq!(embedder.read.lock().expect("lock").len(), 1);
         assert_eq!(section_rows(&store, page.id), 0);
+    }
+
+    /// A page's abstract is embedded as the line it is — not the title and body
+    /// again — and a page rewritten without one loses the vector, which would
+    /// otherwise rank the page by a line it no longer carries.
+    #[test]
+    fn an_abstract_is_embedded_alone_and_forgotten_with_the_line() {
+        let (_dir, store, project, _workspace) = fixture();
+        let mut page = indexable_page(project);
+        page.frontmatter.page_abstract = Some("  Why the index lives in SQLite.  ".to_owned());
+        let embedder = WatchedEmbedder::new(1_000);
+
+        store
+            .index_page(project, &page, &[], Some(&embedder), now())
+            .expect("index");
+
+        let read = embedder.read.lock().expect("lock").clone();
+        assert_eq!(read.len(), 2, "the page, then its abstract: {read:?}");
+        assert_eq!(read[1], "Why the index lives in SQLite.");
+        assert_eq!(
+            store
+                .abstract_embedding_count(project, "narrow-1")
+                .expect("count"),
+            1
+        );
+
+        page.frontmatter.page_abstract = None;
+        store
+            .index_page(project, &page, &[], Some(&embedder), now())
+            .expect("reindex");
+        assert_eq!(
+            store
+                .abstract_embedding_count(project, "narrow-1")
+                .expect("count"),
+            0
+        );
+    }
+
+    /// `abstract: ""` in a hand-edited file is no abstract. A vector for the
+    /// empty string is as close to every question as to any, and would rank
+    /// the page for all of them.
+    #[test]
+    fn a_blank_abstract_gets_no_vector() {
+        let (_dir, store, project, _workspace) = fixture();
+        let mut page = indexable_page(project);
+        page.frontmatter.page_abstract = Some("   ".to_owned());
+        let embedder = WatchedEmbedder::new(1_000);
+
+        store
+            .index_page(project, &page, &[], Some(&embedder), now())
+            .expect("index");
+
+        assert_eq!(embedder.read.lock().expect("lock").len(), 1);
+        assert_eq!(
+            store
+                .abstract_embedding_count(project, "narrow-1")
+                .expect("count"),
+            0
+        );
     }
 
     /// Sections describe what a page said when it was embedded. A page edited

@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A page can carry an **`abstract:`** — one line saying what it is about — and
+  that line gets a vector of its own (`V18`, `page_abstract_embeddings`), at
+  write time and on `reindex`, whatever became of the body's. It feeds a fifth
+  retrieval stream, `Tuning::abstracts`, which **ships at weight zero** and is
+  not run at all until given weight: nothing has measured it here yet. The idea
+  is ai-memory's #672, and the key is theirs so a page carried between the two
+  keeps it — but in ai-memory the consolidator writes `summary:` while the
+  stream reads `abstract:`, so the pages it writes never reach the stream; here
+  the field is `page_abstract` in the code and `abstract` in the file, one name.
+  A blank abstract gets no vector (the empty string is as close to every
+  question as to any), and a page rewritten without one loses the vector
+  rather than keeping a line it no longer says. Eval suites take `abstract =`
+  on a page, `--compare abstracts=1` gives the stream weight, `eval --embed`
+  reports how many pages had an abstract to rank, and `memory_query`'s explain
+  shows the stream's rank beside the other four. Nothing writes abstracts yet;
+  that and the measurement over `long` are the next two steps
 - A page **longer than the embedding model's window is also embedded in
   sections** the model reads whole. `V17` gives `page_embeddings` a `part`:
   every existing row becomes part 0, the page as one text, unchanged, and a long

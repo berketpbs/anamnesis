@@ -181,6 +181,7 @@ impl Store {
                 "UPDATE page_links SET from_page_id = ?2 WHERE from_page_id = ?1",
                 "UPDATE page_links SET to_page_id = ?2 WHERE to_page_id = ?1",
                 "UPDATE page_embeddings SET page_id = ?2 WHERE page_id = ?1",
+                "UPDATE page_abstract_embeddings SET page_id = ?2 WHERE page_id = ?1",
                 "UPDATE page_feedback SET page_id = ?2 WHERE page_id = ?1",
             ] {
                 tx.execute(statement, params![was, becomes])

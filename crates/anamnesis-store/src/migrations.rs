@@ -113,6 +113,10 @@ const SOURCES: &[(&str, &str)] = &[
         "V17__page_embedding_parts",
         include_str!("../migrations/V17__page_embedding_parts.sql"),
     ),
+    (
+        "V18__page_abstract_embeddings",
+        include_str!("../migrations/V18__page_abstract_embeddings.sql"),
+    ),
 ];
 
 /// The name refinery gives its own bookkeeping table.

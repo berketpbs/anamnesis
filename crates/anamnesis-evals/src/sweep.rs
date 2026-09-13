@@ -186,6 +186,9 @@ pub fn default_grid() -> Vec<Tuning> {
                                     // what a long page is embedded as, measured
                                     // with `--compare`.
                                     vector_sections: Tuning::default().vector_sections,
+                                    // Nor this: it scores nothing on a suite
+                                    // with no abstracts, which is all but one.
+                                    abstracts: Tuning::default().abstracts,
                                     authority_exponent,
                                     entity_coverage,
                                     candidates,

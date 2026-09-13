@@ -405,6 +405,21 @@ pub struct Frontmatter {
     /// A page somebody wrote by hand names no session, and that is the honest
     /// answer for it — `None` is "not from a session", never "session unknown".
     pub session: Option<SessionId>,
+    /// One line saying what the page is about, embedded on its own.
+    ///
+    /// A long page's vector stands for however much of it the model reads,
+    /// and its sections each stand for a part; this is the one text that
+    /// stands for the whole page at a length every model reads. Written as
+    /// `abstract:`, the key ai-memory reads for the same purpose, so a page
+    /// carried between the two keeps it. Left out of the file when absent
+    /// rather than written as `null`, since almost every page predates it.
+    ///
+    /// Not called `summary`: ai-memory's consolidator writes `summary:` while
+    /// its abstract stream reads `abstract:`, and nothing joins the two, so
+    /// the pages it writes never reach the stream built for them. One name
+    /// here, in the code and in the file.
+    #[serde(rename = "abstract", skip_serializing_if = "Option::is_none")]
+    pub page_abstract: Option<String>,
 }
 
 impl Default for Frontmatter {
@@ -420,6 +435,7 @@ impl Default for Frontmatter {
             entities: Vec::new(),
             expires_at: None,
             session: None,
+            page_abstract: None,
         }
     }
 }
@@ -447,6 +463,18 @@ impl Frontmatter {
     /// Whether the page has passed its expiry at the given instant.
     pub fn is_expired_at(&self, now: Timestamp) -> bool {
         self.expires_at.is_some_and(|expiry| expiry <= now)
+    }
+
+    /// The page's abstract, when it says anything.
+    ///
+    /// Whitespace alone is no abstract: `abstract: ""` in a hand-edited file
+    /// would otherwise give the page a vector for the empty string, which is
+    /// equally close to every question and so ranks it for all of them.
+    pub fn abstract_text(&self) -> Option<&str> {
+        self.page_abstract
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
     }
 }
 

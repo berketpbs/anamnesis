@@ -383,6 +383,19 @@ the best of a page's sections rewards having many of them; an abstract is one
 vector per page whatever its length, which is an argument for it this
 measurement did not have before.
 
+**The abstract stream is built, and not yet measured.** A page's frontmatter can
+carry `abstract:`, the line is embedded on its own, and `Tuning::abstracts`
+weights a fifth stream over those vectors — at zero, as it ships. Reading how
+ai-memory built the same thing turned up a gap worth writing down: their
+consolidator writes a page's one-line description to `summary:`, their stream
+reads `abstract:`, and nothing joins the two, so the pages their own pipeline
+writes never reach the stream #672 measured. The gain was real and it came from
+a wiki whose abstracts were written by something else. Here the field has one
+name, and the measurement has two conditions before it means anything: `long`'s
+pages need abstracts, and whatever writes them must not have read its questions
+— a line naming what a question asks is an answer placed where only this stream
+can see it.
+
 The same run said something about the weight, too. `vectors = 1.0` is the one
 `Tuning` value still marked as standing on an argument, and `--compare
 vectors=0` under `--embed` is its first paired measurement: level on `retrieval`

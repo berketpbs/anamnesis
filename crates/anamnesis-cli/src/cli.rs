@@ -327,7 +327,7 @@ pub enum Commands {
         /// measurement does not land: a mean that rises because three
         /// questions improved and two got worse reads exactly like one that
         /// rose because five improved and none did, and only one of those
-        /// should ship. Knobs: rrf_k, fts, entity, links, vectors,
+        /// should ship. Knobs: rrf_k, fts, entity, links, vectors, abstracts,
         /// vector_coverage, vector_sections (on or off), authority_exponent,
         /// entity_coverage, candidates.
         #[arg(long, value_name = "NAME=VALUE,...")]

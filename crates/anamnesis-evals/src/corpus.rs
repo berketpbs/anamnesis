@@ -88,6 +88,8 @@ impl Corpus {
             frontmatter.canonical = fixture.canonical;
             frontmatter.pinned = fixture.pinned;
             frontmatter.supersedes = fixture.parsed_supersedes()?;
+            frontmatter.page_abstract =
+                Some(fixture.page_abstract.clone()).filter(|text| !text.trim().is_empty());
 
             let mut page = Page::new(
                 project_id,
@@ -220,6 +222,39 @@ relevant = ["decisions/0002-timeout.md"]
         assert!(
             !paths.contains(&"decisions/0001-timeout.md"),
             "the replaced page is still being offered: {paths:?}"
+        );
+    }
+
+    /// A suite page's abstract reaches the index through the frontmatter, the
+    /// way a real page's does, and a page that declares none is not given an
+    /// empty one.
+    #[test]
+    fn a_suite_page_abstract_is_embedded_and_an_absent_one_is_not() {
+        struct Constant;
+        impl anamnesis_core::embedding::Embed for Constant {
+            fn model(&self) -> &str {
+                "constant"
+            }
+            fn embed(&self, _text: &str) -> Result<Vec<f32>, String> {
+                Ok(vec![1.0, 0.0])
+            }
+        }
+
+        let source = SUITE.replacen(
+            "tier = \"semantic\"",
+            "tier = \"semantic\"\nabstract = \"Why the index is one SQLite file.\"",
+            1,
+        );
+        let suite = Suite::from_toml(&source).expect("suite");
+        let corpus = Corpus::build_with(&suite, now(), Some(&Constant)).expect("build");
+
+        assert_eq!(
+            corpus
+                .store
+                .abstract_embedding_count(corpus.project_id, "constant")
+                .expect("count"),
+            1,
+            "one page of two declares an abstract"
         );
     }
 
