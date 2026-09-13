@@ -31,6 +31,7 @@ mod reindex;
 mod rename;
 mod run;
 mod serve;
+mod service;
 mod sessions;
 mod settings;
 mod setup;
@@ -287,6 +288,17 @@ fn run() -> anyhow::Result<()> {
         Commands::Token { operator } => {
             cmd_token(operator.as_deref())?;
         }
+        Commands::Service { action } => match action {
+            cli::ServiceAction::Install {
+                write,
+                binary,
+                port,
+            } => service::cmd_service_install(write, binary, port, cli.data_dir.clone())?,
+            cli::ServiceAction::Uninstall { write } => service::cmd_service_uninstall(write)?,
+            cli::ServiceAction::Status { port } => {
+                service::cmd_service_status(port, cli.data_dir.clone())?
+            }
+        },
         Commands::Key { action } => match action {
             cli::KeyAction::Set { name, stdin } => keys::cmd_key_set(&name, stdin)?,
             cli::KeyAction::List => keys::cmd_key_list()?,

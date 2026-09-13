@@ -279,6 +279,19 @@ pub enum Commands {
         operator: Option<String>,
     },
 
+    /// Keep the server running without a terminal
+    ///
+    /// Registers the server with this machine's service manager — a scheduled
+    /// task on Windows, a systemd user unit on Linux, a launchd agent on macOS —
+    /// so it starts at login and comes back when it dies, then starts it. The
+    /// server reads its settings from `settings.env` and its key from the
+    /// credential store, so the service needs nothing from the environment.
+    Service {
+        /// What to do
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+
     /// Keep a model key in this account's credential store
     ///
     /// For a server nobody starts by hand. Its environment is empty and
@@ -775,5 +788,34 @@ pub enum KeyAction {
     Forget {
         /// The variable it stands for
         name: String,
+    },
+}
+
+/// What `anamnesis service` can do.
+#[derive(Subcommand)]
+pub enum ServiceAction {
+    /// Register the server to start at login and restart when it dies
+    Install {
+        /// Register it and start the server, rather than showing what would be registered
+        #[arg(long)]
+        write: bool,
+        /// The binary the service runs (default: this one)
+        #[arg(long)]
+        binary: Option<PathBuf>,
+        /// Port the server listens on
+        #[arg(long, default_value = "8080")]
+        port: u16,
+    },
+    /// Remove the registration
+    Uninstall {
+        /// Remove it, rather than saying what would be removed
+        #[arg(long)]
+        write: bool,
+    },
+    /// Say whether the service is registered, what it runs, and whether a server answers
+    Status {
+        /// Port the server listens on
+        #[arg(long, default_value = "8080")]
+        port: u16,
     },
 }
