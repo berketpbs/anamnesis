@@ -43,3 +43,34 @@ At the shipped tuning, and each against it, under `--embed`:
 
 A candidate that loses to what ships here does not ship, whatever the frozen
 suites said.
+
+## Result (run after the commit above; the file's hash matched)
+
+hit@1 / MRR / NDCG@5 over the 24 questions, recall 1.000 in every run:
+
+| configuration                    | hit@1 | MRR   | NDCG@5 | paraphrase hit@1 / MRR |
+|----------------------------------|-------|-------|--------|------------------------|
+| all-MiniLM-L6-v2, ships          | 0.833 | 0.903 | 0.928  | 0.500 / 0.722          |
+| all-MiniLM-L6-v2, `vectors=0.25` | 0.833 | 0.910 | 0.933  | (2↑ 1↓ against ships)  |
+| no vectors                       | 0.833 | 0.910 | 0.933  | (2↑ 1↓ against ships)  |
+| nomic-embed-text                 | 0.875 | 0.931 | 0.948  | 0.667 / 0.833          |
+
+- `keyword` and `natural` answered all twelve first under every configuration;
+  `symptom` was identical under both models. Every difference is in
+  `paraphrase`.
+- **nomic-embed-text against MiniLM:** two questions better (`a quick health
+  check of a new model can pass…` 3 → 1, `Claude Code sends nothing when a shell
+  command exits with an error` 2 → 1), one worse (`the embedding only sees the
+  first hundred or so words of a page` 1 → 2). Against no vectors, 2↑ 2↓ with a
+  net gain.
+- **A quarter weight scored exactly as no vectors did** here, including the one
+  question it cost. On this set it is not a middle ground; it is no stream.
+- MiniLM truncated 50 of the 56 pages; nomic read all 56 whole.
+
+What this does and does not support. The direction agrees with the frozen
+suites: nomic-embed-text is the better embedder, and it did not pay for it on
+keyword or natural questions, nor with the `sqlite`-style keyword loss the
+fixture suite showed. But the margin is one question in twenty-four, the set is
+easy — half of it saturated under everything — and its author knew the
+candidates. It rules out the candidate being a regression on real memory; it
+does not measure how much better it is. The quarter weight is not confirmed.
