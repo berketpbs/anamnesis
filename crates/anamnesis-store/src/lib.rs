@@ -34,6 +34,7 @@ mod ops;
 mod purge;
 mod query;
 mod raw;
+mod redact;
 mod rename;
 mod sweep;
 mod workstream;
@@ -49,6 +50,7 @@ pub use purge::Purged;
 // method and has no way to name what it hands back.
 pub use query::{PageHit, StreamBreakdown};
 pub use raw::{RawError, RawRecord, RawSpool};
+pub use redact::Redaction;
 pub use rename::{RenameError, Renamed};
 pub use sweep::SweepRow;
 pub use workstream::{WorkstreamHandoff, WorkstreamSession};
