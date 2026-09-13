@@ -122,6 +122,21 @@ pub fn cmd_serve(
         Some(embedder) => println!("   embedding:     {}", embedder.model()),
         None => println!("   embedding:     off (set ANAMNESIS_EMBED_ENABLED=1)"),
     }
+    // The same two facts into the log file. The banner goes to stdout, and a
+    // server started by a service manager has nobody reading stdout: under
+    // `conhost --headless` it goes nowhere at all. Which model and which
+    // vectors a server started with is the first question when its pages
+    // come out counted, and until now only a wrapper script that redirected
+    // stdout could answer it.
+    tracing::info!(
+        consolidation = %settings
+            .as_ref()
+            .map_or_else(|| "counted (no model configured)".to_owned(), |s| s.provider.describe()),
+        embedding = %embedder
+            .as_ref()
+            .map_or_else(|| "off".to_owned(), |e| e.model().to_owned()),
+        "serving"
+    );
 
     let served = runtime.block_on(anamnesis_web::serve_on(
         listener,
