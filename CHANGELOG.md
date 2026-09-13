@@ -559,6 +559,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly what must not be lost
 
 ### Fixed
+- `anamnesis doctor` **judges only the embedding model the server uses**. The
+  index keeps every model's vectors and complaint rows, so a machine that
+  moved from MiniLM to another embedder still holds MiniLM's truncations, and
+  doctor reported them as the running system's: on the install that moved to
+  nomic-embed-text, every page had a whole vector and doctor still said four
+  were "embedded from 128 tokens". It now asks the server which model it
+  embeds with (`/whoami`, the `Vectors:` line in `status`) and reads only that
+  model's rows; when nothing answers, it judges every row as before
 - `anamnesis doctor` **tells a truncated page with sections from one without**.
   Since sections, its count of pages embedded from their opening could not say
   which of them `anamnesis reindex` would change, and its remedy still named
