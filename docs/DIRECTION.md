@@ -383,18 +383,59 @@ the best of a page's sections rewards having many of them; an abstract is one
 vector per page whatever its length, which is an argument for it this
 measurement did not have before.
 
-**The abstract stream is built, and not yet measured.** A page's frontmatter can
-carry `abstract:`, the line is embedded on its own, and `Tuning::abstracts`
-weights a fifth stream over those vectors — at zero, as it ships. Reading how
-ai-memory built the same thing turned up a gap worth writing down: their
-consolidator writes a page's one-line description to `summary:`, their stream
-reads `abstract:`, and nothing joins the two, so the pages their own pipeline
-writes never reach the stream #672 measured. The gain was real and it came from
-a wiki whose abstracts were written by something else. Here the field has one
-name, and the measurement has two conditions before it means anything: `long`'s
-pages need abstracts, and whatever writes them must not have read its questions
-— a line naming what a question asks is an answer placed where only this stream
-can see it.
+**The abstract stream was built and measured, and it does not help.** A page's
+frontmatter can carry `abstract:`, the line is embedded on its own, and
+`Tuning::abstracts` weights a fifth stream over those vectors — at zero, as it
+ships. Reading how ai-memory built the same thing turned up a gap worth writing
+down: their consolidator writes a page's one-line description to `summary:`,
+their stream reads `abstract:`, and nothing joins the two, so the pages their
+own pipeline writes never reach the stream #672 measured. The gain was real and
+it came from a wiki whose abstracts were written by something else.
+
+The measurement had two conditions: `long`'s pages need abstracts, and whatever
+writes them must not have read its questions. `anamnesis abstracts` sends a
+model one page at a time, title and body only, and the frozen suite was not
+edited — each set lives in a copy under `docs/measurements/`. Two writers, so a
+result could not be one model's habit: gemini-3.6-flash (17 of 17 on the first
+pass) and qwen2.5:7b-instruct run locally (five refused on the first pass, four
+for opening "This page…" and one for length, and written on later ones). Under
+`--embed`, against `long` shipping at hit@1 0.312 / MRR 0.414:
+
+| variant                  | gemini-3.6-flash       | qwen2.5:7b             |
+|--------------------------|------------------------|------------------------|
+| `abstracts=1`            | 0.312 / 0.417 (2↑ 2↓)  | 0.250 / 0.417 (4↑ 3↓)  |
+| `vectors=0,abstracts=1`  | 0.375 / 0.484 (5↑ 2↓)  | 0.375 / 0.521 (6↑ 2↓)  |
+| `vectors=0`              | 0.500 / 0.562 (6↑ 0↓)  | 0.500 / 0.562 (6↑ 0↓)  |
+
+Neither writer's abstracts gained anything added to the vectors, and neither
+beat removing vectors outright when they replaced them. The losses were shared
+between writers rather than scattered: `what has to happen before the boot
+report goes out` left the results in all four abstract runs; added to vectors,
+both also lost `what if the signing key is lost` (first to second or third);
+replacing them, both lost the guard `reset cause` from first to second — the
+guard sections cost as well. The stronger writer did no better; its lines were
+fuller and ranked no closer. So the fault is not that a long page lacked one
+representative vector. An abstract is one, and a short decoy page the model
+reads whole still out-votes it at full weight.
+
+That moves the question to the one the vector stream itself raises, measured
+under `--embed` over all four suites (hit@1 / MRR; `retrieval` and `crowded`
+did not move under any of these):
+
+| `vectors` | adversarial                     | long                  |
+|-----------|---------------------------------|-----------------------|
+| 1.0       | 0.938 / 0.958                   | 0.312 / 0.414         |
+| 0.5       | 0.938 / 0.969 (1↑ 0↓)           | 0.375 / 0.486 (5↑ 0↓) |
+| 0.25      | 1.000 / 1.000 (1↑ 0↓)           | 0.438 / 0.521 (5↑ 0↓) |
+| 0         | 0.938 / 0.969 (1↑ 1↓, argon2id) | 0.500 / 0.562 (6↑ 0↓) |
+
+A quarter is the one setting that loses nothing anywhere, and it is **not
+shipped**, for the reason `long` and `adversarial` both state in their headers:
+no knob is tuned against them, and this grid was read off exactly those two.
+It needs a set of questions nobody has scored before. And the weight is a
+property of the embedder as much as of fusion — a model that reads 512 tokens
+instead of 128 truncates a different set of pages — so the next measurement is
+of a longer window, and the weight is chosen under whichever model that leaves.
 
 The same run said something about the weight, too. `vectors = 1.0` is the one
 `Tuning` value still marked as standing on an argument, and `--compare

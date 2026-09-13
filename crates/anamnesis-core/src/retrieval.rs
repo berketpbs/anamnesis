@@ -199,13 +199,16 @@ impl Default for Tuning {
             // page, which is what the coverage measurement said was needed,
             // and it was not enough on its own.
             vector_sections: false,
-            // Off, and not yet measured. ai-memory's #672 found hit@1 0.609 to
+            // Off, and measured off. ai-memory's #672 found hit@1 0.609 to
             // 0.746 with this stream and a query router together, on a wiki
             // whose abstracts came from somewhere other than its own
-            // consolidator, under an eight-billion-parameter embedder. None of
-            // those is true here, and the rule is that a retrieval change
-            // lands with a paired measurement of our own: `--compare
-            // abstracts=1` over `long` once its pages carry abstracts.
+            // consolidator, under an eight-billion-parameter embedder. Here, on
+            // 2026-09-13, `long` with abstracts from two writers that never saw
+            // its questions (gemini-3.6-flash and a local qwen2.5:7b) went from
+            // 0.312 / 0.414 to 0.312 / 0.417 and 0.250 / 0.417 — trades, not
+            // gains — and replacing the body vectors with abstracts scored
+            // below removing vectors altogether under both. The sets are in
+            // `docs/measurements/`; `docs/DIRECTION.md` has the table.
             abstracts: 0.0,
             // A quarter, so the full 2.34x multiplier becomes about 1.24x.
             // Authority is a preference between comparably relevant pages,
