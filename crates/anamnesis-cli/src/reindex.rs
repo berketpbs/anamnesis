@@ -290,7 +290,8 @@ pub fn cmd_reindex(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
     println!();
 
     let now = Timestamp::now();
-    let embedder = anamnesis_llm::EmbedConfig::from_env().build(&data.models())?;
+    let embedder =
+        anamnesis_llm::EmbedConfig::from_vars(crate::settings::var).build(&data.models())?;
     let embed = embedder
         .as_deref()
         .map(|embedder| embedder as &dyn anamnesis_core::embedding::Embed);

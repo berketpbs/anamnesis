@@ -70,7 +70,7 @@ pub fn cmd_reconsolidate(
     // over it is the same loss as a counted one — the reason counted replies
     // are refused below. A configured model that does not answer leaves the
     // page as it was, and the command can be run again when it does.
-    let config = anamnesis_llm::LlmConfig::from_env()?.without_fallbacks();
+    let config = anamnesis_llm::LlmConfig::from_vars(crate::settings::var)?.without_fallbacks();
     let Some(provider) = config.build()? else {
         println!("♻  Recompiling {}", scope.scope);
         println!();
@@ -153,7 +153,8 @@ pub fn cmd_reconsolidate(
     // rewritten page keeps the vector its old body was embedded into, and the
     // one stream that finds pages by meaning would be answering from prose
     // that is no longer on the page.
-    let embedder = anamnesis_llm::EmbedConfig::from_env().build(&data.models())?;
+    let embedder =
+        anamnesis_llm::EmbedConfig::from_vars(crate::settings::var).build(&data.models())?;
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -308,7 +309,7 @@ fn cmd_show_prompt(
     // provider *is* configured its budget is used, because a prompt rendered
     // to a different size than the one that would be sent is a different
     // prompt.
-    let max_input_tokens = anamnesis_llm::LlmConfig::from_env()
+    let max_input_tokens = anamnesis_llm::LlmConfig::from_vars(crate::settings::var)
         .map(|config| config.max_input_tokens)
         .unwrap_or_else(|_| anamnesis_llm::LlmConfig::default().max_input_tokens);
 

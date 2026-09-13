@@ -100,6 +100,36 @@ A typo is reported at startup rather than at the end of the first session:
 which model it will consolidate with when they do. `anamnesis status
 --verbose` reports the same thing.
 
+#### Settings for a server nobody starts by hand
+
+A server started at login by the operating system gets an environment nobody
+chose, so exporting variables in a terminal configures nothing it will see.
+Write them to `settings.env` in the data directory instead:
+
+```bash
+# <data_dir>/settings.env
+ANAMNESIS_LLM_PROVIDER=google
+ANAMNESIS_LLM_MODEL=gemini-3.5-flash
+ANAMNESIS_LLM_FALLBACK_PROVIDERS=google:gemini-3.6-flash
+ANAMNESIS_EMBED_ENABLED=1
+ANAMNESIS_EMBED_PROVIDER=openai
+ANAMNESIS_EMBED_URL=http://127.0.0.1:11434/v1/embeddings
+ANAMNESIS_EMBED_MODEL=nomic-embed-text
+```
+
+Every command reads it — the server, the MCP server a harness starts, `status`,
+`reconsolidate` — so the CLI sees the model the server does. A variable in the
+environment still wins over the same line in the file. `NAME=value` per line,
+`#` for comments, an optional `export ` and one pair of quotes; nothing is
+expanded.
+
+Two kinds of line are refused: a **secret** (`*_API_KEY`, `ANAMNESIS_TOKEN`),
+since the file is plain text, and `ANAMNESIS_DATA_DIR`, since the file is found
+through the data directory. A refused or malformed line is named on stderr by
+every command, `status --verbose` lists what the file set and how many lines it
+did not, and `serve` will not start while any line is refused. The file is not
+part of `anamnesis backup`: it describes one machine.
+
 #### Google AI Studio
 
 Gemini publishes an OpenAI-compatible surface, so it is the same client again —

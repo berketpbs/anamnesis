@@ -27,7 +27,8 @@ pub fn cmd_search(
 
     // The same opt-in local embedder `anamnesis mcp` uses, so a search from
     // the terminal ranks identically to one an agent runs.
-    let embedder = anamnesis_llm::EmbedConfig::from_env().build(&data.models())?;
+    let embedder =
+        anamnesis_llm::EmbedConfig::from_vars(crate::settings::var).build(&data.models())?;
     let query_vector = embedder
         .as_ref()
         .and_then(|embedder| match embedder.embed(query) {
@@ -198,7 +199,8 @@ pub fn cmd_write_page(
     // And a vector, when one is enabled: a page written here is a page
     // somebody meant, and leaving it out of the vector stream would make the
     // stream depend on which command wrote a page rather than on what it says.
-    let embedder = anamnesis_llm::EmbedConfig::from_env().build(&data.models())?;
+    let embedder =
+        anamnesis_llm::EmbedConfig::from_vars(crate::settings::var).build(&data.models())?;
     store.index_page(
         scope.project_id,
         &page,

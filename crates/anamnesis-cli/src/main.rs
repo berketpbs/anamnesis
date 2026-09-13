@@ -31,6 +31,7 @@ mod rename;
 mod run;
 mod serve;
 mod sessions;
+mod settings;
 mod setup;
 mod spool;
 mod status;
@@ -108,6 +109,34 @@ fn main() -> anyhow::Result<()> {
                 )
                 .init(),
             None => registry.init(),
+        }
+    }
+
+    // Read before any command, so every one of them sees the same settings:
+    // the server, the MCP server a harness starts, and the CLI asked about
+    // either. A line that was typed and not applied is said here — and the
+    // server will not start with one, since it is the process that runs
+    // unattended. Not the hook: it answers on stdout and must never fail.
+    let loaded = settings::init(cli.data_dir.clone());
+    if !loaded.problems.is_empty() {
+        if matches!(cli.command, Commands::Serve { .. }) {
+            for problem in &loaded.problems {
+                tracing::error!(%problem, "settings file refused a line");
+            }
+            anyhow::bail!(
+                "{} has lines that were not applied:
+  {}",
+                loaded.path.display(),
+                loaded.problems.join(
+                    "
+  "
+                )
+            );
+        }
+        if !matches!(cli.command, Commands::Hook { .. }) {
+            for problem in &loaded.problems {
+                eprintln!("anamnesis: {problem}");
+            }
         }
     }
 

@@ -57,13 +57,17 @@ pub fn cmd_status(
             Some(path) => println!("  Marker:       {}", path.display()),
             None => println!("  Marker:       (none)"),
         }
+        if let Some(settings) = crate::settings::loaded() {
+            println!("  Settings:     {}", describe_settings(settings));
+        }
 
-        // This shell's environment, which is what a server started from
-        // *here* would use — not what the running server was started with.
+        // This shell's environment and the settings file, which is what a
+        // server started from *here* would use — not necessarily what the
+        // running server was started with.
         // The `Summaries:` line above is the server's own answer, and the two
         // disagreeing is the normal case on a machine where the server is
         // launched by something else.
-        match anamnesis_llm::LlmConfig::from_env() {
+        match anamnesis_llm::LlmConfig::from_vars(crate::settings::var) {
             Ok(llm) if llm.provider == anamnesis_llm::ProviderKind::None => {
                 println!("  Model here:   (none — a server started here would count)");
             }
@@ -319,6 +323,32 @@ impl From<AuthState> for ServerFacts {
             auth,
             ..Self::default()
         }
+    }
+}
+
+/// Where the settings file is, what it sets, and what it refused.
+///
+/// Names rather than values: the file holds no secrets, but a line in `status`
+/// is the kind of thing pasted into an issue, and the names are what answer
+/// "is this setting coming from the file".
+fn describe_settings(settings: &crate::settings::Settings) -> String {
+    let path = settings.path.display();
+    if !settings.present {
+        return format!("{path} (none)");
+    }
+    let names = if settings.values.is_empty() {
+        "nothing set".to_owned()
+    } else {
+        settings
+            .values
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match settings.problems.len() {
+        0 => format!("{path} — {names}"),
+        n => format!("{path} — {names}; {n} line(s) NOT applied, each named above"),
     }
 }
 
