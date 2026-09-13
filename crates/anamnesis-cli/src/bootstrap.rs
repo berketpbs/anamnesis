@@ -838,8 +838,11 @@ pub fn cmd_bootstrap(
     store.migrate()?;
     let wiki = Wiki::open(data.wiki())?;
 
-    let embedder =
-        anamnesis_llm::EmbedConfig::from_vars(crate::settings::var).build(&data.models())?;
+    let embedder = crate::serve::embedder_for(
+        &anamnesis_llm::EmbedConfig::from_vars(crate::settings::var),
+        &data.models(),
+        |said| eprintln!("anamnesis: {said}"),
+    )?;
     let report = seed(
         &store,
         &wiki,
