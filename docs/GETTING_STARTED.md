@@ -892,6 +892,37 @@ own with `--suite path/to/suite.toml`; the format is the shipped file. A suite
 is gated on the measures it names in `[thresholds]` and no others, so an older
 suite goes on meaning what it meant.
 
+#### Against your own memory
+
+The shipped suites say how retrieval does on pages written for them. Whether a
+setting that wins there also wins on the memory you actually have is a second
+question, and it is asked of a copy:
+
+```bash
+anamnesis backup --out memory.tar.gz
+anamnesis eval --suite my-questions.toml --pages-from memory.tar.gz
+anamnesis eval --suite my-questions.toml --pages-from memory.tar.gz --embed --compare vectors=0
+```
+
+`--pages-from` takes an archive written by `anamnesis backup`, or a data
+directory. Its wiki pages become the corpus — frontmatter and all, so a
+superseded page stays out of the answers as it is in real use — and the corpus
+is built in a throwaway directory like any other: an archive is unpacked
+there, and a data directory is only read as files, so nothing is counted
+against the memory the pages came from. A page that does not parse is left out
+and named.
+
+The questions file is a suite with no `[[page]]` in it: `name`, `description`,
+optionally `categories` and `limit`, and the `[[case]]`s, each naming the paths
+that answer it. A case naming a page the copy does not have is refused before
+anything runs. When the copy holds more than one project, say which with
+`--scope workspace/project`.
+
+Your questions are about your notes, so keep the file wherever the notes are
+kept rather than beside the shipped suites. Write them before the first run
+and do not edit them after: a set tuned to the scores it produced measures
+nothing.
+
 ### Turn On Semantic Search
 
 Retrieval fuses four streams, and one of them is off unless asked: cosine

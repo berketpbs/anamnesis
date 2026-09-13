@@ -39,6 +39,10 @@ pub struct EvalOptions {
     pub compare: Option<String>,
     /// Score with the embedding stream switched on.
     pub embed: bool,
+    /// Take the corpus from an archive or data directory instead of the suite.
+    pub pages_from: Option<PathBuf>,
+    /// Which project's pages to take, as `workspace/project`.
+    pub scope: Option<String>,
 }
 
 pub fn cmd_eval(
@@ -54,17 +58,49 @@ pub fn cmd_eval(
         k_sensitivity,
         compare,
         embed,
+        pages_from,
+        scope,
     } = options;
     // Held still on purpose. Freshness is an input to nothing a suite scores,
     // and it can only be that way if two runs are handed the same instant.
     let now: Timestamp = "2026-01-01T00:00:00Z".parse()?;
 
-    let suites: Vec<(String, anamnesis_evals::Suite)> = match suite {
-        Some(path) => {
+    // Kept alive for the whole run: an archive is unpacked into it, and the
+    // pages read from there are owned by the suite, but a later error message
+    // naming the directory should still name something that exists.
+    let mut _unpacked: Option<tempfile::TempDir> = None;
+
+    let suites: Vec<(String, anamnesis_evals::Suite)> = match (suite, pages_from) {
+        (Some(path), Some(source)) => {
+            let (wiki_root, holder) = snapshot_wiki(&source)?;
+            _unpacked = holder;
+            let scope = match scope.as_deref() {
+                Some(text) => anamnesis_evals::parse_scope(text)?,
+                None => only_scope(&wiki_root, &source)?,
+            };
+            let read = anamnesis_evals::pages_from_wiki(&wiki_root, &scope)?;
+            println!(
+                "Asking {} of {} page(s) of {scope}, from {}.",
+                path.display(),
+                read.pages.len(),
+                source.display()
+            );
+            for (page, reason) in &read.unreadable {
+                println!("  left out {page}: {reason}");
+            }
+            println!("Built in a throwaway directory; nothing is recorded against the original.");
+            println!();
+            let questions = std::fs::read_to_string(path)
+                .map_err(|error| anyhow::anyhow!("could not read {}: {error}", path.display()))?;
+            let loaded = anamnesis_evals::Suite::from_questions(&questions, read.pages)?;
+            vec![(path.display().to_string(), loaded)]
+        }
+        (Some(path), None) => {
             let loaded = anamnesis_evals::Suite::load(path)?;
             vec![(path.display().to_string(), loaded)]
         }
-        None => anamnesis_evals::builtin_suites()
+        // `--pages-from` requires `--suite`, so this is the built-in suites.
+        (None, _) => anamnesis_evals::builtin_suites()
             .into_iter()
             .map(|(name, source)| {
                 anamnesis_evals::Suite::from_toml(source).map(|suite| (name.to_owned(), suite))
@@ -176,6 +212,50 @@ pub fn cmd_eval(
 /// came for, and the lists are printed under them because they are what
 /// decides. A regression is never folded into the summary line: the whole
 /// reason this command exists is that a mean can absorb one.
+/// Where the wiki of a `--pages-from` source is, unpacking an archive first.
+///
+/// An archive goes through the same vetting `restore` does, into a directory
+/// that is gone when the run ends. A data directory is read where it is: the
+/// pages are only read as files, never opened as a repository or an index, so
+/// pointing this at live memory leaves it exactly as it was — no access
+/// counted, no commit, no lock held against a running server.
+fn snapshot_wiki(source: &std::path::Path) -> anyhow::Result<(PathBuf, Option<tempfile::TempDir>)> {
+    if source.is_file() {
+        let dir = tempfile::tempdir()?;
+        crate::archive::unpack(source, dir.path())?;
+        return Ok((dir.path().join("wiki"), Some(dir)));
+    }
+    if source.join("wiki").is_dir() {
+        return Ok((source.join("wiki"), None));
+    }
+    anyhow::bail!(
+        "{} is neither an archive written by `anamnesis backup` nor a data directory with a wiki/ in it",
+        source.display()
+    )
+}
+
+/// The one project a snapshot holds, or a refusal that lists them.
+fn only_scope(
+    wiki_root: &std::path::Path,
+    source: &std::path::Path,
+) -> anyhow::Result<anamnesis_core::scope::Scope> {
+    let mut scopes = anamnesis_evals::scopes_in_wiki(wiki_root)?;
+    match scopes.len() {
+        1 => Ok(scopes.remove(0)),
+        0 => anyhow::bail!("{} holds no project's pages", source.display()),
+        _ => anyhow::bail!(
+            "{} holds {} projects; name one with --scope: {}",
+            source.display(),
+            scopes.len(),
+            scopes
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
 fn print_comparison(measured: &anamnesis_evals::Comparison, verbose: bool) {
     println!(
         "⚖️  {} — {} pages, {} questions",

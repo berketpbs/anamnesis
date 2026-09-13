@@ -313,6 +313,21 @@ pub enum Commands {
         #[arg(long)]
         suite: Option<PathBuf>,
 
+        /// Ask `--suite`'s questions of pages from a copy of real memory
+        ///
+        /// An archive written by `anamnesis backup`, or a data directory. Its
+        /// wiki pages become the corpus, built in a throwaway directory as
+        /// always, so nothing is read from its index or recorded against it.
+        /// The questions file then carries no pages of its own. For checking a
+        /// setting chosen on the fixture suites against the memory it is for.
+        #[arg(long, value_name = "ARCHIVE_OR_DATA_DIR", requires = "suite")]
+        pages_from: Option<PathBuf>,
+
+        /// Which project's pages to take from `--pages-from`, as
+        /// `workspace/project`. Needed only when it holds more than one.
+        #[arg(long, value_name = "WORKSPACE/PROJECT", requires = "pages_from")]
+        scope: Option<String>,
+
         /// Print every case with the rank its answer came back at
         #[arg(short, long)]
         verbose: bool,

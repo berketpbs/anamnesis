@@ -342,11 +342,7 @@ impl Wiki {
     /// rather than failing the walk, since the wiki directory belongs to the
     /// user and may hold anything.
     pub fn pages(&self, scope: &Scope) -> Result<Vec<PagePath>> {
-        let root = self.scope_root(scope);
-        let mut found = Vec::new();
-        collect_pages(&root, &root, &mut found)?;
-        found.sort();
-        Ok(found)
+        pages_under(&self.scope_root(scope))
     }
 
     /// The workspace's shared `_global` scope, as this wiki lays it out.
@@ -494,6 +490,20 @@ pub fn page(
 ///
 /// A missing directory is an empty scope, not an error: a project that has
 /// never had a page written is the state every new project starts in.
+/// Every page under one scope's directory, in sorted path order, read without
+/// a [`Wiki`].
+///
+/// The same walk [`Wiki::pages`] does, for a reader that must leave what it
+/// reads exactly as it found it: [`Wiki::open`] creates a repository where
+/// there is none, and a copy of memory unpacked to be measured is not a wiki
+/// anything should start committing to.
+pub fn pages_under(scope_root: &Path) -> Result<Vec<PagePath>> {
+    let mut found = Vec::new();
+    collect_pages(scope_root, scope_root, &mut found)?;
+    found.sort();
+    Ok(found)
+}
+
 fn collect_pages(root: &Path, dir: &Path, found: &mut Vec<PagePath>) -> Result<()> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,

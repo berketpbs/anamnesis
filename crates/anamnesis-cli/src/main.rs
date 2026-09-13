@@ -215,6 +215,8 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Eval {
             suite,
+            pages_from,
+            scope,
             verbose,
             check,
             streams,
@@ -233,6 +235,8 @@ fn main() -> anyhow::Result<()> {
                     k_sensitivity,
                     compare,
                     embed,
+                    pages_from,
+                    scope,
                 },
                 cli.data_dir.clone(),
             )?;
