@@ -99,6 +99,12 @@ pub struct Truncated {
     pub path: String,
     /// What the page came to, and what the model read.
     pub overflow: Overflow,
+    /// How many sections the page was also embedded in, all of them read
+    /// whole. Zero where it could not be, which leaves the page with nothing
+    /// but its opening under either setting of `vector_sections` — and a
+    /// comparison of that setting that moved nothing would otherwise be
+    /// indistinguishable from one that had nothing to move.
+    pub sections: usize,
 }
 
 impl VectorCoverage {
@@ -118,6 +124,14 @@ impl VectorCoverage {
         !self.truncated.is_empty()
     }
 
+    /// Truncated pages that were also embedded in sections.
+    pub fn sectioned(&self) -> usize {
+        self.truncated
+            .iter()
+            .filter(|page| page.sections > 0)
+            .count()
+    }
+
     /// Read back from the index a corpus was built into.
     ///
     /// From the complaint rows the write path records, rather than by asking
@@ -135,6 +149,7 @@ impl VectorCoverage {
                 (EmbedFault::Truncated, Some(tokens), Some(budget)) => truncated.push(Truncated {
                     path: complaint.path.as_str().to_owned(),
                     overflow: Overflow { tokens, budget },
+                    sections: complaint.sections,
                 }),
                 // A truncation row without its numbers still says the vector
                 // is partial; it is counted as a failure rather than dropped,
@@ -626,6 +641,8 @@ relevant = ["notes/windows.md"]
         assert_eq!(least.path, "decisions/0001-sqlite.md");
         assert_eq!(least.overflow.tokens, 13);
         assert_eq!(least.overflow.budget, 10);
+        assert!(least.sections > 1, "{least:?}");
+        assert_eq!(vectors.sectioned(), 1);
 
         // Lower the window until both overflow, and the order has to follow
         // coverage rather than the order the suite lists them in.

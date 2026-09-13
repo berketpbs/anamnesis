@@ -8,6 +8,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A page **longer than the embedding model's window is also embedded in
+  sections** the model reads whole. `V17` gives `page_embeddings` a `part`:
+  every existing row becomes part 0, the page as one text, unchanged, and a long
+  page gains parts 1 and up — cut at headings (not ones inside a code fence),
+  packed by paragraph, split by line, sentence, word and finally character where
+  a paragraph will not fit, each carrying the page title and its heading so a
+  piece from the middle still says where it is from. Every word of the body is in
+  some section, in order, which a property test holds. What fits is asked of the
+  embedder's own tokenizer. Sections are all or none: one that fails to embed,
+  or a page needing more than 64, leaves the page with its whole-page vector and
+  truncation row as before, and a page edited down to fit loses them rather than
+  answering for words it no longer has. `anamnesis reindex` gives sections to
+  long pages embedded before this. Whether a query uses them is a new tuning,
+  `vector_sections`, which **ships off**, because `anamnesis eval --embed
+  --compare vector_sections=1` found a trade: `long` rose from MRR 0.414 to
+  0.469 at the same hit@1, five questions better and three worse — one of them
+  the guard `reset cause`, where the best of a long page's many vectors beat the
+  short page that answers — and the three short-page suites did not move.
+  `docs/DIRECTION.md` records what that says about the next attempt. `eval
+  --embed` now reports how many truncated pages were sectioned, so a comparison
+  that moved nothing can be told apart from one that had nothing to move, and
+  `--compare`'s help lists `vector_coverage` and `vector_sections`, which it
+  accepted without saying so
 - A page **longer than the model that embedded it** now says so, in a row and in
   `anamnesis doctor`. A model with a fixed window does not refuse a long page —
   it embeds as much as it can reach and returns an ordinary vector, and nothing

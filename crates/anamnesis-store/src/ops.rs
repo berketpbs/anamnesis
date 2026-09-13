@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use anamnesis_core::embedding::{Embed, Overflow, page_text};
+use anamnesis_core::embedding::{Embed, MAX_SECTIONS, Overflow, page_sections, page_text};
 use anamnesis_core::handoff::{Handoff, HandoffState, Slot};
 use anamnesis_core::ids::{HandoffId, ObservationId, PageId, ProjectId, SessionId, WorkstreamId};
 use anamnesis_core::observation::{BoundedBody, EventKind, Observation, ToolRef};
@@ -139,6 +139,14 @@ pub struct EmbedFailure {
     pub tokens: Option<usize>,
     /// What the model could read, on a `Truncated` row.
     pub budget: Option<usize>,
+    /// How many section vectors the page holds under the same model.
+    ///
+    /// A truncated page with sections has a whole-page vector that stands for
+    /// its opening *and* sections that stand for all of it; which of the two a
+    /// query compares is [`anamnesis_core::retrieval::Tuning::vector_sections`].
+    /// Zero on a failure, and on a truncated page embedded before sections
+    /// existed — which `anamnesis reindex` gives them.
+    pub sections: usize,
 }
 
 /// One row of `anamnesis sessions`: what a session was, without its
@@ -496,14 +504,22 @@ impl Store {
                 // it can reach, and what comes back is an ordinary vector. The
                 // embedder is asked rather than the length guessed here,
                 // because only it knows its own tokenizer and its own limit.
-                if let Some(over) = embedder.overflow(&text) {
-                    tracing::warn!(
-                        path = %page.path,
-                        tokens = over.tokens,
-                        budget = over.budget,
-                        "page is longer than the model can read; its vector stands for the first part only"
-                    );
-                    self.record_embed_truncation(page.id, embedder.model(), over)?;
+                match embedder.overflow(&text) {
+                    Some(over) => {
+                        tracing::warn!(
+                            path = %page.path,
+                            tokens = over.tokens,
+                            budget = over.budget,
+                            "page is longer than the model can read; its vector stands for the first part only"
+                        );
+                        // Still true of the whole-page vector, which is still
+                        // there and is what a query without sections compares.
+                        self.record_embed_truncation(page.id, embedder.model(), over)?;
+                        self.embed_sections(page, embedder)?;
+                    }
+                    // A page that fits has no sections, and one that used to
+                    // be longer must not keep the sections of what it said then.
+                    None => self.clear_page_sections(page.id, embedder.model())?,
                 }
             }
             Err(error) => {
@@ -516,9 +532,49 @@ impl Store {
                 // person can still find it tomorrow, which is the difference
                 // between a fault and an invisible one.
                 self.record_embed_failure(page.id, embedder.model(), &error.to_string())?;
+                self.clear_page_sections(page.id, embedder.model())?;
             }
         }
         Ok(())
+    }
+
+    /// Embed a page too long for one read in sections the model reads whole.
+    ///
+    /// All of them or none. A section that fails to embed leaves the page with
+    /// its whole-page vector and the truncation row that describes it, which is
+    /// a thin page reported as thin; half a set of sections would be a page
+    /// whose middle can be found and whose end cannot, with nothing saying so.
+    /// A page needing more than [`MAX_SECTIONS`] is left the same way, for the
+    /// reason that constant gives.
+    fn embed_sections(&self, page: &Page, embedder: &dyn Embed) -> Result<()> {
+        let fits = |text: &str| embedder.overflow(text).is_none();
+        let sections = page_sections(&page.frontmatter.title, &page.body, &fits);
+
+        if sections.len() > MAX_SECTIONS {
+            tracing::warn!(
+                path = %page.path,
+                sections = sections.len(),
+                most = MAX_SECTIONS,
+                "page is too long to embed in sections; it keeps its whole-page vector only"
+            );
+            return self.clear_page_sections(page.id, embedder.model());
+        }
+
+        let mut vectors = Vec::with_capacity(sections.len());
+        for section in &sections {
+            match embedder.embed(section) {
+                Ok(vector) => vectors.push(vector),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        path = %page.path,
+                        "a section of a long page failed to embed; the page keeps its whole-page vector only"
+                    );
+                    return self.clear_page_sections(page.id, embedder.model());
+                }
+            }
+        }
+        self.set_page_sections(page.id, embedder.model(), &vectors)
     }
 
     /// Record that a page could not be embedded under one model.
@@ -598,7 +654,9 @@ impl Store {
     pub fn embed_failures(&self, project_id: ProjectId) -> Result<Vec<EmbedFailure>> {
         let conn = self.connection();
         let mut statement = conn.prepare(
-            "SELECT p.path, p.title, f.model, f.at, f.reason, f.kind, f.tokens, f.budget
+            "SELECT p.path, p.title, f.model, f.at, f.reason, f.kind, f.tokens, f.budget,
+                    (SELECT COUNT(*) FROM page_embeddings e
+                     WHERE e.page_id = f.page_id AND e.model = f.model AND e.part > 0)
              FROM page_embed_failures f
              JOIN pages p ON p.id = f.page_id
              WHERE p.project_id = ?1
@@ -606,20 +664,23 @@ impl Store {
         )?;
         let rows = statement.query_map(params![project_id.to_string()], |row| {
             Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
+                (
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ),
                 row.get::<_, Option<i64>>(6)?,
                 row.get::<_, Option<i64>>(7)?,
+                row.get::<_, i64>(8)?,
             ))
         })?;
 
         let mut failures = Vec::new();
         for row in rows {
-            let (path, title, model, at, reason, kind, tokens, budget) = row?;
+            let ((path, title, model, at, reason, kind), tokens, budget, sections) = row?;
             failures.push(EmbedFailure {
                 kind: EmbedFault::parse(&kind),
                 // `try_from` rather than `as`: a negative count in a row is
@@ -627,6 +688,7 @@ impl Store {
                 // eighteen quintillion tokens long.
                 tokens: tokens.and_then(|n| usize::try_from(n).ok()),
                 budget: budget.and_then(|n| usize::try_from(n).ok()),
+                sections: usize::try_from(sections).unwrap_or(0),
                 path: crate::convert::parse_page_path(&path),
                 title,
                 model,
@@ -2186,12 +2248,202 @@ mod tests {
         let conn = store.connection();
         let vectors: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM page_embeddings WHERE page_id = ?1",
+                "SELECT COUNT(*) FROM page_embeddings WHERE page_id = ?1 AND part = 0",
                 params![page.id.to_string()],
                 |row| row.get(0),
             )
             .expect("count");
         assert_eq!(vectors, 1, "the page has a vector and a complaint at once");
+    }
+
+    /// An embedder with a window that remembers what it was given, and can be
+    /// told to refuse every text that fits — which, for a page too long for
+    /// one read, is exactly its sections.
+    struct WatchedEmbedder {
+        budget: usize,
+        refuse_sections: bool,
+        read: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl WatchedEmbedder {
+        fn new(budget: usize) -> Self {
+            Self {
+                budget,
+                refuse_sections: false,
+                read: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn refusing_sections(budget: usize) -> Self {
+            Self {
+                refuse_sections: true,
+                ..Self::new(budget)
+            }
+        }
+    }
+
+    impl anamnesis_core::embedding::Embed for WatchedEmbedder {
+        fn model(&self) -> &str {
+            // The same model as `NarrowEmbedder`, so the two write over each
+            // other's rows the way two runs of one model do.
+            "narrow-1"
+        }
+        fn embed(&self, text: &str) -> std::result::Result<Vec<f32>, String> {
+            self.read.lock().expect("lock").push(text.to_owned());
+            if self.refuse_sections && self.overflow(text).is_none() {
+                return Err("refused".to_owned());
+            }
+            Ok(vec![1.0, 0.0])
+        }
+        fn overflow(&self, text: &str) -> Option<Overflow> {
+            let tokens = text.split_whitespace().count();
+            (tokens > self.budget).then_some(Overflow {
+                tokens,
+                budget: self.budget,
+            })
+        }
+    }
+
+    fn section_rows(store: &Store, page: PageId) -> i64 {
+        store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM page_embeddings WHERE page_id = ?1 AND part > 0",
+                params![page.to_string()],
+                |row| row.get(0),
+            )
+            .expect("count")
+    }
+
+    /// The point of the sections: a page the model reads the start of is also
+    /// embedded in pieces it reads whole, and between them they are all of it.
+    #[test]
+    fn a_long_page_is_also_embedded_in_sections_the_model_reads_whole() {
+        let (_dir, store, project, _workspace) = fixture();
+        let mut page = indexable_page(project);
+        page.body = (0..50)
+            .map(|n| format!("w{n}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let embedder = WatchedEmbedder::new(10);
+
+        store
+            .index_page(project, &page, &[], Some(&embedder), now())
+            .expect("index");
+
+        let read = embedder.read.lock().expect("lock").clone();
+        let (whole, sections) = read.split_first().expect("the page was read");
+        assert!(
+            embedder.overflow(whole).is_some(),
+            "the first read is the page"
+        );
+        assert!(sections.len() > 1, "{sections:?}");
+        for section in sections {
+            assert!(
+                embedder.overflow(section).is_none(),
+                "{section:?} does not fit"
+            );
+        }
+        for n in 0..50 {
+            let word = format!("w{n}");
+            assert!(
+                sections
+                    .iter()
+                    .any(|section| section.split_whitespace().any(|w| w == word)),
+                "{word} is in no section"
+            );
+        }
+
+        assert_eq!(section_rows(&store, page.id) as usize, sections.len());
+        let complaints = store.embed_failures(project).expect("failures");
+        assert_eq!(complaints[0].kind, EmbedFault::Truncated);
+        assert_eq!(complaints[0].sections, sections.len());
+    }
+
+    /// A page that fits is read once, and has no sections to keep.
+    #[test]
+    fn a_page_that_fits_is_embedded_once() {
+        let (_dir, store, project, _workspace) = fixture();
+        let page = indexable_page(project);
+        let embedder = WatchedEmbedder::new(1_000);
+
+        store
+            .index_page(project, &page, &[], Some(&embedder), now())
+            .expect("index");
+
+        assert_eq!(embedder.read.lock().expect("lock").len(), 1);
+        assert_eq!(section_rows(&store, page.id), 0);
+    }
+
+    /// Sections describe what a page said when it was embedded. A page edited
+    /// down to fit its window must not keep the sections of the longer text,
+    /// which would answer questions about words it no longer has.
+    #[test]
+    fn a_page_that_shrinks_to_fit_loses_its_sections() {
+        let (_dir, store, project, _workspace) = fixture();
+        let mut page = indexable_page(project);
+        page.body = "word ".repeat(50);
+        store.upsert_page(&page, now()).expect("row");
+        store
+            .embed_page(&page, Some(&NarrowEmbedder { budget: 10 }))
+            .expect("embed");
+        assert!(section_rows(&store, page.id) > 0);
+
+        page.body = "short".to_owned();
+        store
+            .embed_page(&page, Some(&NarrowEmbedder { budget: 10 }))
+            .expect("embed");
+        assert_eq!(section_rows(&store, page.id), 0);
+    }
+
+    /// All the sections or none. A page whose middle can be found and whose
+    /// end cannot, with nothing saying so, is worse than a page reported as
+    /// read from its opening — so a failed section leaves exactly that, even
+    /// where an earlier embedding had written a full set.
+    #[test]
+    fn a_section_that_fails_to_embed_leaves_the_page_with_no_sections() {
+        let (_dir, store, project, _workspace) = fixture();
+        let mut page = indexable_page(project);
+        page.body = "word ".repeat(50);
+        store.upsert_page(&page, now()).expect("row");
+        store
+            .embed_page(&page, Some(&WatchedEmbedder::new(10)))
+            .expect("embed");
+        assert!(section_rows(&store, page.id) > 0);
+
+        store
+            .embed_page(&page, Some(&WatchedEmbedder::refusing_sections(10)))
+            .expect("a failed section does not fail the write");
+
+        assert_eq!(section_rows(&store, page.id), 0);
+        let complaints = store.embed_failures(project).expect("failures");
+        assert_eq!(complaints.len(), 1);
+        assert_eq!(complaints[0].kind, EmbedFault::Truncated);
+        assert_eq!(complaints[0].sections, 0);
+    }
+
+    /// Past the bound, a page keeps what it had before sections existed: its
+    /// whole-page vector and the row saying how much of it that is.
+    #[test]
+    fn a_page_needing_more_sections_than_the_bound_keeps_only_its_whole_vector() {
+        let (_dir, store, project, _workspace) = fixture();
+        let mut page = indexable_page(project);
+        // A window of three words holds the two-word title and one more, so
+        // every word of the body is a section of its own.
+        page.body = "word ".repeat(MAX_SECTIONS + 1);
+        let embedder = WatchedEmbedder::new(3);
+
+        store
+            .index_page(project, &page, &[], Some(&embedder), now())
+            .expect("index");
+
+        assert_eq!(
+            embedder.read.lock().expect("lock").len(),
+            1,
+            "no section was embedded only to be thrown away"
+        );
+        assert_eq!(section_rows(&store, page.id), 0);
+        assert_eq!(store.embed_failures(project).expect("f").len(), 1);
     }
 
     /// A page that shrinks below the window stops being reported, the same way

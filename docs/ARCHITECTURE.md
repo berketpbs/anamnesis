@@ -667,6 +667,18 @@ that leaves 43 of 49 pages embedded from part of themselves, the longest from
 about a twelfth. Full-text, entity and link retrieval see those pages whole; the
 vector stream is the one that does not.
 
+`page_embeddings` is keyed `(page_id, model, part)`. Part 0 is the vector every
+page has: the page as one text, read as far as the model reads. A page too long
+for that is also embedded in sections the model reads whole — cut at headings,
+then paragraphs, then finer, each carrying the page title and its heading — and
+those are parts 1 and up. Sections are all or none: one that fails to embed, or a
+page that would need more than 64, leaves the page with part 0 and its
+truncation row, and a page edited down to fit loses them. A truncated page's row
+in `page_embed_failures` stays, because it is still true of part 0. Whether a
+query compares the sections is `Tuning::vector_sections`, off by default for the
+measurement beside it; keeping part 0 for long pages is what lets the two be
+scored against each other over one index.
+
 An entity is stored twice, like a supersession and like a link: `entities.name`
 is what someone wrote, and `entity_tokens` is that name split the same way a
 query is. A query is tokenized before it is matched, so a name kept whole could

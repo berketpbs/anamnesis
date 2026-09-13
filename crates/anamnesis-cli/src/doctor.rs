@@ -704,6 +704,7 @@ mod tests {
             model: "all-MiniLM-L6-v2".to_owned(),
             at: "2026-09-11T12:00:00Z".to_owned(),
             reason: reason.to_owned(),
+            sections: 0,
         }
     }
 

@@ -182,6 +182,10 @@ pub fn default_grid() -> Vec<Tuning> {
                                     // the model, and `--compare` is how it is
                                     // measured on the one that does not.
                                     vector_coverage: Tuning::default().vector_coverage,
+                                    // Nor this: an index-time difference in
+                                    // what a long page is embedded as, measured
+                                    // with `--compare`.
+                                    vector_sections: Tuning::default().vector_sections,
                                     authority_exponent,
                                     entity_coverage,
                                     candidates,

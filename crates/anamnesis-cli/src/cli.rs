@@ -328,7 +328,8 @@ pub enum Commands {
         /// questions improved and two got worse reads exactly like one that
         /// rose because five improved and none did, and only one of those
         /// should ship. Knobs: rrf_k, fts, entity, links, vectors,
-        /// authority_exponent, entity_coverage, candidates.
+        /// vector_coverage, vector_sections (on or off), authority_exponent,
+        /// entity_coverage, candidates.
         #[arg(long, value_name = "NAME=VALUE,...")]
         compare: Option<String>,
 

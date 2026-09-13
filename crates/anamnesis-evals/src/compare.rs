@@ -218,6 +218,22 @@ pub fn parse_variant(spec: &str) -> Result<(Tuning, String), EvalError> {
             continue;
         }
 
+        // The one switch. `1` and `0` as well as the words, because every other
+        // knob here is written as a number and a comparison is typed quickly.
+        if name == "vector_sections" {
+            tuning.vector_sections = match value {
+                "1" | "true" | "on" => true,
+                "0" | "false" | "off" => false,
+                other => {
+                    return Err(EvalError::Corpus(format!(
+                        "vector_sections is on or off, got {other:?}"
+                    )));
+                }
+            };
+            named.push(format!("vector_sections={value}"));
+            continue;
+        }
+
         let number: f64 = value
             .parse()
             .map_err(|_| EvalError::Corpus(format!("{name} wants a number, got {value:?}")))?;
@@ -233,7 +249,8 @@ pub fn parse_variant(spec: &str) -> Result<(Tuning, String), EvalError> {
             other => {
                 return Err(EvalError::Corpus(format!(
                     "no tuning called {other:?}. Try one of: rrf_k, fts, entity, links, \
-                     vectors, vector_coverage, authority_exponent, entity_coverage, candidates"
+                     vectors, vector_coverage, vector_sections, authority_exponent, \
+                     entity_coverage, candidates"
                 )));
             }
         }
@@ -345,6 +362,21 @@ mod tests {
     #[test]
     fn a_whole_number_knob_refuses_a_fraction() {
         parse_variant("candidates=30.7").expect_err("candidates is a count");
+    }
+
+    /// The one switch takes a number like every other knob, or a word, and
+    /// nothing else — `vector_sections=2` is a typo, not a stronger yes.
+    #[test]
+    fn vector_sections_is_on_or_off() {
+        for on in ["1", "true", "on"] {
+            let (tuning, _) = parse_variant(&format!("vector_sections={on}")).expect("parse");
+            assert!(tuning.vector_sections, "{on}");
+        }
+        for off in ["0", "false", "off"] {
+            let (tuning, _) = parse_variant(&format!("vector_sections={off}")).expect("parse");
+            assert!(!tuning.vector_sections, "{off}");
+        }
+        parse_variant("vector_sections=2").expect_err("not a switch value");
     }
 
     #[test]
