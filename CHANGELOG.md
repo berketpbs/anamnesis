@@ -116,6 +116,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   page needs one; pages written meanwhile record the failure that `doctor`
   reports. The `starting` line now comes before anything that can fail, and
   any error that stops `serve` is logged as `serve stopped`
+- **`write-page` no longer commits a page it then fails to index**, and
+  `search`, `write-page` and `bootstrap` work while the embedding endpoint is
+  down. `write-page` wrote the page into the wiki first and built the embedder
+  after, so with Ollama not running it failed with the page committed and
+  absent from the index — found again anywhere only by a watching server or
+  `reindex`. The embedder is now built before anything is written, and the
+  three commands take a hosted endpoint that does not answer the way the
+  servers do: they say so, go on without vectors, and a page written meanwhile
+  records the failure `doctor` reports. `reindex` and `reconsolidate` still
+  refuse, since filling in vectors is much of what they are run for
 - **`anamnesis reindex` rebuilds an index that is gone.** Pages were rebuilt
   before sessions, so into an empty database the first page a model wrote —
   which names the session behind it — failed a foreign key and the rebuild

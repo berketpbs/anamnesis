@@ -25,10 +25,13 @@ pub fn cmd_search(
 ) -> anyhow::Result<()> {
     let (scope, data, store) = open_project(data_dir)?;
 
-    // The same opt-in local embedder `anamnesis mcp` uses, so a search from
-    // the terminal ranks identically to one an agent runs.
-    let embedder =
-        anamnesis_llm::EmbedConfig::from_vars(crate::settings::var).build(&data.models())?;
+    // The same opt-in embedder `anamnesis mcp` uses, on the same terms, so a
+    // search from the terminal ranks identically to one an agent runs.
+    let embedder = crate::serve::embedder_for(
+        &anamnesis_llm::EmbedConfig::from_vars(crate::settings::var),
+        &data.models(),
+        |said| eprintln!("anamnesis: {said}"),
+    )?;
     let query_vector = embedder
         .as_ref()
         .and_then(|embedder| match embedder.embed(query) {
@@ -178,6 +181,15 @@ pub fn cmd_write_page(
         })?);
     }
 
+    // Before the page is written rather than after, so an embedder that cannot
+    // be built stops the command while nothing has happened yet. After, it
+    // left the page committed to the wiki and absent from the index.
+    let embedder = crate::serve::embedder_for(
+        &anamnesis_llm::EmbedConfig::from_vars(crate::settings::var),
+        &data.models(),
+        |said| eprintln!("anamnesis: {said}"),
+    )?;
+
     let now = Timestamp::now();
     store.upsert_project(&scope, now)?;
 
@@ -199,8 +211,7 @@ pub fn cmd_write_page(
     // And a vector, when one is enabled: a page written here is a page
     // somebody meant, and leaving it out of the vector stream would make the
     // stream depend on which command wrote a page rather than on what it says.
-    let embedder =
-        anamnesis_llm::EmbedConfig::from_vars(crate::settings::var).build(&data.models())?;
+    // The embedder was built before the wiki write, above.
     store.index_page(
         scope.project_id,
         &page,

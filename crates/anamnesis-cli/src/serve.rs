@@ -206,7 +206,16 @@ fn llm_config(
 /// reason is said through `said`, and a page written before the endpoint
 /// answers records its embedding failure, which `doctor` reports with
 /// `anamnesis reindex` as the remedy.
-fn embedder_for(
+///
+/// The commands a person runs for one page or one query take it on the same
+/// terms — `search`, `write-page`, `bootstrap` — since for each of them the
+/// vector is one signal among several. `write-page` had it worst: it committed
+/// the page to the wiki and then failed building the embedder, so the page was
+/// in the wiki and missing from the index. `reindex` and `reconsolidate` keep
+/// refusing, because filling in vectors is much of what a rebuild is run for,
+/// and a rebuild that quietly recorded a failure for every page would be worse
+/// than one that stopped.
+pub(crate) fn embedder_for(
     config: &anamnesis_llm::EmbedConfig,
     models: &std::path::Path,
     said: impl FnOnce(&str),
@@ -215,7 +224,7 @@ fn embedder_for(
         Ok(embedder) => Ok(embedder),
         Err(error) if config.provider == anamnesis_llm::embed::EmbedProvider::Hosted => {
             said(&format!(
-                "{} did not answer ({error}); starting without vectors, \
+                "{} did not answer ({error}); going on without vectors, \
                  asking again when one is needed",
                 config.url
             ));
