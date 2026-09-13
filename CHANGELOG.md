@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `anamnesis eval --pages-from <archive or data dir>` **asks a questions file
+  of a copy of real memory**. The wiki pages of a `backup` archive, or of a data
+  directory read as files only, become the corpus, built in a throwaway
+  directory as always; the questions file carries no pages and each case is
+  validated against the copy. Frontmatter status comes along, so a superseded
+  page stays out of the answers. `--scope` picks a project when the copy holds
+  more than one. The frozen live set from 2026-09-13, re-run against that day's
+  backup without exporting a single page, reproduced its no-vectors row exactly
+  (hit@1 0.833, MRR 0.910, NDCG@5 0.933). Suites may now give a page a
+  `status`
 - **A chain of fallback models** — `ANAMNESIS_LLM_FALLBACK_PROVIDERS`, a
   comma-separated list of `provider[:model]` asked in order when the configured
   model fails transiently. On 2026-09-07 an afternoon of `503 high demand` and

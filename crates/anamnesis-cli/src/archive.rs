@@ -290,7 +290,7 @@ fn read_manifest(archive: &Path) -> anyhow::Result<Manifest> {
 /// archive that came before it — an index from one backup beside no wiki at
 /// all — which is a worse state to be in than either the memory that was
 /// there or the one being restored.
-fn unpack(archive: &Path, root: &Path) -> anyhow::Result<usize> {
+pub(crate) fn unpack(archive: &Path, root: &Path) -> anyhow::Result<usize> {
     vet(archive)?;
 
     let file = std::fs::File::open(archive)?;

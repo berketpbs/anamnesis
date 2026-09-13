@@ -175,8 +175,16 @@ Small, and everything after it depends on it.
   The NDCG is over the suite's own scored window and prints as `NDCG@5` for that
   reason — it is single-relevance, because a case's `relevant` list is a set of
   acceptable answers rather than a set of pages that all must appear.
-- Let `eval` run against a **restored snapshot**. `archive.rs` already does the
-  difficult part; nothing connects it to the evals crate.
+- ~~Let `eval` run against a **restored snapshot**. `archive.rs` already does the
+  difficult part; nothing connects it to the evals crate.~~ **Landed.**
+  `anamnesis eval --suite <questions> --pages-from <archive or data dir>` takes
+  the wiki pages of a backup — or of a data directory, read as files only — as
+  the corpus, and asks a questions file that carries no pages of its own. The
+  corpus is still built in a throwaway directory, so nothing is counted against
+  the memory the pages came from. Its first use re-ran the frozen live set from
+  2026-09-13 against that day's backup and reproduced the no-vectors row
+  exactly (hit@1 0.833, MRR 0.910, NDCG@5 0.933), without the pages having to
+  be exported into a suite file first.
 - Grow the question set and **freeze it before evaluating**, with category
   labels — fact-keyword, fact-NL, session-recall, temporal — plus a small
   deliberately adversarial set. *Category labels have landed*, on all

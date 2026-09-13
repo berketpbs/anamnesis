@@ -85,6 +85,7 @@ impl Corpus {
             let mut frontmatter =
                 Frontmatter::new(fixture.title.clone(), fixture.parsed_entities()?)?;
             frontmatter.tier = fixture.parsed_tier()?;
+            frontmatter.status = fixture.parsed_status()?;
             frontmatter.canonical = fixture.canonical;
             frontmatter.pinned = fixture.pinned;
             frontmatter.supersedes = fixture.parsed_supersedes()?;

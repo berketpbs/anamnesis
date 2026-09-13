@@ -5,7 +5,7 @@
 //! the same on every machine — an eval whose corpus is whatever happens to be
 //! in someone's real memory measures their week, not the retrieval code.
 
-use anamnesis_core::page::{Entity, PagePath, Tier};
+use anamnesis_core::page::{Entity, PagePath, PageStatus, Tier};
 use serde::Deserialize;
 
 use crate::EvalError;
@@ -121,6 +121,14 @@ pub struct FixturePage {
     /// the abstract stream can see it, and the score would measure that.
     #[serde(default, rename = "abstract")]
     pub page_abstract: String,
+    /// Trust status. Defaults to `active`.
+    ///
+    /// A fixture written for a suite rarely needs one. A page taken from real
+    /// memory does: a superseded page is on disk and out of every answer, and
+    /// a corpus that filed it as active would be scoring a memory that offers
+    /// what the real one withholds.
+    #[serde(default)]
+    pub status: String,
 }
 
 impl FixturePage {
@@ -148,6 +156,16 @@ impl FixturePage {
             return Ok(Tier::Episodic);
         }
         Tier::parse(&self.tier)
+            .map_err(|error| EvalError::Suite(format!("{error} (on {})", self.path)))
+    }
+
+    /// The trust status this page carries, refused rather than defaulted when
+    /// it is not one, for the reason [`FixturePage::parsed_tier`] gives.
+    pub fn parsed_status(&self) -> Result<PageStatus, EvalError> {
+        if self.status.trim().is_empty() {
+            return Ok(PageStatus::Active);
+        }
+        PageStatus::parse(&self.status)
             .map_err(|error| EvalError::Suite(format!("{error} (on {})", self.path)))
     }
 
@@ -198,6 +216,33 @@ impl Suite {
         Ok(suite)
     }
 
+    /// Parse questions from TOML and ask them of pages from somewhere else.
+    ///
+    /// For a corpus that is not checked in: a snapshot of real memory, whose
+    /// pages are somebody's working notes and do not belong in a suite file.
+    /// The questions still do, and are validated against these pages exactly
+    /// as a suite's own would be — a case naming a page the snapshot lacks can
+    /// never be answered, and would read as a retrieval failure forever.
+    ///
+    /// A questions file that brings pages of its own is refused. Two corpora
+    /// in one run is a question about which one was scored, and the answer
+    /// should not depend on reading this function.
+    pub fn from_questions(source: &str, pages: Vec<FixturePage>) -> Result<Self, EvalError> {
+        let mut suite: Self =
+            toml_edit::de::from_str(source).map_err(|error| EvalError::Suite(error.to_string()))?;
+        if !suite.pages.is_empty() {
+            return Err(EvalError::Suite(format!(
+                "suite {:?} carries {} page(s) of its own; a questions file asked of a \
+                 snapshot must carry none",
+                suite.name,
+                suite.pages.len()
+            )));
+        }
+        suite.pages = pages;
+        suite.validate()?;
+        Ok(suite)
+    }
+
     /// Read a suite from a file.
     pub fn load(path: &std::path::Path) -> Result<Self, EvalError> {
         let source = std::fs::read_to_string(path).map_err(|error| {
@@ -236,6 +281,7 @@ impl Suite {
             page.page_path()?;
             page.parsed_entities()?;
             page.parsed_tier()?;
+            page.parsed_status()?;
             page.parsed_supersedes()?;
         }
 
