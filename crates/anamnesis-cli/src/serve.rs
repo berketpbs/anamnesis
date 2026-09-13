@@ -39,6 +39,22 @@ pub fn cmd_serve(
     }
 
     let data = DataDir::resolve(data_dir)?;
+
+    // This line goes to the log file, which is the thing that outlives the
+    // terminal: "when did memory stop" needs a first half to compare against.
+    // It is written before anything that can fail rather than just before the
+    // bind, so that a start that fails leaves a record of having been
+    // attempted, which is the case where the file is the only place anybody
+    // will look. It used to follow the model and the embedder; a server that
+    // could not reach its embedder after a reboot then tried every minute and
+    // left not one line.
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        %address,
+        data_dir = %data.root().display(),
+        "anamnesis server starting"
+    );
+
     data.ensure_layout()?;
 
     let store = Store::open(data.db_file())?;
@@ -53,11 +69,14 @@ pub fn cmd_serve(
     // summary, spawned and detached, with nothing holding a connection open
     // behind it. See `BACKGROUND_MAX_RETRIES`.
     let llm = llm_config(crate::settings::var)?;
-    // The same opt-in embedder the MCP server builds. Without one here, the
-    // vector stream covered only the pages an agent wrote through MCP — not a
-    // single session summary, and nothing anybody edited by hand.
-    let embedder =
-        anamnesis_llm::EmbedConfig::from_vars(crate::settings::var).build(&data.models())?;
+    // The same opt-in embedder the MCP server builds, on the same terms. Without
+    // one here, the vector stream covered only the pages an agent wrote through
+    // MCP — not a single session summary, and nothing anybody edited by hand.
+    let embedder = embedder_for(
+        &anamnesis_llm::EmbedConfig::from_vars(crate::settings::var),
+        &data.models(),
+        |said| tracing::warn!("{said}"),
+    )?;
     let settings = llm.build()?.map(|provider| anamnesis_web::LlmSettings {
         provider,
         max_input_tokens: llm.max_input_tokens,
@@ -66,28 +85,13 @@ pub fn cmd_serve(
 
     let runtime = tokio::runtime::Runtime::new()?;
 
-    // This line goes to the log file, which is the thing that outlives the
-    // terminal: "when did memory stop" needs a first half to compare against.
-    // It is written before the bind rather than after it so that a start that
-    // fails leaves a record of having been attempted, which is the case where
-    // the file is the only place anybody will look.
-    tracing::info!(
-        version = env!("CARGO_PKG_VERSION"),
-        %address,
-        data_dir = %data.root().display(),
-        "anamnesis server starting"
-    );
-
     // Bound before a word is printed about it. Everything below announces a
     // server that is serving, and until the listener exists that is a guess —
     // one this machine got wrong every minute for a while, printing the whole
     // banner and then failing on the address a healthy server already held.
     let listener = runtime
         .block_on(anamnesis_web::bind(address))
-        .map_err(|error| {
-            tracing::error!(%address, %error, "could not take the address");
-            explain_bind(address, &error)
-        })?;
+        .map_err(|error| explain_bind(address, &error))?;
 
     // The address in hand, rather than the one asked for: they differ when the
     // request was port 0, and every line below is read as a place to go.
@@ -177,6 +181,52 @@ fn llm_config(
     var: impl Fn(&str) -> Option<String>,
 ) -> Result<anamnesis_llm::LlmConfig, anamnesis_llm::LlmError> {
     anamnesis_llm::LlmConfig::from_vars_unhurried(var)
+}
+
+/// The embedder a process starts with, built before it serves anything.
+///
+/// Built up front, so a misconfigured embedder — a local model that will not
+/// load, a hosted endpoint that refuses the key — is a startup error rather
+/// than a warning buried in a log file.
+///
+/// Except a hosted endpoint that does not answer yet. That is not
+/// misconfiguration; on the machine this project runs on it is an Ollama that
+/// has not started, and after a reboot it is the ordinary state of things for
+/// the first minute, or for good if nothing starts it. Refusing then costs far
+/// more than the one retrieval stream allowed to be missing:
+///
+/// - the MCP server takes every memory tool away from the session it was
+///   started for;
+/// - the HTTP server takes capture itself. Under a service manager the refusal
+///   went nowhere anybody reads — `conhost --headless` discards stderr and
+///   reports the exit as success — and the one-minute restart asked again,
+///   failed again, and recorded nothing for as long as Ollama stayed down.
+///
+/// So both start with an embedder that connects when it is first needed. The
+/// reason is said through `said`, and a page written before the endpoint
+/// answers records its embedding failure, which `doctor` reports with
+/// `anamnesis reindex` as the remedy.
+fn embedder_for(
+    config: &anamnesis_llm::EmbedConfig,
+    models: &std::path::Path,
+    said: impl FnOnce(&str),
+) -> anyhow::Result<Option<Arc<dyn anamnesis_llm::Embedder>>> {
+    match config.build(models) {
+        Ok(embedder) => Ok(embedder),
+        Err(error) if config.provider == anamnesis_llm::embed::EmbedProvider::Hosted => {
+            said(&format!(
+                "{} did not answer ({error}); starting without vectors, \
+                 asking again when one is needed",
+                config.url
+            ));
+            Ok(Some(Arc::new(anamnesis_llm::hosted::Reconnecting::new(
+                config.url.clone(),
+                config.model.clone(),
+                config.key.clone(),
+            ))))
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// What to say when the address will not be taken.
@@ -272,33 +322,12 @@ pub fn cmd_mcp(repo: &std::path::Path, data_dir: Option<PathBuf>) -> anyhow::Res
     store.upsert_project(&scope, Timestamp::now())?;
     let wiki = Wiki::open(data.wiki())?;
 
-    // Built before the transport connects, so a misconfigured or unreachable
-    // model is a startup error someone sees rather than a warning buried in a
-    // log file, the same reasoning `cmd_serve` applies to the LLM provider.
-    let embed_config = anamnesis_llm::EmbedConfig::from_vars(crate::settings::var);
-    //
-    // Except a hosted endpoint that does not answer yet. A harness starts this
-    // with the agent, and refusing to start takes every memory tool away for
-    // the session over the one stream allowed to be missing; the Ollama beside
-    // a server is exactly what is not up yet after a reboot. The reason is
-    // still said, on stderr, and the endpoint is asked again when a query
-    // needs it.
-    let embedder = match embed_config.build(&data.models()) {
-        Ok(embedder) => embedder,
-        Err(error) if embed_config.provider == anamnesis_llm::embed::EmbedProvider::Hosted => {
-            eprintln!(
-                "anamnesis: {} did not answer ({error}); starting without vectors, \
-                 asking again when a query needs one",
-                embed_config.url
-            );
-            Some(Arc::new(anamnesis_llm::hosted::Reconnecting::new(
-                embed_config.url.clone(),
-                embed_config.model.clone(),
-                embed_config.key.clone(),
-            )) as Arc<dyn anamnesis_llm::Embedder>)
-        }
-        Err(error) => return Err(error.into()),
-    };
+    // Never stdout, for the reason below.
+    let embedder = embedder_for(
+        &anamnesis_llm::EmbedConfig::from_vars(crate::settings::var),
+        &data.models(),
+        |said| eprintln!("anamnesis: {said}"),
+    )?;
 
     // Never stdout: the MCP transport owns stdout for protocol frames, so a
     // stray print here would corrupt the stream the same way a log line would
@@ -364,6 +393,58 @@ mod tests {
     #[test]
     fn the_refusal_can_be_overridden_deliberately() {
         assert!(refuse_anonymous_exposure(&address("0.0.0.0:8080"), true, true).is_none());
+    }
+
+    fn hosted_at(url: String) -> anamnesis_llm::EmbedConfig {
+        anamnesis_llm::EmbedConfig {
+            enabled: true,
+            provider: anamnesis_llm::embed::EmbedProvider::Hosted,
+            model: "nomic-embed-text".to_owned(),
+            url,
+            key: None,
+        }
+    }
+
+    /// The morning this was found: the machine rebooted, Ollama had not
+    /// started, and the server refused to start every minute without a line
+    /// anywhere. An endpoint that does not answer is a port nothing listens
+    /// on — held for a moment and let go, so the refusal is real and immediate.
+    #[test]
+    fn an_embedder_that_does_not_answer_yet_does_not_stop_a_start() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .expect("a free port")
+            .port();
+        let url = format!("http://127.0.0.1:{port}/v1/embeddings");
+        let models = tempfile::tempdir().expect("models dir");
+
+        let mut said = None;
+        let embedder = embedder_for(&hosted_at(url.clone()), models.path(), |line| {
+            said = Some(line.to_owned());
+        })
+        .expect("a start that does not depend on the endpoint");
+
+        let embedder = embedder.expect("an embedder that connects when it is needed");
+        assert_eq!(embedder.model(), "nomic-embed-text");
+        let said = said.expect("the reason is said, not swallowed");
+        assert!(said.contains(&url), "{said}");
+        assert!(said.contains("without vectors"), "{said}");
+    }
+
+    /// Off is off: nothing is built and nothing is said.
+    #[test]
+    fn an_embedder_nobody_turned_on_is_neither_built_nor_mentioned() {
+        let models = tempfile::tempdir().expect("models dir");
+        let config = anamnesis_llm::EmbedConfig {
+            enabled: false,
+            ..hosted_at("http://127.0.0.1:9/v1/embeddings".to_owned())
+        };
+
+        let mut said = false;
+        let embedder = embedder_for(&config, models.path(), |_| said = true).expect("off");
+
+        assert!(embedder.is_none());
+        assert!(!said);
     }
 
     /// The reason this change exists, asserted where the choice is made: the

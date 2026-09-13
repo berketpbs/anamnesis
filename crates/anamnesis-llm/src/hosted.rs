@@ -139,14 +139,14 @@ pub const RECONNECT_AFTER: Duration = Duration::from_secs(30);
 /// A hosted embedder that connects when it is first needed, and again after a
 /// failure.
 ///
-/// For a process whose startup must not depend on the endpoint. `serve` probes
-/// at startup and refuses to start without an answer, because a scheduled task
-/// starts it and a refusal is written where somebody looks. The MCP server is
-/// the opposite case: a harness starts it with the agent, a refusal there takes
-/// every memory tool away for the whole session over the one retrieval stream
-/// that was allowed to be missing — and an endpoint on this machine, an Ollama
-/// started beside the server, is exactly the kind that is not up yet when an
-/// editor is opened after a reboot.
+/// For a process whose startup must not depend on the endpoint, which is every
+/// process that has one. The MCP server was first: a harness starts it with the
+/// agent, and a refusal there takes every memory tool away for the whole
+/// session over the one retrieval stream that was allowed to be missing. `serve`
+/// used to refuse, on the grounds that a scheduled task starts it and a refusal
+/// is written where somebody looks — and after a reboot, with the Ollama beside
+/// it not yet up, that refusal was written nowhere at all, and capture stopped
+/// until somebody noticed.
 ///
 /// So this starts unconnected. A query that finds it unconnected tries once;
 /// a failure costs that query its vector stream, as a failed embedding always
