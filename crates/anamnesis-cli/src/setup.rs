@@ -311,8 +311,22 @@ pub fn cmd_install_hooks(
 /// variables somebody had added by hand. A registered server that cannot reach
 /// its endpoint at startup now starts anyway and asks again later, so carrying
 /// the settings can no longer cost the agent its memory tools.
-fn mcp_environment() -> (Vec<(String, String)>, Option<String>) {
-    mcp_environment_for(&anamnesis_llm::EmbedConfig::from_vars(crate::settings::var))
+///
+/// A data directory that is not the default is carried too, as the variable
+/// the server reads it from. The hooks deliver to a server that was started
+/// with it; an MCP server registered without it opened the default directory
+/// instead, and answered out of a memory nothing was being recorded into.
+/// Absolute, because the harness chooses the working directory it starts in.
+pub(crate) fn mcp_environment(
+    data_dir: Option<&std::path::Path>,
+) -> (Vec<(String, String)>, Option<String>) {
+    let (mut env, said) =
+        mcp_environment_for(&anamnesis_llm::EmbedConfig::from_vars(crate::settings::var));
+    if let Some(dir) = data_dir {
+        let dir = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+        env.push(("ANAMNESIS_DATA_DIR".to_owned(), dir.display().to_string()));
+    }
+    (env, said)
 }
 
 /// [`mcp_environment`], for a configuration a test can write.
@@ -359,6 +373,7 @@ pub fn cmd_install_mcp(
     write: bool,
     config_path: Option<PathBuf>,
     repo: Option<PathBuf>,
+    data_dir: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let Some(target) = mcp_config::target(agent) else {
         // A harness that cannot be registered this way gets a reason rather
@@ -393,7 +408,7 @@ pub fn cmd_install_mcp(
         Some(repo) => repo,
         None => std::env::current_dir()?,
     };
-    let (env, embedding) = mcp_environment();
+    let (env, embedding) = mcp_environment(data_dir.as_deref());
     let entry = mcp_config::server_entry(&binary, &repo, &env);
 
     if !write {
@@ -530,6 +545,20 @@ mod tests {
         assert!(value(&env, "ANAMNESIS_EMBED_API_KEY").is_none());
         assert!(value(&env, "ANAMNESIS_EMBED_URL").is_some());
         assert!(said.expect("a line").contains("ANAMNESIS_EMBED_API_KEY"));
+    }
+
+    /// Hooks deliver to a server started with a data directory; an MCP server
+    /// registered without it reads the default one. Carried absolute, because
+    /// the harness picks the directory the server starts in.
+    #[test]
+    fn a_data_directory_that_is_not_the_default_is_carried_absolute() {
+        let (env, _) = mcp_environment(Some(std::path::Path::new("elsewhere/data")));
+        let carried = value(&env, "ANAMNESIS_DATA_DIR").expect("carried");
+        assert!(std::path::Path::new(carried).is_absolute(), "{carried}");
+        assert!(carried.ends_with("data"), "{carried}");
+
+        let (env, _) = mcp_environment(None);
+        assert!(value(&env, "ANAMNESIS_DATA_DIR").is_none());
     }
 
     #[test]
