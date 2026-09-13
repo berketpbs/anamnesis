@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reads its own on every tool call
 
 ### Changed
+- **`serve` writes a panic to its log file.** The standard hook prints to
+  stderr, which belongs to whatever started the process — a closed terminal, or
+  a service manager that discards it — and on the machine this project runs on
+  a PowerShell wrapper redirected stderr into a file for that reason alone. The
+  message, the location and the thread now go to `logs/` first, and the standard
+  hook still runs after. The hook is global, so a panic in a spawned task the
+  server survives is written down too
 - **Every command runs on a thread with a 16 MB stack.** In a debug build the
   entry function's frame holds every command's locals at once, Windows gives a
   main thread 1 MB, and adding one subcommand made every command — `--version`

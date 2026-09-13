@@ -112,6 +112,7 @@ fn run() -> anyhow::Result<()> {
     let log_file = matches!(cli.command, Commands::Serve { .. })
         .then(|| open_log_file(cli.data_dir.clone()))
         .flatten();
+    let writes_a_log = log_file.is_some();
 
     {
         use tracing_subscriber::layer::SubscriberExt;
@@ -135,6 +136,31 @@ fn run() -> anyhow::Result<()> {
         }
     }
 
+    // A panic is the one way the server stops that it did not write down. The
+    // standard hook prints to stderr, and stderr belongs to whatever started
+    // the process: a terminal that is gone by the time anyone asks, or a
+    // service manager that discards it. On the machine this project runs on, a
+    // PowerShell wrapper existed partly to redirect stderr into a file so a
+    // panic would leave anything at all. The log file is where the server's
+    // own account already goes, so the panic goes there too — and the
+    // standard hook still runs after it, so a terminal sees what it always did.
+    //
+    // Global, so a panic in a spawned task that the server survives is written
+    // down as well; that one used to leave nothing anywhere.
+    if writes_a_log {
+        let standard = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let (message, location) = describe_panic(info);
+            tracing::error!(
+                %message,
+                %location,
+                thread = std::thread::current().name().unwrap_or("unnamed"),
+                "panicked"
+            );
+            standard(info);
+        }));
+    }
+
     // Read before any command, so every one of them sees the same settings:
     // the server, the MCP server a harness starts, and the CLI asked about
     // either. A line that was typed and not applied is said here — and the
@@ -147,13 +173,9 @@ fn run() -> anyhow::Result<()> {
                 tracing::error!(%problem, "settings file refused a line");
             }
             anyhow::bail!(
-                "{} has lines that were not applied:
-  {}",
+                "{} has lines that were not applied:\n  {}",
                 loaded.path.display(),
-                loaded.problems.join(
-                    "
-  "
-                )
+                loaded.problems.join("\n  ")
             );
         }
         if !matches!(cli.command, Commands::Hook { .. }) {
@@ -454,6 +476,27 @@ fn open_log_file(
         .ok()
 }
 
+/// A panic's message and where it happened, as two plain strings for a log line.
+fn describe_panic(info: &std::panic::PanicHookInfo<'_>) -> (String, String) {
+    let location = info
+        .location()
+        .map(|at| format!("{}:{}:{}", at.file(), at.line(), at.column()))
+        .unwrap_or_else(|| "unknown".to_owned());
+    (panic_message(info.payload()), location)
+}
+
+/// What a panic said, whether it was given a literal or a formatted string.
+///
+/// `panic!("literal")` carries a `&str` and `panic!("{x}")` a `String`, and a
+/// hook that looked for only one of them would log the other as nothing.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|message| (*message).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic that carried no message".to_owned())
+}
+
 fn default_filter(debug: bool) -> &'static str {
     if debug {
         "debug"
@@ -481,5 +524,20 @@ mod tests {
     #[test]
     fn debug_logging_still_shows_it() {
         assert!(!default_filter(true).contains("refinery_core=warn"));
+    }
+
+    /// Both shapes a panic's message comes in, and the one that is neither.
+    #[test]
+    fn a_panic_is_logged_with_what_it_said() {
+        let literal: Box<dyn std::any::Any + Send> = Box::new("index out of range");
+        let formatted: Box<dyn std::any::Any + Send> = Box::new(format!("page {} missing", 7));
+        let other: Box<dyn std::any::Any + Send> = Box::new(42_u32);
+
+        assert_eq!(panic_message(literal.as_ref()), "index out of range");
+        assert_eq!(panic_message(formatted.as_ref()), "page 7 missing");
+        assert_eq!(
+            panic_message(other.as_ref()),
+            "a panic that carried no message"
+        );
     }
 }
