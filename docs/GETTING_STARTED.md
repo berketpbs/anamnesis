@@ -221,6 +221,17 @@ never `ANAMNESIS_LLM_API_KEY`, which belongs to the configured provider. Every
 link shares the configured budgets, timeout and effort, and a chain that cannot
 be built is refused at startup like any other setting.
 
+**Every link is sent the prompt the configured budget built.** The transcript
+is fitted to `ANAMNESIS_LLM_MAX_INPUT_TOKENS` once, before the first link is
+asked, and a fallback gets that same text. A hosted model with a large window
+takes it whole. A local one may not: Ollama serves 4096 tokens unless the model
+says otherwise, and what does not fit is dropped rather than refused, so the
+fallback's page would read fine and be written from part of the session with
+nothing on it saying so. Before putting a local model in a chain, give it a
+window that holds the input budget and the reply (see *A model on this
+machine* for the `Modelfile`), or lower the budget to what it holds — or keep
+the chain to hosted models on separate quotas.
+
 A page a fallback wrote says so at the bottom — `Written by qwen2.5:7b-instruct,
 standing in for gemini-3.5-flash, which did not answer.` — and its session is
 recorded against the model that wrote it. `anamnesis serve` prints the whole
