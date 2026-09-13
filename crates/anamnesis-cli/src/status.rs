@@ -93,6 +93,13 @@ pub fn cmd_status(
     let facts = probe_server_facts(server, token, &reachable);
     println!();
     println!("  Server:    {}", describe_server(server, &reachable));
+    // Only when nothing answered: the log is this machine's, and a server that
+    // is up has already said everything this line could.
+    if reachable == ServerState::Down
+        && let Some(word) = crate::server_log::last_word(&data.logs())
+    {
+        println!("  Log says:  {}", crate::server_log::describe(&word, now));
+    }
     println!(
         "  Auth:      {}",
         describe_auth(&facts.auth, token.is_some())

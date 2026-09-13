@@ -684,14 +684,24 @@ pub fn cmd_service_status(port: u16, data_dir: Option<PathBuf>) -> anyhow::Resul
             );
         }
     }
+    let answers = server_answers(port);
     println!(
         "  Server:    {}",
-        if server_answers(port) {
+        if answers {
             format!("answering on port {port}")
         } else {
             format!("nothing answers on port {port}")
         }
     );
+    // A service that restarts the server every minute and a server that fails
+    // every minute look the same from here: registered, and nothing answering.
+    // What tells them apart is what the server wrote on its way down.
+    if !answers && let Some(word) = crate::server_log::last_word(&data.logs()) {
+        println!(
+            "  Log says:  {}",
+            crate::server_log::describe(&word, jiff::Timestamp::now())
+        );
+    }
     println!("  Logs:      {}", data.logs().display());
     Ok(())
 }

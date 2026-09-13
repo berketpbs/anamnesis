@@ -32,6 +32,7 @@ mod reindex;
 mod rename;
 mod run;
 mod serve;
+mod server_log;
 mod service;
 mod sessions;
 mod settings;

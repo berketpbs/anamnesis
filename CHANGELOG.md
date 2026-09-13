@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`status` and `service status` say why nothing answers**, from what the
+  server last wrote to `logs/`: the error a start failed with, a panic, the
+  cause of a clean stop, or a log that ends with the server running — which is
+  how a killed process and a machine that went down look from the inside.
+  Both commands could tell that the port was silent and not why, while a
+  scheduled task restarted a server that failed every minute; `doctor` already
+  names a server running another build, so this line is only for one that is
+  not running at all
 - **`anamnesis redact [--apply]`** runs today's redaction rules over what is
   already stored. Capture redacts once, with the rules it has, and a rule added
   later never reached what came before: an AI Studio key typed into a prompt on
