@@ -69,10 +69,19 @@ fn brief(message: &str) -> String {
             _ => None,
         }
     }
-    let text = serde_json::from_str::<Value>(message)
-        .ok()
-        .and_then(|value| find(&value))
-        .unwrap_or_else(|| message.to_owned());
+    // The body is not always JSON on its own: the provider layer appends
+    // "(retry after 29s)" to it, and the whole no longer parses. So the first
+    // JSON value is read from where it starts, and whatever follows is left.
+    let parsed = message
+        .find(['[', '{'])
+        .and_then(|start| {
+            serde_json::Deserializer::from_str(&message[start..])
+                .into_iter::<Value>()
+                .next()
+                .and_then(Result::ok)
+        })
+        .and_then(|value| find(&value));
+    let text = parsed.unwrap_or_else(|| message.to_owned());
     let line = text.lines().next().unwrap_or_default().trim();
     match line.char_indices().nth(200) {
         Some((end, _)) => format!("{}…", &line[..end]),
@@ -332,7 +341,8 @@ mod tests {
     "message": "You exceeded your current quota, please check your plan.\n* Quota exceeded for metric: requests, limit: 5",
     "status": "RESOURCE_EXHAUSTED"
   }
-}]"#;
+}]
+ (retry after 29s)"#;
         let error = AbstractError::Model(LlmError::Api {
             status: 429,
             kind: "unknown".to_owned(),
