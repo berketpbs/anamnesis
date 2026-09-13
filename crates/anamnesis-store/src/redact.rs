@@ -98,16 +98,43 @@ impl Store {
             }
         }
         if apply && !rewrites.is_empty() {
-            let transaction = conn.transaction()?;
-            for (id, body) in &rewrites {
-                transaction.execute(
-                    "UPDATE observations SET body = ?2, sanitized = 1 WHERE id = ?1",
-                    params![id, body],
-                )?;
-            }
-            transaction.commit()?;
+            // An UPDATE frees the old cell and, for a long body, its overflow
+            // pages, and SQLite leaves freed bytes where they were. A rewrite
+            // that masks a key in the row and keeps it in the free space of the
+            // same file has masked nothing, so freed content is zeroed for the
+            // length of this transaction.
+            conn.pragma_update(None, "secure_delete", true)?;
+            let written = (|| {
+                let transaction = conn.transaction()?;
+                for (id, body) in &rewrites {
+                    transaction.execute(
+                        "UPDATE observations SET body = ?2, sanitized = 1 WHERE id = ?1",
+                        params![id, body],
+                    )?;
+                }
+                transaction.commit()
+            })();
+            conn.pragma_update(None, "secure_delete", false)?;
+            written?;
         }
         Ok(found)
+    }
+
+    /// Move everything in the write-ahead log into the database file, and
+    /// empty the log.
+    ///
+    /// The index runs in WAL mode, so a rewritten row lives in `-wal` until
+    /// a checkpoint, while the database file keeps the page as it was, old
+    /// value and all. On the machine this was written for, `redact --apply` left
+    /// the index rows clean and one copy of the key in `anamnesis.db`
+    /// until this ran. Returns `false` when a reader holding an older snapshot
+    /// kept it from finishing. The old page is then still in the file, and
+    /// running it again once that reader is gone finishes the job.
+    pub fn checkpoint(&self) -> crate::Result<bool> {
+        let busy: i64 =
+            self.connection()
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+        Ok(busy == 0)
     }
 }
 
@@ -121,7 +148,10 @@ mod tests {
     /// Rows as they were stored before the rule existed: marked sanitized,
     /// because they had been through the rules there were.
     fn store_with(bodies: &[&str]) -> Store {
-        let store = Store::open_in_memory().expect("open");
+        seeded(Store::open_in_memory().expect("open"), bodies)
+    }
+
+    fn seeded(store: Store, bodies: &[&str]) -> Store {
         store.migrate().expect("migrate");
         {
             let conn = store.connection();
@@ -189,6 +219,44 @@ mod tests {
             .redact_observations(&Redactor::new(), true)
             .expect("again");
         assert_eq!(again.changed, 0, "redaction is idempotent");
+    }
+
+    /// The row is not the only copy. The database file keeps the page the
+    /// row was on until a checkpoint, and the free space an UPDATE leaves
+    /// keeps the bytes that were there. Both ways kept the value in
+    /// `anamnesis.db` after every row said it was masked.
+    #[test]
+    fn applying_leaves_no_copy_of_the_value_in_the_database_files() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("index.db");
+        // Long enough to spill onto overflow pages, which an UPDATE frees
+        // rather than rewrites.
+        let body = format!(
+            "{} use {KEY} for gemini {}",
+            "a".repeat(6000),
+            "b".repeat(6000)
+        );
+        let store = seeded(Store::open(&path).expect("open"), &[&body]);
+        assert!(store.checkpoint().expect("checkpoint"), "seed checkpoint");
+        let copies = |file: &std::path::Path| -> usize {
+            let bytes = std::fs::read(file).unwrap_or_default();
+            bytes
+                .windows(KEY.len())
+                .filter(|window| *window == KEY.as_bytes())
+                .count()
+        };
+        assert_eq!(copies(&path), 1, "the value is in the file to begin with");
+
+        store
+            .redact_observations(&Redactor::new(), true)
+            .expect("apply");
+        assert!(
+            store.checkpoint().expect("checkpoint"),
+            "nothing else reads"
+        );
+
+        let wal = dir.path().join("index.db-wal");
+        assert_eq!(copies(&path) + copies(&wal), 0, "a copy survived");
     }
 
     /// Text already masked matches the assignment rule again and comes out

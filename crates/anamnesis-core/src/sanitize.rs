@@ -18,6 +18,9 @@ struct Rule {
     name: &'static str,
     pattern: Regex,
     replacement: &'static str,
+    /// Whether the pattern is the credential itself — a prefix and a shape
+    /// nothing else has — rather than the text around a value.
+    shaped: bool,
 }
 
 /// Result of running redaction over a piece of text.
@@ -71,8 +74,29 @@ impl Redactor {
             name,
             pattern,
             replacement: "[redacted]",
+            shaped: true,
         });
         self
+    }
+
+    /// Names of the rules that recognise a credential by its own shape and
+    /// find one in `input`. Nothing is replaced.
+    ///
+    /// For text whose surroundings cannot be trusted: bytes read out of a
+    /// database file or an archive, where JSON escaping and page boundaries
+    /// put quotes and separators where the rules that read context —
+    /// `key = value`, an `Authorization` header, credentials in a URL — do not
+    /// expect them. Run over a backup of this project's memory, those rules
+    /// matched their own `TOKENS='[redacted]'` and reported values in every
+    /// archive, the clean ones included. A prefix nobody else uses has no
+    /// context to misread, and a masked value no longer has its prefix.
+    pub fn credentials_in(&self, input: &str) -> Vec<&'static str> {
+        builtin_rules()
+            .iter()
+            .chain(self.extra.iter())
+            .filter(|rule| rule.shaped && rule.pattern.is_match(input))
+            .map(|rule| rule.name)
+            .collect()
     }
 
     /// Redact `input`, reporting which rules fired.
@@ -101,13 +125,19 @@ impl Redactor {
 fn builtin_rules() -> &'static [Rule] {
     static RULES: OnceLock<Vec<Rule>> = OnceLock::new();
     RULES.get_or_init(|| {
-        let rule = |name, pattern: &str, replacement| Rule {
+        let compiled = |name, pattern: &str, replacement, shaped| Rule {
             name,
             // Patterns are compile-time constants in this function; a failure
             // here is a bug in this file, not a runtime condition.
             pattern: Regex::new(pattern).expect("built-in redaction pattern is valid"),
             replacement,
+            shaped,
         };
+        // A credential recognised by its own shape, and a value recognised by
+        // what surrounds it: see `Redactor::credentials_in` for why they differ.
+        let rule = |name, pattern: &str, replacement| compiled(name, pattern, replacement, true);
+        let context =
+            |name, pattern: &str, replacement| compiled(name, pattern, replacement, false);
 
         vec![
             rule(
@@ -249,12 +279,12 @@ fn builtin_rules() -> &'static [Rule] {
                 r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}",
                 "[redacted:jwt]",
             ),
-            rule(
+            context(
                 "auth-header",
                 r"(?i)(?P<head>authorization\s*:\s*(?:bearer|basic|token)\s+)\S+",
                 "${head}[redacted]",
             ),
-            rule(
+            context(
                 // Up to the *last* `@` before the path, not the first. A
                 // password typed into a connection string by hand often holds
                 // an `@`, and so does a username that is an email address; the
@@ -265,7 +295,7 @@ fn builtin_rules() -> &'static [Rule] {
                 r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*://)[^/\s:]+:[^/\s]*@",
                 "${scheme}[redacted]@",
             ),
-            rule(
+            context(
                 // A quoted value is everything between its quotes. The
                 // unquoted rule below stops at a space, a comma or a
                 // semicolon, which is right for `KEY=value` and wrong for
@@ -278,12 +308,12 @@ fn builtin_rules() -> &'static [Rule] {
                 r#"(?i)(?P<head>[A-Za-z0-9_.\-]*(?:api[_\-]?key|access[_\-]?key|secret|token|password|passwd|pwd|credential|passphrase)[A-Za-z0-9_.\-]*["']?\s*[:=]\s*)"[^"\n]{6,}""#,
                 "${head}\"[redacted]\"",
             ),
-            rule(
+            context(
                 "assignment",
                 r#"(?i)(?P<head>[A-Za-z0-9_.\-]*(?:api[_\-]?key|access[_\-]?key|secret|token|password|passwd|pwd|credential|passphrase)[A-Za-z0-9_.\-]*["']?\s*[:=]\s*)'[^'\n]{6,}'"#,
                 "${head}'[redacted]'",
             ),
-            rule(
+            context(
                 "assignment",
                 // The secret word can sit anywhere inside the identifier, which
                 // is why it is wrapped in wildcards rather than anchored: real
@@ -305,6 +335,24 @@ mod tests {
 
     fn redact(input: &str) -> Redacted {
         Redactor::new().redact(input)
+    }
+
+    /// Text read out of a file whose context is encoded — here, a masked
+    /// assignment followed by more of the line — is where the context rules
+    /// report a value that is not there. A credential by its shape is still
+    /// found, and the same credential masked is not.
+    #[test]
+    fn credentials_are_found_by_shape_and_masked_text_is_not_a_credential() {
+        let redactor = Redactor::new();
+        let encoded = r#"{\"text\":\"export ANAMNESIS_TOKENS='[redacted]' && run\"}"#;
+        assert!(!redact(encoded).is_clean(), "the context rules fire here");
+        assert!(redactor.credentials_in(encoded).is_empty(), "{encoded}");
+
+        let key = "AQ.0123456789abcdefghijklmnopqrstuvwxyz";
+        let held = format!(r#"{{\"text\":\"use {key}\"}}"#);
+        assert_eq!(redactor.credentials_in(&held), ["google-auth-key"]);
+        assert!(redactor.credentials_in(redact(&held).text()).is_empty());
+        assert!(redactor.credentials_in("password = hunter22").is_empty());
     }
 
     #[test]

@@ -16,10 +16,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spool lines and index rows whose text would change — never the value — and
   `--apply` rewrites them: spool lines decoded and redacted string by string (a
   rule run over encoded JSON would eat its quotes), the file replaced whole and
-  re-read if the server appended meanwhile, index rows in one transaction. Wiki
-  pages holding a match are named, not rewritten, since their git history keeps
-  every version; backups are listed as still holding the originals. A rewrite
-  is recorded in the audit log as `memory.redacted`. `doctor` reports stored
+  re-read if the server appended meanwhile, index rows in one transaction. The
+  rows are not the only copy: an UPDATE leaves the freed bytes in place, and the
+  index file keeps a rewritten row's old page until a checkpoint. Run on this
+  project's live memory, the first `--apply` left every row clean and the key
+  still in `anamnesis.db`. So the rewrite zeroes what it frees, and `--apply`
+  checkpoints the index and then reads the file back, saying so if a reader
+  kept an old page there. What is not rewritten is looked at before it is
+  named. Wiki pages holding a match now, pages that held one in any commit
+  git still keeps, and backups, archives and `anamnesis.db.*` copies are
+  listed only if they still hold a credential. Those bytes are checked
+  only with rules that recognise a credential by its own shape
+  (`Redactor::credentials_in`), since the `key = value` rules misread encoded
+  text and reported every archive, including one taken after the rewrite. A
+  rewrite is recorded in the audit log as `memory.redacted`. `doctor` reports stored
   observations that still hold anything the rules mask, as a new `exposed`
   finding ranked above `broken`. Run over a restored copy of this project's
   memory: 11 records (not the 130 a first draft reported by counting rules that

@@ -458,7 +458,9 @@ pub enum Commands {
     /// because a secret was found to have gone through — never reaches what was
     /// captured before it. This runs the current rules over the raw spool and
     /// the index and says, per rule, how many records carry something they
-    /// mask, never the value. Wiki pages and backups are named, not rewritten.
+    /// mask, never the value. `--apply` also checkpoints the index, so its file
+    /// keeps no old page. Wiki pages, their git history, backups and copies of
+    /// the index are named if they still hold something, and never rewritten.
     Redact {
         /// Rewrite them, rather than only reporting what would change
         #[arg(long)]
