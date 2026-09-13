@@ -89,6 +89,18 @@ pub struct Tuning {
     /// orders pages by how close their vectors are, because that closeness is
     /// a true fact about the part of the page that was read.
     pub vector_coverage: f64,
+    /// Whether a long page is matched by its sections.
+    ///
+    /// A page longer than the embedding model's window is embedded twice: once
+    /// whole, which the model reads to its window and no further, and once in
+    /// sections it reads entirely ([`crate::embedding::page_sections`]). Off,
+    /// the vector stream compares a question with the whole-page vector only,
+    /// as it always has. On, a page's closeness is its closest section's, and
+    /// a page with sections counts as read in full.
+    ///
+    /// A page that fits its window has no sections, so this changes nothing
+    /// about it either way.
+    pub vector_sections: bool,
     /// Exponent applied to [`authority_multiplier`]. `1.0` leaves it as it is,
     /// `0.0` switches it off, and anything between softens it.
     pub authority_exponent: f64,
@@ -158,6 +170,26 @@ impl Default for Tuning {
             // The three suites of short pages cannot see the knob at all:
             // every page fits, and a whole page scales by one.
             vector_coverage: 0.0,
+            // Off, because measuring it found a trade rather than a gain.
+            // Every long page in `long` is embedded in sections either way;
+            // this only decides whether a query compares them. Under
+            // `--embed`, on took `long` from MRR 0.414 to 0.469 with hit@1
+            // level at 0.312: five questions gained, every one answered by a
+            // long page and four of them paraphrase or symptom questions, and
+            // three lost. One loss is a guard, `reset
+            // cause`, 1 → 2, which is the cost the guards are there to show:
+            // a page's closeness is the best of all its vectors, so a long
+            // page can only get closer to every question, including the ones
+            // a short page answers. The other two are deep questions, one of
+            // which (`what has to happen before the boot report goes out`)
+            // fell out of the results entirely. The three suites of short
+            // pages did not move, as they cannot.
+            //
+            // Nor is on better than no vectors at all, which scores `long` at
+            // 0.500 / 0.562. Sections made a long page's vector stand for the
+            // page, which is what the coverage measurement said was needed,
+            // and it was not enough on its own.
+            vector_sections: false,
             // A quarter, so the full 2.34x multiplier becomes about 1.24x.
             // Authority is a preference between comparably relevant pages,
             // and applied whole it was larger than the entire spread of the

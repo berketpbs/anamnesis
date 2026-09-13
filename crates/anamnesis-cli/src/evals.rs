@@ -415,7 +415,11 @@ fn print_vector_coverage(vectors: &anamnesis_evals::VectorCoverage) {
         vectors.model
     );
     if vectors.reaches_the_window() {
-        line.push_str(&format!(" · {} truncated", vectors.truncated.len()));
+        line.push_str(&format!(
+            " · {} truncated, {} of them also in sections",
+            vectors.truncated.len(),
+            vectors.sectioned()
+        ));
     }
     if vectors.failed > 0 {
         line.push_str(&format!(" · {} without a vector", vectors.failed));

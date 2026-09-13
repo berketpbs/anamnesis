@@ -11,6 +11,7 @@ use std::path::{Component, Path};
 
 use anamnesis_core::capture::CaptureFilter;
 use anamnesis_core::config::CaptureConfig;
+use anamnesis_core::embedding::page_sections;
 use anamnesis_core::page::PagePath;
 use anamnesis_core::retrieval::tokenize;
 use anamnesis_core::sanitize::Redactor;
@@ -189,6 +190,65 @@ proptest! {
         ) {
             let _ = filter.excludes(&path);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sections. A long page is embedded in pieces the model reads whole, and the
+// promise is that the pieces are the page: each one fits, and nothing of the
+// body is left out of all of them.
+// ---------------------------------------------------------------------------
+
+/// Markdown made of the things that decide where a page is cut.
+fn markdown_body() -> impl Strategy<Value = String> {
+    let line = prop_oneof![
+        4 => "[a-z]{1,8}( [a-z]{1,8}){0,14}[.!?]?",
+        1 => "#{1,3} [a-z]{1,8}( [a-z]{1,8}){0,3}",
+        1 => Just(String::new()),
+        1 => Just("```".to_owned()),
+        1 => "[a-z0-9]{20,60}",
+        1 => "\\PC{1,20}",
+    ];
+    prop::collection::vec(line, 0..40).prop_map(|lines| lines.join("\n"))
+}
+
+fn words(text: &str) -> Vec<&str> {
+    text.split_whitespace().collect()
+}
+
+proptest! {
+    #[test]
+    fn every_section_fits_and_together_they_are_the_whole_page(
+        title in "[A-Za-z]{1,8}( [A-Za-z]{1,8}){0,4}",
+        body in markdown_body(),
+        limit in 6usize..40,
+    ) {
+        let fits = |text: &str| text.split_whitespace().count() <= limit;
+        let pieces = page_sections(&title, &body, &fits);
+
+        for piece in &pieces {
+            prop_assert!(fits(piece), "{piece:?} is over {limit} words");
+        }
+
+        // Every word of the body, in order, somewhere in the pieces. Headings
+        // and the title repeat in every piece of their section, which only adds
+        // words, so the body has to be a subsequence of the pieces rather than
+        // equal to them.
+        let body_words = words(&body);
+        let joined = pieces.join(" ");
+        let mut remaining = words(&joined).into_iter();
+        for word in &body_words {
+            prop_assert!(
+                remaining.any(|candidate| candidate == *word),
+                "{word:?} is missing from the pieces of {body:?}: {pieces:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_page_is_cut_the_same_way_every_time(body in markdown_body(), limit in 6usize..40) {
+        let fits = |text: &str| text.split_whitespace().count() <= limit;
+        prop_assert_eq!(page_sections("T", &body, &fits), page_sections("T", &body, &fits));
     }
 }
 

@@ -189,7 +189,7 @@ impl Store {
 
         let (vectors, coverage): (Vec<PageId>, Vec<f64>) = match embedding {
             Some((model, vector)) if !vector.is_empty() => self
-                .vector_stream(project_id, model, vector, depth)?
+                .vector_stream(project_id, model, vector, depth, tuning.vector_sections)?
                 .into_iter()
                 .unzip(),
             _ => (Vec::new(), Vec::new()),
@@ -292,7 +292,7 @@ impl Store {
 
         let (vectors, vector_coverage): (Vec<PageId>, Vec<f64>) = match embedding {
             Some((model, vector)) if !vector.is_empty() => self
-                .vector_stream(project_id, model, vector, limit)?
+                .vector_stream(project_id, model, vector, limit, tuning.vector_sections)?
                 .into_iter()
                 .unzip(),
             _ => (Vec::new(), Vec::new()),
@@ -391,31 +391,80 @@ impl Store {
         Ok(())
     }
 
-    /// Store (or replace) a page's embedding under one model.
+    /// Store (or replace) a page's whole-page embedding under one model.
     ///
     /// Keyed by `(page_id, model)` rather than `page_id` alone, so re-running
     /// this under a new model name adds a second row instead of overwriting a
     /// vector that other, not-yet-migrated queries might still compare against.
+    /// This is part 0; a long page's sections are [`Store::set_page_sections`].
     pub fn set_page_embedding(&self, page_id: PageId, model: &str, vector: &[f32]) -> Result<()> {
         let conn = self.connection();
         conn.execute(
-            "INSERT INTO page_embeddings (page_id, model, dim, vector) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT (page_id, model) DO UPDATE SET dim = excluded.dim, vector = excluded.vector",
+            "INSERT INTO page_embeddings (page_id, model, part, dim, vector) VALUES (?1, ?2, 0, ?3, ?4)
+             ON CONFLICT (page_id, model, part) DO UPDATE SET dim = excluded.dim, vector = excluded.vector",
             params![page_id.to_string(), model, vector.len() as i64, vector_to_bytes(vector)],
         )?;
         Ok(())
     }
 
+    /// Replace a page's section embeddings under one model, in order.
+    ///
+    /// Every section row is removed before the new ones are written, in one
+    /// transaction: a page edited from five sections to three must not keep the
+    /// last two from before, which would match questions about text the page
+    /// no longer says.
+    pub fn set_page_sections(
+        &self,
+        page_id: PageId,
+        model: &str,
+        vectors: &[Vec<f32>],
+    ) -> Result<()> {
+        let mut conn = self.connection();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM page_embeddings WHERE page_id = ?1 AND model = ?2 AND part > 0",
+            params![page_id.to_string(), model],
+        )?;
+        for (index, vector) in vectors.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO page_embeddings (page_id, model, part, dim, vector)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    page_id.to_string(),
+                    model,
+                    index as i64 + 1,
+                    vector.len() as i64,
+                    vector_to_bytes(vector)
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Remove a page's section embeddings under one model, keeping the
+    /// whole-page vector.
+    pub fn clear_page_sections(&self, page_id: PageId, model: &str) -> Result<()> {
+        self.set_page_sections(page_id, model, &[])
+    }
+
     /// Vector stream: pages embedded under `model`, ranked by cosine
     /// similarity to `query_vector`, each with the share of the page its
-    /// vector was embedded from.
+    /// vector stands for.
     ///
-    /// The share comes from the truncation `index_page` recorded for that page
-    /// under that model, and is `1.0` where none was — a page that fit, or one
-    /// written before anything recorded truncation, which is read as whole
-    /// rather than guessed at.
+    /// With `sections` off, only the whole-page vector is compared, and the
+    /// share comes from the truncation `index_page` recorded for that page
+    /// under that model — `1.0` where none was, a page that fit or one written
+    /// before anything recorded truncation, which is read as whole rather than
+    /// guessed at.
     ///
-    /// Brute force — every embedded page in the project is scored on every
+    /// With `sections` on, a page's closeness is the closest of all its
+    /// vectors, and a page that has sections counts as read in full: every
+    /// section was read whole. A long page embedded before sections existed has
+    /// none, and is compared by its whole-page vector and its recorded share,
+    /// exactly as with `sections` off.
+    ///
+    /// Brute force — every embedded vector in the project is scored on every
     /// call. Fine at the scale this system targets (a project's wiki, not a
     /// search engine's corpus); an ANN index is a later problem, not a
     /// day-one dependency.
@@ -425,35 +474,52 @@ impl Store {
         model: &str,
         query_vector: &[f32],
         limit: usize,
+        sections: bool,
     ) -> Result<Vec<(PageId, f64)>> {
         let conn = self.connection();
         let mut statement = conn.prepare(
-            "SELECT pe.page_id, pe.vector, f.tokens, f.budget FROM page_embeddings pe
+            "SELECT pe.page_id, pe.part, pe.vector, f.tokens, f.budget FROM page_embeddings pe
              JOIN pages p ON p.id = pe.page_id
              LEFT JOIN page_embed_failures f
                ON f.page_id = pe.page_id AND f.model = pe.model AND f.kind = 'truncated'
              WHERE pe.model = ?1 AND p.project_id = ?2
-               AND p.is_latest = 1 AND p.status != 'superseded'",
+               AND p.is_latest = 1 AND p.status != 'superseded'
+               AND (?3 OR pe.part = 0)
+             ORDER BY pe.page_id, pe.part",
         )?;
-        let rows = statement.query_map(params![model, project_id.to_string()], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, Option<i64>>(2)?,
-                row.get::<_, Option<i64>>(3)?,
-            ))
-        })?;
+        let rows =
+            statement.query_map(params![model, project_id.to_string(), sections], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                ))
+            })?;
 
-        let mut scored: Vec<(PageId, f32, f64)> = Vec::new();
+        // One entry per page: its best similarity, whether any section row
+        // was seen, and the share its whole-page vector stands for.
+        let mut pages: Vec<(PageId, f32, bool, f64)> = Vec::new();
         for row in rows {
-            let (id, bytes, tokens, budget) = row?;
-            let vector = bytes_to_vector(&bytes);
-            scored.push((
-                parse_id(id),
-                cosine_similarity(query_vector, &vector),
-                coverage_of(tokens, budget),
-            ));
+            let (id, part, bytes, tokens, budget) = row?;
+            let id = parse_id(id);
+            let similarity = cosine_similarity(query_vector, &bytes_to_vector(&bytes));
+            match pages.last_mut() {
+                Some((page, best, has_sections, _)) if *page == id => {
+                    *best = best.max(similarity);
+                    *has_sections |= part > 0;
+                }
+                _ => pages.push((id, similarity, part > 0, coverage_of(tokens, budget))),
+            }
         }
+
+        let mut scored: Vec<(PageId, f32, f64)> = pages
+            .into_iter()
+            .map(|(id, best, has_sections, share)| {
+                (id, best, if has_sections { 1.0 } else { share })
+            })
+            .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(limit);
         Ok(scored
@@ -1568,6 +1634,126 @@ mod tests {
             let expected = if *page == partial { 0.25 } else { 1.0 };
             assert!((share - expected).abs() < 1e-12, "{page:?}: {share}");
         }
+    }
+
+    /// A long page whose opening is about something else and whose third
+    /// section is the answer, beside a short page that is only roughly it.
+    /// Compared by whole-page vectors the short page is closer; compared by
+    /// sections the long page is, and it counts as read in full — over the
+    /// same index, which is what lets the two be measured against each other.
+    #[test]
+    fn with_sections_a_long_page_is_as_close_as_its_closest_section() {
+        let (_dir, store, project, _workspace) = fixture();
+        let short = write_page(
+            &store,
+            project,
+            "notes/short.md",
+            "Short",
+            "roughly it",
+            Vec::new(),
+        );
+        let long = write_page(
+            &store,
+            project,
+            "notes/long.md",
+            "Long",
+            "the answer, far down",
+            Vec::new(),
+        );
+        store
+            .set_page_embedding(short, "test-model", &[0.8, 0.6])
+            .expect("embed");
+        store
+            .set_page_embedding(long, "test-model", &[0.0, 1.0])
+            .expect("embed");
+        store
+            .set_page_sections(
+                long,
+                "test-model",
+                &[vec![0.0, 1.0], vec![0.1, 1.0], vec![1.0, 0.0]],
+            )
+            .expect("sections");
+        store
+            .record_embed_truncation(
+                long,
+                "test-model",
+                anamnesis_core::embedding::Overflow {
+                    tokens: 400,
+                    budget: 100,
+                },
+            )
+            .expect("truncation");
+
+        let question: &[f32] = &[1.0, 0.0];
+        let streams = |sections: bool| {
+            store
+                .query_streams(
+                    project,
+                    "nothing in common",
+                    5,
+                    Some(("test-model", question)),
+                    &Tuning {
+                        vector_sections: sections,
+                        ..Tuning::default()
+                    },
+                )
+                .expect("streams")
+        };
+
+        let off = streams(false);
+        assert_eq!(off.vectors, [short, long]);
+        assert_eq!(off.vector_coverage, [1.0, 0.25]);
+
+        let on = streams(true);
+        assert_eq!(on.vectors, [long, short]);
+        assert_eq!(on.vector_coverage, [1.0, 1.0]);
+    }
+
+    /// A page edited from three sections to one keeps one. Rows left over from
+    /// the longer text would match questions about words the page no longer
+    /// has.
+    #[test]
+    fn fewer_sections_replace_more_rather_than_joining_them() {
+        let (_dir, store, project, _workspace) = fixture();
+        let page = write_page(&store, project, "notes/p.md", "P", "body", Vec::new());
+        store
+            .set_page_embedding(page, "test-model", &[1.0, 0.0])
+            .expect("embed");
+        store
+            .set_page_sections(page, "test-model", &[vec![1.0], vec![2.0], vec![3.0]])
+            .expect("three");
+        store
+            .set_page_sections(page, "test-model", &[vec![4.0]])
+            .expect("one");
+
+        let parts: Vec<(i64, Vec<u8>)> = store
+            .connection()
+            .prepare("SELECT part, vector FROM page_embeddings WHERE page_id = ?1 ORDER BY part")
+            .expect("prepare")
+            .query_map(params![page.to_string()], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .expect("query")
+            .collect::<std::result::Result<_, _>>()
+            .expect("rows");
+        let parts: Vec<(i64, Vec<f32>)> = parts
+            .into_iter()
+            .map(|(part, bytes)| (part, bytes_to_vector(&bytes)))
+            .collect();
+        assert_eq!(parts, [(0, vec![1.0, 0.0]), (1, vec![4.0])]);
+
+        store
+            .clear_page_sections(page, "test-model")
+            .expect("clear");
+        let left: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM page_embeddings WHERE page_id = ?1",
+                params![page.to_string()],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(left, 1, "clearing sections keeps the whole-page vector");
     }
 
     /// A truncation row whose numbers nothing here could have written is read

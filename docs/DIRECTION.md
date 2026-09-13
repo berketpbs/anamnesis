@@ -359,6 +359,30 @@ abstract stream is back to being the candidate, with one more thing it has to be
 measured against: whether a long page that finally has a representative vector
 wins back the questions its decoys take.
 
+**One vector per section was built and measured, and it is a trade.** A page
+longer than the window is now also embedded in sections the model reads whole,
+and `Tuning::vector_sections` decides whether a query compares them — the best
+section's closeness standing for the page — or only the whole-page vector as
+before. Both are scored over one index, so the measurement is paired. Under
+`--embed --compare vector_sections=1`, `long` went from hit@1 0.312 / MRR 0.414
+to 0.312 / 0.469: five questions gained, every one answered by a long page, and
+three lost. One of the three is the guard `reset cause` (1 → 2), which is the
+cost this suite's guards were written to show — the best of many vectors can
+only bring a long page closer to a question, never further, including questions
+a short page answers. The other two are deep: `what if the signing key is lost`
+(1 → 2) and `what has to happen before the boot report goes out`, which left the
+results. The three suites of short pages did not move, since none of their pages
+has sections. The setting ships off.
+
+Two things follow. A representative vector for a long page helped where
+discounting a partial one hurt — MRR up where coverage scaling took it down —
+but it was not sufficient: `long` still
+scores better with no vector stream at all (0.500 / 0.562). And the guard that
+moved says the next attempt has to answer the bias as well as the reach. Taking
+the best of a page's sections rewards having many of them; an abstract is one
+vector per page whatever its length, which is an argument for it this
+measurement did not have before.
+
 The same run said something about the weight, too. `vectors = 1.0` is the one
 `Tuning` value still marked as standing on an argument, and `--compare
 vectors=0` under `--embed` is its first paired measurement: level on `retrieval`
