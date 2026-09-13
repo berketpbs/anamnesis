@@ -63,7 +63,14 @@ pub fn cmd_reconsolidate(
     // commit, every page would look freshly written to the sweep, and not one
     // word would have changed. This command exists to add what a model says,
     // so having no model is the one condition under which it does nothing.
-    let config = anamnesis_llm::LlmConfig::from_env()?;
+    //
+    // Without the fallback chain, deliberately. The chain is for the page a
+    // session would otherwise not get; this command replaces a page that
+    // exists, usually one a model already wrote, and a stand-in's weaker page
+    // over it is the same loss as a counted one — the reason counted replies
+    // are refused below. A configured model that does not answer leaves the
+    // page as it was, and the command can be run again when it does.
+    let config = anamnesis_llm::LlmConfig::from_env()?.without_fallbacks();
     let Some(provider) = config.build()? else {
         println!("♻  Recompiling {}", scope.scope);
         println!();

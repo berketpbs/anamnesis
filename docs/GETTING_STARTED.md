@@ -88,11 +88,12 @@ else has a default.
 | `ANAMNESIS_LLM_MODEL` | `claude-opus-5`; `llama3.2` for `ollama`; `gemini-3.6-flash` for `google` | Model id. |
 | `ANAMNESIS_LLM_BASE_URL` | per provider | `https://api.anthropic.com`, `https://api.openai.com/v1`, `https://generativelanguage.googleapis.com/v1beta/openai`, or `http://127.0.0.1:11434/v1`. Point at a gateway, a second Ollama, or vLLM. |
 | `ANAMNESIS_LLM_EFFORT` | `high` | `low`, `medium`, `high`, `xhigh`, or `max`. `google` has no word above `high` and is sent `high` for the two above it. |
-| `ANAMNESIS_LLM_MAX_INPUT_TOKENS` | `6500` | Prompt budget. Long sessions are trimmed from the middle to fit. |
-| `ANAMNESIS_LLM_MAX_OUTPUT_TOKENS` | `2000` | Reply budget, floored at 1000. |
+| `ANAMNESIS_LLM_MAX_INPUT_TOKENS` | `64000` | Prompt budget. Long sessions are trimmed from the middle to fit, and the page says how much of the session it was written from. |
+| `ANAMNESIS_LLM_MAX_OUTPUT_TOKENS` | `16000` | Reply ceiling, floored at 1000. Only generated tokens are billed; reasoning models spend much of it before answering. |
 | `ANAMNESIS_LLM_TIMEOUT_SECS` | `90` | Per-request timeout. |
-| `ANAMNESIS_LLM_MAX_RETRIES` | `2` | Retries, for rate limits and server faults only. |
+| `ANAMNESIS_LLM_MAX_RETRIES` | `2`; `8` for the server | Retries, for rate limits and server faults only. |
 | `ANAMNESIS_LLM_FALLBACKS` | on | Server-side fallback to another model if a request is declined. |
+| `ANAMNESIS_LLM_FALLBACK_PROVIDERS` | — | Providers to ask, in order, when the configured one fails transiently: `provider[:model]`, comma-separated. See below. |
 
 A typo is reported at startup rather than at the end of the first session:
 `anamnesis serve` refuses to bind if the settings do not parse, and prints
@@ -193,6 +194,39 @@ was JSON fragments. The page is only as good as the model; the schema keeps it
 declined, or comes back as something other than a page, the counted summary is
 written instead and the reason is logged. Consolidation also runs *after* the
 hook's response is sent, so a slow model delays the page, never the session.
+
+#### When the model does not answer
+
+A free tier's daily quota, or an afternoon of `503 high demand`, turns every
+session in that window into a counted page. A chain of fallbacks turns it into
+a page written by the next model that answers:
+
+```bash
+export ANAMNESIS_LLM_PROVIDER=google
+export ANAMNESIS_LLM_MODEL=gemini-3.5-flash
+export ANAMNESIS_LLM_FALLBACK_PROVIDERS=google:gemini-3.6-flash,ollama:qwen2.5:7b-instruct
+```
+
+Each entry is `provider[:model]`, split at the first colon, so a local model's
+own tag survives. They are asked in order, and only after the one before has
+failed **transiently** and spent its own retries: a timeout, a refused
+connection, a rate limit, a server fault, a reply that did not parse. A bad
+key, an unknown model, a refusal, or a reply too long for its budget stops
+there, because each is something to fix or decide rather than route around.
+
+A link to the same backend keeps its address and key — another model on a
+separate quota is the common case. A link to a different backend takes that
+backend's own key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`),
+never `ANAMNESIS_LLM_API_KEY`, which belongs to the configured provider. Every
+link shares the configured budgets, timeout and effort, and a chain that cannot
+be built is refused at startup like any other setting.
+
+A page a fallback wrote says so at the bottom — `Written by qwen2.5:7b-instruct,
+standing in for gemini-3.5-flash, which did not answer.` — and its session is
+recorded against the model that wrote it. `anamnesis serve` prints the whole
+chain. `anamnesis reconsolidate` does not use it: it replaces pages that
+usually already had a good one, and a stand-in's page over it is the loss a
+counted one would be.
 
 #### Per-project style
 

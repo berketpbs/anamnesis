@@ -28,8 +28,8 @@ pub use abstracts::{
 };
 pub use files::{changed_files, mentioned_files};
 pub use llm::{
-    DigestSource, PREFERENCES_PAGE, Surroundings, consolidate_with_llm, consolidate_with_source,
-    render_prompt, render_prompt_reporting, schema,
+    Attributed, DigestSource, PREFERENCES_PAGE, Surroundings, consolidate_attributed,
+    consolidate_with_llm, consolidate_with_source, render_prompt, render_prompt_reporting, schema,
 };
 
 /// Longest handoff this module will produce, in bytes.

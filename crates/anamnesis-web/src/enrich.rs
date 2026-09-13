@@ -21,7 +21,7 @@
 
 use std::sync::Arc;
 
-use anamnesis_consolidate::{Surroundings, consolidate_with_source};
+use anamnesis_consolidate::{Surroundings, consolidate_attributed};
 use anamnesis_core::embedding::Embed;
 use anamnesis_core::ids::SessionId;
 use anamnesis_core::scope::{ResolvedScope, resolve_scope};
@@ -115,7 +115,7 @@ pub async fn enrich(
         return Ok(Enriched::Nothing);
     };
 
-    let compiled = consolidate_with_source(
+    let compiled = consolidate_attributed(
         llm.provider.as_ref(),
         &session,
         &observations,
@@ -128,10 +128,13 @@ pub async fn enrich(
     )
     .await;
 
-    let model = llm.provider.model().to_owned();
-    let Some((digest, source)) = compiled else {
+    let Some(compiled) = compiled else {
         return Ok(Enriched::Nothing);
     };
+    // The model that wrote the page, which with a chain configured is not
+    // always the one the provider is named after.
+    let model = compiled.model(llm.provider.as_ref()).to_owned();
+    let (digest, source) = (compiled.digest, compiled.source);
 
     // A counted reply is not written. The page it would produce is the page
     // that is already there, so writing it would cost a commit, renew the

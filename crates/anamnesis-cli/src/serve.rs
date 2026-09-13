@@ -113,11 +113,7 @@ pub fn cmd_serve(
         }
     );
     match &settings {
-        Some(settings) => println!(
-            "   consolidation: {} ({})",
-            settings.provider.model(),
-            settings.provider.name()
-        ),
+        Some(settings) => println!("   consolidation: {}", settings.provider.describe()),
         None => println!("   consolidation: counted (no model configured)"),
     }
     match &embedder {

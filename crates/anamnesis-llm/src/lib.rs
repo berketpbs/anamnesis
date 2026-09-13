@@ -20,6 +20,7 @@
 
 mod anthropic;
 mod budget;
+mod chain;
 mod config;
 pub mod embed;
 pub mod hosted;
@@ -29,6 +30,7 @@ mod provider;
 
 pub use anthropic::Anthropic;
 pub use budget::{clip_to_tokens, estimate_tokens};
+pub use chain::Chain;
 pub use config::{Effort, LlmConfig, ProviderKind, provider_from_env};
 pub use embed::{EmbedConfig, EmbedError, Embedder, LocalEmbedder};
 pub use openai::OpenAiCompatible;

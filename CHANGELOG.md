@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A chain of fallback models** — `ANAMNESIS_LLM_FALLBACK_PROVIDERS`, a
+  comma-separated list of `provider[:model]` asked in order when the configured
+  model fails transiently. On 2026-09-07 an afternoon of `503 high demand` and
+  on 2026-09-13 a spent daily quota each turned a day's sessions into counted
+  pages, while another model was one request away. Only a timeout, a refused
+  connection, a rate limit, a server fault or an unparseable reply is handed
+  on, after the link's own retries; a bad key, an unknown model, a refusal and
+  a reply too long for its budget stop where they happen. A link to another
+  backend takes that backend's own key and never `ANAMNESIS_LLM_API_KEY`. A
+  page a fallback wrote ends with `Written by <model>, standing in for <model>,
+  which did not answer.`, and its session is recorded against the model that
+  wrote it. `serve` prints the whole chain; `reconsolidate` and `abstracts`
+  deliberately do not use it, since one replaces pages that usually had a good
+  one and the other is measured as a single writer's
 - **Embedding models with a longer window were measured against MiniLM**, over
   all four suites at the shipped tuning. `nomic-embed-text` through Ollama is
   the first vector stream to beat no vectors on `long` (hit@1 / MRR 0.500 /

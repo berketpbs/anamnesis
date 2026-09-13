@@ -290,6 +290,7 @@ mod tests {
                 model: "scripted-1".to_owned(),
                 input_tokens: 1,
                 output_tokens: 1,
+                instead_of: None,
             })
         }
     }
