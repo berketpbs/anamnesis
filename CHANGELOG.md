@@ -559,6 +559,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly what must not be lost
 
 ### Fixed
+- A model reply whose **letters came back damaged is asked for again**. Two
+  Turkish pages in this project's memory were written by Gemini flash models
+  from transcripts whose Turkish was intact, and hold not one `ş`, `ğ`, `ü`,
+  `ö` or `ç`: in their place `ő`, `đ`, `œ`, and once a C1 control character —
+  the first UTF-8 byte of each letter kept, the second one wrong. The JSON was
+  valid and every field filled, so the pages were written as the model's, and
+  no search typed with the proper letters finds them. A reply is now counted for
+  letters the transcript never held, in either case, that share a first byte
+  with one it did; at three or more and a tenth of the reply's non-ASCII
+  letters, the same request is sent once more and the reply with fewer is kept.
+  Over the 31 session pages in that memory, rendered again with
+  `reconsolidate --show-prompt`, the two damaged ones scored 47 and 25 and
+  every other one 0. Asking again never costs the page: a reply that trips the
+  check honestly is kept
 - `anamnesis doctor` **judges only the embedding model the server uses**. The
   index keeps every model's vectors and complaint rows, so a machine that
   moved from MiniLM to another embedder still holds MiniLM's truncations, and

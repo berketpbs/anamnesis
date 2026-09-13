@@ -13,12 +13,14 @@
 //! in testing and then starts 400-ing on exactly the long sessions whose
 //! summaries are worth the most.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use anamnesis_core::observation::{EventKind, Observation, RESULT_MARKER};
 use anamnesis_core::page::{Entity, PagePath};
 use anamnesis_core::session::Session;
-use anamnesis_llm::{Completion, LlmError, Provider, clip_to_tokens, estimate_tokens};
+use anamnesis_llm::{
+    Completion, CompletionOutput, LlmError, Provider, clip_to_tokens, estimate_tokens,
+};
 use serde_json::{Value, json};
 
 use crate::{
@@ -327,6 +329,8 @@ pub async fn consolidate_with_source(
     match reply {
         Ok(output) => match digest_from_json(&output.json, session) {
             Ok(digest) => {
+                let (digest, output) =
+                    unless_garbled(provider, &request, session, digest, output).await;
                 tracing::info!(
                     provider = provider.name(),
                     model = %output.model,
@@ -348,6 +352,155 @@ pub async fn consolidate_with_source(
             tracing::warn!(%error, "model unavailable; using the counted summary");
             Some((fallback, DigestSource::Counted))
         }
+    }
+}
+
+/// Fewest damaged letters that make a reply worth asking for again.
+///
+/// A floor, so that an English page quoting one name — `café`, `Gödel` — from a
+/// session whose transcript happened to hold a letter beside it is not a
+/// second request.
+const GARBLED_AT_LEAST: usize = 3;
+
+/// Share of a reply's non-ASCII letters that must be damaged, as a divisor.
+///
+/// One in ten. The two damaged sessions found had 31% and 27%; the pages of
+/// fourteen sound ones in the same memory, eight recorded as the same model's,
+/// had at most 1%, and that was two capital `İ`s.
+const GARBLED_SHARE: usize = 10;
+
+/// Ask for a reply again when its letters look damaged, and keep the better.
+///
+/// Found in this project's own memory, on two pages Gemini flash models wrote
+/// eight days apart — one recorded as gemini-3.5-flash, the other recompiled
+/// the afternoon the setup moved from 3.6-flash to 3.5-flash — in Turkish, from
+/// transcripts whose Turkish was intact: not
+/// one `ş`, `ğ`, `ü`, `ö` or `ç` on either page, and in their place `ő`, `đ`,
+/// `œ`, a stray `w`, and once a C1 control character. `ı` came through
+/// untouched on both. The prompts were rendered again and were sound, the same
+/// code path had written gemini-3.5-flash's other Turkish pages cleanly, and
+/// nothing downstream touches the letters — so the damage is in the reply, and it
+/// arrives as valid JSON with every field filled. Every check this module makes
+/// passed, and a page that no search for `şema` or `için` will ever find was
+/// written as the model's.
+///
+/// Asked again rather than refused: a reply that trips this is almost always a
+/// reply the model gets right on a second try, and one that trips it honestly —
+/// some language nobody here reads — gets the same letters the second time and
+/// is kept. The cost of being wrong is one request, never the page.
+async fn unless_garbled(
+    provider: &dyn Provider,
+    request: &Completion,
+    session: &Session,
+    digest: SessionDigest,
+    output: CompletionOutput,
+) -> (SessionDigest, CompletionOutput) {
+    // The material, not the instructions: the system prompt quotes `Özet` and
+    // `görev` to every session, and letters it holds say nothing about what
+    // this session's person typed.
+    let shown = &request.user;
+    let garbled = garbled_letters(&digest, shown);
+    if garbled == 0 {
+        return (digest, output);
+    }
+    tracing::warn!(
+        garbled,
+        "the reply wrote letters the session never used, beside ones it did; asking again"
+    );
+    let again = match provider.complete(request).await {
+        Ok(again) => again,
+        Err(error) => {
+            tracing::warn!(%error, "asking again failed; keeping the first reply");
+            return (digest, output);
+        }
+    };
+    match digest_from_json(&again.json, session) {
+        Ok(retry) if garbled_letters(&retry, shown) < garbled => (retry, again),
+        Ok(_) => {
+            tracing::warn!(
+                garbled,
+                "asked again and the letters were no better; keeping the first reply"
+            );
+            (digest, output)
+        }
+        Err(reason) => {
+            tracing::warn!(%reason, "asked again and the reply was not a page; keeping the first");
+            (digest, output)
+        }
+    }
+}
+
+/// How many letters in a reply look like damaged copies of the session's own.
+///
+/// Zero unless the reply as a whole looks damaged — see [`GARBLED_AT_LEAST`]
+/// and [`GARBLED_SHARE`] — so that the number can be compared between two
+/// replies and zero means leave it alone.
+///
+/// A letter counts when the model was never shown it, in either case, and it
+/// shares its first UTF-8 byte with a letter the model was shown. That is the
+/// shape both damaged pages had: `ş` (C5 9F) came back as `ő` (C5 91) on one
+/// and `œ` (C5 93) on the other, `ğ` (C4 9F) as `đ` (C4 91) on both — the
+/// first byte kept, the second one wrong. Requiring the first byte is what
+/// leaves a correct reply alone when the person typed Turkish without its
+/// letters and the model, as the system prompt asks, wrote them properly:
+/// nothing in that transcript sits beside `ş`. Only two-byte letters are read,
+/// since those are the ones a single wrong byte turns into another letter.
+///
+/// A C1 control character counts wherever it appears. No prose holds one, and
+/// the second page had `ç` (C3 A7) come back as U+0087 (C2 87).
+fn garbled_letters(digest: &SessionDigest, shown: &str) -> usize {
+    fn two_byte(c: char) -> bool {
+        ('\u{80}'..'\u{800}').contains(&c)
+    }
+    // The first byte of a two-byte UTF-8 sequence is `110` and the top five
+    // of the character's eleven bits, so the bits above the low six name it.
+    fn first_byte(c: char) -> u32 {
+        u32::from(c) >> 6
+    }
+
+    let mut known: HashSet<char> = HashSet::new();
+    for c in shown.chars().filter(|c| !c.is_ascii()) {
+        known.insert(c);
+        known.extend(c.to_lowercase());
+        known.extend(c.to_uppercase());
+    }
+    let beside: HashSet<u32> = known
+        .iter()
+        .filter(|c| c.is_alphabetic() && two_byte(**c))
+        .map(|c| first_byte(*c))
+        .collect();
+
+    let reply = std::iter::once(digest.title.as_str())
+        .chain([digest.body.as_str(), digest.handoff.as_str()])
+        .chain(
+            digest
+                .notes
+                .iter()
+                .flat_map(|note| [note.title.as_str(), note.body.as_str()]),
+        );
+
+    let (mut letters, mut garbled) = (0, 0);
+    for c in reply.flat_map(str::chars).filter(|c| !c.is_ascii()) {
+        if ('\u{80}'..'\u{a0}').contains(&c) {
+            garbled += 1;
+            continue;
+        }
+        if !c.is_alphabetic() {
+            continue;
+        }
+        letters += 1;
+        let seen = known.contains(&c)
+            || c.to_lowercase().any(|v| known.contains(&v))
+            || c.to_uppercase().any(|v| known.contains(&v));
+        if !seen && two_byte(c) && beside.contains(&first_byte(c)) {
+            garbled += 1;
+        }
+    }
+
+    if garbled >= GARBLED_AT_LEAST && garbled * GARBLED_SHARE >= letters {
+        garbled
+    } else {
+        0
     }
 }
 
@@ -1973,6 +2126,197 @@ mod tests {
             json!(["title", "body", "handoff", "entities"]),
             "and does not go on requiring what it no longer offers"
         );
+    }
+
+    /// A provider that gives its replies in order and repeats the last.
+    struct Scripted {
+        replies: Vec<Value>,
+        asked: std::sync::Mutex<usize>,
+    }
+
+    impl Scripted {
+        fn answering(replies: Vec<Value>) -> Self {
+            Self {
+                replies,
+                asked: std::sync::Mutex::new(0),
+            }
+        }
+        fn asked(&self) -> usize {
+            *self.asked.lock().expect("lock")
+        }
+    }
+
+    #[async_trait]
+    impl Provider for Scripted {
+        fn name(&self) -> &'static str {
+            "scripted"
+        }
+        fn model(&self) -> &str {
+            "scripted-1"
+        }
+        async fn complete(&self, _: &Completion) -> Result<CompletionOutput, LlmError> {
+            let mut asked = self.asked.lock().expect("lock");
+            let reply = self.replies[(*asked).min(self.replies.len() - 1)].clone();
+            *asked += 1;
+            Ok(CompletionOutput {
+                json: reply,
+                model: "scripted-1".to_owned(),
+                input_tokens: 1,
+                output_tokens: 1,
+            })
+        }
+    }
+
+    /// A session whose person wrote Turkish with its letters.
+    fn turkish_session() -> Vec<Observation> {
+        vec![
+            observation(EventKind::SessionStart, "", None),
+            observation(
+                EventKind::UserPrompt,
+                "değişikliği geri al, testi düzelt ve çalıştır",
+                None,
+            ),
+        ]
+    }
+
+    fn turkish_reply(body: &str) -> Value {
+        json!({
+            "title": "Geri alma",
+            "body": body,
+            "handoff": "Test çalışıyor.",
+            "entities": [],
+        })
+    }
+
+    const SOUND: &str = "Değişiklik geri alındı, test düzeltildi ve çalıştırıldı.";
+    /// The damage as it was found: `ş` as `ő`, `ğ` as `đ`, `ü` gone to `w`.
+    const DAMAGED: &str = "Deđiőiklik geri alındı, test dwzeltildi ve alıőtırıldı.";
+
+    fn digest_with(body: &str) -> SessionDigest {
+        digest_from_json(&turkish_reply(body), &session()).expect("a digest")
+    }
+
+    fn shown() -> &'static str {
+        "değişikliği geri al, testi düzelt ve çalıştır"
+    }
+
+    /// The shape the two damaged pages had: letters the session never used,
+    /// each sharing a first byte with one it did.
+    #[test]
+    fn letters_beside_the_sessions_own_are_counted() {
+        assert_eq!(garbled_letters(&digest_with(DAMAGED), shown()), 3);
+        assert_eq!(garbled_letters(&digest_with(SOUND), shown()), 0);
+    }
+
+    /// A capital the transcript only had in lower case is the same letter, and
+    /// the sound pages this was measured on used them — `Ç`, `Ş`, `Ö` —
+    /// wherever a sentence began with one.
+    #[test]
+    fn a_capital_of_a_letter_the_session_used_is_not_damage() {
+        let digest = digest_with("Çalıştırıldı. Şimdi Üstteki Çalışıyor. Ğ yok.");
+        assert_eq!(garbled_letters(&digest, shown()), 0);
+    }
+
+    /// The person typed Turkish without its letters and the model, as it is
+    /// told to, wrote them. Nothing in the transcript sits beside `ş` or `ğ`,
+    /// so none of it counts.
+    #[test]
+    fn letters_nobody_typed_are_not_damage_when_nothing_typed_sits_beside_them() {
+        let typed_plainly = "degisikligi geri al, testi duzelt ve calistir";
+        let digest = digest_with("Değişiklik ğğğ şşş geri alındı.");
+        assert_eq!(garbled_letters(&digest, typed_plainly), 0);
+    }
+
+    /// One name from another language, on a page with plenty of its own
+    /// letters, is below both bars.
+    #[test]
+    fn one_foreign_name_is_not_damage() {
+        let digest = digest_with("Değişiklik geri alındı; ő bir isim. Test düzeltildi.");
+        assert_eq!(garbled_letters(&digest, shown()), 0);
+    }
+
+    /// No prose holds a C1 control; the second damaged page had `ç` come back
+    /// as one.
+    #[test]
+    fn c1_controls_count_wherever_they_are() {
+        let digest = digest_with("Test d\u{87}zeltildi \u{87}al\u{87}\u{87}.");
+        assert_eq!(garbled_letters(&digest, shown()), 4);
+    }
+
+    /// The durable pages come from the same reply and were damaged with it:
+    /// the live case wrote a gotcha in the same broken letters.
+    #[test]
+    fn a_notes_letters_are_read_too() {
+        let reply = json!({
+            "title": "Geri alma",
+            "body": SOUND,
+            "handoff": "Test çalışıyor.",
+            "entities": [],
+            "notes": [{
+                "kind": "gotcha",
+                "title": "Canlı sorgular decay verisini bozar",
+                "body": "Geliőtirme sırasında canlı veri wzerinde yapılan őeyler kalıcı ize dwőer.",
+            }],
+        });
+        let digest = digest_from_json(&reply, &session()).expect("a digest");
+        assert!(garbled_letters(&digest, shown()) >= GARBLED_AT_LEAST);
+    }
+
+    #[tokio::test]
+    async fn a_damaged_reply_is_asked_for_again_and_the_sound_one_kept() {
+        let provider = Scripted::answering(vec![turkish_reply(DAMAGED), turkish_reply(SOUND)]);
+        let (digest, source) = consolidate_with_source(
+            &provider,
+            &session(),
+            &turkish_session(),
+            Surroundings::default(),
+            6_500,
+            1_000,
+        )
+        .await
+        .expect("a digest");
+
+        assert_eq!(provider.asked(), 2);
+        assert_eq!(source, DigestSource::Model);
+        assert_eq!(digest.body, SOUND);
+    }
+
+    /// Something that trips the check honestly trips it again, and the page
+    /// is still the model's: the cost of a wrong guess is one request.
+    #[tokio::test]
+    async fn a_reply_damaged_twice_is_kept_rather_than_lost() {
+        let provider = Scripted::answering(vec![turkish_reply(DAMAGED)]);
+        let (digest, source) = consolidate_with_source(
+            &provider,
+            &session(),
+            &turkish_session(),
+            Surroundings::default(),
+            6_500,
+            1_000,
+        )
+        .await
+        .expect("a digest");
+
+        assert_eq!(provider.asked(), 2, "asked again once, not more");
+        assert_eq!(source, DigestSource::Model);
+        assert_eq!(digest.body, DAMAGED);
+    }
+
+    #[tokio::test]
+    async fn a_sound_reply_is_asked_for_once() {
+        let provider = Scripted::answering(vec![turkish_reply(SOUND)]);
+        consolidate_with_source(
+            &provider,
+            &session(),
+            &turkish_session(),
+            Surroundings::default(),
+            6_500,
+            1_000,
+        )
+        .await
+        .expect("a digest");
+
+        assert_eq!(provider.asked(), 1);
     }
 
     /// One note, written out in full, asserting the two things a note is: a
