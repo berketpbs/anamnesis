@@ -605,8 +605,7 @@ pub fn cmd_doctor(server: &str, data_dir: Option<PathBuf>) -> anyhow::Result<()>
     let data = DataDir::resolve(data_dir)?;
 
     let mut symptoms = Symptoms {
-        model: std::env::var("ANAMNESIS_LLM_PROVIDER")
-            .ok()
+        model: crate::settings::var("ANAMNESIS_LLM_PROVIDER")
             .filter(|value| !value.trim().is_empty()),
         server_answered: server_answers(server),
         server_build: server_build(server),

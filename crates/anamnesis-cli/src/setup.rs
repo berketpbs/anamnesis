@@ -312,7 +312,7 @@ pub fn cmd_install_hooks(
 /// its endpoint at startup now starts anyway and asks again later, so carrying
 /// the settings can no longer cost the agent its memory tools.
 fn mcp_environment() -> (Vec<(String, String)>, Option<String>) {
-    mcp_environment_for(&anamnesis_llm::EmbedConfig::from_env())
+    mcp_environment_for(&anamnesis_llm::EmbedConfig::from_vars(crate::settings::var))
 }
 
 /// [`mcp_environment`], for a configuration a test can write.

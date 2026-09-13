@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`<data_dir>/settings.env`**, read by every command. A server started at
+  login by the operating system gets an environment nobody chose, and on the
+  machine this project is developed on the model and embedding settings had to
+  be put there by a PowerShell wrapper, a VBScript and a second wrapper so the
+  CLI saw the same model — none of it in the repository. `NAME=value` lines;
+  the environment wins, variable by variable. Secrets (`*_API_KEY`,
+  `ANAMNESIS_TOKEN`) and `ANAMNESIS_DATA_DIR` are refused by name, every refused
+  line is named on stderr, `status --verbose` lists what the file set, and
+  `serve` will not start while a line is refused
+
 ### Fixed
 - `anamnesis install-mcp` **carries a hosted embedder's settings into the
   registration**, and never its key. It used to carry none of them, on the
