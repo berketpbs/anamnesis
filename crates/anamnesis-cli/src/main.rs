@@ -27,6 +27,7 @@ mod pages;
 mod project;
 mod purge;
 mod reconsolidate;
+mod redact;
 mod reindex;
 mod rename;
 mod run;
@@ -331,6 +332,9 @@ fn run() -> anyhow::Result<()> {
                 },
                 cli.data_dir.clone(),
             )?;
+        }
+        Commands::Redact { apply } => {
+            redact::cmd_redact(apply, cli.data_dir.clone())?;
         }
         Commands::Forget { paths } => {
             cmd_forget(&paths, cli.data_dir.clone())?;

@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`anamnesis redact [--apply]`** runs today's redaction rules over what is
+  already stored. Capture redacts once, with the rules it has, and a rule added
+  later never reached what came before: an AI Studio key typed into a prompt on
+  2026-09-02, a day before the `AQ.` rule landed, was still in the raw spool, the
+  index and every backup eleven days later. The command counts, per rule, the
+  spool lines and index rows whose text would change — never the value — and
+  `--apply` rewrites them: spool lines decoded and redacted string by string (a
+  rule run over encoded JSON would eat its quotes), the file replaced whole and
+  re-read if the server appended meanwhile, index rows in one transaction. Wiki
+  pages holding a match are named, not rewritten, since their git history keeps
+  every version; backups are listed as still holding the originals. A rewrite
+  is recorded in the audit log as `memory.redacted`. `doctor` reports stored
+  observations that still hold anything the rules mask, as a new `exposed`
+  finding ranked above `broken`. Run over a restored copy of this project's
+  memory: 11 records (not the 130 a first draft reported by counting rules that
+  matched text they had already masked), 0 unmasked keys afterwards, and a
+  second run finding nothing
 - **`<data_dir>/settings.env`**, read by every command. A server started at
   login by the operating system gets an environment nobody chose, and on the
   machine this project is developed on the model and embedding settings had to

@@ -452,6 +452,19 @@ pub enum Commands {
         paths: Vec<String>,
     },
 
+    /// Apply today's redaction rules to what is already stored
+    ///
+    /// Capture redacts with the rules it has, once. A rule added later — added
+    /// because a secret was found to have gone through — never reaches what was
+    /// captured before it. This runs the current rules over the raw spool and
+    /// the index and says, per rule, how many records carry something they
+    /// mask, never the value. Wiki pages and backups are named, not rewritten.
+    Redact {
+        /// Rewrite them, rather than only reporting what would change
+        #[arg(long)]
+        apply: bool,
+    },
+
     /// Forget a session, its observations, and its transcript
     ///
     /// For a session that was never a session: a hook fired by hand to check

@@ -41,6 +41,12 @@ pub enum Severity {
     Thin,
     /// Something is not being recorded at all.
     Broken,
+    /// A secret is stored where the redaction rules say it must not be.
+    ///
+    /// Above `Broken` because the harm is already done rather than pending: a
+    /// memory that records nothing loses the future, a memory holding a key
+    /// has handed out the past to anyone who reads the directory or a backup.
+    Exposed,
 }
 
 impl Severity {
@@ -50,6 +56,7 @@ impl Severity {
             Self::Fine => "ok",
             Self::Thin => "thin",
             Self::Broken => "broken",
+            Self::Exposed => "exposed",
         }
     }
 }
@@ -118,6 +125,13 @@ pub struct Symptoms {
     /// system does not have. `None` — nothing answered, or a server too old to
     /// say — judges every row, as before, rather than guessing which is live.
     pub server_embedding: Option<String>,
+    /// What today's redaction rules would still mask in stored observations,
+    /// across every project in the index.
+    ///
+    /// Capture redacts once, with the rules of the day; a rule added later
+    /// never reaches what came before it. This is the count of what it did not
+    /// reach.
+    pub stored_secrets: anamnesis_store::Redaction,
 }
 
 /// What one recent session shows about what capture is producing.
@@ -158,8 +172,40 @@ pub fn diagnose(symptoms: &Symptoms) -> Vec<Finding> {
     findings.extend(judge_pages(symptoms));
     findings.extend(judge_embeddings(symptoms));
     findings.extend(judge_build(symptoms));
+    findings.extend(judge_stored_secrets(symptoms));
     findings.sort_by_key(|finding| std::cmp::Reverse(finding.severity));
     findings
+}
+
+/// Whether anything stored holds a secret today's rules would mask.
+///
+/// Silent when nothing does: redaction working is the ordinary case, and a line
+/// saying so on every run is a line people learn to skip.
+fn judge_stored_secrets(symptoms: &Symptoms) -> Vec<Finding> {
+    let found = &symptoms.stored_secrets;
+    if found.changed == 0 {
+        return Vec::new();
+    }
+    let rules = found
+        .rules
+        .iter()
+        .map(|(rule, count)| format!("{rule} ×{count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    vec![Finding {
+        severity: Severity::Exposed,
+        subject: "secrets",
+        verdict: format!(
+            "{} stored observation(s) hold something today's redaction rules mask ({rules}) — \
+             captured before the rule existed",
+            found.changed
+        ),
+        remedy: Some(
+            "`anamnesis redact` to see where, `anamnesis redact --apply` to mask them; then \
+             revoke the credential, since it has been on disk, and replace older backups"
+                .to_owned(),
+        ),
+    }]
 }
 
 /// Whether every page that should carry a vector carries a whole one.
@@ -657,6 +703,8 @@ pub fn cmd_doctor(server: &str, data_dir: Option<PathBuf>) -> anyhow::Result<()>
     }
     symptoms.embed_failures = store.embed_failures(scope.project_id)?;
     symptoms.sections_compared = Tuning::default().vector_sections;
+    symptoms.stored_secrets =
+        store.redact_observations(&anamnesis_core::sanitize::Redactor::new(), false)?;
 
     println!("🩺 Anamnesis Memory Diagnosis");
     println!();
@@ -1305,6 +1353,45 @@ mod tests {
                 .iter()
                 .any(|f| f.verdict.contains("reports every moment")),
             "{findings:#?}"
+        );
+    }
+
+    /// A key captured before its rule existed is the worst news doctor has,
+    /// and the finding says what fired and how many, never the value.
+    #[test]
+    fn a_secret_left_in_stored_observations_is_exposed_and_first() {
+        let mut symptoms = wired("claude-code", &EVERY_MOMENT);
+        symptoms.stored_secrets.examined = 2000;
+        symptoms.stored_secrets.count(&["google-auth-key"]);
+        symptoms.stored_secrets.count(&["google-auth-key"]);
+
+        let findings = diagnose(&symptoms);
+        let first = findings.first().expect("a finding");
+        assert_eq!(first.severity, Severity::Exposed);
+        assert_eq!(first.subject, "secrets");
+        assert!(
+            first.verdict.contains("2 stored observation(s)"),
+            "{}",
+            first.verdict
+        );
+        assert!(
+            first.verdict.contains("google-auth-key ×2"),
+            "{}",
+            first.verdict
+        );
+        assert!(
+            first
+                .remedy
+                .as_deref()
+                .is_some_and(|r| r.contains("redact --apply")),
+            "{:?}",
+            first.remedy
+        );
+
+        symptoms.stored_secrets = anamnesis_store::Redaction::default();
+        assert!(
+            diagnose(&symptoms).iter().all(|f| f.subject != "secrets"),
+            "silent when nothing is stored"
         );
     }
 

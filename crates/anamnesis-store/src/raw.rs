@@ -240,6 +240,83 @@ impl RawSpool {
             .collect())
     }
 
+    /// Run `redactor` over every string in one spool file, rewriting it with
+    /// `apply`.
+    ///
+    /// The one exception to append-only, and the reason it is allowed: a rule
+    /// added after a secret was captured is otherwise never applied to it, and
+    /// the spool is the most durable copy there is. Everything else about the
+    /// file is kept. Lines are decoded and the rules run over their string
+    /// values, never over the encoded line — a rule like `authorization: bearer
+    /// \S+` run across JSON would eat the closing quote and brace. A line that
+    /// does not parse, which can only be a half-written last one, is kept
+    /// byte for byte. Keys and structure are untouched.
+    ///
+    /// The rewrite goes to a sibling file that replaces the original, so a
+    /// crash leaves one or the other whole. The server may be appending to
+    /// today's files while this runs, so the length is checked again just
+    /// before the replace: a file that grew is read again, up to three times,
+    /// rather than losing the line that arrived.
+    pub fn redact_file(
+        &self,
+        path: &Path,
+        redactor: &anamnesis_core::sanitize::Redactor,
+        apply: bool,
+    ) -> Result<crate::redact::Redaction, RawError> {
+        let io = |source| RawError::Io {
+            path: path.to_path_buf(),
+            source,
+        };
+        for _ in 0..3 {
+            let before = std::fs::read_to_string(path).map_err(io)?;
+            let mut found = crate::redact::Redaction::default();
+            let mut rewritten = String::with_capacity(before.len());
+
+            for line in before.split_inclusive('\n') {
+                let content = line.trim_end_matches(['\n', '\r']);
+                let ending = &line[content.len()..];
+                if content.trim().is_empty() {
+                    rewritten.push_str(line);
+                    continue;
+                }
+                let Ok(mut value) = serde_json::from_str::<serde_json::Value>(content) else {
+                    rewritten.push_str(line);
+                    continue;
+                };
+                found.examined += 1;
+                let mut hits = Vec::new();
+                redact_strings(&mut value, redactor, &mut hits);
+                if hits.is_empty() {
+                    rewritten.push_str(line);
+                } else {
+                    found.count(&hits);
+                    rewritten.push_str(&serde_json::to_string(&value)?);
+                    rewritten.push_str(ending);
+                }
+            }
+
+            if !apply || found.changed == 0 {
+                return Ok(found);
+            }
+
+            let staged = path.with_extension("jsonl.redacting");
+            std::fs::write(&staged, rewritten.as_bytes()).map_err(io)?;
+            let now = std::fs::metadata(path).map_err(io)?.len();
+            if now != before.len() as u64 {
+                let _ = std::fs::remove_file(&staged);
+                continue;
+            }
+            std::fs::rename(&staged, path).map_err(io)?;
+            return Ok(found);
+        }
+        Err(RawError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::other(
+                "the file kept growing while it was being rewritten; try again when it is quiet",
+            ),
+        })
+    }
+
     /// Every spool file under the root, oldest path first.
     ///
     /// Used by a rebuild, which has no database to ask what sessions exist.
@@ -248,6 +325,36 @@ impl RawSpool {
         collect_jsonl(&self.root, &mut found)?;
         found.sort();
         Ok(found)
+    }
+}
+
+/// Redact every string value inside `value`, in place, collecting rule names.
+fn redact_strings(
+    value: &mut serde_json::Value,
+    redactor: &anamnesis_core::sanitize::Redactor,
+    hits: &mut Vec<&'static str>,
+) {
+    match value {
+        serde_json::Value::String(text) => {
+            let redacted = redactor.redact(text);
+            // Only when the text changes: see `Store::redact_observations`
+            // on rules that match what they already masked.
+            if !redacted.is_clean() && redacted.text() != text.as_str() {
+                hits.extend_from_slice(redacted.hits());
+                *text = redacted.into_text();
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_strings(item, redactor, hits);
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            for (_, field) in fields.iter_mut() {
+                redact_strings(field, redactor, hits);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -478,5 +585,89 @@ mod tests {
         let path = spool.locate(&scope(), &session);
         assert!(path.starts_with(dir.path().join("default").join("widget").join("2026-08-25")));
         assert!(path.is_file());
+    }
+
+    /// Not a key; the shape the `AQ.` rule masks.
+    const KEY: &str = "AQ.testonlynotarealkey0123456789abcdefghijklmn";
+
+    /// A file as it looked before the rule existed: the observation was
+    /// sanitized by the rules there were, and the key went through.
+    fn spooled_before_the_rule(dir: &Path) -> (RawSpool, PathBuf) {
+        let spool = RawSpool::new(dir);
+        let session = session();
+        spool
+            .append(
+                &scope(),
+                &session,
+                &observation(&format!("use {KEY} for gemini")),
+            )
+            .unwrap();
+        spool
+            .append(&scope(), &session, &observation("cargo test"))
+            .unwrap();
+        let path = spool.locate(&scope(), &session);
+        // A half-written last line, which must survive byte for byte.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"{\"type\":\"observ").unwrap();
+        (spool, path)
+    }
+
+    #[test]
+    fn a_dry_run_over_a_spool_file_counts_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (spool, path) = spooled_before_the_rule(dir.path());
+        let before = std::fs::read(&path).unwrap();
+
+        let found = spool
+            .redact_file(&path, &anamnesis_core::sanitize::Redactor::new(), false)
+            .unwrap();
+
+        assert_eq!(
+            found.examined, 3,
+            "header and two observations, not the torn line"
+        );
+        assert_eq!(found.changed, 1);
+        assert_eq!(found.rules.get("google-auth-key"), Some(&1));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    /// The key is gone, every line still parses as the record it was, the
+    /// untouched lines are the same bytes, and the torn line is still there.
+    #[test]
+    fn applying_rewrites_only_the_value_and_keeps_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let (spool, path) = spooled_before_the_rule(dir.path());
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        spool
+            .redact_file(&path, &anamnesis_core::sanitize::Redactor::new(), true)
+            .unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+
+        assert!(!after.contains(KEY));
+        assert!(after.contains("[redacted:google-auth-key]"));
+        let before_lines: Vec<&str> = before.lines().collect();
+        let after_lines: Vec<&str> = after.lines().collect();
+        assert_eq!(before_lines.len(), after_lines.len());
+        assert_eq!(before_lines[0], after_lines[0], "the header was untouched");
+        assert_eq!(
+            before_lines[2], after_lines[2],
+            "the clean observation was untouched"
+        );
+        assert!(
+            after.ends_with("{\"type\":\"observ"),
+            "the torn line survived"
+        );
+        let records = spool.read_file(&path).unwrap();
+        assert_eq!(records.len(), 3, "every whole line still reads back");
+        assert!(!path.with_extension("jsonl.redacting").exists());
+
+        let again = spool
+            .redact_file(&path, &anamnesis_core::sanitize::Redactor::new(), true)
+            .unwrap();
+        assert_eq!(again.changed, 0);
     }
 }
