@@ -11,6 +11,7 @@
 //! said otherwise.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anamnesis_core::datadir::DataDir;
 use anamnesis_core::scope::resolve_scope;
@@ -259,7 +260,29 @@ pub fn cmd_mcp(repo: &std::path::Path, data_dir: Option<PathBuf>) -> anyhow::Res
     // model is a startup error someone sees rather than a warning buried in a
     // log file, the same reasoning `cmd_serve` applies to the LLM provider.
     let embed_config = anamnesis_llm::EmbedConfig::from_env();
-    let embedder = embed_config.build(&data.models())?;
+    //
+    // Except a hosted endpoint that does not answer yet. A harness starts this
+    // with the agent, and refusing to start takes every memory tool away for
+    // the session over the one stream allowed to be missing; the Ollama beside
+    // a server is exactly what is not up yet after a reboot. The reason is
+    // still said, on stderr, and the endpoint is asked again when a query
+    // needs it.
+    let embedder = match embed_config.build(&data.models()) {
+        Ok(embedder) => embedder,
+        Err(error) if embed_config.provider == anamnesis_llm::embed::EmbedProvider::Hosted => {
+            eprintln!(
+                "anamnesis: {} did not answer ({error}); starting without vectors, \
+                 asking again when a query needs one",
+                embed_config.url
+            );
+            Some(Arc::new(anamnesis_llm::hosted::Reconnecting::new(
+                embed_config.url.clone(),
+                embed_config.model.clone(),
+                embed_config.key.clone(),
+            )) as Arc<dyn anamnesis_llm::Embedder>)
+        }
+        Err(error) => return Err(error.into()),
+    };
 
     // Never stdout: the MCP transport owns stdout for protocol frames, so a
     // stray print here would corrupt the stream the same way a log line would

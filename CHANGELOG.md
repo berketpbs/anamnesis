@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `anamnesis install-mcp` **carries a hosted embedder's settings into the
+  registration**, and never its key. It used to carry none of them, on the
+  grounds that a hosted endpoint wants a key — and the one this project
+  recommends, nomic-embed-text in Ollama, wants none. The agent's server ran
+  without the vector stream, and running `install-mcp --write` again to change
+  anything else removed the variables somebody had added by hand. When a key
+  is set, the line says it was left out and where it has to be instead
+- **The MCP server starts when its embedding endpoint does not answer.** The
+  embedder is probed at startup, and an Ollama not yet up after a reboot made
+  the whole server fail — every memory tool gone for the session over the one
+  retrieval stream that is allowed to be missing. It now starts, says so on
+  stderr, and connects on the first query that needs a vector, trying again at
+  most every 30 seconds. `serve` still refuses to start without an answer
+
 ## [1.1.0] - 2026-09-13
 
 What changed since 1.0 is mostly what a page is written *from*. A session page
