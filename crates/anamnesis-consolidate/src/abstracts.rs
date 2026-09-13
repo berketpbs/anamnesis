@@ -58,35 +58,48 @@ impl std::fmt::Display for AbstractError {
 
 /// The human sentence out of a provider's error body, or the body's first line.
 fn brief(message: &str) -> String {
-    fn find(value: &Value) -> Option<String> {
+    fn find(value: &Value, key: &str) -> Option<String> {
         match value {
             Value::Object(map) => map
-                .get("message")
+                .get(key)
                 .and_then(Value::as_str)
                 .map(str::to_owned)
-                .or_else(|| map.values().find_map(find)),
-            Value::Array(items) => items.iter().find_map(find),
+                .or_else(|| map.values().find_map(|value| find(value, key))),
+            Value::Array(items) => items.iter().find_map(|value| find(value, key)),
             _ => None,
         }
     }
     // The body is not always JSON on its own: the provider layer appends
     // "(retry after 29s)" to it, and the whole no longer parses. So the first
     // JSON value is read from where it starts, and whatever follows is left.
-    let parsed = message
-        .find(['[', '{'])
-        .and_then(|start| {
-            serde_json::Deserializer::from_str(&message[start..])
-                .into_iter::<Value>()
-                .next()
-                .and_then(Result::ok)
-        })
-        .and_then(|value| find(&value));
-    let text = parsed.unwrap_or_else(|| message.to_owned());
+    let parsed = message.find(['[', '{']).and_then(|start| {
+        serde_json::Deserializer::from_str(&message[start..])
+            .into_iter::<Value>()
+            .next()
+            .and_then(Result::ok)
+    });
+    let text = parsed
+        .as_ref()
+        .and_then(|value| find(value, "message"))
+        .unwrap_or_else(|| message.to_owned());
+    // The first sentence: a quota message goes on to billing links, which say
+    // nothing about this run.
     let line = text.lines().next().unwrap_or_default().trim();
-    match line.char_indices().nth(200) {
-        Some((end, _)) => format!("{}…", &line[..end]),
-        None => line.to_owned(),
+    let sentence = match line.find(". ") {
+        Some(end) => &line[..=end],
+        None => line,
+    };
+    let mut brief = match sentence.char_indices().nth(200) {
+        Some((end, _)) => format!("{}…", &sentence[..end]),
+        None => sentence.to_owned(),
+    };
+    // Which limit, when the body names it. A per-minute limit and a per-day
+    // one read the same in the sentence and call for a minute's wait or a
+    // day's.
+    if let Some(quota) = parsed.as_ref().and_then(|value| find(value, "quotaId")) {
+        brief.push_str(&format!(" [{quota}]"));
     }
+    brief
 }
 
 /// Most words an abstract may run to.
@@ -97,7 +110,7 @@ fn brief(message: &str) -> String {
 /// vector is the long-page problem again at a smaller size.
 pub const MAX_ABSTRACT_WORDS: usize = 40;
 
-/// Words that, after "this" or "the", make an opening about the page itself.
+/// Words that, after "this", make an opening about the page itself.
 const ABOUT_THE_PAGE: &[&str] = &[
     "page",
     "document",
@@ -338,8 +351,9 @@ mod tests {
         let body = r#"[{
   "error": {
     "code": 429,
-    "message": "You exceeded your current quota, please check your plan.\n* Quota exceeded for metric: requests, limit: 5",
-    "status": "RESOURCE_EXHAUSTED"
+    "message": "You exceeded your current quota, please check your plan and billing details. For more information, head to the docs.\n* Quota exceeded for metric: requests, limit: 20",
+    "status": "RESOURCE_EXHAUSTED",
+    "details": [{"violations": [{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]}]
   }
 }]
  (retry after 29s)"#;
@@ -351,7 +365,8 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "the model answered 429: You exceeded your current quota, please check your plan."
+            "the model answered 429: You exceeded your current quota, please check your plan \
+             and billing details. [GenerateRequestsPerDayPerProjectPerModel-FreeTier]"
         );
         assert!(error.is_transient());
         assert!(
