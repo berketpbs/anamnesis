@@ -88,8 +88,13 @@ pub struct Symptoms {
     pub unwired: Vec<String>,
     /// Sessions examined, newest first: how many observations each holds.
     pub sessions: Vec<SessionFacts>,
-    /// Whether a model is configured to write pages.
-    pub model: Option<String>,
+    /// What the server's model answered the last time it did not answer with
+    /// a page, as `/whoami` reports it: the model's name and the reason,
+    /// `gemini-3.5-flash answered 400: Please pass a valid API key`.
+    ///
+    /// `None` when the server's latest request was answered, when nothing
+    /// answered, and for a server too old to say.
+    pub server_model_failure: Option<String>,
     /// Which build the server answering is, when one answered.
     ///
     /// `None` means nothing answered, which `status` is the command for. This
@@ -619,14 +624,33 @@ fn judge_pages(symptoms: &Symptoms) -> Vec<Finding> {
         return findings;
     }
 
-    // Two situations produce identical pages — no model configured for the
-    // server, and a model that was asked and failed — so the verdict names
-    // both and the remedy starts where they are told apart.
-    let hint = match &symptoms.model {
-        Some(provider) => format!(
-            " (this terminal has ANAMNESIS_LLM_PROVIDER={provider}, which the server does not inherit)"
+    // The server is the one process that asks the model, so when it heard a
+    // refusal that is the reason, and the remedy follows from it. This used to
+    // point at the terminal's environment ("which the server does not
+    // inherit"), which stopped being true when every command started reading
+    // `settings.env` and the credential store: on 2026-09-15 it sent somebody
+    // whose key had been refused for a day to compare environments.
+    let (hint, remedy) = match &symptoms.server_model_failure {
+        Some(failure) if refuses_the_key(failure) => (
+            format!("; the server's model: {failure}"),
+            "the key was refused: store a new one with `anamnesis key set ANAMNESIS_LLM_API_KEY`, \
+             confirm it with `anamnesis key check`, and restart the server — its next passes \
+             rewrite the counted pages"
+                .to_owned(),
         ),
-        None => String::new(),
+        Some(failure) => (
+            format!("; the server's model: {failure}"),
+            "once the model answers, the server rewrites the counted pages on its own passes; \
+             `anamnesis key check` asks it now, and `anamnesis reconsolidate --apply` rewrites \
+             them at once"
+                .to_owned(),
+        ),
+        None => (
+            String::new(),
+            "`anamnesis key check` asks the configured model whether it answers, and the server \
+             log says why a page fell back; then `anamnesis reconsolidate --apply` rewrites them"
+                .to_owned(),
+        ),
     };
     findings.push(Finding {
         severity: Severity::Thin,
@@ -635,13 +659,20 @@ fn judge_pages(symptoms: &Symptoms) -> Vec<Finding> {
             "{counted} of {} recent pages were written by counting — a tally of what happened rather than an account of it{hint}",
             summarised.len()
         ),
-        remedy: Some(
-            "the model lives in the server's environment, not this one: check the server log for why it fell back, then rewrite the pages with `anamnesis reconsolidate --apply`"
-                .to_owned(),
-        ),
+        remedy: Some(remedy),
     });
 
     findings
+}
+
+/// Whether a reason the server reported is a refused credential: a 401 or a
+/// 403, or a 400 whose sentence names the key — Google's way of saying it.
+fn refuses_the_key(failure: &str) -> bool {
+    let lower = failure.to_ascii_lowercase();
+    lower.contains("answered 401")
+        || lower.contains("answered 403")
+        || (lower.contains("answered 400")
+            && (lower.contains("api key") || lower.contains("auth key")))
 }
 
 /// Gather what is true on this machine, then say what it means.
@@ -650,12 +681,16 @@ pub fn cmd_doctor(server: &str, data_dir: Option<PathBuf>) -> anyhow::Result<()>
     let scope = resolve_scope(&cwd)?;
     let data = DataDir::resolve(data_dir)?;
 
+    let whoami = server_whoami(server);
     let mut symptoms = Symptoms {
-        model: crate::settings::var("ANAMNESIS_LLM_PROVIDER")
-            .filter(|value| !value.trim().is_empty()),
+        server_model_failure: whoami.as_ref().and_then(model_failure),
         server_answered: server_answers(server),
         server_build: server_build(server),
-        server_embedding: server_embedding(server),
+        server_embedding: whoami.as_ref().and_then(|body| {
+            body.get("embedding")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        }),
         this_build: anamnesis_core::build::IDENTITY.to_owned(),
         ..Symptoms::default()
     };
@@ -763,13 +798,14 @@ fn server_build(server: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Ask the server which model it embeds with.
+/// Ask the server what it does: which model it embeds with, and what its
+/// consolidation model last answered when it did not write a page.
 ///
-/// From `/whoami`, the answer `status` prints as `Vectors:`. A token is sent
-/// when this shell has one, since a server that requires tokens answers
-/// nothing without it; any failure, and a server that says it has no
-/// embedder, is `None` — which judges every complaint row rather than none.
-fn server_embedding(server: &str) -> Option<String> {
+/// A token is sent when this shell has one, since a server that requires
+/// tokens answers nothing without it. Any failure is `None`: for the embedder
+/// that judges every complaint row rather than none, and for the model it is
+/// no reason rather than a guessed one.
+fn server_whoami(server: &str) -> Option<serde_json::Value> {
     let client = probe_client().ok()?;
     let mut request = client.get(format!("{server}/whoami"));
     if let Ok(token) = std::env::var(anamnesis_web::auth::TOKEN_ENV) {
@@ -779,10 +815,21 @@ fn server_embedding(server: &str) -> Option<String> {
     if !response.status().is_success() {
         return None;
     }
-    let body: serde_json::Value = response.json().ok()?;
-    body.get("embedding")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
+    response.json().ok()
+}
+
+/// `gemini-3.5-flash answered 400: ...`, from a `/whoami` body.
+fn model_failure(body: &serde_json::Value) -> Option<String> {
+    let reason = body.get("consolidation_failure")?.get("reason")?.as_str()?;
+    Some(
+        match body
+            .get("consolidation")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some(model) => format!("{model} {reason}"),
+            None => reason.to_owned(),
+        },
+    )
 }
 
 /// The lifecycle moments a settings file wires to anamnesis.
@@ -853,10 +900,7 @@ mod tests {
     }
 
     fn wired(agent: &str, moments: &[EventKind]) -> Symptoms {
-        let mut symptoms = Symptoms {
-            model: Some("gemini-2.5-flash".to_owned()),
-            ..Symptoms::default()
-        };
+        let mut symptoms = Symptoms::default();
         symptoms.wired.insert(agent.to_owned(), moments.to_vec());
         symptoms
     }
@@ -1294,14 +1338,89 @@ mod tests {
             .expect("a pages finding");
         assert_eq!(pages.severity, Severity::Thin);
         assert!(pages.verdict.contains("written by counting"), "{pages:#?}");
+        let remedy = pages.remedy.as_ref().unwrap();
+        assert!(remedy.contains("anamnesis key check"), "{pages:#?}");
         assert!(
-            pages
-                .remedy
-                .as_ref()
-                .unwrap()
-                .contains("server's environment"),
+            !remedy.contains("environment") && !pages.verdict.contains("inherit"),
+            "the terminal's environment is not where the server's model comes from any more: {pages:#?}"
+        );
+    }
+
+    /// What doctor said on 2026-09-15 with the key refused for a day: compare
+    /// this terminal's environment with the server's. The server knew the
+    /// reason; now the finding carries it, and the remedy is the one for it.
+    #[test]
+    fn a_refused_key_the_server_heard_is_the_reason_and_the_remedy() {
+        let body = serde_json::json!({
+            "consolidation": "gemini-3.5-flash",
+            "consolidation_failure": {
+                "at": "2026-09-14T21:47:35Z",
+                "status": 400,
+                "reason": "answered 400: Please pass a valid API key",
+            },
+        });
+        let mut symptoms = wired("claude-code", &EVERY_MOMENT);
+        symptoms.server_model_failure = model_failure(&body);
+        symptoms.sessions = vec![SessionFacts {
+            summary: Some(SummarySource::Counted),
+            ..session(&[(EventKind::UserPrompt, 1), (EventKind::ToolUse, 3)])
+        }];
+
+        let findings = diagnose(&symptoms);
+        let pages = findings
+            .iter()
+            .find(|f| f.subject == "pages")
+            .expect("a pages finding");
+
+        assert!(
+            pages.verdict.ends_with(
+                "; the server's model: gemini-3.5-flash answered 400: Please pass a valid API key"
+            ),
             "{pages:#?}"
         );
+        let remedy = pages.remedy.as_ref().unwrap();
+        assert!(remedy.contains("key set ANAMNESIS_LLM_API_KEY"), "{remedy}");
+        assert!(remedy.contains("restart the server"), "{remedy}");
+    }
+
+    /// Any other refusal is named, and the remedy is waiting for the model
+    /// rather than replacing a key that works.
+    #[test]
+    fn another_refusal_is_named_without_blaming_the_key() {
+        for reason in [
+            "answered 503: The model is overloaded.",
+            "answered 429: You exceeded your current quota. [GenerateRequestsPerDayPerProjectPerModel-FreeTier]",
+            "answered 400: Invalid JSON payload received.",
+        ] {
+            assert!(!refuses_the_key(reason), "{reason}");
+            let mut symptoms = wired("claude-code", &EVERY_MOMENT);
+            symptoms.server_model_failure = Some(format!("gemini-3.5-flash {reason}"));
+            symptoms.sessions = vec![SessionFacts {
+                summary: Some(SummarySource::Counted),
+                ..session(&[(EventKind::UserPrompt, 1)])
+            }];
+            let findings = diagnose(&symptoms);
+            let pages = findings.iter().find(|f| f.subject == "pages").unwrap();
+            assert!(pages.verdict.contains(reason), "{pages:#?}");
+            assert!(
+                !pages.remedy.as_ref().unwrap().contains("key set"),
+                "{pages:#?}"
+            );
+        }
+        for reason in [
+            "answered 400: Invalid Auth key.",
+            "answered 401: invalid x-api-key",
+            "answered 403: Your API key was reported as leaked.",
+        ] {
+            assert!(refuses_the_key(reason), "{reason}");
+        }
+        assert_eq!(
+            model_failure(
+                &serde_json::json!({"consolidation": "m", "consolidation_failure": null})
+            ),
+            None
+        );
+        assert_eq!(model_failure(&serde_json::json!({"auth": "open"})), None);
     }
 
     /// A terminal with no provider exported says nothing about the server, so
@@ -1310,7 +1429,7 @@ mod tests {
     #[test]
     fn a_shell_without_a_provider_is_not_evidence_against_the_server() {
         let mut symptoms = wired("claude-code", &EVERY_MOMENT);
-        symptoms.model = None;
+        symptoms.server_model_failure = None;
         symptoms.sessions = vec![SessionFacts {
             summary: Some(SummarySource::Model),
             with_results: 3,
@@ -1494,10 +1613,7 @@ mod tests {
     /// it is the one case where every other check would report a quiet week.
     #[test]
     fn a_project_with_no_hooks_is_told_so_first() {
-        let symptoms = Symptoms {
-            model: Some("gemini-2.5-flash".to_owned()),
-            ..Symptoms::default()
-        };
+        let symptoms = Symptoms::default();
 
         let findings = diagnose(&symptoms);
 
