@@ -52,6 +52,37 @@ and v1.0.0 were built on the newest runners: their Linux binary needs glibc
 C++ Redistributable, so pinning `ANAMNESIS_VERSION` to either on a machine
 without them stops at the check above, which says so.
 
+### With a package manager
+
+```bash
+# Homebrew, on macOS or Linux (x86-64)
+brew tap berketpbs/anamnesis https://github.com/berketpbs/anamnesis
+brew install berketpbs/anamnesis/anamnesis
+```
+
+```powershell
+# Scoop, on Windows
+scoop bucket add anamnesis https://github.com/berketpbs/anamnesis
+scoop install anamnesis/anamnesis
+```
+
+```bash
+# cargo-binstall, anywhere a release is built for
+cargo binstall --git https://github.com/berketpbs/anamnesis anamnesis-cli
+```
+
+The tap and the bucket are this repository: the formula is
+`HomebrewFormula/anamnesis.rb` and the manifest `bucket/anamnesis.json`, both
+written from a release's `SHA256SUMS` by `packaging/render.sh`, so
+`brew upgrade` and `scoop update` install a release only once its manifests
+have been rendered and merged. `cargo binstall` needs `--git` because the name
+`anamnesis` on crates.io belongs to another project; it fetches the same
+release archive the install scripts do.
+
+Run `anamnesis setup` after an upgrade. It reports a hook or a service naming
+a binary other than the one it runs as, which is what an upgrade that moved the
+binary leaves behind.
+
 ### From a Release
 
 Every tagged version has binaries attached to it on the

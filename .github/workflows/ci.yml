@@ -229,6 +229,85 @@ jobs:
           & "$env:ANAMNESIS_INSTALL_DIR\anamnesis.exe" --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+  # The manifests in HomebrewFormula/ and bucket/ are checked the way the
+  # install scripts are: by the package manager a reader would use, installing
+  # from this checkout as a tap or a bucket. A formula that parses and names a
+  # hash nobody published is still a formula that fails on somebody's machine.
+  packages:
+    name: packages (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      # The files are rendered, not written: what is committed has to be what
+      # render.sh makes of the release they name, or the next release's render
+      # would quietly undo a hand edit.
+      - name: The manifests are what render.sh writes
+        if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shellcheck packaging/render.sh
+          version=$(sed -n 's/^  version "\(.*\)"$/\1/p' HomebrewFormula/anamnesis.rb)
+          gh release download "v$version" --repo "$GITHUB_REPOSITORY" -p SHA256SUMS -D "$RUNNER_TEMP"
+          sh packaging/render.sh "v$version" "$RUNNER_TEMP/SHA256SUMS" "$RUNNER_TEMP/rendered"
+          diff -u "$RUNNER_TEMP/rendered/HomebrewFormula/anamnesis.rb" HomebrewFormula/anamnesis.rb
+          diff -u "$RUNNER_TEMP/rendered/bucket/anamnesis.json" bucket/anamnesis.json
+
+      - name: Install from the tap
+        if: runner.os != 'Windows'
+        run: |
+          if ! command -v brew > /dev/null; then
+            eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          fi
+          brew tap berketpbs/anamnesis "$GITHUB_WORKSPACE"
+          brew install berketpbs/anamnesis/anamnesis
+          brew test berketpbs/anamnesis/anamnesis
+          anamnesis --version
+          # The path a hook would be wired to. Printed rather than asserted
+          # until the release this formula names carries the fix that keeps
+          # it at brew's link instead of the versioned Cellar directory.
+          repo=$(mktemp -d) && cd "$repo" && git init -q
+          anamnesis install-hooks | grep -m1 'hook --agent'
+
+      - name: Install from the bucket
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          Invoke-RestMethod https://get.scoop.sh -OutFile "$env:RUNNER_TEMP\install-scoop.ps1"
+          & "$env:RUNNER_TEMP\install-scoop.ps1" -RunAsAdmin
+          $env:PATH = "$env:USERPROFILE\scoop\shims;$env:PATH"
+          scoop bucket add anamnesis "$env:GITHUB_WORKSPACE"
+          scoop install anamnesis/anamnesis
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          anamnesis --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # From the checkout's metadata, for the version the checkout names. A
+      # release PR names a version with no archives yet, and says so.
+      - name: Install with cargo binstall
+        if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          if ! gh release view "v$version" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "::notice::v$version is not released yet; nothing for binstall to fetch"
+            exit 0
+          fi
+          curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+          # Outside the checkout, so rust-toolchain.toml does not install a
+          # toolchain for a command that compiles nothing.
+          cd "$RUNNER_TEMP"
+          cargo binstall --no-confirm --disable-strategies compile \
+            --manifest-path "$GITHUB_WORKSPACE/crates/anamnesis-cli/Cargo.toml" \
+            --install-path "$RUNNER_TEMP/binstall" anamnesis-cli
+          "$RUNNER_TEMP/binstall/anamnesis" --version
+
   # The build every check above implies, run once on the platform the project
   # is actually developed on. Windows is where the paths, the MSVC linker, and
   # the PowerShell BOM handling differ, so a green Linux run is not evidence

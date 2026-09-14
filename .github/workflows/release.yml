@@ -341,3 +341,59 @@ jobs:
             --title "${GITHUB_REF#refs/tags/}" \
             --notes "Binaries for Linux, macOS (Intel and Apple silicon) and Windows. Verify with SHA256SUMS. What changed is in CHANGELOG.md." \
             dist/*
+
+  # The Homebrew formula and the Scoop manifest name one release's archives by
+  # hash, so every release leaves them one behind until they are rendered
+  # again. This renders them from the checksums the release is built with, on
+  # a dispatched run too — the rendering is most of what can break, and a
+  # rehearsal that skipped it would say nothing about it. Only a tag pushes the
+  # result, as a branch for a pull request rather than a commit to main: the
+  # manifests change what `brew upgrade` installs for everybody, and that goes
+  # through the same review as anything else that does.
+  manifests:
+    name: package manifests
+    needs: [build, publish]
+    if: ${{ !cancelled() && needs.build.result == 'success' && (needs.publish.result == 'success' || needs.publish.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # On a tag, main: the branch this pushes is for a pull request into it.
+      # On a dispatched run, the branch being rehearsed.
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ startsWith(github.ref, 'refs/tags/') && 'main' || github.ref }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: anamnesis-*
+          merge-multiple: true
+
+      - name: Render
+        id: render
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            version="${GITHUB_REF#refs/tags/}"
+          else
+            version="v$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          fi
+          (cd dist && cat *.sha256 > SHA256SUMS)
+          sh packaging/render.sh "$version" dist/SHA256SUMS
+          git diff --stat
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Push them for a pull request
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          version="${{ steps.render.outputs.version }}"
+          branch="packaging/$version"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add HomebrewFormula bucket
+          git commit -m "packaging: Homebrew and Scoop manifests for $version"
+          git push origin "$branch"
+          echo "::notice::manifests for $version are on $branch; open a pull request from it to main"
