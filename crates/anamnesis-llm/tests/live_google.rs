@@ -9,18 +9,21 @@
 //! about somebody else's service, and the only honest way to hold them is to
 //! ask it.
 //!
-//! Ignored because it needs a key and spends money. Run it with one, without
-//! putting the key on a command line:
-//!
-//! ```text
-//! powershell -NoProfile -File "$env:APPDATA\anamnesis\bin\with-llm-env.ps1" -- \
-//!     cargo test -p anamnesis-llm --test live_google -- --ignored --nocapture
-//! ```
-//!
-//! Or, anywhere the key is already exported:
+//! Ignored because they need the network, and all but one need a key and spend
+//! money. The quick check of a stored key is `anamnesis key check`, which reads
+//! the credential store; these tests read only the environment, since this
+//! crate does not know about the store:
 //!
 //! ```text
 //! GEMINI_API_KEY=AQ.... cargo test -p anamnesis-llm --test live_google -- --ignored --nocapture
+//! ```
+//!
+//! The one that needs no key asks with a key that cannot work, and holds the
+//! shape of Google's refusal — the thing every "the key was refused" line in
+//! this project is read from:
+//!
+//! ```text
+//! cargo test -p anamnesis-llm --test live_google a_key_google_does_not_know -- --ignored
 //! ```
 
 use anamnesis_llm::{Completion, LlmConfig, Provider};
@@ -48,9 +51,71 @@ fn key() -> String {
     }
 
     panic!(
-        "no key in the environment; run this under with-llm-env.ps1, or export \
-         GEMINI_API_KEY for the shell that runs it"
+        "no key in the environment; export GEMINI_API_KEY for the shell that runs \
+         this (a key kept with `anamnesis key set` is not read here)"
     )
+}
+
+/// What Google says to a key it does not know, read the way the server reads
+/// it.
+///
+/// The refusal arrives as a one-element JSON array naming its kind in
+/// `status`, and for a day this project logged it as `400 (unknown)` and a raw
+/// body across eight lines. Costs nothing: the request is refused before a
+/// model is involved.
+#[tokio::test]
+#[ignore = "needs the network; no key"]
+async fn a_key_google_does_not_know_is_refused_in_its_own_words() {
+    // Both shapes AI Studio has handed out. Google words the refusal
+    // differently for each — found by running this: an `AQ.` key it does not
+    // know is "Invalid Auth key.", where the revoked one this machine had was
+    // "Please pass a valid API key".
+    for key in [
+        "AQ.this-key-is-not-a-key-and-google-knows",
+        "AIzaSyThisKeyIsNotAKeyAndGoogleKnows0000",
+    ] {
+        let vars: Vec<(&str, String)> = vec![
+            ("ANAMNESIS_LLM_PROVIDER", "google".to_owned()),
+            ("ANAMNESIS_LLM_API_KEY", key.to_owned()),
+            ("ANAMNESIS_LLM_MODEL", model()),
+            ("ANAMNESIS_LLM_MAX_RETRIES", "0".to_owned()),
+        ];
+        let provider = LlmConfig::from_vars(|name| {
+            vars.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.clone())
+        })
+        .expect("google configures")
+        .build()
+        .expect("provider builds")
+        .expect("google is a provider");
+
+        let error = provider
+            .complete(&request())
+            .await
+            .expect_err("an invalid key is refused");
+        eprintln!("google said to {}…: {error}", &key[..4]);
+
+        let anamnesis_llm::LlmError::Api {
+            status,
+            kind,
+            message,
+        } = &error
+        else {
+            panic!("expected an api error, got {error:?}");
+        };
+        assert!(
+            matches!(status, 400 | 401 | 403),
+            "a refused key is a client error: {error}"
+        );
+        assert_ne!(kind, "unknown", "the kind was not read: {error}");
+        assert!(
+            message.to_ascii_lowercase().contains("key"),
+            "the sentence names the key: {error}"
+        );
+        assert!(!message.contains('\n'), "one line: {message:?}");
+        assert!(!error.is_retryable());
+    }
 }
 
 /// The provider as configuration builds it, effort included. Assembling a

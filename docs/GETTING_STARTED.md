@@ -262,6 +262,27 @@ consolidation — a model can answer this and refuse every real session with a
 `503` — so read `anamnesis status` after the next session ends: its `Why:` line
 carries what the model said if it did not write the page.
 
+Putting a new key in, in order:
+
+1. `anamnesis key set ANAMNESIS_LLM_API_KEY` (or the provider's own variable).
+2. `anamnesis key check` — every model ✅. A refused key reads `the key was
+   refused (400): ...`; Google words it `Please pass a valid API key` or
+   `Invalid Auth key.` depending on the key's shape.
+3. Restart the server, which reads its key only when it starts. Under
+   `anamnesis service`: on Windows stop the process whose command line ends in
+   `serve` — not the `mcp` one a harness started — and the task starts it again
+   within a minute; on Linux `systemctl --user restart anamnesis.service`; on
+   macOS `launchctl kickstart -k gui/$(id -u)/dev.anamnesis.server`.
+4. `anamnesis status`. Sessions whose pages were counted while the key was
+   refused are asked about again by the server's next pass, a few at a time;
+   `Why:` disappears once a request is answered, and the `Summaries:` count
+   moves as the pages are rewritten.
+
+On a free tier with a daily quota, a backlog of counted sessions can spend the
+day's requests in minutes. A refusal for a quota counted per day is asked once
+and handed to the next model in `ANAMNESIS_LLM_FALLBACK_PROVIDERS`, and the
+rest waits for tomorrow.
+
 It is read under the name of the variable it stands for, after the environment
 and the settings file, by every command. The store is the account's and the
 settings file is one data directory's, so a key stored as
