@@ -281,7 +281,14 @@ jobs:
           Invoke-RestMethod https://get.scoop.sh -OutFile "$env:RUNNER_TEMP\install-scoop.ps1"
           & "$env:RUNNER_TEMP\install-scoop.ps1" -RunAsAdmin
           $env:PATH = "$env:USERPROFILE\scoop\shims;$env:PATH"
-          scoop bucket add anamnesis "$env:GITHUB_WORKSPACE"
+          # Scoop takes a bucket only by a URL ending in host/user/repo, so the
+          # checkout goes in as file:///D:/a/..., which matches; D:\a\... does
+          # not. Git then reads a repository another account checked out,
+          # which it refuses unless told the directory is safe.
+          git config --global --add safe.directory '*'
+          $bucket = 'file:///' + ($env:GITHUB_WORKSPACE -replace '\\', '/')
+          scoop bucket add anamnesis $bucket
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           scoop install anamnesis/anamnesis
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           anamnesis --version
