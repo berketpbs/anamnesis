@@ -23,6 +23,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   here
 
 ### Fixed
+- **`ANAMNESIS_LLM_API_KEY` no longer selects Anthropic.** It is the key of the
+  provider `ANAMNESIS_LLM_PROVIDER` names, and `anamnesis key set` keeps it in
+  the account's credential store, which every data directory on the machine
+  reads, while the provider is named per data directory in `settings.env`. In
+  a data directory without that line the stored key still selected Anthropic:
+  a server started on 2026-09-14 for an eval, in a directory of its own, sent
+  this machine's Gemini key to api.anthropic.com with a session's transcript
+  and logged a 401 every minute. With no provider named the key is now sent
+  nowhere, pages are counted, and `serve` logs which key was set and not used.
+  `ANTHROPIC_API_KEY` still selects Anthropic, and is the key sent when both
+  are set. A named provider also stops taking another provider's variable:
+  `openai` read `ANTHROPIC_API_KEY` when no stored key was set, and now reads
+  `OPENAI_API_KEY`
 - **The server stops asking a model that does not answer every minute.** The
   pass that asks again about sessions whose page was counted ran each minute
   over the three oldest, whatever had happened to them. On 2026-09-14 the
