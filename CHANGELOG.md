@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **The install scripts try a download again when GitHub answers with a server
+  error.** On the day 1.1.1 was released, both CI runs of the install job
+  failed on Linux, macOS and Windows with `504 Gateway Timeout` from the
+  release download, while `brew`, which retries, fetched the same files in the
+  same runs. `install.sh` passes `--retry 5` to curl (timeouts, 408, 429 and
+  5xx, backing off from a second); `install.ps1`, on a Windows PowerShell with
+  no retry of its own, tries a server error, a 408, a 429 or a connection that
+  got no answer five times, waiting 1, 2, 4 and 8 seconds. A 404 fails at once.
+  Both were run against a local server answering 504 twice: the file arrived on
+  the third request, and a 404 was asked for once
 - **Hooks, the MCP registration and the service name the binary by the path it
   was run as**, when that path leads to the same file. They named the path
   `current_exe` reports, and on Linux that has every symlink resolved: an

@@ -30,6 +30,26 @@ function Fail([string] $message) {
     throw "anamnesis install: $message"
 }
 
+# GitHub answers a release download with a 504 now and then: on 2026-09-14 both
+# CI runs of the install job failed that way on three systems while brew, which
+# retries, fetched the same files in the same runs. A server error, a 408, a 429
+# or a connection that got no answer is tried again, waiting 1, 2, 4 and 8
+# seconds; anything else - a 404 for a release that does not exist - fails at
+# once. Windows PowerShell 5.1 has no retry of its own.
+function Invoke-Retried([scriptblock] $action) {
+    for ($attempt = 1; ; $attempt++) {
+        try {
+            return & $action
+        } catch [Net.WebException] {
+            $status = 0
+            if ($_.Exception.Response) { $status = [int] $_.Exception.Response.StatusCode }
+            $transient = ($status -eq 0) -or ($status -ge 500) -or ($status -eq 408) -or ($status -eq 429)
+            if (-not $transient -or $attempt -ge 5) { throw }
+            Start-Sleep -Seconds ([int] [math]::Pow(2, $attempt - 1))
+        }
+    }
+}
+
 if (-not [Environment]::Is64BitOperatingSystem) {
     Fail 'no release is built for 32-bit Windows'
 }
@@ -39,12 +59,13 @@ if (-not [Environment]::Is64BitOperatingSystem) {
 $version = $env:ANAMNESIS_VERSION
 if (-not $version) {
     try {
-        $request = [Net.HttpWebRequest]::Create("https://github.com/$repo/releases/latest")
-        $request.AllowAutoRedirect = $false
-        $request.Method = 'HEAD'
-        $response = $request.GetResponse()
-        $location = $response.Headers['Location']
-        $response.Close()
+        $location = Invoke-Retried {
+            $request = [Net.HttpWebRequest]::Create("https://github.com/$repo/releases/latest")
+            $request.AllowAutoRedirect = $false
+            $request.Method = 'HEAD'
+            $response = $request.GetResponse()
+            try { $response.Headers['Location'] } finally { $response.Close() }
+        }
     } catch {
         Fail "could not reach github.com to find the latest release: $($_.Exception.Message)"
     }
@@ -75,8 +96,8 @@ New-Item -ItemType Directory -Force $work | Out-Null
 try {
     Write-Host "anamnesis $version for $target"
     try {
-        Invoke-WebRequest -UseBasicParsing "$base/$archive" -OutFile (Join-Path $work $archive)
-        Invoke-WebRequest -UseBasicParsing "$base/SHA256SUMS" -OutFile (Join-Path $work 'SHA256SUMS')
+        Invoke-Retried { Invoke-WebRequest -UseBasicParsing "$base/$archive" -OutFile (Join-Path $work $archive) }
+        Invoke-Retried { Invoke-WebRequest -UseBasicParsing "$base/SHA256SUMS" -OutFile (Join-Path $work 'SHA256SUMS') }
     } catch {
         Fail "could not download $version from $base`: $($_.Exception.Message)"
     }
