@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Hooks, the MCP registration and the service name the binary by the path it
+  was run as**, when that path leads to the same file. They named the path
+  `current_exe` reports, and on Linux that has every symlink resolved: an
+  anamnesis installed by Homebrew and run as `…/bin/anamnesis` wrote
+  `…/Cellar/anamnesis/<version>/bin/anamnesis` into every file it wired, the
+  directory `brew upgrade` removes, leaving hooks that no longer start and
+  settings that look right. A shim, a copy, or a name not on `PATH` still gets
+  the path `current_exe` gives
+
 ## [1.1.1] - 2026-09-14
 
 1.1.0's binaries started only on machines like the ones that built them: a

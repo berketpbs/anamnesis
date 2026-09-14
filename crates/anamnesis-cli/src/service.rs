@@ -463,7 +463,7 @@ pub fn cmd_service_install(
     let named = binary.is_some();
     let binary = match binary {
         Some(binary) => binary,
-        None => std::env::current_exe()?,
+        None => crate::binary::stable_path()?,
     };
     let launch = Launch::new(binary, data_dir.as_deref(), port);
 

@@ -233,9 +233,7 @@ fn start(
     };
     let program = program.unwrap_or_else(|| default_program.to_owned());
 
-    let binary = std::env::current_exe()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|_| "anamnesis".to_owned());
+    let binary = crate::binary::stable_command();
     let wiring = wiring_for(agent, root, &binary);
 
     match decide(server_reachable(server), server, wiring, agent, anyway) {

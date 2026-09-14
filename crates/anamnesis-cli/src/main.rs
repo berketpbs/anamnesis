@@ -11,6 +11,7 @@ mod abstracts;
 mod archive;
 mod audit;
 mod bench;
+mod binary;
 mod bootstrap;
 mod capture;
 mod cli;

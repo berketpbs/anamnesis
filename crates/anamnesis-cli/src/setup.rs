@@ -94,9 +94,7 @@ fn install_opencode_plugin(
     write: bool,
     settings: Option<PathBuf>,
 ) -> anyhow::Result<()> {
-    let binary = std::env::current_exe()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|_| "anamnesis".to_owned());
+    let binary = crate::binary::stable_command();
     let source = opencode::plugin(&binary, server);
     let path = match settings {
         Some(path) => path,
@@ -185,9 +183,7 @@ pub fn cmd_install_hooks(
         return Ok(());
     };
 
-    let binary = std::env::current_exe()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "anamnesis".to_owned());
+    let binary = crate::binary::stable_command();
     let config = hooks::hook_config(&harness, &hooks::hook_command(&binary, agent, server));
 
     if !write {
@@ -403,7 +399,7 @@ pub fn cmd_install_mcp(
         return Ok(());
     };
 
-    let binary = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("anamnesis"));
+    let binary = crate::binary::stable_path().unwrap_or_else(|_| PathBuf::from("anamnesis"));
     let repo = match repo {
         Some(repo) => repo,
         None => std::env::current_dir()?,
