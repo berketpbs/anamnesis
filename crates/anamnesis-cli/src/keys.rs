@@ -177,6 +177,7 @@ pub fn cmd_key_set(name: &str, from_stdin: bool) -> anyhow::Result<()> {
         service()
     );
     println!("  Every anamnesis command reads it when {name} is not in its environment.");
+    println!("  `anamnesis key check` asks the model with it, before a server depends on it.");
     println!("  A running server read its settings when it started: restart it to use this.");
     if std::env::var(name).is_ok() {
         println!();

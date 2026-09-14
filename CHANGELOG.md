@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`anamnesis key check`** asks each configured model one small question with
+  the key a server started now would use, and says what came back: the key
+  accepted, refused, or out of today's quota, a model that does not exist, a
+  service that did not answer. Every link of a fallback chain is asked on its
+  own and once, since a chain hides the link that failed and a retry spends
+  quota on the answer already given, and the line names which variable the
+  key came from and whether from this shell or the credential store. It exits
+  non-zero when any model could not be shown to work. Between `key set` and a
+  server restarted to read the key there was nothing to run; on 2026-09-14 a
+  key that had stopped working was found a day later in a log. Run on this
+  machine, it named the stored Gemini key as refused for both models in one
+  request each
 - **`status` says what the model answered when it did not answer with a
   page.** The `Summaries:` line reads the sessions, and on 2026-09-14 it said
   exactly what they showed: "the last 4 were counted, the model is not

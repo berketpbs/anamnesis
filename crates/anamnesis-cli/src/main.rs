@@ -20,6 +20,7 @@ mod evals;
 mod format;
 mod hooks;
 mod improve;
+mod key_check;
 mod keys;
 mod lint;
 mod mcp_config;
@@ -333,6 +334,7 @@ fn run() -> anyhow::Result<()> {
         Commands::Key { action } => match action {
             cli::KeyAction::Set { name, stdin } => keys::cmd_key_set(&name, stdin)?,
             cli::KeyAction::List => keys::cmd_key_list()?,
+            cli::KeyAction::Check => key_check::cmd_key_check()?,
             cli::KeyAction::Forget { name } => keys::cmd_key_forget(&name)?,
         },
         Commands::Eval {
