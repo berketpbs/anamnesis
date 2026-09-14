@@ -51,7 +51,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   catch; CI runs that. A memory-arm probe is counted only when the page of its
   planting session was written by a model and the MCP server was connected.
   Tried on two sessions: hooks, MCP, page tracking and the report worked, at
-  about ten cents a session with Haiku 4.5
+  about ten cents a session with Haiku 4.5. A run first asks the memory arm's
+  model through `anamnesis key check`, with the settings its server will
+  read, and stops before any session when a model cannot be shown to work,
+  since every probe after a counted page is excluded; `--skip-model-check`
+  starts anyway
 - **Homebrew, Scoop and cargo-binstall.** This repository is the tap and the
   bucket: `HomebrewFormula/anamnesis.rb` (macOS on both architectures, Linux
   x86-64) and `bucket/anamnesis.json`, both written by `packaging/render.sh`

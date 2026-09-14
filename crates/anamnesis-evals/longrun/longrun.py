@@ -430,6 +430,58 @@ def version_of(command: list[str]) -> str:
         return f"unavailable: {error}"
 
 
+def model_check_verdict(returncode: int, output: str) -> tuple[bool, str]:
+    """Read `anamnesis key check`: whether the memory arm's model can be shown
+    to work, and one line saying why not.
+
+    A binary from before the command answers with clap's usage error, which is
+    not a verdict about the key, and is named as what it is.
+    """
+    if returncode == 0:
+        return True, "every model answered"
+    if "unrecognized subcommand" in output or "unexpected argument" in output:
+        return False, "this anamnesis has no `key check`; use a newer build or pass --skip-model-check"
+    # Without its mark: the reason is printed, and on a Windows console in a
+    # legacy code page (cp1254 on the machine this runs on) printing "❌"
+    # raised UnicodeEncodeError — at the one moment the run had to say why it
+    # stopped.
+    refusals = [line.strip() for line in output.splitlines() if line.strip().startswith(("❌", "⚠"))]
+    if refusals:
+        return False, refusals[0].lstrip("❌⚠️").strip()
+    last = [line.strip() for line in output.splitlines() if line.strip()]
+    return False, last[-1] if last else f"key check exited {returncode} and said nothing"
+
+
+def model_check(binary: Path, settings: Path, scratch: Path) -> dict:
+    """Ask the memory arm's model, with the settings its server will read,
+    before anything is spent on sessions.
+
+    The report excludes every probe whose planting session's page was counted,
+    so a run under a key that is refused costs two hours and a few dollars and
+    measures nothing. On 2026-09-14 that was the state of this machine's key.
+    """
+    data = scratch / "data"
+    data.mkdir(parents=True)
+    shutil.copy2(settings, data / "settings.env")
+    env = dict(os.environ, ANAMNESIS_DATA_DIR=str(data))
+    try:
+        proc = subprocess.run(
+            [str(binary), "key", "check"],
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5 * 60,
+        )
+        returncode, output = proc.returncode, proc.stdout + proc.stderr
+    except (OSError, subprocess.TimeoutExpired) as error:
+        returncode, output = -1, f"key check did not finish: {error}"
+    (scratch / "key-check.txt").write_text(output, encoding="utf-8")
+    ok, reason = model_check_verdict(returncode, output)
+    return {"ok": ok, "reason": reason, "returncode": returncode}
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     scenario = load_scenario()
     claude = shutil.which(args.claude) or args.claude
@@ -466,6 +518,25 @@ def cmd_run(args: argparse.Namespace) -> int:
     write_json(results_path, results)
     print(f"run {run_id}: {', '.join(arms)} on {results['claude']}, {results['anamnesis']}")
 
+    # First, because it is the cheapest thing that can make the whole run
+    # worthless, and the isolation check below already spends an agent call.
+    settings = Path(args.settings_env) if args.settings_env else live_data_dir() / "settings.env"
+    if "memory" in arms and args.settings_env != "none" and not args.skip_model_check:
+        if not settings.exists():
+            print(f"  no settings.env at {settings}; the memory arm would run without a model", file=sys.stderr)
+            return 3
+        checked = model_check(binary, settings, run_dir / "model-check")
+        results["model_check"] = checked
+        write_json(results_path, results)
+        print(f"  model: {checked['reason']}")
+        if not checked["ok"]:
+            print(
+                "  the memory arm's model cannot be shown to work, so every page would be counted and "
+                f"every probe excluded; stopping. See {run_dir / 'model-check' / 'key-check.txt'}",
+                file=sys.stderr,
+            )
+            return 3
+
     if not args.skip_isolation_check:
         isolation = isolation_check(claude, args.model, run_dir / "isolation")
         results["isolation"] = isolation
@@ -488,7 +559,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         if "memory" in arms:
             data = run_dir / "memory" / "data"
             data.mkdir()
-            settings = Path(args.settings_env) if args.settings_env else live_data_dir() / "settings.env"
             if args.settings_env != "none" and settings.exists():
                 shutil.copy2(settings, data / "settings.env")
                 results["settings_env"] = str(settings)
@@ -685,6 +755,34 @@ def cmd_selftest(_: argparse.Namespace) -> int:
         print(f"FAIL summarize_stream: {wrong}")
         return 1
     print("ok   summarize_stream reads turns, tokens, tool errors and memory calls")
+
+    # What `key check` printed on this machine on 2026-09-15, and the two
+    # other things it can come back as.
+    refused = (
+        "🔑 Checking the model key\n\n"
+        "  model    gemini-3.5-flash (https://generativelanguage.googleapis.com/v1beta/openai)\n"
+        "  key      ANAMNESIS_LLM_API_KEY, from the credential store\n"
+        "  ❌ the key was refused (400): Please pass a valid API key\n\n"
+        "Error: 1 of 1 model(s) could not be shown to work\n"
+    )
+    cases = [
+        ((0, "  ✅ answered, as gemini-3.5-flash: the key works\n"), (True, "every model answered")),
+        ((1, refused), (False, "the key was refused (400): Please pass a valid API key")),
+        (
+            (1, "  ⚠️  the service did not answer (503): overloaded — this says nothing about the key; try again\n"),
+            (False, "the service did not answer (503): overloaded — this says nothing about the key; try again"),
+        ),
+        (
+            (2, "error: unrecognized subcommand 'check'\n\nUsage: anamnesis key <COMMAND>\n"),
+            (False, "this anamnesis has no `key check`; use a newer build or pass --skip-model-check"),
+        ),
+    ]
+    for (returncode, output), expected in cases:
+        got = model_check_verdict(returncode, output)
+        if got != expected:
+            print(f"FAIL model_check_verdict({returncode}): {got!r}, expected {expected!r}")
+            return 1
+    print("ok   model_check_verdict stops a run on a refused key and on a binary without key check")
     return checks.selftest()
 
 
@@ -709,6 +807,11 @@ def main() -> int:
         help="settings.env for the memory arm's server; this machine's by default, 'none' for no model",
     )
     run.add_argument("--skip-isolation-check", action="store_true")
+    run.add_argument(
+        "--skip-model-check",
+        action="store_true",
+        help="start without asking the memory arm's model first (`anamnesis key check`)",
+    )
     run.set_defaults(func=cmd_run)
 
     report = commands.add_parser("report", help="every run so far")
