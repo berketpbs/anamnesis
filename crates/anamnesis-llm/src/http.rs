@@ -35,26 +35,41 @@ pub fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
         .map(Duration::from_secs)
 }
 
+/// Longest message an error carries, in characters.
+///
+/// A body that is not JSON is carried whole as the message, and a proxy's
+/// error page is kilobytes of markup. The start is where the clue is.
+const MAX_MESSAGE_CHARS: usize = 1_000;
+
 /// Classify a non-2xx response.
 ///
-/// Both APIs answer with `{"error": {"type": ..., "message": ...}}`, and a
-/// body that is not JSON at all — a proxy's HTML, a local server's plain text
-/// — is carried through as the message rather than being replaced by a parse
-/// error about it, because the text is the only clue anyone has.
+/// Anthropic and OpenAI answer with `{"error": {"type": ..., "message": ...}}`.
+/// Google's compatible surface answers with the same object inside a
+/// one-element array, naming its kind in `status` rather than `type` — and
+/// until that shape was read, every refusal from it was logged as `400
+/// (unknown)` followed by the raw body across eight lines, which is how a
+/// rejected key spent a day looking like any other fault. A body that is not
+/// JSON at all — a proxy's HTML, a local server's plain text — is carried
+/// through as the message rather than being replaced by a parse error about
+/// it, because the text is the only clue anyone has.
+///
+/// The message is always one line: it ends up in a log line and in `status`,
+/// and neither is helped by the body's own line breaks.
 pub fn api_error(status: u16, body: &str, retry_after: Option<Duration>) -> LlmError {
     let parsed: Option<Value> = serde_json::from_str(body).ok();
-    let error = parsed.as_ref().and_then(|value| value.get("error"));
+    let error = parsed.as_ref().and_then(error_object);
 
     let kind = error
-        .and_then(|error| error.get("type"))
+        .and_then(|error| error.get("type").or_else(|| error.get("status")))
         .and_then(Value::as_str)
         .unwrap_or("unknown")
         .to_owned();
-    let message = error
-        .and_then(|error| error.get("message"))
-        .and_then(Value::as_str)
-        .unwrap_or(body)
-        .to_owned();
+    let message = one_line(
+        error
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or(body),
+    );
 
     // The header is the trustworthy answer and is preferred, but it is not
     // the only one: Google states its wait inside the body and sends no
@@ -62,6 +77,14 @@ pub fn api_error(status: u16, body: &str, retry_after: Option<Duration>) -> LlmE
     // one and then two — two more refusals, out of a quota the wait was
     // there to protect.
     let retry_after = retry_after.or_else(|| stated_delay(error, &message));
+
+    // Which limit a refusal was about, when the body names it. A per-minute
+    // limit and a per-day one read the same in the sentence, and call for a
+    // minute's wait or a day's.
+    let message = match error.and_then(quota_id) {
+        Some(quota) => format!("{message} [{quota}]"),
+        None => message,
+    };
 
     // Folded into the message rather than a field: the only consumers are a
     // log line and the retry loop, and the loop reads it back below.
@@ -74,6 +97,41 @@ pub fn api_error(status: u16, body: &str, retry_after: Option<Duration>) -> LlmE
         status,
         kind,
         message,
+    }
+}
+
+/// The `error` object of a body, bare or inside Google's one-element array.
+fn error_object(body: &Value) -> Option<&Value> {
+    match body {
+        Value::Array(items) => items.iter().find_map(|item| item.get("error")),
+        other => other.get("error"),
+    }
+}
+
+/// The quota a refusal names, from a `QuotaFailure` detail's violations.
+fn quota_id(error: &Value) -> Option<&str> {
+    error
+        .get("details")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|detail| detail.get("violations").and_then(Value::as_array))
+        .flatten()
+        .find_map(|violation| violation.get("quotaId").and_then(Value::as_str))
+}
+
+/// `text` with its lines joined by single spaces, and no longer than
+/// [`MAX_MESSAGE_CHARS`].
+fn one_line(text: &str) -> String {
+    let joined = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    match joined.char_indices().nth(MAX_MESSAGE_CHARS) {
+        Some((end, _)) => format!("{}…", &joined[..end]),
+        None => joined,
     }
 }
 
@@ -241,6 +299,70 @@ mod tests {
         };
         assert_eq!(kind, "unknown");
         assert!(message.contains("Bad Gateway"), "{message}");
+    }
+
+    /// The body Google sent for every consolidation on 2026-09-14, byte for
+    /// byte as the server logged it. It was logged as `400 (unknown)` and the
+    /// raw array across eight lines, so the one sentence that said what was
+    /// wrong was the fifth line of a log entry.
+    #[test]
+    fn googles_array_wrapped_refusal_is_read_for_its_status_and_message() {
+        let body = "[{\n  \"error\": {\n    \"code\": 400,\n    \"message\": \"Please pass a valid API key\",\n    \"status\": \"INVALID_ARGUMENT\"\n  }\n}\n]";
+
+        let error = api_error(400, body, None);
+
+        assert_eq!(
+            error.to_string(),
+            "llm api error 400 (INVALID_ARGUMENT): Please pass a valid API key"
+        );
+        assert!(
+            !error.is_retryable(),
+            "a refused key does not get better with waiting"
+        );
+    }
+
+    /// The same shape for a spent quota, where the details carry both the wait
+    /// and which quota it was. Before the array was read, neither was: the
+    /// wait fell back to the sentence, and the quota to nothing.
+    #[test]
+    fn a_quota_refusal_names_its_quota_and_honours_its_stated_wait() {
+        let body = json!([{"error": {
+            "code": 429,
+            "message": "You exceeded your current quota, please check your plan and billing details.\n* Quota exceeded for metric: generate_content_free_tier_requests, limit: 20",
+            "status": "RESOURCE_EXHAUSTED",
+            "details": [
+                {"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                 "violations": [{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]},
+                {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "29s"},
+            ],
+        }}])
+        .to_string();
+
+        let error = api_error(429, &body, None);
+
+        assert_eq!(retry_delay(&error, 0), Duration::from_secs(29));
+        let LlmError::Api { kind, message, .. } = &error else {
+            panic!("expected an api error");
+        };
+        assert_eq!(kind, "RESOURCE_EXHAUSTED");
+        assert!(
+            message.contains("[GenerateRequestsPerDayPerProjectPerModel-FreeTier]"),
+            "{message}"
+        );
+        assert!(!message.contains('\n'), "one line: {message:?}");
+    }
+
+    /// A proxy's error page is kept as the clue it is, but not as kilobytes
+    /// of markup on one log line.
+    #[test]
+    fn a_long_body_is_cut_and_kept_on_one_line() {
+        let page = format!("<html>\n<body>\n{}\n</body>\n</html>", "x".repeat(5_000));
+        let LlmError::Api { message, .. } = api_error(502, &page, None) else {
+            panic!("expected an api error");
+        };
+        assert!(message.starts_with("<html> <body> xxx"), "{message}");
+        assert!(message.ends_with('…'), "{message}");
+        assert!(message.chars().count() <= MAX_MESSAGE_CHARS + 1);
     }
 
     #[test]

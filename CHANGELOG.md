@@ -40,6 +40,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   here
 
 ### Fixed
+- **A refusal from Google is read for what it says.** Google's compatible
+  surface wraps its error object in a one-element array and names the kind in
+  `status` rather than `type`, and neither was read: every refusal was logged
+  as `llm api error 400 (unknown):` followed by the raw body across eight
+  lines. The rejected key on 2026-09-14 spent the day that way, the sentence
+  saying `Please pass a valid API key` on the fifth line of each entry. The
+  line is now `llm api error 400 (INVALID_ARGUMENT): Please pass a valid API
+  key`. A spent quota also names which one it was, as
+  `[GenerateRequestsPerDayPerProjectPerModel-FreeTier]`, and the wait Google
+  states in the array's details is honoured rather than read out of the
+  sentence. Every error message is one line, and a body that is not JSON is
+  cut at a thousand characters
 - **`ANAMNESIS_LLM_API_KEY` no longer selects Anthropic.** It is the key of the
   provider `ANAMNESIS_LLM_PROVIDER` names, and `anamnesis key set` keeps it in
   the account's credential store, which every data directory on the machine
