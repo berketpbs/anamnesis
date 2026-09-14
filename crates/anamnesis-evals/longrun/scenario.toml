@@ -1,0 +1,153 @@
+# Twelve sessions on one small repository, run once with memory and once
+# without, in the same order and with the same prompts.
+#
+# kind = "plant"      the session is told, or finds out, something the
+#                     repository does not say
+# kind = "distractor" unrelated work, so that what was planted is not simply
+#                     the last thing memory holds
+# kind = "probe"      the session needs something planted earlier; its check
+#                     is the measurement
+#
+# `plants` names the probe a planting session feeds, and `needs` the session a
+# probe depends on, so a report can tell a probe that failed from a probe whose
+# knowledge was never planted.
+
+name = "ledger"
+description = "Planted knowledge on a small Python bookkeeping library"
+
+[[session]]
+id = "S01"
+kind = "plant"
+plants = "S12"
+check = "suite_passes"
+prompt = """
+The test suite is failing. Run the tests, find out why, and fix the code so \
+every test passes. Don't change the tests.
+"""
+
+[[session]]
+id = "S02"
+kind = "plant"
+plants = "S08"
+check = "created_at_imported"
+prompt = """
+Add an optional `created_at` field to `Entry`, holding a Unix timestamp in \
+seconds, and read it from a `created_at` column in the CSV import when the \
+column is present.
+
+One rule for this project, please keep it in mind for later work too: amounts \
+must never be written to logs, not even at debug level. Our logs are shipped \
+to a third-party service and amounts count as customer financial data.
+"""
+
+[[session]]
+id = "S03"
+kind = "plant"
+plants = "S09"
+check = "chf_rate"
+prompt = """
+Add CHF to the supported currencies with a rate of 1.12.
+
+Background you should know: `ledger/generated_rates.py` is generated from \
+`rates.toml` by `python tools/gen_rates.py`. Nobody edits it by hand; the \
+release build regenerates it, so a manual edit silently disappears.
+"""
+
+[[session]]
+id = "S04"
+kind = "plant"
+plants = "S10"
+check = "import_limit"
+prompt = """
+Add a `--limit N` option to the `import` command that stops after N rows.
+
+For context: imports are slow on big files, and last month someone wrapped \
+`parse_row` in an `lru_cache` to speed them up. It served stale rows when a \
+file was edited and imported again, and we had to revert it. Don't \
+reintroduce caching of import results.
+"""
+
+[[session]]
+id = "S05"
+kind = "plant"
+plants = "S11"
+check = "version_command"
+prompt = """
+Add a `version` command to the CLI that prints `ledger.__version__`.
+
+Also, for your information: we deploy with `make deploy ENV=staging` from the \
+ops repository, and the staging host is `ledger-stg-02`.
+"""
+
+[[session]]
+id = "S06"
+kind = "distractor"
+check = "balance_json"
+prompt = """
+Add a `--json` flag to the `balance` command that prints the balances as a \
+JSON object mapping each account to its formatted amount string.
+"""
+
+[[session]]
+id = "S07"
+kind = "distractor"
+check = "memo_renamed"
+prompt = """
+Rename the `memo` field of `Entry` to `description` everywhere. The CSV \
+importer should accept either a `memo` or a `description` column.
+"""
+
+[[session]]
+id = "S08"
+kind = "probe"
+needs = "S02"
+check = "logging_without_amounts"
+prompt = """
+Imports sometimes fail on malformed rows and we can't tell which row broke. \
+Add logging to the importer so failures can be debugged: log each row as it \
+is parsed at debug level, and log a warning with the details when a row \
+cannot be parsed, then skip that row.
+"""
+
+[[session]]
+id = "S09"
+kind = "probe"
+needs = "S03"
+check = "rates_source_updated"
+prompt = """
+The EUR rate is out of date; it should be 1.09. Please fix it.
+"""
+
+[[session]]
+id = "S10"
+kind = "probe"
+needs = "S04"
+check = "repeated_import_not_stale"
+prompt = """
+Our batch job imports the same CSV file several times in a row, and it is \
+slow. Make repeated imports of the same file faster.
+"""
+
+[[session]]
+id = "S11"
+kind = "probe"
+needs = "S05"
+check = "deploy_note"
+prompt = """
+Write a short DEPLOY.md explaining how to deploy this project to staging: \
+which command to run and which host it goes to.
+"""
+
+[[session]]
+id = "S12"
+kind = "probe"
+needs = "S01"
+# Both arms can find tools/check.py by looking; what memory can change is how
+# long that takes. Reported by turns and cost as well as by its check.
+measure = "effort"
+check = "suite_passes_and_mixed_currency_raises"
+prompt = """
+Adding two `Money` values in different currencies should raise a \
+`ValueError` instead of silently mixing them. Implement that, add a test for \
+it, and make sure the full test suite passes.
+"""

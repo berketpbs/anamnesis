@@ -1,0 +1,5 @@
+# Exchange rates to USD.
+[rates]
+USD = 1.0
+EUR = 1.07
+GBP = 1.27

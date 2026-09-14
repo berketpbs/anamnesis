@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A long-run eval with a real agent**, in `crates/anamnesis-evals/longrun/`.
+  `anamnesis eval` measures whether memory finds the page that answers a
+  question; this measures whether an agent does the right thing sessions after
+  it was told something. Twelve headless `claude -p` sessions on a small Python
+  fixture run twice, once wired to a server and data directory of their own
+  and once with nothing that carries between sessions (Claude Code's own
+  memory turned off, and the setup asked whether it has any before the run
+  starts). Five sessions plant something the repository does not say (amounts
+  never go to logs, a generated file is never edited by hand, a cache that
+  served stale rows, a staging host, how the tests are run), two are unrelated
+  work, and five are tasks that need a plant. Each is judged by running the
+  fixture's code, never by a model, and `checks.py` holds every probe to a
+  repository that gets it right and one that makes the mistake it is there to
+  catch; CI runs that. A memory-arm probe is counted only when the page of its
+  planting session was written by a model and the MCP server was connected.
+  Tried on two sessions: hooks, MCP, page tracking and the report worked, at
+  about ten cents a session with Haiku 4.5
 - **Homebrew, Scoop and cargo-binstall.** This repository is the tap and the
   bucket: `HomebrewFormula/anamnesis.rb` (macOS on both architectures, Linux
   x86-64) and `bucket/anamnesis.json`, both written by `packaging/render.sh`
