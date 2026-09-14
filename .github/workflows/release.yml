@@ -28,7 +28,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Not ubuntu-latest. A binary linked against glibc asks for the
+          # newest symbol versions of the machine it was built on, and the
+          # loader refuses to start it anywhere older: v1.1.0, built on 24.04,
+          # needed glibc 2.39 and could not run on Ubuntu 22.04, Debian 12 or
+          # RHEL 9. Building on the oldest supported runner is what sets the
+          # floor, and the check below holds it there.
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             archive: tar.gz
             native: true
@@ -64,8 +70,20 @@ jobs:
         with:
           key: release-${{ matrix.target }}
 
+      # The C runtime linked in rather than borrowed from the machine. Without
+      # it the Windows binary imports VCRUNTIME140.dll, which Windows does not
+      # ship: v1.1.0 started on every machine with a Visual C++ Redistributable
+      # installed, including the one it was written on and the runner that
+      # checked it, and nowhere else. Every C dependency here is compiled from
+      # source by the cc crate, which follows this flag, so nothing is left
+      # linked against the other runtime.
       - name: Build
-        run: cargo build --release --locked -p anamnesis-cli --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          if [[ "${{ matrix.target }}" == *-windows-msvc ]]; then
+            export RUSTFLAGS="-C target-feature=+crt-static"
+          fi
+          cargo build --release --locked -p anamnesis-cli --target ${{ matrix.target }}
 
       # The version comes from the tag when there is one, and from the
       # manifest otherwise, so a dispatched build produces the same names a
@@ -140,6 +158,40 @@ jobs:
           else
             "target/${{ matrix.target }}/release/anamnesis" --version
           fi
+
+      # Starting on the runner says little about starting anywhere else: the
+      # runner has the newest glibc and a Visual C++ Redistributable, which is
+      # exactly why v1.1.0 passed the step above. So what the binary asks of
+      # the machine is read out of the binary itself.
+      - name: Check what it needs from the machine
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            *-linux-gnu)
+              # Ubuntu 22.04's glibc. Raising this drops that release, and
+              # Debian 12 and RHEL 9 with it.
+              floor=2.35
+              binary="target/${{ matrix.target }}/release/anamnesis"
+              needed=$(objdump -T "$binary" | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' | sed 's/GLIBC_//' | sort -uV | tail -1)
+              echo "needs glibc $needed (floor $floor)"
+              if [[ "$(printf '%s\n%s\n' "$needed" "$floor" | sort -V | tail -1)" != "$floor" ]]; then
+                echo "::error::the Linux binary needs glibc $needed, newer than $floor; it will not start on older distributions"
+                exit 1
+              fi
+              ;;
+            *-windows-msvc)
+              binary="target/${{ matrix.target }}/release/anamnesis.exe"
+              if grep -aqiE 'vcruntime140(_1)?\.dll|msvcp140\.dll' "$binary"; then
+                echo "::error::the Windows binary imports the Visual C++ runtime DLLs; it will not start without the Redistributable"
+                exit 1
+              fi
+              echo "links the C runtime statically"
+              ;;
+            *)
+              echo "nothing to read for ${{ matrix.target }}"
+              ;;
+          esac
 
       - uses: actions/upload-artifact@v4
         with:
