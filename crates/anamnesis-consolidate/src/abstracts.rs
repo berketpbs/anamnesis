@@ -35,7 +35,12 @@ impl AbstractError {
     /// request finding that out.
     pub fn is_transient(&self) -> bool {
         match self {
-            Self::Model(error) => error.is_retryable() && !matches!(error, LlmError::Malformed(_)),
+            // A day's quota is not retried by the provider, and is the
+            // plainest case of every later page meeting the same refusal.
+            Self::Model(error) => {
+                (error.is_retryable() && !matches!(error, LlmError::Malformed(_)))
+                    || error.is_spent_for_the_day()
+            }
             Self::Unusable(_) => false,
         }
     }
@@ -435,6 +440,12 @@ mod tests {
             bad_key.to_string(),
             "the model answered 400: Please pass a valid API key"
         );
+
+        assert!(
+            error.is_transient(),
+            "a day's quota is not retried by the provider, and still stops the run"
+        );
+        assert!(!bad_key.is_transient());
     }
 
     /// Every way an abstract goes wrong embeds without complaint, so each is

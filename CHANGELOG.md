@@ -52,6 +52,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   states in the array's details is honoured rather than read out of the
   sentence. Every error message is one line, and a body that is not JSON is
   cut at a thousand characters
+- **A quota spent for the day is asked about once, and handed to the next
+  model.** Google's free tier allows twenty requests a day per model, and its
+  refusal is a 429 like a per-minute limit's, asking for half a minute. The
+  retry loop took it at its word: with the server's eight retries for
+  background work, each session spent about five minutes and nine refusals on
+  a model that would not answer before midnight Pacific, and a fallback in
+  `ANAMNESIS_LLM_FALLBACK_PROVIDERS`, on a quota of its own, waited behind all
+  of them. A refusal naming a per-day quota is no longer retried, is still
+  handed on along the chain, and still stops `anamnesis abstracts`, where
+  every later page would meet the same refusal
 - **`ANAMNESIS_LLM_API_KEY` no longer selects Anthropic.** It is the key of the
   provider `ANAMNESIS_LLM_PROVIDER` names, and `anamnesis key set` keeps it in
   the account's credential store, which every data directory on the machine

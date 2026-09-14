@@ -95,12 +95,17 @@ impl LlmError {
     ///
     /// Rate limits and server faults are transient; a bad key or a refusal is
     /// not, and retrying those only delays the fallback.
+    ///
+    /// A quota spent for the day is not: see [`LlmError::is_spent_for_the_day`].
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Transport(error) => {
                 error.is_timeout() || error.is_connect() || error.is_request()
             }
-            Self::Api { status, .. } => matches!(status, 408 | 409 | 429) || *status >= 500,
+            Self::Api { status, .. } => {
+                (matches!(status, 408 | 409 | 429) || *status >= 500)
+                    && !self.is_spent_for_the_day()
+            }
             // A malformed reply is worth one more roll of the dice: sampling
             // is not deterministic, and the same prompt often parses next time.
             Self::Malformed(_) => true,
@@ -113,5 +118,31 @@ impl LlmError {
             Self::Truncated(_) => false,
             Self::Config(_) | Self::Refused { .. } => false,
         }
+    }
+
+    /// Whether this is a refusal for a quota counted per day.
+    ///
+    /// A 429 like any other, and the one a retry cannot outlast: Google's
+    /// free tier allows twenty requests a day per model, the refusal asks for
+    /// half a minute, and the retry loop — eight attempts for the server's
+    /// background work — spent about five minutes per session re-asking a
+    /// model that would not answer before midnight Pacific. So it is not
+    /// retried. It is still handed on by a [`Chain`]: the quota is the
+    /// model's, and the next model on the same key has its own.
+    ///
+    /// Read from the `[quotaId]` the HTTP layer appends when the body
+    /// names one — `GenerateRequestsPerDayPerProjectPerModel-FreeTier`,
+    /// `GenerateContentInputTokensPerModelPerDay-FreeTier` — since the status,
+    /// the kind and the sentence are the same for a per-minute limit.
+    pub fn is_spent_for_the_day(&self) -> bool {
+        matches!(
+            self,
+            Self::Api { status: 429, message, .. }
+                if message
+                    .split('[')
+                    .skip(1)
+                    .filter_map(|rest| rest.split_once(']'))
+                    .any(|(quota, _)| quota.contains("PerDay"))
+        )
     }
 }
