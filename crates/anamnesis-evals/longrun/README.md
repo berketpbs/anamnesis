@@ -54,6 +54,14 @@ session's `stream-json` transcript, the memory arm's data directory and server
 log, and `results.json`. `--only S01,S02` tries the harness without the whole
 scenario; `--settings-env none` runs the memory arm without a model.
 
+Before anything else a run asks the memory arm's model, with the
+`settings.env` its server will read and the key in the credential store,
+through `anamnesis key check`, and stops if any model cannot be shown to work:
+under a refused key every page is counted, every probe is excluded, and the
+run measures nothing for two hours. What the check said is in
+`runs/<run>/model-check/key-check.txt` and `results.json`.
+`--skip-model-check` starts anyway.
+
 One repeat takes one to two hours with Haiku 4.5 and costs a few dollars of
 agent usage. It also asks the consolidation model about twelve sessions, which
 on a free Gemini tier is most of a day's quota, so repeats are meant to run
