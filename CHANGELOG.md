@@ -107,6 +107,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never runs `main`, so nothing but running the debug binary would have shown it
 
 ### Fixed
+- **Release binaries start on machines other than the one that built them.**
+  v1.1.0's Linux binary was built on Ubuntu 24.04 and needed glibc 2.39, so the
+  loader refused it on Ubuntu 22.04, Debian 12 and RHEL 9; its Windows binary
+  imported `VCRUNTIME140.dll`, which Windows does not ship. Both passed the
+  release's own check because the runners have the newest glibc and the
+  Redistributable. Linux is now built on Ubuntu 22.04 (glibc 2.35) and Windows
+  with the C runtime linked in, and the release reads both requirements out of
+  the binaries and fails when either comes back
 - `anamnesis install-mcp` **carries a hosted embedder's settings into the
   registration**, and never its key. It used to carry none of them, on the
   grounds that a hosted endpoint wants a key — and the one this project
