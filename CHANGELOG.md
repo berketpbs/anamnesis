@@ -71,6 +71,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   here
 
 ### Fixed
+- **`doctor` gives the server's reason for counted pages, and stops blaming
+  the terminal.** Its "pages written by counting" finding said the terminal's
+  `ANAMNESIS_LLM_PROVIDER` "the server does not inherit" and sent people to
+  compare environments, which stopped being true when every command started
+  reading `settings.env` and the credential store; on 2026-09-15 it said that
+  about a key the server had heard refused for a day. It now reads
+  `consolidation_failure` from `/whoami` and appends the model's answer to the
+  finding. A refused key (401, 403, or a 400 naming the key) gets the remedy
+  for one — `key set`, `key check`, restart — any other refusal says the
+  server rewrites the pages once the model answers, and with no reason
+  reported it points at `anamnesis key check`
 - **A refusal from Google is read for what it says.** Google's compatible
   surface wraps its error object in a one-element array and names the kind in
   `status` rather than `type`, and neither was read: every refusal was logged
