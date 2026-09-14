@@ -520,6 +520,72 @@ mod tests {
         );
     }
 
+    /// What the retry loop does with a day's quota, against a socket: it asks
+    /// once. With eight retries configured — the server's budget for work
+    /// nobody waits on — and the half-minute wait Google states, this cost
+    /// about five minutes per session and eight more refusals, each of them
+    /// certain.
+    #[tokio::test]
+    async fn a_quota_spent_for_the_day_is_asked_about_once() {
+        use std::io::{Read, Write};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counted = requests.clone();
+
+        // Left running when the test ends: every response closes its
+        // connection, so each request the client makes is one accepted here.
+        std::thread::spawn(move || {
+            let body = json!([{"error": {
+                "code": 429,
+                "message": "You exceeded your current quota.",
+                "status": "RESOURCE_EXHAUSTED",
+                "details": [
+                    {"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                     "violations": [{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]},
+                    {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "0s"},
+                ],
+            }}])
+            .to_string();
+            for socket in listener.incoming() {
+                let Ok(mut socket) = socket else { continue };
+                let mut buffer = [0_u8; 16_384];
+                let _ = socket.read(&mut buffer);
+                counted.fetch_add(1, Ordering::SeqCst);
+                let _ = socket.write_all(
+                    format!(
+                        "HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+
+        let config = LlmConfig {
+            provider: crate::config::ProviderKind::Google,
+            api_key: Some(secrecy::SecretString::from("AQ.test-key-not-a-real-one")),
+            model: "gemini-3.5-flash".to_owned(),
+            base_url: format!("http://{address}/v1beta/openai"),
+            max_retries: 8,
+            ..LlmConfig::default()
+        };
+        let client = OpenAiCompatible::new(&config, "google").expect("builds");
+
+        let error = client.complete(&request()).await.expect_err("refused");
+
+        assert!(error.is_spent_for_the_day(), "{error}");
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            1,
+            "asked once, not nine times"
+        );
+    }
+
     fn reply(message: Value, finish: &str) -> Value {
         json!({
             "model": "gpt-5",

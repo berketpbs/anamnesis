@@ -352,6 +352,56 @@ mod tests {
         assert!(!message.contains('\n'), "one line: {message:?}");
     }
 
+    /// Same status, same kind, same sentence; only the quota's name says
+    /// whether waiting half a minute can help.
+    #[test]
+    fn a_quota_for_the_day_is_not_retried_and_a_quota_for_the_minute_is() {
+        let refusal = |quota: &str| {
+            let body = json!([{"error": {
+                "code": 429,
+                "message": "You exceeded your current quota.",
+                "status": "RESOURCE_EXHAUSTED",
+                "details": [
+                    {"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                     "violations": [{"quotaId": quota}]},
+                    {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "31s"},
+                ],
+            }}])
+            .to_string();
+            api_error(429, &body, None)
+        };
+
+        for daily in [
+            "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+            "GenerateContentInputTokensPerModelPerDay-FreeTier",
+        ] {
+            let error = refusal(daily);
+            assert!(error.is_spent_for_the_day(), "{daily}");
+            assert!(!error.is_retryable(), "{daily}");
+        }
+
+        let per_minute = refusal("GenerateRequestsPerMinutePerProjectPerModel-FreeTier");
+        assert!(!per_minute.is_spent_for_the_day());
+        assert!(per_minute.is_retryable());
+
+        let unnamed = api_error(429, "{}", None);
+        assert!(!unnamed.is_spent_for_the_day());
+        assert!(
+            unnamed.is_retryable(),
+            "a 429 that names no quota is the ordinary rate limit"
+        );
+
+        let not_a_refusal = LlmError::Api {
+            status: 500,
+            kind: "server_error".to_owned(),
+            message: "boom [GenerateRequestsPerDayPerProjectPerModel-FreeTier]".to_owned(),
+        };
+        assert!(
+            !not_a_refusal.is_spent_for_the_day(),
+            "only a 429 is a quota"
+        );
+    }
+
     /// A proxy's error page is kept as the clue it is, but not as kilobytes
     /// of markup on one log line.
     #[test]

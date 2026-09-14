@@ -62,8 +62,12 @@ impl Chain {
 }
 
 /// Whether the next link should be asked after this failure.
+///
+/// What is worth retrying, and a quota spent for the day, which is not worth
+/// retrying on the model that spent it and is exactly what a second model on
+/// its own quota is for.
 fn hands_on(error: &LlmError) -> bool {
-    error.is_retryable()
+    error.is_retryable() || error.is_spent_for_the_day()
 }
 
 #[async_trait]
@@ -252,6 +256,30 @@ mod tests {
             "named after the configured model, not the link before the one that answered"
         );
         assert_eq!(third.asked(), 1);
+    }
+
+    fn out_for_the_day() -> Result<CompletionOutput, LlmError> {
+        Err(LlmError::Api {
+            status: 429,
+            kind: "RESOURCE_EXHAUSTED".to_owned(),
+            message: "You exceeded your current quota. \
+                      [GenerateRequestsPerDayPerProjectPerModel-FreeTier] (retry after 31s)"
+                .to_owned(),
+        })
+    }
+
+    /// The link that spent its day does not retry, and the chain is what
+    /// makes that cost nothing: the next model has a quota of its own.
+    #[tokio::test]
+    async fn a_quota_spent_for_the_day_hands_on_to_the_next_model() {
+        let first = Link::new("google", "gemini-3.5-flash", out_for_the_day);
+        let second = Link::new("google", "gemini-3.6-flash", answered);
+        let chain = Chain::new(vec![first.clone(), second.clone()]);
+
+        let output = chain.complete(&request()).await.expect("an answer");
+
+        assert_eq!(output.instead_of.as_deref(), Some("gemini-3.5-flash"));
+        assert_eq!((first.asked(), second.asked()), (1, 1));
     }
 
     /// The last link's error is the one returned: it is what the caller's
