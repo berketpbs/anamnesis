@@ -3420,6 +3420,196 @@ mod tests {
         );
     }
 
+    /// A stand-in for Google's compatible surface that checks the key the way
+    /// Google does: the one it was given is accepted, any other gets the
+    /// refusal this machine received on 2026-09-14, byte for byte. Hands back
+    /// the bearer token of every request it saw.
+    fn gemini_accepting(key: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let base = format!(
+            "http://{}/v1beta/openai",
+            listener.local_addr().expect("address")
+        );
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for socket in listener.incoming() {
+                let Ok(mut socket) = socket else { continue };
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 65_536];
+                // Read until the whole body has arrived: headers, then as many
+                // bytes as content-length says.
+                while let Ok(read) = socket.read(&mut buffer) {
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                        let length = head
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|n| n.trim().parse::<usize>().unwrap_or(0))
+                            })
+                            .unwrap_or(0);
+                        if body.len() >= length {
+                            break;
+                        }
+                    }
+                }
+                let text = String::from_utf8_lossy(&request).into_owned();
+                let bearer = text
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("authorization: Bearer ")
+                            .or_else(|| line.strip_prefix("Authorization: Bearer "))
+                    })
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned();
+                log.lock().push(bearer.clone());
+
+                let (status, body) = if bearer == key {
+                    let content = json!({"title": "Provider wired", "body": "## Why\nIt answered.", "handoff": "Carry on."}).to_string();
+                    (
+                        "200 OK",
+                        json!({
+                            "model": "gemini-3.5-flash",
+                            "choices": [{"index": 0, "finish_reason": "stop",
+                                         "message": {"role": "assistant", "content": content}}],
+                            "usage": {"prompt_tokens": 10, "completion_tokens": 10},
+                        })
+                        .to_string(),
+                    )
+                } else {
+                    (
+                        "400 Bad Request",
+                        "[{\n  \"error\": {\n    \"code\": 400,\n    \"message\": \"Please pass a valid API key\",\n    \"status\": \"INVALID_ARGUMENT\"\n  }\n}\n]".to_owned(),
+                    )
+                };
+                let _ = socket.write_all(
+                    format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        (base, seen)
+    }
+
+    /// Settings the way `serve` builds them from `settings.env` and a stored
+    /// key, pointed at `base`.
+    fn google_settings(base: &str, key: &str) -> LlmSettings {
+        let vars = [
+            ("ANAMNESIS_LLM_PROVIDER", "google"),
+            ("ANAMNESIS_LLM_MODEL", "gemini-3.5-flash"),
+            ("ANAMNESIS_LLM_API_KEY", key),
+            ("ANAMNESIS_LLM_BASE_URL", base),
+            ("ANAMNESIS_LLM_MAX_RETRIES", "0"),
+        ];
+        let config = anamnesis_llm::LlmConfig::from_vars(|name| {
+            vars.iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| (*v).to_owned())
+        })
+        .expect("config");
+        LlmSettings::watched(
+            config.build().expect("builds").expect("a provider"),
+            config.max_input_tokens,
+            config.max_output_tokens,
+        )
+    }
+
+    /// The whole day this check was written for, over HTTP rather than
+    /// through a fake: a session ends while the key is refused, and the page
+    /// is counted and `/whoami` says why in Google's own words; the key is
+    /// replaced and the server restarted, and the next pass rewrites the
+    /// counted page with the model's and forgets the refusal. Every piece has
+    /// its own test; this is the one that would notice the pieces not
+    /// fitting — the error body not parsing, the watcher not wrapping the
+    /// provider the enricher asks, the provenance not moving.
+    #[tokio::test]
+    async fn a_refused_key_and_its_replacement_end_to_end() {
+        let harness = harness();
+        let (base, seen) = gemini_accepting("AQ.new-key-not-a-real-one");
+        let (scope, session_id) = recorded(&harness);
+
+        // The day the key stopped.
+        let revoked = google_settings(&base, "AQ.revoked-key-not-a-real-one");
+        let before = harness.state.clone().with_llm(Some(revoked.clone()));
+        finalize_and_enrich(
+            &before.store,
+            &before.wiki,
+            &scope,
+            session_id,
+            None,
+            now(),
+            &revoked,
+        )
+        .await
+        .expect("finalized")
+        .expect("the counted page stands");
+        assert_eq!(
+            provenance(&before, &scope, session_id),
+            Some(anamnesis_store::SummarySource::Counted)
+        );
+
+        let response = send(
+            &before,
+            with_token(HttpRequest::builder().uri("/whoami"), None),
+        )
+        .await;
+        let body: serde_json::Value = serde_json::from_str(&body_of(response).await).expect("json");
+        assert_eq!(body["consolidation"], "gemini-3.5-flash");
+        assert_eq!(body["consolidation_failure"]["status"], 400);
+        assert_eq!(
+            body["consolidation_failure"]["reason"],
+            "answered 400: Please pass a valid API key"
+        );
+
+        // A new key, and the restart that reads it: new settings, new pacing.
+        let replaced = google_settings(&base, "AQ.new-key-not-a-real-one");
+        let after = harness.state.clone().with_llm(Some(replaced));
+        assert_eq!(
+            enrich::sweep_awaiting(&after, now()).await,
+            1,
+            "the counted session is asked about again straight away"
+        );
+        assert_eq!(
+            provenance(&after, &scope, session_id),
+            Some(anamnesis_store::SummarySource::Model)
+        );
+        let pages = after.store.pages_from_session(session_id).expect("pages");
+        assert_eq!(pages.len(), 1, "rewritten in place, not written twice");
+
+        let response = send(
+            &after,
+            with_token(HttpRequest::builder().uri("/whoami"), None),
+        )
+        .await;
+        let body: serde_json::Value = serde_json::from_str(&body_of(response).await).expect("json");
+        assert_eq!(body["consolidation_failure"], serde_json::Value::Null);
+
+        let keys = seen.lock().clone();
+        assert!(
+            keys.first()
+                .is_some_and(|key| key == "AQ.revoked-key-not-a-real-one"),
+            "{keys:?}"
+        );
+        assert_eq!(
+            keys.last().map(String::as_str),
+            Some("AQ.new-key-not-a-real-one"),
+            "{keys:?}"
+        );
+    }
+
     /// A handoff is single-use, so a refused request must not be a use. The
     /// layer running before the handler is what guarantees it; this is the
     /// test that would notice if the guard were ever moved inside.

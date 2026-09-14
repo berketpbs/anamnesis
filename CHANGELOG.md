@@ -19,7 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server restarted to read the key there was nothing to run; on 2026-09-14 a
   key that had stopped working was found a day later in a log. Run on this
   machine, it named the stored Gemini key as refused for both models in one
-  request each
+  request each. Google words a refused key by the key's shape — `Please pass a
+  valid API key`, or `Invalid Auth key.` for an `AQ.` key it does not know —
+  and both are read as refused; an ignored live test that needs no key asks
+  the real endpoint with both shapes and holds the refusal's format
 - **`status` says what the model answered when it did not answer with a
   page.** The `Summaries:` line reads the sessions, and on 2026-09-14 it said
   exactly what they showed: "the last 4 were counted, the model is not

@@ -83,13 +83,15 @@ impl Verdict {
                 message: sentence(error),
             },
             // Google answers a bad key with a plain 400, and says so only in
-            // the sentence: "Please pass a valid API key", "API key not
-            // valid", "API key expired".
+            // the sentence, worded by the shape of the key: "Please pass a
+            // valid API key" for a revoked `AQ.` key and an unknown `AIza`
+            // one, "Invalid Auth key." for an unknown `AQ.` one — asked of
+            // the real endpoint, in `live_google.rs`.
             LlmError::Api {
                 status: 400,
                 message,
                 ..
-            } if message.to_ascii_lowercase().contains("api key") => Self::KeyRefused {
+            } if names_a_key(message) => Self::KeyRefused {
                 status: 400,
                 message: sentence(error),
             },
@@ -147,6 +149,12 @@ impl Verdict {
             Self::Other { message } => format!("❌ {message}"),
         }
     }
+}
+
+/// Whether a 400's sentence is about the credential.
+fn names_a_key(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("api key") || lower.contains("auth key")
 }
 
 /// The provider's own sentence, without the wait the retry loop reads.
@@ -328,6 +336,13 @@ mod tests {
                 status: 400,
                 message: "Please pass a valid API key".to_owned()
             }
+        );
+        assert!(
+            matches!(
+                Verdict::of(&api(400, "Invalid Auth key.")),
+                Verdict::KeyRefused { status: 400, .. }
+            ),
+            "what Google says to an `AQ.` key it does not know"
         );
         assert!(matches!(
             Verdict::of(&api(403, "Your API key was reported as leaked.")),
