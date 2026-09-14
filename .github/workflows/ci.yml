@@ -185,6 +185,21 @@ jobs:
       - name: The compose file resolves
         run: docker compose config --quiet
 
+  # The long-run eval needs an agent and a model and runs on a machine, not
+  # here. What can run here is the part everything else rests on: that each
+  # probe's check passes a repository that got it right and fails one that
+  # made the mistake it exists to catch, and that the scenario names only
+  # checks that exist.
+  longrun:
+    name: long-run eval checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python crates/anamnesis-evals/longrun/longrun.py selftest
+
   # The install scripts name archives the release workflow produces, and the two
   # can drift apart without either file changing in a way that looks wrong. So
   # the scripts in this checkout are run against the latest published release,

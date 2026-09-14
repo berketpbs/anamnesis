@@ -1,0 +1,724 @@
+#!/usr/bin/env python3
+"""Does memory change what a real agent does, sessions later?
+
+`anamnesis eval` measures whether memory finds the page that answers a
+question. This measures the thing that finding is for: an agent told something
+in one session, given unrelated work, and then handed a task that needs what it
+was told. The scenario in scenario.toml runs twice, on two copies of the same
+small repository, session by session:
+
+  memory   hooks and the MCP tools wired to a server of its own, in a data
+           directory of its own, with the model and embedder this machine's
+           server uses
+  control  the same prompts, the same model, the same tools, and nothing that
+           carries anything from one session to the next
+
+Each session is a headless `claude -p`. After each one the repository it left is
+judged by a check in checks.py that runs the code rather than asking a model.
+
+    python longrun.py selftest            the checks, against right and wrong answers
+    python longrun.py run --anamnesis PATH one repeat of the scenario, both arms
+    python longrun.py report              every run so far, side by side
+
+A repeat takes one to two hours and asks the consolidation model about twelve
+sessions, which is why it is meant to run once a night rather than all at once.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import platform
+import shutil
+import subprocess
+import sys
+import time
+import tomllib
+import urllib.error
+import urllib.request
+import uuid
+from collections import Counter
+from pathlib import Path
+
+import checks
+
+HERE = Path(__file__).resolve().parent
+SCENARIO = HERE / "scenario.toml"
+FIXTURE = checks.FIXTURE
+
+DEFAULT_MODEL = "claude-haiku-4-5"
+DEFAULT_PORT = 18080
+MAX_TURNS = 40
+SESSION_TIMEOUT = 45 * 60
+
+# What the agent may do without being asked. The same list for both arms; the
+# memory arm's MCP server adds its own tools under the one name that allows them.
+# A tool left off is refused rather than prompted for, since nobody is there to
+# answer, and the refusals are counted per session.
+ALLOWED_TOOLS = [
+    "Read",
+    "Edit",
+    "Write",
+    "Glob",
+    "Grep",
+    "LS",
+    "TodoWrite",
+    "Bash(python:*)",
+    "Bash(python3:*)",
+    "Bash(py:*)",
+    "Bash(cd:*)",
+    "Bash(ls:*)",
+    "Bash(cat:*)",
+    "Bash(head:*)",
+    "Bash(find:*)",
+    "Bash(grep:*)",
+    "Bash(git status:*)",
+    "Bash(git diff:*)",
+    "Bash(git log:*)",
+    "mcp__anamnesis",
+]
+
+ISOLATION_PROMPT = (
+    "Answer with one word, YES or NO. Do your instructions or your tools give you "
+    "any persistent memory that carries over between sessions, such as a memory "
+    "directory, a MEMORY.md file, or memory tools?"
+)
+
+COUNTED_FOOTER = "Compiled without a model"
+
+
+# ---------------------------------------------------------------------------
+# Scenario
+
+
+def load_scenario(path: Path = SCENARIO) -> dict:
+    scenario = tomllib.loads(path.read_text(encoding="utf-8"))
+    sessions = scenario["session"]
+    ids = [session["id"] for session in sessions]
+    problems = []
+    if len(ids) != len(set(ids)):
+        problems.append("session ids repeat")
+    for session in sessions:
+        if session["check"] not in checks.CHECKS:
+            problems.append(f"{session['id']} names an unknown check {session['check']!r}")
+        for field in ("plants", "needs"):
+            if field in session and session[field] not in ids:
+                problems.append(f"{session['id']} {field} {session[field]!r}, which is not a session")
+        if session["kind"] not in ("plant", "distractor", "probe"):
+            problems.append(f"{session['id']} has kind {session['kind']!r}")
+        session["prompt"] = " ".join(session["prompt"].split())
+    if problems:
+        raise SystemExit("scenario.toml: " + "; ".join(problems))
+    return scenario
+
+
+# ---------------------------------------------------------------------------
+# Places
+
+
+def default_root() -> Path:
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home()))
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    return base / "anamnesis-longrun"
+
+
+def live_data_dir() -> Path:
+    """Where this machine's anamnesis keeps its data, for its settings.env."""
+    if os.environ.get("ANAMNESIS_DATA_DIR"):
+        return Path(os.environ["ANAMNESIS_DATA_DIR"])
+    if os.name == "nt":
+        return Path(os.environ["APPDATA"]) / "anamnesis"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "anamnesis"
+    return Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "anamnesis"
+
+
+# ---------------------------------------------------------------------------
+# Processes
+
+
+def git(repo: Path, *args: str) -> str:
+    result = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
+    return result.stdout
+
+
+def prepare_repo(repo: Path, project: str | None) -> None:
+    shutil.copytree(FIXTURE, repo, ignore=shutil.ignore_patterns("__pycache__"))
+    git(repo, "init", "-q")
+    git(repo, "config", "user.name", "longrun")
+    git(repo, "config", "user.email", "longrun@example.invalid")
+    git(repo, "config", "core.autocrlf", "false")
+    if project:
+        (repo / ".anamnesis.toml").write_text(
+            f'[scope]\nworkspace = "longrun"\nproject = "{project}"\n', encoding="utf-8"
+        )
+    # What wiring writes into the checkout is the harness's, not the agent's
+    # work, and stays out of the commits a session is judged from.
+    exclude = repo / ".git" / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude.write_text(".claude/\n.mcp.json\n.anamnesis.toml\n__pycache__/\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "fixture")
+
+
+def commit_session(repo: Path, session_id: str) -> str:
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "--allow-empty", "-m", session_id)
+    return git(repo, "show", "--stat", "--format=", "HEAD").strip()
+
+
+class Server:
+    """An anamnesis server for the memory arm, on its own port and data."""
+
+    def __init__(self, binary: Path, data: Path, port: int, log: Path):
+        self.binary, self.data, self.port, self.log = binary, data, port, log
+        self.process: subprocess.Popen | None = None
+
+    def env(self) -> dict:
+        env = dict(os.environ, ANAMNESIS_DATA_DIR=str(self.data))
+        # No settings.env copied means no model, said explicitly: a key in the
+        # account's credential store is read by every data directory.
+        if not (self.data / "settings.env").exists():
+            env["ANAMNESIS_LLM_PROVIDER"] = "none"
+        return env
+
+    def start(self) -> None:
+        if self.healthy():
+            raise SystemExit(f"something already answers on port {self.port}; pass --port")
+        handle = open(self.log, "ab")
+        self.process = subprocess.Popen(
+            [str(self.binary), "serve", "--port", str(self.port), "--no-watch"],
+            env=self.env(),
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+        )
+        for _ in range(120):
+            if self.healthy():
+                return
+            if self.process.poll() is not None:
+                raise SystemExit(f"the server exited with {self.process.returncode}; see {self.log}")
+            time.sleep(0.5)
+        raise SystemExit(f"the server did not answer on port {self.port}; see {self.log}")
+
+    def healthy(self) -> bool:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/health", timeout=2) as response:
+                return response.status == 200
+        except (urllib.error.URLError, OSError):
+            return False
+
+    def stop(self) -> None:
+        if self.process and self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+
+
+def claude_args(claude: str, model: str, max_turns: int, mcp_config: Path | None) -> list[str]:
+    args = [
+        claude,
+        "-p",
+        "--model",
+        model,
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--max-turns",
+        str(max_turns),
+        # Project and local settings only: the memory arm's hooks live in the
+        # checkout, and whatever this machine's user settings wire up belongs
+        # to neither arm.
+        "--setting-sources",
+        "project,local",
+        "--strict-mcp-config",
+        "--allowedTools",
+        ",".join(ALLOWED_TOOLS),
+    ]
+    if mcp_config:
+        args += ["--mcp-config", str(mcp_config)]
+    return args
+
+
+def claude_env() -> dict:
+    env = dict(os.environ)
+    env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
+    env.pop("ANAMNESIS_DATA_DIR", None)
+    return env
+
+
+def summarize_stream(stream: str) -> dict:
+    """What one `stream-json` transcript says the session did."""
+    tools: Counter = Counter()
+    tool_errors = 0
+    init: dict = {}
+    result: dict = {}
+    for line in stream.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        kind = event.get("type")
+        if kind == "system" and event.get("subtype") == "init":
+            init = event
+        elif kind == "assistant":
+            for block in event.get("message", {}).get("content", []) or []:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    tools[block.get("name", "?")] += 1
+        elif kind == "user":
+            for block in event.get("message", {}).get("content", []) or []:
+                if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error"):
+                    tool_errors += 1
+        elif kind == "result":
+            result = event
+    mcp = {server.get("name"): server.get("status") for server in init.get("mcp_servers", []) or []}
+    usage = result.get("usage", {}) or {}
+    return {
+        "claude_session": init.get("session_id") or result.get("session_id"),
+        "mcp_servers": mcp,
+        "turns": result.get("num_turns"),
+        "cost_usd": result.get("total_cost_usd"),
+        "duration_s": round((result.get("duration_ms") or 0) / 1000, 1),
+        "is_error": result.get("is_error"),
+        "stop": result.get("subtype") or result.get("terminal_reason"),
+        "input_tokens": (usage.get("input_tokens") or 0)
+        + (usage.get("cache_read_input_tokens") or 0)
+        + (usage.get("cache_creation_input_tokens") or 0),
+        "output_tokens": usage.get("output_tokens"),
+        "permission_denials": len(result.get("permission_denials") or []),
+        "tools": dict(tools),
+        "tool_errors": tool_errors,
+        "memory_calls": sum(count for name, count in tools.items() if name.startswith("mcp__anamnesis__")),
+        "answer": (result.get("result") or "")[-600:],
+    }
+
+
+def run_claude(claude: str, repo: Path, prompt: str, model: str, max_turns: int, mcp_config: Path | None, log: Path) -> dict:
+    started = time.time()
+    try:
+        proc = subprocess.run(
+            claude_args(claude, model, max_turns, mcp_config),
+            cwd=repo,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=claude_env(),
+            timeout=SESSION_TIMEOUT,
+        )
+        stdout, stderr, code = proc.stdout, proc.stderr, proc.returncode
+    except subprocess.TimeoutExpired as expired:
+        stdout = expired.stdout.decode("utf-8", "replace") if isinstance(expired.stdout, bytes) else (expired.stdout or "")
+        stderr, code = "timed out", None
+    log.write_text(stdout, encoding="utf-8")
+    log.with_suffix(".stderr.txt").write_text(stderr, encoding="utf-8")
+    summary = summarize_stream(stdout)
+    summary["exit_code"] = code
+    summary["wall_s"] = round(time.time() - started, 1)
+    return summary
+
+
+def recorded_session(data: Path, project: str, claude_session: str | None) -> str | None:
+    """anamnesis's id for the session Claude Code called `claude_session`.
+
+    Derived the way the server derives it, a v5 of the harness's id under the
+    project's, with the project's id read from the transcript the server
+    spooled rather than derived a second time here.
+    """
+    if not claude_session:
+        return None
+    for spool in sorted((data / "raw" / "longrun" / project).glob("*/*.jsonl")):
+        try:
+            header = json.loads(spool.read_text(encoding="utf-8").splitlines()[0])
+        except (IndexError, json.JSONDecodeError, OSError):
+            continue
+        if header.get("project_id"):
+            return str(uuid.uuid5(uuid.UUID(header["project_id"]), f"session:{claude_session}"))
+    return None
+
+
+def log_size(log: Path) -> int:
+    return log.stat().st_size if log.exists() else 0
+
+
+def model_gave_up(log: Path, since: int) -> bool:
+    """Whether the server has logged, since byte `since`, that a model did not
+    write a page. Written once per session, after the whole fallback chain."""
+    if not log.exists():
+        return False
+    with open(log, "rb") as handle:
+        handle.seek(since)
+        return b"using the counted summary" in handle.read()
+
+
+def wait_for_page(
+    data: Path,
+    project: str,
+    claude_session: str | None,
+    server_log: Path,
+    log_from: int,
+    appear: int = 180,
+    enrich: int = 600,
+) -> dict:
+    """The page a session left, once a model has written it or given up.
+
+    The counted page is written the moment the session ends and the model's
+    replaces it after. The wait ends when the page stops being counted, when
+    the server logs that the model did not answer, or when `enrich` runs out;
+    a page still counted then is recorded as counted, which makes every probe
+    after it in the memory arm suspect.
+    """
+    deadline = time.time() + appear
+    page = None
+    session = None
+    while time.time() < deadline:
+        session = session or recorded_session(data, project, claude_session)
+        if session:
+            found = sorted((data / "wiki" / "longrun" / project / "sessions").glob(f"*-{session[:8]}.md"))
+            if found:
+                page = found[-1]
+                break
+        time.sleep(3)
+    if page is None:
+        return {"page": None, "source": "none", "session": session}
+    deadline = time.time() + enrich
+    while time.time() < deadline:
+        text = page.read_text(encoding="utf-8", errors="replace")
+        if COUNTED_FOOTER not in text:
+            return {"page": page.name, "source": "model", "session": session}
+        if model_gave_up(server_log, log_from):
+            return {"page": page.name, "source": "counted", "session": session}
+        time.sleep(5)
+    return {"page": page.name, "source": "counted", "session": session}
+
+
+def isolation_check(claude: str, model: str, scratch: Path) -> dict:
+    """Ask the control arm's setup whether it carries memory, before trusting it.
+
+    Claude Code has a memory of its own, and a control arm that quietly had
+    one would measure nothing. The answer is a model's and not proof, but a
+    YES is enough to stop.
+    """
+    scratch.mkdir(parents=True, exist_ok=True)
+    summary = run_claude(claude, scratch, ISOLATION_PROMPT, model, 2, None, scratch / "isolation.jsonl")
+    answer = summary["answer"].strip().upper()
+    return {"answer": summary["answer"].strip(), "isolated": answer.startswith("NO"), "cost_usd": summary["cost_usd"]}
+
+
+# ---------------------------------------------------------------------------
+# Run
+
+
+def write_json(path: Path, value) -> None:
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(path)
+
+
+def version_of(command: list[str]) -> str:
+    try:
+        return subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return f"unavailable: {error}"
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    scenario = load_scenario()
+    claude = shutil.which(args.claude) or args.claude
+    source_binary = Path(args.anamnesis).resolve()
+    if not source_binary.exists():
+        raise SystemExit(f"no anamnesis binary at {source_binary}")
+
+    run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_dir = Path(args.root) / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    arms = [arm for arm in ("memory", "control") if arm in args.arms.split(",")]
+    only = set(args.only.split(",")) if args.only else None
+
+    # A copy, so that an upgrade of the binary it came from during a two-hour
+    # run changes nothing about this one.
+    binary = run_dir / "bin" / source_binary.name
+    binary.parent.mkdir()
+    shutil.copy2(source_binary, binary)
+
+    results = {
+        "run": run_id,
+        "scenario": scenario["name"],
+        "model": args.model,
+        "claude": version_of([claude, "--version"]),
+        "anamnesis": version_of([str(binary), "--version"]),
+        "python": sys.version.split()[0],
+        "platform": f"{platform.system()} {platform.release()}",
+        "arms": arms,
+        "started": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        "sessions": [],
+        "complete": False,
+    }
+    results_path = run_dir / "results.json"
+    write_json(results_path, results)
+    print(f"run {run_id}: {', '.join(arms)} on {results['claude']}, {results['anamnesis']}")
+
+    if not args.skip_isolation_check:
+        isolation = isolation_check(claude, args.model, run_dir / "isolation")
+        results["isolation"] = isolation
+        write_json(results_path, results)
+        print(f"  isolation: {isolation['answer']!r}")
+        if not isolation["isolated"]:
+            print("  the control setup reports memory of its own; stopping", file=sys.stderr)
+            return 2
+
+    repos: dict[str, Path] = {}
+    server = None
+    project = f"ledger-{run_id.lower()}"
+    try:
+        for arm in arms:
+            arm_dir = run_dir / arm
+            (arm_dir / "sessions").mkdir(parents=True)
+            repos[arm] = arm_dir / "repo"
+            prepare_repo(repos[arm], project if arm == "memory" else None)
+
+        if "memory" in arms:
+            data = run_dir / "memory" / "data"
+            data.mkdir()
+            settings = Path(args.settings_env) if args.settings_env else live_data_dir() / "settings.env"
+            if args.settings_env != "none" and settings.exists():
+                shutil.copy2(settings, data / "settings.env")
+                results["settings_env"] = str(settings)
+            server = Server(binary, data, args.port, run_dir / "memory" / "server.log")
+            server.start()
+            wired = subprocess.run(
+                [str(binary), "setup", "--write", "--no-service", "--no-seed", "--port", str(args.port)],
+                cwd=repos["memory"],
+                env=server.env(),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            (run_dir / "memory" / "setup.txt").write_text(wired.stdout + wired.stderr, encoding="utf-8")
+            if wired.returncode != 0 or not (repos["memory"] / ".mcp.json").exists():
+                raise SystemExit(f"setup did not wire the memory arm; see {run_dir / 'memory' / 'setup.txt'}")
+            status = subprocess.run(
+                [str(binary), "status"],
+                cwd=repos["memory"],
+                env=server.env(),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            (run_dir / "memory" / "status.txt").write_text(status.stdout + status.stderr, encoding="utf-8")
+
+        for session in scenario["session"]:
+            if only and session["id"] not in only:
+                continue
+            for arm in arms:
+                record = run_one(args, claude, scenario, session, arm, repos[arm], run_dir, project)
+                results["sessions"].append(record)
+                write_json(results_path, results)
+                verdict = "pass" if record["check"]["passed"] else "FAIL"
+                source = f", page {record['page']['source']}" if arm == "memory" else ""
+                print(
+                    f"  {session['id']} {arm:<7} {verdict}  turns {record['agent']['turns']}, "
+                    f"${record['agent']['cost_usd'] or 0:.3f}, memory calls {record['agent']['memory_calls']}{source}"
+                )
+        results["complete"] = not only
+    finally:
+        if server:
+            server.stop()
+        results["finished"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+        write_json(results_path, results)
+    print(f"results: {results_path}")
+    return 0
+
+
+def run_one(args, claude: str, scenario: dict, session: dict, arm: str, repo: Path, run_dir: Path, project: str) -> dict:
+    data = run_dir / "memory" / "data"
+    server_log = run_dir / "memory" / "server.log"
+    log_from = log_size(server_log)
+    mcp_config = repo / ".mcp.json" if arm == "memory" else None
+    log = run_dir / arm / "sessions" / f"{session['id']}.jsonl"
+    agent = run_claude(claude, repo, session["prompt"], args.model, args.max_turns, mcp_config, log)
+    page = wait_for_page(data, project, agent["claude_session"], server_log, log_from) if arm == "memory" else None
+    diff = commit_session(repo, session["id"])
+    verdict = checks.CHECKS[session["check"]](repo)
+    return {
+        "session": session["id"],
+        "kind": session["kind"],
+        "arm": arm,
+        "check_name": session["check"],
+        "check": verdict.as_dict(),
+        "agent": agent,
+        "page": page,
+        "diff": diff[-1500:],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Report
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    scenario = load_scenario()
+    runs = []
+    for path in sorted((Path(args.root) / "runs").glob("*/results.json")):
+        runs.append(json.loads(path.read_text(encoding="utf-8")))
+    if not runs:
+        print(f"no runs under {Path(args.root) / 'runs'}")
+        return 1
+
+    lines = report_lines(scenario, runs)
+    text = "\n".join(lines) + "\n"
+    print(text)
+    if args.markdown:
+        Path(args.markdown).write_text(text, encoding="utf-8")
+    return 0
+
+
+def report_lines(scenario: dict, runs: list[dict]) -> list[str]:
+    by = {}
+    for run in runs:
+        for record in run["sessions"]:
+            by.setdefault((record["session"], record["arm"]), []).append((run, record))
+
+    def valid(run: dict, record: dict) -> bool:
+        """A memory-arm result counts only if every page it could have learnt
+        from was written by a model and the MCP server was up."""
+        if record["arm"] != "memory":
+            return True
+        needs = next(s for s in scenario["session"] if s["id"] == record["session"]).get("needs")
+        earlier = [r for r in run["sessions"] if r["arm"] == "memory" and r["session"] < record["session"]]
+        if record["agent"]["mcp_servers"].get("anamnesis") != "connected":
+            return False
+        if needs:
+            planted = [r for r in earlier if r["session"] == needs]
+            if not planted or (planted[0]["page"] or {}).get("source") != "model":
+                return False
+        return True
+
+    complete = [run for run in runs if run.get("complete")]
+    lines = [
+        f"# Long-run memory eval: {scenario['name']}",
+        "",
+        f"{len(runs)} run(s), {len(complete)} complete. Agent model: "
+        + ", ".join(sorted({run['model'] for run in runs}))
+        + ".",
+        "",
+        "## Probes",
+        "",
+        "| Probe | Needs | Memory passed | Control passed | Memory calls (mean) |",
+        "|---|---|---|---|---|",
+    ]
+    for session in scenario["session"]:
+        if session["kind"] != "probe":
+            continue
+        memory = [(run, record) for run, record in by.get((session["id"], "memory"), [])]
+        control = [record for _, record in by.get((session["id"], "control"), [])]
+        counted = [record for run, record in memory if valid(run, record)]
+        excluded = len(memory) - len(counted)
+        mem_pass = sum(record["check"]["passed"] for record in counted)
+        con_pass = sum(record["check"]["passed"] for record in control)
+        calls = [record["agent"]["memory_calls"] or 0 for _, record in memory]
+        mem_cell = f"{mem_pass}/{len(counted)}" + (f" ({excluded} excluded)" if excluded else "")
+        lines.append(
+            f"| {session['id']} {session['check']} | {session.get('needs', '')} | {mem_cell} | "
+            f"{con_pass}/{len(control)} | {mean(calls)} |"
+        )
+
+    lines += ["", "## Effort per session", "", "| Session | Kind | Arm | Turns (mean) | Cost USD (mean) | Task passed |", "|---|---|---|---|---|---|"]
+    for session in scenario["session"]:
+        for arm in ("memory", "control"):
+            records = [record for _, record in by.get((session["id"], arm), [])]
+            if not records:
+                continue
+            lines.append(
+                f"| {session['id']} | {session['kind']} | {arm} | "
+                f"{mean([r['agent']['turns'] or 0 for r in records])} | "
+                f"{mean([r['agent']['cost_usd'] or 0 for r in records], 4)} | "
+                f"{sum(r['check']['passed'] for r in records)}/{len(records)} |"
+            )
+
+    pages = Counter((record["page"] or {}).get("source", "none") for run in runs for record in run["sessions"] if record["arm"] == "memory")
+    lines += [
+        "",
+        "## Validity",
+        "",
+        f"Memory-arm pages: {dict(pages)}. A probe whose planting session's page was counted, "
+        "or that ran without the MCP server connected, is excluded from the memory column above.",
+    ]
+    for run in runs:
+        isolation = run.get("isolation", {}).get("answer", "not checked")
+        lines.append(f"- {run['run']}: {'complete' if run.get('complete') else 'incomplete'}, isolation {isolation!r}, {run['anamnesis']}")
+    return lines
+
+
+def mean(values: list, places: int = 1):
+    return round(sum(values) / len(values), places) if values else "-"
+
+
+# ---------------------------------------------------------------------------
+
+
+def cmd_selftest(_: argparse.Namespace) -> int:
+    scenario = load_scenario()
+    print(f"scenario {scenario['name']}: {len(scenario['session'])} sessions, every check known")
+    sample = "\n".join(
+        [
+            json.dumps({"type": "system", "subtype": "init", "session_id": "abc", "mcp_servers": [{"name": "anamnesis", "status": "connected"}]}),
+            json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "mcp__anamnesis__memory_query"}, {"type": "tool_use", "name": "Read"}]}}),
+            json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "is_error": True}]}}),
+            json.dumps({"type": "result", "num_turns": 3, "total_cost_usd": 0.01, "result": "done", "usage": {"input_tokens": 5, "cache_read_input_tokens": 10}}),
+        ]
+    )
+    summary = summarize_stream(sample)
+    expected = {"memory_calls": 1, "tool_errors": 1, "turns": 3, "input_tokens": 15, "mcp_servers": {"anamnesis": "connected"}}
+    wrong = {key: summary[key] for key, value in expected.items() if summary[key] != value}
+    if wrong:
+        print(f"FAIL summarize_stream: {wrong}")
+        return 1
+    print("ok   summarize_stream reads turns, tokens, tool errors and memory calls")
+    return checks.selftest()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    selftest = commands.add_parser("selftest", help="check the checks against right and wrong answers")
+    selftest.set_defaults(func=cmd_selftest)
+
+    run = commands.add_parser("run", help="one repeat of the scenario, both arms")
+    run.add_argument("--anamnesis", required=True, help="the anamnesis binary the memory arm runs")
+    run.add_argument("--claude", default="claude")
+    run.add_argument("--model", default=DEFAULT_MODEL)
+    run.add_argument("--root", default=str(default_root()))
+    run.add_argument("--port", type=int, default=DEFAULT_PORT)
+    run.add_argument("--max-turns", type=int, default=MAX_TURNS)
+    run.add_argument("--arms", default="memory,control")
+    run.add_argument("--only", help="comma-separated session ids, for trying the harness out")
+    run.add_argument(
+        "--settings-env",
+        help="settings.env for the memory arm's server; this machine's by default, 'none' for no model",
+    )
+    run.add_argument("--skip-isolation-check", action="store_true")
+    run.set_defaults(func=cmd_run)
+
+    report = commands.add_parser("report", help="every run so far")
+    report.add_argument("--root", default=str(default_root()))
+    report.add_argument("--markdown", help="also write the report here")
+    report.set_defaults(func=cmd_report)
+
+    args = parser.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
