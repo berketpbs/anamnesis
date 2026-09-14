@@ -169,9 +169,11 @@ jobs:
           set -euo pipefail
           case "${{ matrix.target }}" in
             *-linux-gnu)
-              # Ubuntu 22.04's glibc. Raising this drops that release, and
-              # Debian 12 and RHEL 9 with it.
-              floor=2.35
+              # RHEL 9's glibc, the oldest of the three this build is for
+              # (Ubuntu 22.04 has 2.35, Debian 12 2.36). Building on 22.04
+              # allows symbols up to 2.35, so it is this line, not the
+              # runner, that keeps RHEL 9; v1.1.1 measured 2.34.
+              floor=2.34
               binary="target/${{ matrix.target }}/release/anamnesis"
               needed=$(objdump -T "$binary" | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' | sed 's/GLIBC_//' | sort -uV | tail -1)
               echo "needs glibc $needed (floor $floor)"

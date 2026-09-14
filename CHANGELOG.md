@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-09-14
+
+1.1.0's binaries started only on machines like the ones that built them: a
+Linux with glibc 2.39, a Windows with the Visual C++ Redistributable. This
+release's binaries start on RHEL 9, Ubuntu 22.04, Debian 12 and a Windows with
+nothing installed, and the release checks that in the binaries rather than on
+its runners.
+
+The rest is getting from a downloaded binary to a memory that records, and
+keeping it recording without anybody watching. The install scripts check the
+archive and start the binary before replacing anything; `setup` wires a
+project in one command and says which part is not done; `service` keeps the
+server running at login; `key` and `settings.env` give that server the model
+and embedder the shell has, without a wrapper script. When the embedder is
+down after a reboot the server now starts without vectors instead of failing
+every minute in silence, and `status` says why a server that does not answer
+stopped. `redact` applies redaction rules added after something was captured
+to what is already stored.
+
+The index schema is unchanged at 18; nothing written by 1.1.0 or 1.0 needs
+converting.
+
 ### Added
 - **Install scripts**: `curl -fsSL …/install.sh | sh` on Linux and macOS,
   `irm …/install.ps1 | iex` on Windows. Installing from a release meant picking
@@ -124,9 +146,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loader refused it on Ubuntu 22.04, Debian 12 and RHEL 9; its Windows binary
   imported `VCRUNTIME140.dll`, which Windows does not ship. Both passed the
   release's own check because the runners have the newest glibc and the
-  Redistributable. Linux is now built on Ubuntu 22.04 (glibc 2.35) and Windows
-  with the C runtime linked in, and the release reads both requirements out of
-  the binaries and fails when either comes back
+  Redistributable. Linux is now built on Ubuntu 22.04 and needs glibc 2.34, and
+  Windows links the C runtime in. The release reads both requirements out of
+  the binaries and fails when either comes back; the glibc floor is RHEL 9's
+  2.34 rather than the build runner's 2.35, since a floor at the runner's
+  version would have let a build that drops RHEL 9 through
 - `anamnesis install-mcp` **carries a hosted embedder's settings into the
   registration**, and never its key. It used to carry none of them, on the
   grounds that a hosted endpoint wants a key — and the one this project

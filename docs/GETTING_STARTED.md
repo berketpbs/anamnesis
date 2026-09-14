@@ -45,10 +45,12 @@ into a shell takes no arguments:
 | `ANAMNESIS_INSTALL_DIR` | install here instead of the directory chosen above |
 | `ANAMNESIS_NO_PATH` | Windows only: leave the user `PATH` alone |
 
-Releases up to v1.1.0 are built on the newest runners, so the Linux binary
-needs glibc 2.39 or later (Ubuntu 24.04, Debian 13) and the Windows binary
-needs the Microsoft Visual C++ Redistributable. On a machine without them the
-script stops at the check above and says so.
+From v1.1.1 the Linux binary needs glibc 2.34 or later (RHEL 9, Ubuntu 22.04,
+Debian 12) and the Windows binary needs nothing Windows does not ship. v1.1.0
+and v1.0.0 were built on the newest runners: their Linux binary needs glibc
+2.39 (Ubuntu 24.04, Debian 13) and their Windows binary the Microsoft Visual
+C++ Redistributable, so pinning `ANAMNESIS_VERSION` to either on a machine
+without them stops at the check above, which says so.
 
 ### From a Release
 
@@ -59,8 +61,8 @@ binary, the README, the licence and the changelog, and every release carries a
 `SHA256SUMS` file — a release nobody can verify is a release nobody should run.
 
 ```bash
-tar -xzf anamnesis-v1.1.0-x86_64-unknown-linux-gnu.tar.gz
-./anamnesis-v1.1.0-x86_64-unknown-linux-gnu/anamnesis --version
+tar -xzf anamnesis-v1.1.1-x86_64-unknown-linux-gnu.tar.gz
+./anamnesis-v1.1.1-x86_64-unknown-linux-gnu/anamnesis --version
 ```
 
 Put the binary where it will stay — on `PATH`, or beside the data directory —
