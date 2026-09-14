@@ -833,6 +833,13 @@ pub enum KeyAction {
     },
     /// Say which keys are stored or in this shell, never their values
     List,
+    /// Ask the configured model, and each fallback, one small question
+    ///
+    /// Reads the settings every command reads, so it sees the key a server
+    /// started now would use. Says whether each key was accepted, refused, or
+    /// out of quota — before a server depends on it. Exits non-zero when any
+    /// model could not be shown to work.
+    Check,
     /// Remove a stored key
     Forget {
         /// The variable it stands for

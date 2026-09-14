@@ -248,8 +248,19 @@ Windows, the Keychain on macOS — typed without being shown:
 ```bash
 anamnesis key set GEMINI_API_KEY          # or ANAMNESIS_LLM_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY
 anamnesis key list                        # which are stored or in this shell, never the values
+anamnesis key check                       # ask each configured model one question with its key
 anamnesis key forget GEMINI_API_KEY
 ```
+
+`key check` builds the models a server started now would build — the
+configured one and every fallback, each on its own — and sends each a one-line
+question. It says whether the key was accepted, refused, or out of quota, which
+of the variables it came from, and exits non-zero when any model could not be
+shown to work. Run it after `key set` and before restarting the server, which
+reads its key only when it starts. An answer to one line is not an answer to a
+consolidation — a model can answer this and refuse every real session with a
+`503` — so read `anamnesis status` after the next session ends: its `Why:` line
+carries what the model said if it did not write the page.
 
 It is read under the name of the variable it stands for, after the environment
 and the settings file, by every command. The store is the account's and the
