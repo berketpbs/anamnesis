@@ -33,9 +33,11 @@ function Fail([string] $message) {
 # GitHub answers a release download with a 504 now and then: on 2026-09-14 both
 # CI runs of the install job failed that way on three systems while brew, which
 # retries, fetched the same files in the same runs. A server error, a 408, a 429
-# or a connection that got no answer is tried again, waiting 1, 2, 4 and 8
-# seconds; anything else - a 404 for a release that does not exist - fails at
-# once. Windows PowerShell 5.1 has no retry of its own.
+# or a connection that got no answer is tried seven times in all, waiting 1, 2,
+# 4, 8, 16 and 32 seconds; anything else - a 404 for a release that does not
+# exist - fails at once. Five attempts over fifteen seconds were not enough:
+# later the same day GitHub answered that way for more than half a minute.
+# Windows PowerShell 5.1 has no retry of its own.
 function Invoke-Retried([scriptblock] $action) {
     for ($attempt = 1; ; $attempt++) {
         try {
@@ -44,7 +46,7 @@ function Invoke-Retried([scriptblock] $action) {
             $status = 0
             if ($_.Exception.Response) { $status = [int] $_.Exception.Response.StatusCode }
             $transient = ($status -eq 0) -or ($status -ge 500) -or ($status -eq 408) -or ($status -eq 429)
-            if (-not $transient -or $attempt -ge 5) { throw }
+            if (-not $transient -or $attempt -ge 7) { throw }
             Start-Sleep -Seconds ([int] [math]::Pow(2, $attempt - 1))
         }
     }

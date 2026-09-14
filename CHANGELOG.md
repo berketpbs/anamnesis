@@ -28,12 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed on Linux, macOS and Windows with `504 Gateway Timeout` from the
   release download, while `brew`, which retries, fetched the same files in the
   same runs. Both scripts now try a request that got no answer, a 408, a 429 or
-  a 5xx five times, waiting 1, 2, 4 and 8 seconds, and fail at once on anything
-  else, such as a 404 for a release that does not exist. `install.sh` reads the
-  status itself rather than passing `--retry` to curl: the first attempt did,
-  and on macOS the 504 came back as a receive error (exit 56) that `--retry`
-  does not count as transient. Both were run against a local server answering
-  504 twice: the file arrived on the third request, and a 404 was asked for once
+  a 5xx seven times, waiting 1, 2, 4, 8, 16 and 32 seconds, and fail at once on
+  anything else, such as a 404 for a release that does not exist. Five
+  attempts over fifteen seconds were tried first and lost to an answer that
+  stayed bad for over half a minute; `install.sh` also said only that it gave
+  up, since an HTTP error is not a curl error, and now names the status.
+  `install.sh` reads the status itself rather than passing `--retry` to curl:
+  on macOS the 504 came back as a receive error (exit 56) that `--retry` does
+  not count as transient. Both were run against a local server: answering 504
+  twice, the file arrived on the third request; answering 503 always, both
+  gave up after seven requests and about a minute; a 404 was asked for once
 - **Hooks, the MCP registration and the service name the binary by the path it
   was run as**, when that path leads to the same file. They named the path
   `current_exe` reports, and on Linux that has every symlink resolved: an

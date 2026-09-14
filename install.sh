@@ -29,11 +29,13 @@ need() {
 # GitHub answers a release download with a 504 now and then: on 2026-09-14 both
 # CI runs of the install job failed that way on three systems while brew, which
 # retries, fetched the same files in the same runs. So a request that got no
-# answer, a 408, a 429 or a 5xx is made again, up to five times, waiting 1, 2, 4
-# and 8 seconds; anything else, such as a 404 for a release that does not exist,
-# fails at once. The status is read here rather than left to `curl --retry`:
-# macOS's curl reported that 504 as a receive error (exit 56), which `--retry`
-# does not count as transient, and gave up on the first one.
+# answer, a 408, a 429 or a 5xx is made again, seven times in all, waiting 1, 2,
+# 4, 8, 16 and 32 seconds; anything else, such as a 404 for a release that does
+# not exist, fails at once. Five attempts over fifteen seconds were not enough:
+# later the same day GitHub answered that way for more than half a minute.
+# The status is read here rather than left to `curl --retry`: macOS's curl
+# reported that 504 as a receive error (exit 56), which `--retry` does not
+# count as transient, and gave up on the first one.
 #
 # fetch <curl arguments>: prints the final URL, the body goes where -o says.
 fetch() {
@@ -49,7 +51,12 @@ fetch() {
             000 | 408 | 429 | 5??) ;;
             *) say "  HTTP $status from ${answer#* }" >&2; return 1 ;;
         esac
-        [ "$attempt" -lt 5 ] || return 1
+        if [ "$attempt" -ge 7 ]; then
+            # An HTTP error is not a curl error, so nothing has said which one
+            # this was. Without this line the script only reports that it gave up.
+            [ "$status" = 000 ] || say "  HTTP $status from ${answer#* }, $attempt times" >&2
+            return 1
+        fi
         sleep $((1 << (attempt - 1)))
         attempt=$((attempt + 1))
     done
