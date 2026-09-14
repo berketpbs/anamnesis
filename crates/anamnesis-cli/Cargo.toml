@@ -11,6 +11,18 @@ authors.workspace = true
 name = "anamnesis"
 path = "src/main.rs"
 
+# `cargo binstall --git https://github.com/berketpbs/anamnesis anamnesis-cli`
+# takes the release archive instead of compiling for ten minutes. `--git`,
+# because the name `anamnesis` on crates.io belongs to another project. The
+# names below are the ones the release workflow's Package step writes.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/anamnesis-v{ version }-{ target }{ archive-suffix }"
+bin-dir = "anamnesis-v{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
 [dependencies]
 anamnesis-core.workspace = true
 anamnesis-store.workspace = true

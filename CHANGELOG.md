@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Homebrew, Scoop and cargo-binstall.** This repository is the tap and the
+  bucket: `HomebrewFormula/anamnesis.rb` (macOS on both architectures, Linux
+  x86-64) and `bucket/anamnesis.json`, both written by `packaging/render.sh`
+  from a release's `SHA256SUMS` and never by hand, since a manifest is a
+  promise about bytes somebody else downloads. The release workflow renders
+  them on every run, a rehearsal included, and a tag pushes the result as a
+  `packaging/<tag>` branch for a pull request. CI installs from the checkout
+  with `brew` on Linux and macOS and `scoop` on Windows, fails when the
+  committed files differ from what the script makes of the release they name,
+  and installs with `cargo binstall` from the `[package.metadata.binstall]`
+  the CLI's manifest now carries. `WINGET=1` also writes the three winget
+  manifests, which are submitted to `microsoft/winget-pkgs` rather than kept
+  here
+
 ### Fixed
 - **The install scripts try a download again when GitHub answers with a server
   error.** On the day 1.1.1 was released, both CI runs of the install job

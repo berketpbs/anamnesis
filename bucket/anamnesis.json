@@ -1,0 +1,27 @@
+{
+    "version": "1.1.1",
+    "description": "Long-term memory for AI coding agents",
+    "homepage": "https://github.com/berketpbs/anamnesis",
+    "license": "MIT",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/berketpbs/anamnesis/releases/download/v1.1.1/anamnesis-v1.1.1-x86_64-pc-windows-msvc.zip",
+            "hash": "f8ea9a93e662816a433335ab63160f06938bf025b62c476def70a449fdce5722",
+            "extract_dir": "anamnesis-v1.1.1-x86_64-pc-windows-msvc"
+        }
+    },
+    "bin": "anamnesis.exe",
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/berketpbs/anamnesis/releases/download/v$version/anamnesis-v$version-x86_64-pc-windows-msvc.zip",
+                "extract_dir": "anamnesis-v$version-x86_64-pc-windows-msvc"
+            }
+        },
+        "hash": {
+            "url": "$baseurl/SHA256SUMS"
+        }
+    },
+    "notes": "Wire a repository from inside it with: anamnesis setup"
+}
