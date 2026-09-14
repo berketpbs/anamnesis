@@ -78,10 +78,31 @@ fn brief(message: &str) -> String {
             .next()
             .and_then(Result::ok)
     });
-    let text = parsed
-        .as_ref()
-        .and_then(|value| find(value, "message"))
-        .unwrap_or_else(|| message.to_owned());
+    // The provider layer now reads the body itself and hands over its
+    // sentence with the quota and the wait appended, as `... [quota] (retry
+    // after 29s)`. Both come off here so the quota is said once, at the end.
+    let (text, stated_quota) = match &parsed {
+        Some(value) => (
+            find(value, "message").unwrap_or_else(|| message.to_owned()),
+            None,
+        ),
+        None => {
+            let head = message
+                .rsplit_once(" (retry after ")
+                .map_or(message, |(head, _)| head);
+            match head.rsplit_once(" [") {
+                Some((sentence, tail))
+                    if tail.ends_with(']') && !tail.contains(char::is_whitespace) =>
+                {
+                    (
+                        sentence.to_owned(),
+                        Some(tail.trim_end_matches(']').to_owned()),
+                    )
+                }
+                _ => (head.to_owned(), None),
+            }
+        }
+    };
     // The first sentence: a quota message goes on to billing links, which say
     // nothing about this run.
     let line = text.lines().next().unwrap_or_default().trim();
@@ -96,7 +117,11 @@ fn brief(message: &str) -> String {
     // Which limit, when the body names it. A per-minute limit and a per-day
     // one read the same in the sentence and call for a minute's wait or a
     // day's.
-    if let Some(quota) = parsed.as_ref().and_then(|value| find(value, "quotaId")) {
+    if let Some(quota) = parsed
+        .as_ref()
+        .and_then(|value| find(value, "quotaId"))
+        .or(stated_quota)
+    {
         brief.push_str(&format!(" [{quota}]"));
     }
     brief
@@ -377,6 +402,38 @@ mod tests {
                 message: "bad key".to_owned(),
             })
             .is_transient()
+        );
+    }
+
+    /// The same refusal as the provider layer hands it over now that it reads
+    /// Google's body itself: one line, the quota and the wait appended. The
+    /// sentence a list of pages shows must not change with it.
+    #[test]
+    fn a_rate_limit_already_read_by_the_provider_reads_the_same() {
+        let error = AbstractError::Model(LlmError::Api {
+            status: 429,
+            kind: "RESOURCE_EXHAUSTED".to_owned(),
+            message: "You exceeded your current quota, please check your plan and billing \
+                      details. For more information, head to the docs. * Quota exceeded for \
+                      metric: requests, limit: 20 \
+                      [GenerateRequestsPerDayPerProjectPerModel-FreeTier] (retry after 29s)"
+                .to_owned(),
+        });
+
+        assert_eq!(
+            error.to_string(),
+            "the model answered 429: You exceeded your current quota, please check your plan \
+             and billing details. [GenerateRequestsPerDayPerProjectPerModel-FreeTier]"
+        );
+
+        let bad_key = AbstractError::Model(LlmError::Api {
+            status: 400,
+            kind: "INVALID_ARGUMENT".to_owned(),
+            message: "Please pass a valid API key".to_owned(),
+        });
+        assert_eq!(
+            bad_key.to_string(),
+            "the model answered 400: Please pass a valid API key"
         );
     }
 
