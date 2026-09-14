@@ -185,6 +185,50 @@ jobs:
       - name: The compose file resolves
         run: docker compose config --quiet
 
+  # The install scripts name archives the release workflow produces, and the two
+  # can drift apart without either file changing in a way that looks wrong. So
+  # the scripts in this checkout are run against the latest published release,
+  # on each system they claim, the way a reader would run them: piped into a
+  # shell rather than executed as a file. Twice, because the second run is the
+  # one that replaces an existing binary, which is the path an upgrade takes.
+  install:
+    name: install (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Lint the POSIX script
+        if: runner.os == 'Linux'
+        run: shellcheck install.sh
+
+      - name: Install, then install over it
+        if: runner.os != 'Windows'
+        env:
+          ANAMNESIS_INSTALL_DIR: ${{ runner.temp }}/anamnesis-bin
+        run: |
+          sh < install.sh
+          sh < install.sh
+          "$ANAMNESIS_INSTALL_DIR/anamnesis" --version
+
+      - name: Install, then install over it
+        if: runner.os == 'Windows'
+        # Windows PowerShell 5.1, not pwsh: it is what `irm | iex` runs in on a
+        # machine nobody has set up, and it is the one that reads a script in
+        # the local code page.
+        shell: powershell
+        env:
+          ANAMNESIS_INSTALL_DIR: ${{ runner.temp }}\anamnesis-bin
+          ANAMNESIS_NO_PATH: "1"
+        run: |
+          Get-Content -Raw install.ps1 | Invoke-Expression
+          Get-Content -Raw install.ps1 | Invoke-Expression
+          & "$env:ANAMNESIS_INSTALL_DIR\anamnesis.exe" --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   # The build every check above implies, run once on the platform the project
   # is actually developed on. Windows is where the paths, the MSVC linker, and
   # the PowerShell BOM handling differ, so a green Linux run is not evidence
