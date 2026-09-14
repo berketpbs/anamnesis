@@ -23,6 +23,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   here
 
 ### Fixed
+- **The server stops asking a model that does not answer every minute.** The
+  pass that asks again about sessions whose page was counted ran each minute
+  over the three oldest, whatever had happened to them. On 2026-09-14 the
+  model key on the machine this project runs on stopped being accepted, and
+  from 00:11 the server asked about the same three sessions every minute: 820
+  refused requests by 15:05, and with a working key and a spent daily quota
+  the same loop would spend the rest of the day the same way. A session that
+  can never be enriched, its checkout moved or nothing in it, also held one of
+  the three places for good, so nothing behind it was ever asked about. A
+  session that comes back without a page now waits before it is asked about
+  again, twice as long each time up to six hours, and the pass takes the next
+  due session behind it; a pass in which nothing answered doubles the pause
+  before the next, up to an hour, and says so in the log. A page written
+  resets both. The pacing lives in the server's memory, so a restart after
+  fixing a key asks straight away
 - **The install scripts try a download again when GitHub answers with a server
   error.** On the day 1.1.1 was released, both CI runs of the install job
   failed on Linux, macOS and Windows with `504 Gateway Timeout` from the

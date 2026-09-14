@@ -2597,6 +2597,144 @@ mod tests {
         );
     }
 
+    /// A provider that never answers, and remembers every prompt it refused.
+    struct Refusing {
+        asked: Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for Refusing {
+        fn name(&self) -> &'static str {
+            "refusing"
+        }
+
+        fn model(&self) -> &str {
+            "refusing-1"
+        }
+
+        async fn complete(
+            &self,
+            request: &anamnesis_llm::Completion,
+        ) -> Result<anamnesis_llm::CompletionOutput, anamnesis_llm::LlmError> {
+            self.asked.lock().push(request.user.clone());
+            Err(anamnesis_llm::LlmError::Config(
+                "Please pass a valid API key".to_owned(),
+            ))
+        }
+    }
+
+    /// Which of the numbered tasks the provider has been asked about since the
+    /// last look, emptying its list.
+    fn tasks_asked(provider: &Refusing, tasks: usize) -> Vec<usize> {
+        let asked = std::mem::take(&mut *provider.asked.lock());
+        (0..tasks)
+            .filter(|n| {
+                asked
+                    .iter()
+                    .any(|prompt| prompt.contains(&format!("numbered task {n} ")))
+            })
+            .collect()
+    }
+
+    /// What the enricher did on 2026-09-14 with a model key that had stopped
+    /// being accepted: the same three oldest sessions asked about every minute,
+    /// and every session behind them never asked about at all. A session that
+    /// comes back without a page now waits before it is asked about again, the
+    /// next pass reaches the one behind it, and passes in which nothing
+    /// answered move further apart.
+    #[tokio::test]
+    async fn a_refused_session_waits_and_the_one_behind_it_is_asked() {
+        let harness = harness();
+        let provider = Arc::new(Refusing {
+            asked: Mutex::new(Vec::new()),
+        });
+        let refusing = settings(provider.clone());
+        let t0 = now();
+        let at = |seconds: i64| {
+            t0.checked_add(jiff::SignedDuration::from_secs(seconds))
+                .unwrap()
+        };
+
+        for n in 0..4 {
+            let session = format!("session-{n}");
+            record(
+                &harness.state.store,
+                harness.state.raw.as_deref(),
+                &hook(
+                    &harness,
+                    "SessionStart",
+                    json!({"source": "startup", "session_id": session}),
+                ),
+                at(n),
+                None,
+            )
+            .expect("start");
+            let (scope, session_id) = record(
+                &harness.state.store,
+                harness.state.raw.as_deref(),
+                &hook(
+                    &harness,
+                    "UserPromptSubmit",
+                    json!({"prompt": format!("numbered task {n} of four"), "session_id": session}),
+                ),
+                at(n),
+                None,
+            )
+            .expect("prompt");
+            finalize_and_enrich(
+                &harness.state.store,
+                &harness.state.wiki,
+                &scope,
+                session_id,
+                None,
+                at(n),
+                &refusing,
+            )
+            .await
+            .expect("finalized")
+            .expect("the counted page");
+        }
+        tasks_asked(&provider, 4);
+
+        let state = harness.state.clone().with_llm(Some(refusing));
+        let mut pacing = enrich::Pacing::default();
+
+        assert_eq!(enrich::sweep_paced(&state, at(60), &mut pacing).await, 0);
+        assert_eq!(
+            tasks_asked(&provider, 4),
+            vec![0, 1, 2],
+            "the first pass asks about the oldest three"
+        );
+
+        assert_eq!(enrich::sweep_paced(&state, at(120), &mut pacing).await, 0);
+        assert_eq!(
+            tasks_asked(&provider, 4),
+            vec![3],
+            "the next reaches the one behind them, and does not ask the three again a minute later"
+        );
+
+        assert_eq!(enrich::sweep_paced(&state, at(130), &mut pacing).await, 0);
+        assert!(
+            tasks_asked(&provider, 4).is_empty(),
+            "nobody is due ten seconds later"
+        );
+        assert_eq!(
+            pacing.next_pass_in(),
+            std::time::Duration::from_secs(4 * 60),
+            "two passes in which nothing answered: the next is four minutes away, not one"
+        );
+
+        assert_eq!(
+            enrich::sweep_paced(&state, at(60 + 121), &mut pacing).await,
+            0
+        );
+        assert_eq!(
+            tasks_asked(&provider, 4),
+            vec![0, 1, 2],
+            "and the three are asked again once their two minutes are up"
+        );
+    }
+
     /// The model's handoff is the better one, so it replaces the counted note
     /// written when the session closed.
     #[tokio::test]
