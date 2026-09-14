@@ -124,6 +124,17 @@ pub fn cmd_status(
         (Some(line), None) | (None, Some(line)) => println!("  Summaries: {line}"),
         (None, None) => {}
     }
+    // The reason the line above cannot give: the server is the one process
+    // that asks the model, so it is the one that heard the answer. A rejected
+    // key, a spent quota and an overloaded model all read "not answering" from
+    // the sessions, and each calls for something different.
+    if let Some(line) = describe_model_failure(
+        &facts.consolidation,
+        facts.consolidation_failure.as_ref(),
+        now,
+    ) {
+        println!("  Why:       {line}");
+    }
     if let Some(line) = describe_embedding(&facts.embedding) {
         println!("  Vectors:   {line}");
     }
@@ -277,6 +288,7 @@ fn probe_server_facts(server: &str, token: Option<&str>, reachable: &ServerState
             ServerFacts {
                 auth,
                 consolidation: ServerModel::read(&body, "consolidation"),
+                consolidation_failure: ModelFailure::read(&body),
                 embedding: ServerModel::read(&body, "embedding"),
             }
         }
@@ -320,8 +332,51 @@ struct ServerFacts {
     auth: AuthState,
     /// The model it summarises sessions with.
     consolidation: ServerModel,
+    /// What that model said the last time it did not answer.
+    consolidation_failure: Option<ModelFailure>,
     /// The model it embeds pages with.
     embedding: ServerModel,
+}
+
+/// A request the server's model did not answer, as `/whoami` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelFailure {
+    /// When.
+    at: Timestamp,
+    /// A clause that follows the model's name: `answered 400: ...`.
+    reason: String,
+}
+
+impl ModelFailure {
+    /// Read `consolidation_failure`. Absent, `null` and unreadable all come
+    /// to nothing: the line this feeds is an explanation, and a server that
+    /// gave none has not said the model is fine.
+    fn read(body: &serde_json::Value) -> Option<Self> {
+        let failure = body.get("consolidation_failure")?;
+        Some(Self {
+            at: failure.get("at")?.as_str()?.parse().ok()?,
+            reason: failure.get("reason")?.as_str()?.to_owned(),
+        })
+    }
+}
+
+/// The line under `Summaries:` that says why, when the server knows.
+///
+/// Only for a server that named its model: the clause reads as that model's
+/// answer, and a server without one asks nobody anything.
+fn describe_model_failure(
+    configured: &ServerModel,
+    failure: Option<&ModelFailure>,
+    now: Timestamp,
+) -> Option<String> {
+    let (ServerModel::Named(model), Some(failure)) = (configured, failure) else {
+        return None;
+    };
+    Some(format!(
+        "{model} {}, {}",
+        failure.reason,
+        crate::format::describe_age(failure.at, now)
+    ))
 }
 
 impl From<AuthState> for ServerFacts {
@@ -825,6 +880,63 @@ mod tests {
         assert_eq!(
             ServerModel::read(&older, "consolidation"),
             ServerModel::Unstated
+        );
+    }
+
+    /// What 2026-09-14 needed: the model's own answer, under the line that
+    /// says the pages were counted.
+    #[test]
+    fn the_models_last_refusal_is_said_with_its_age() {
+        let body = serde_json::json!({
+            "consolidation": "gemini-3.5-flash",
+            "consolidation_failure": {
+                "at": "2026-09-14T21:47:35Z",
+                "status": 400,
+                "reason": "answered 400: Please pass a valid API key",
+            },
+        });
+        let failure = ModelFailure::read(&body).expect("a failure");
+
+        assert_eq!(
+            describe_model_failure(
+                &ServerModel::read(&body, "consolidation"),
+                Some(&failure),
+                at("2026-09-14T21:50:40Z"),
+            )
+            .as_deref(),
+            Some("gemini-3.5-flash answered 400: Please pass a valid API key, 3m ago")
+        );
+    }
+
+    /// Nothing to explain: no failure, an older server, or a server with no
+    /// model, which asks nobody anything.
+    #[test]
+    fn no_failure_and_no_model_say_nothing() {
+        let answered =
+            serde_json::json!({"consolidation": "gemini-3.5-flash", "consolidation_failure": null});
+        let older = serde_json::json!({"consolidation": "gemini-3.5-flash"});
+        let garbled =
+            serde_json::json!({"consolidation_failure": {"at": "yesterday", "reason": "x"}});
+        assert_eq!(ModelFailure::read(&answered), None);
+        assert_eq!(ModelFailure::read(&older), None);
+        assert_eq!(ModelFailure::read(&garbled), None);
+
+        let failure = ModelFailure {
+            at: at("2026-09-14T21:47:35Z"),
+            reason: "answered 400: x".to_owned(),
+        };
+        let now = at("2026-09-14T21:50:40Z");
+        assert_eq!(
+            describe_model_failure(&ServerModel::Absent, Some(&failure), now),
+            None
+        );
+        assert_eq!(
+            describe_model_failure(&ServerModel::Unstated, Some(&failure), now),
+            None
+        );
+        assert_eq!(
+            describe_model_failure(&ServerModel::Named("m".to_owned()), None, now),
+            None
         );
     }
 

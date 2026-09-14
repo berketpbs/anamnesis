@@ -83,10 +83,10 @@ pub fn cmd_serve(
         &data.models(),
         |said| tracing::warn!("{said}"),
     )?;
-    let settings = llm.build()?.map(|provider| anamnesis_web::LlmSettings {
-        provider,
-        max_input_tokens: llm.max_input_tokens,
-        max_output_tokens: llm.max_output_tokens,
+    // Watched, so `status` can say what the model answered when it did not
+    // answer with a page.
+    let settings = llm.build()?.map(|provider| {
+        anamnesis_web::LlmSettings::watched(provider, llm.max_input_tokens, llm.max_output_tokens)
     });
 
     let runtime = tokio::runtime::Runtime::new()?;

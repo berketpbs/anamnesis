@@ -30,6 +30,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio_util::task::TaskTracker;
 
+pub mod answering;
 pub mod api;
 pub mod auth;
 mod boundary;
@@ -106,6 +107,28 @@ pub struct LlmSettings {
     pub max_input_tokens: usize,
     /// Reply budget, in tokens.
     pub max_output_tokens: u32,
+    /// What the model said the last time it did not answer, for `/whoami`.
+    ///
+    /// Filled only when `provider` reports into it, which
+    /// [`LlmSettings::watched`] arranges.
+    pub last_failure: answering::LastFailure,
+}
+
+impl LlmSettings {
+    /// Settings around `provider`, remembering its last failure.
+    pub fn watched(
+        provider: Arc<dyn Provider>,
+        max_input_tokens: usize,
+        max_output_tokens: u32,
+    ) -> Self {
+        let last_failure = answering::LastFailure::default();
+        Self {
+            provider: Arc::new(answering::Watched::new(provider, last_failure.clone())),
+            max_input_tokens,
+            max_output_tokens,
+            last_failure,
+        }
+    }
 }
 
 impl std::fmt::Debug for LlmSettings {
@@ -390,6 +413,10 @@ struct WhoAmI {
     operator: Option<String>,
     /// The model sessions are summarised with. `null` means they are counted.
     consolidation: Option<String>,
+    /// What that model said the last time it did not answer. `null` when the
+    /// latest request was answered, when none has been made since the server
+    /// started, and when there is no model.
+    consolidation_failure: Option<answering::ModelFailure>,
     /// The model pages are embedded with. `null` means vector search is off.
     embedding: Option<String>,
 }
@@ -421,6 +448,10 @@ async fn whoami(
             .llm
             .as_ref()
             .map(|settings| settings.provider.model().to_owned()),
+        consolidation_failure: state
+            .llm
+            .as_ref()
+            .and_then(|settings| settings.last_failure.get()),
         embedding: state
             .embedder
             .as_ref()
@@ -1787,11 +1818,7 @@ mod tests {
 
     /// The budgets every test uses, around whichever provider it supplies.
     fn settings(provider: Arc<dyn Provider>) -> LlmSettings {
-        LlmSettings {
-            provider,
-            max_input_tokens: 6_500,
-            max_output_tokens: 2_000,
-        }
+        LlmSettings::watched(provider, 6_500, 2_000)
     }
 
     /// Record a small session without closing it, and hand back its scope.
@@ -3321,6 +3348,76 @@ mod tests {
         );
         assert_eq!(body["consolidation"], serde_json::Value::Null);
         assert_eq!(body["embedding"], serde_json::Value::Null);
+        assert!(
+            body.get("consolidation_failure").is_some(),
+            "present and null, so a client can tell 'answering' from 'an older server'"
+        );
+        assert_eq!(body["consolidation_failure"], serde_json::Value::Null);
+    }
+
+    /// The reason `status` could not give on 2026-09-14. A session ends, the
+    /// model refuses, and `/whoami` says what it said; the next session the
+    /// model answers, and the reason is gone rather than left to contradict
+    /// the page that was just written.
+    #[tokio::test]
+    async fn whoami_says_what_the_model_answered_until_it_answers() {
+        let harness = harness();
+        let refusing = settings(Arc::new(Fake::broken()));
+        let state = harness.state.clone().with_llm(Some(refusing.clone()));
+        let whoami = |state: AppState| async move {
+            let response = send(
+                &state,
+                with_token(HttpRequest::builder().uri("/whoami"), None),
+            )
+            .await;
+            serde_json::from_str::<serde_json::Value>(&body_of(response).await).expect("json")
+        };
+
+        assert_eq!(
+            whoami(state.clone()).await["consolidation_failure"],
+            serde_json::Value::Null,
+            "nothing asked yet"
+        );
+
+        let (scope, session_id) = recorded(&harness);
+        finalize_and_enrich(
+            &state.store,
+            &state.wiki,
+            &scope,
+            session_id,
+            None,
+            now(),
+            &refusing,
+        )
+        .await
+        .expect("finalized")
+        .expect("the counted page");
+
+        let body = whoami(state.clone()).await;
+        let failure = &body["consolidation_failure"];
+        assert_eq!(failure["status"], serde_json::Value::Null);
+        assert_eq!(failure["reason"], "is misconfigured: no model");
+        assert!(failure["at"].is_string(), "{body}");
+
+        // The same settings object, now over a provider that answers — what a
+        // fixed key looks like from in here.
+        let answering = LlmSettings {
+            provider: Arc::new(answering::Watched::new(
+                Arc::new(Fake::answering(
+                    json!({"title": "t", "body": "b", "handoff": "h"}),
+                )),
+                refusing.last_failure.clone(),
+            )),
+            ..refusing
+        };
+        let state = state.with_llm(Some(answering));
+        assert_eq!(enrich::sweep_awaiting(&state, now()).await, 1);
+
+        assert_eq!(
+            whoami(state).await["consolidation_failure"],
+            serde_json::Value::Null,
+            "an answer forgets the refusal"
+        );
     }
 
     /// A handoff is single-use, so a refused request must not be a use. The
