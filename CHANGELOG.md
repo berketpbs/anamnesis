@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`status` says what the model answered when it did not answer with a
+  page.** The `Summaries:` line reads the sessions, and on 2026-09-14 it said
+  exactly what they showed: "the last 4 were counted, the model is not
+  answering". Why was in the server's log. A rejected key, a spent quota and
+  an overloaded model all read the same from the sessions and each needs
+  something different done. The server now remembers the last request its
+  model did not answer, forgets it when the next one is answered, and reports
+  it in `/whoami` as `consolidation_failure`; `status` prints it underneath as
+  `Why: gemini-3.5-flash answered 400: Please pass a valid API key, 3m ago`.
+  The reason is redacted before it is kept, in case a gateway echoes a
+  credential back, and held in memory, so a server restarted after a key is
+  fixed does not go on naming the old refusal
 - **A long-run eval with a real agent**, in `crates/anamnesis-evals/longrun/`.
   `anamnesis eval` measures whether memory finds the page that answers a
   question; this measures whether an agent does the right thing sessions after
