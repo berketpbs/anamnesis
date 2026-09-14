@@ -28,11 +28,31 @@ need() {
 
 # GitHub answers a release download with a 504 now and then: on 2026-09-14 both
 # CI runs of the install job failed that way on three systems while brew, which
-# retries, fetched the same files in the same runs. `--retry` repeats a timeout,
-# a 408, a 429 and any 5xx, backing off from one second; a 404, for a
-# release that does not exist, fails at once.
+# retries, fetched the same files in the same runs. So a request that got no
+# answer, a 408, a 429 or a 5xx is made again, up to five times, waiting 1, 2, 4
+# and 8 seconds; anything else, such as a 404 for a release that does not exist,
+# fails at once. The status is read here rather than left to `curl --retry`:
+# macOS's curl reported that 504 as a receive error (exit 56), which `--retry`
+# does not count as transient, and gave up on the first one.
+#
+# fetch <curl arguments>: prints the final URL, the body goes where -o says.
 fetch() {
-    curl -fsSL --retry 5 "$@"
+    attempt=1
+    while :; do
+        if answer=$(curl -sSL -w '%{http_code} %{url_effective}' "$@"); then
+            status=${answer%% *}
+        else
+            status=000
+        fi
+        case "$status" in
+            2??) printf '%s\n' "${answer#* }"; return 0 ;;
+            000 | 408 | 429 | 5??) ;;
+            *) say "  HTTP $status from ${answer#* }" >&2; return 1 ;;
+        esac
+        [ "$attempt" -lt 5 ] || return 1
+        sleep $((1 << (attempt - 1)))
+        attempt=$((attempt + 1))
+    done
 }
 
 need curl
@@ -61,7 +81,7 @@ esac
 # the API, which limits unauthenticated callers to sixty requests an hour.
 version="${ANAMNESIS_VERSION:-}"
 if [ -z "$version" ]; then
-    latest=$(fetch -I -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest") ||
+    latest=$(fetch -I -o /dev/null "https://github.com/$REPO/releases/latest") ||
         fail "could not reach github.com to find the latest release"
     version="${latest##*/}"
     case "$version" in
@@ -90,8 +110,8 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 say "anamnesis $version for $target"
-fetch -o "$work/$archive" "$base/$archive" || fail "could not download $base/$archive"
-fetch -o "$work/SHA256SUMS" "$base/SHA256SUMS" || fail "could not download $base/SHA256SUMS"
+fetch -o "$work/$archive" "$base/$archive" >/dev/null || fail "could not download $base/$archive"
+fetch -o "$work/SHA256SUMS" "$base/SHA256SUMS" >/dev/null || fail "could not download $base/SHA256SUMS"
 
 expected=$(awk -v file="$archive" '$2 == file || $2 == "*" file { print $1 }' "$work/SHA256SUMS")
 [ -n "$expected" ] || fail "SHA256SUMS has no line for $archive"
