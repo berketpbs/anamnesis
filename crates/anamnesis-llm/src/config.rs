@@ -281,6 +281,10 @@ pub struct LlmConfig {
     /// is a whole configuration of its own, sharing this one's budgets,
     /// timeout, effort and retries; see [`crate::Chain`] for when one is asked.
     pub fallbacks: Vec<LlmConfig>,
+    /// A key that was set and not used, because nothing named the provider it
+    /// belongs to. Something to say at startup: from the outside it looks the
+    /// same as a configured model that is not answering.
+    pub ignored_key: Option<&'static str>,
 }
 
 impl Default for LlmConfig {
@@ -297,6 +301,7 @@ impl Default for LlmConfig {
             max_retries: DEFAULT_MAX_RETRIES,
             server_side_fallbacks: true,
             fallbacks: Vec::new(),
+            ignored_key: None,
         }
     }
 }
@@ -342,19 +347,39 @@ impl LlmConfig {
             ..Self::default()
         };
 
-        let key = var("ANAMNESIS_LLM_API_KEY")
-            .or_else(|| var("ANTHROPIC_API_KEY"))
-            .filter(|value| !value.trim().is_empty());
+        let named = var("ANAMNESIS_LLM_PROVIDER");
+        let stored = var("ANAMNESIS_LLM_API_KEY").filter(|value| !value.trim().is_empty());
 
-        // Selection is implicit by default: a key present means someone wants
-        // a model used. Being explicit is still possible, and is the only way
-        // to turn a model *off* without unsetting a key other tools may want.
-        config.provider = match var("ANAMNESIS_LLM_PROVIDER") {
+        // Selection is implicit only for Anthropic's own variable: that key
+        // present means someone wants Anthropic used. Being explicit is still
+        // possible, and is the only way to turn a model *off* without unsetting
+        // a key other tools may want.
+        //
+        // `ANAMNESIS_LLM_API_KEY` selects nothing. It is the key of whichever
+        // provider `ANAMNESIS_LLM_PROVIDER` names, and `anamnesis key set`
+        // keeps it in the account's credential store, which every data
+        // directory on the machine reads, while the provider is named per data
+        // directory in its `settings.env`. When this key still selected
+        // Anthropic, a data directory without that line sent the machine's
+        // Gemini key to api.anthropic.com with a session's transcript, and was
+        // refused with a 401 — found on 2026-09-14 by a server started for an
+        // eval in a data directory of its own. A key that selects a provider is
+        // a key that can redirect one, which is also why Google's and OpenAI's
+        // own variables are read only once that provider is named.
+        config.provider = match &named {
             Some(value) => value.parse()?,
-            None if key.is_some() => ProviderKind::Anthropic,
+            None if own_key(ProviderKind::Anthropic, &var).is_some() => ProviderKind::Anthropic,
             None => ProviderKind::None,
         };
-        config.api_key = key.map(SecretString::from);
+        config.api_key = match (&named, stored) {
+            (Some(_), Some(stored)) => Some(stored),
+            (None, Some(_)) => {
+                config.ignored_key = Some("ANAMNESIS_LLM_API_KEY");
+                own_key(config.provider, &var)
+            }
+            (_, None) => own_key(config.provider, &var),
+        }
+        .map(SecretString::from);
 
         // Defaults that depend on which backend was chosen, applied before the
         // overrides below so that an explicit `ANAMNESIS_LLM_BASE_URL` still
@@ -363,19 +388,6 @@ impl LlmConfig {
         let (base_url, model) = provider_defaults(config.provider);
         config.base_url = base_url.to_owned();
         config.model = model.to_owned();
-
-        // Google's own variable names, read only once Google has been asked
-        // for by name. Deliberately not part of the chain above: a Gemini key
-        // left in the environment by some other tool must never become the
-        // reason consolidation stopped talking to whatever it was configured
-        // to talk to. A key that selects a provider is a key that can redirect
-        // one.
-        if config.provider == ProviderKind::Google && config.api_key.is_none() {
-            config.api_key = var("GEMINI_API_KEY")
-                .or_else(|| var("GOOGLE_API_KEY"))
-                .filter(|value| !value.trim().is_empty())
-                .map(SecretString::from);
-        }
 
         if config.provider == ProviderKind::Anthropic && config.api_key.is_none() {
             return Err(LlmError::Config(
@@ -550,14 +562,7 @@ fn fallbacks(
             let (base_url, default_model) = provider_defaults(provider);
             link.base_url = base_url.to_owned();
             link.model = default_model.to_owned();
-            link.api_key = match provider {
-                ProviderKind::Anthropic => var("ANTHROPIC_API_KEY"),
-                ProviderKind::OpenAi => var("OPENAI_API_KEY"),
-                ProviderKind::Google => var("GEMINI_API_KEY").or_else(|| var("GOOGLE_API_KEY")),
-                ProviderKind::Ollama | ProviderKind::None => None,
-            }
-            .filter(|key| !key.trim().is_empty())
-            .map(SecretString::from);
+            link.api_key = own_key(provider, var).map(SecretString::from);
         }
         match model {
             Some(model) => link.model = model.to_owned(),
@@ -590,6 +595,17 @@ fn fallbacks(
         links.push(link);
     }
     Ok(links)
+}
+
+/// A provider's key from that provider's own variables, and from nothing else.
+fn own_key(provider: ProviderKind, var: &impl Fn(&str) -> Option<String>) -> Option<String> {
+    match provider {
+        ProviderKind::Anthropic => var("ANTHROPIC_API_KEY"),
+        ProviderKind::OpenAi => var("OPENAI_API_KEY"),
+        ProviderKind::Google => var("GEMINI_API_KEY").or_else(|| var("GOOGLE_API_KEY")),
+        ProviderKind::Ollama | ProviderKind::None => None,
+    }
+    .filter(|key| !key.trim().is_empty())
 }
 
 /// Parse a numeric setting, naming the variable when it does not parse.
@@ -753,6 +769,73 @@ mod tests {
         assert_eq!(
             config.api_key.expect("key kept").expose_secret(),
             "sk-ant-test"
+        );
+    }
+
+    /// The key `anamnesis key set` keeps for whichever provider settings.env
+    /// names. Read in a data directory with no such line, it selected
+    /// Anthropic and went there with a transcript; now it goes nowhere, and
+    /// the configuration says it was set and not used.
+    #[test]
+    fn the_stored_key_alone_selects_no_provider_and_is_sent_nowhere() {
+        let config = LlmConfig::from_vars(vars(&[("ANAMNESIS_LLM_API_KEY", "AQ.google-key")]))
+            .expect("no error");
+        assert_eq!(config.provider, ProviderKind::None);
+        assert!(config.api_key.is_none());
+        assert_eq!(config.ignored_key, Some("ANAMNESIS_LLM_API_KEY"));
+        assert!(config.build().expect("builds").is_none());
+    }
+
+    /// Anthropic's own variable still selects Anthropic, and when the stored
+    /// key is also there it is Anthropic's variable that is sent: the stored
+    /// key belongs to a provider nothing named.
+    #[test]
+    fn anthropics_own_key_selects_anthropic_and_is_the_key_sent() {
+        let config = LlmConfig::from_vars(vars(&[
+            ("ANTHROPIC_API_KEY", "sk-ant-own"),
+            ("ANAMNESIS_LLM_API_KEY", "AQ.google-key"),
+        ]))
+        .expect("no error");
+        assert_eq!(config.provider, ProviderKind::Anthropic);
+        assert_eq!(config.api_key.expect("a key").expose_secret(), "sk-ant-own");
+        assert_eq!(config.ignored_key, Some("ANAMNESIS_LLM_API_KEY"));
+    }
+
+    #[test]
+    fn a_named_provider_takes_the_stored_key() {
+        let config = LlmConfig::from_vars(vars(&[
+            ("ANAMNESIS_LLM_PROVIDER", "google"),
+            ("ANAMNESIS_LLM_API_KEY", "AQ.google-key"),
+            ("ANTHROPIC_API_KEY", "sk-ant-own"),
+        ]))
+        .expect("config");
+        assert_eq!(config.provider, ProviderKind::Google);
+        assert_eq!(
+            config.api_key.expect("a key").expose_secret(),
+            "AQ.google-key"
+        );
+        assert_eq!(config.ignored_key, None);
+    }
+
+    /// Before, a named provider with no stored key took `ANTHROPIC_API_KEY`
+    /// whatever the provider was, so `openai` sent Anthropic's key to OpenAI.
+    #[test]
+    fn a_named_provider_never_takes_another_providers_key() {
+        let config = LlmConfig::from_vars(vars(&[
+            ("ANAMNESIS_LLM_PROVIDER", "openai"),
+            ("ANTHROPIC_API_KEY", "sk-ant-own"),
+        ]))
+        .expect("config");
+        assert!(config.api_key.is_none(), "Anthropic's key is not OpenAI's");
+
+        let config = LlmConfig::from_vars(vars(&[
+            ("ANAMNESIS_LLM_PROVIDER", "openai"),
+            ("OPENAI_API_KEY", "sk-openai-own"),
+        ]))
+        .expect("config");
+        assert_eq!(
+            config.api_key.expect("a key").expose_secret(),
+            "sk-openai-own"
         );
     }
 

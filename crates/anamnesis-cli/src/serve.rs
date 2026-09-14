@@ -69,6 +69,12 @@ pub fn cmd_serve(
     // summary, spawned and detached, with nothing holding a connection open
     // behind it. See `BACKGROUND_MAX_RETRIES`.
     let llm = llm_config(crate::settings::var)?;
+    if let Some(key) = llm.ignored_key {
+        tracing::warn!(
+            "{key} is set and ANAMNESIS_LLM_PROVIDER does not name the provider it belongs to, \
+             so it was not sent anywhere and pages are counted; name the provider in settings.env"
+        );
+    }
     // The same opt-in embedder the MCP server builds, on the same terms. Without
     // one here, the vector stream covered only the pages an agent wrote through
     // MCP — not a single session summary, and nothing anybody edited by hand.

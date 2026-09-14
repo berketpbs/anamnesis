@@ -189,13 +189,14 @@ Export a key in the environment the server runs in:
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-That alone is enough: a key present selects the Anthropic provider. Everything
-else has a default.
+That alone is enough: `ANTHROPIC_API_KEY` present selects the Anthropic
+provider. Everything else has a default.
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | — | Credential. `ANAMNESIS_LLM_API_KEY` overrides it. |
-| `ANAMNESIS_LLM_PROVIDER` | `anthropic` when a key is set | `anthropic`, `openai`, `google`, `ollama`, or `none`. Set `none` to turn the model off without unsetting the key. |
+| `ANTHROPIC_API_KEY` | — | Anthropic's credential. The only key that selects a provider by being set. |
+| `ANAMNESIS_LLM_API_KEY` | — | The credential of the provider `ANAMNESIS_LLM_PROVIDER` names, used before that provider's own variable. With no provider named it is sent nowhere, and `serve` says so. |
+| `ANAMNESIS_LLM_PROVIDER` | `anthropic` when `ANTHROPIC_API_KEY` is set | `anthropic`, `openai`, `google`, `ollama`, or `none`. Set `none` to turn the model off without unsetting the key. |
 | `ANAMNESIS_LLM_MODEL` | `claude-opus-5`; `llama3.2` for `ollama`; `gemini-3.6-flash` for `google` | Model id. |
 | `ANAMNESIS_LLM_BASE_URL` | per provider | `https://api.anthropic.com`, `https://api.openai.com/v1`, `https://generativelanguage.googleapis.com/v1beta/openai`, or `http://127.0.0.1:11434/v1`. Point at a gateway, a second Ollama, or vLLM. |
 | `ANAMNESIS_LLM_EFFORT` | `high` | `low`, `medium`, `high`, `xhigh`, or `max`. `google` has no word above `high` and is sent `high` for the two above it. |
@@ -251,7 +252,10 @@ anamnesis key forget GEMINI_API_KEY
 ```
 
 It is read under the name of the variable it stands for, after the environment
-and the settings file, by every command. `--stdin` takes the key from one line
+and the settings file, by every command. The store is the account's and the
+settings file is one data directory's, so a key stored as
+`ANAMNESIS_LLM_API_KEY` is used only where that directory's settings name the
+provider; a provider's own name (`GEMINI_API_KEY`) is the one to prefer. `--stdin` takes the key from one line
 of standard input, for moving it out of somewhere else without it ever being an
 argument. Server tokens (`ANAMNESIS_TOKEN`) are not stored this way: the hook
 reads its token from the environment it runs in, on every tool call.
