@@ -99,7 +99,7 @@ pub fn cmd_setup(options: Options, data_dir: Option<PathBuf>) -> anyhow::Result<
     let cwd = std::env::current_dir()?;
     let scope = resolve_scope(&cwd)?;
     let data = DataDir::resolve(data_dir.clone())?;
-    let binary = std::env::current_exe()?;
+    let binary = crate::binary::stable_path()?;
     let server = options
         .server
         .clone()
