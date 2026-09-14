@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Install scripts**: `curl -fsSL …/install.sh | sh` on Linux and macOS,
+  `irm …/install.ps1 | iex` on Windows. Installing from a release meant picking
+  the archive for the machine, checking it against `SHA256SUMS` by hand — the
+  step people skip — and choosing where the binary lives, which matters more
+  than it looks because hooks, the MCP registration and the service all name it
+  by its path. The scripts refuse an archive that does not match `SHA256SUMS`,
+  start the new binary once before it replaces anything so a binary the machine
+  cannot run leaves a working install alone, and replace an existing install
+  where it is (on Windows by renaming the running `.exe` aside, since Windows
+  will not overwrite it). `ANAMNESIS_VERSION` pins a tag and
+  `ANAMNESIS_INSTALL_DIR` picks the directory. CI runs both scripts, twice, on
+  Linux, macOS and Windows against the latest release
 - **`anamnesis setup [--write]`** wires a project in one command. Getting
   memory to work took five commands in an order `GETTING_STARTED.md` spread
   over several hundred lines, and each had a way to be done wrongly that looked

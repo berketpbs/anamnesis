@@ -91,6 +91,21 @@ They are listed so nobody plans around them:
 
 ## Getting Started
 
+### Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/berketpbs/anamnesis/main/install.sh | sh
+```
+
+```powershell
+irm https://raw.githubusercontent.com/berketpbs/anamnesis/main/install.ps1 | iex
+```
+
+Either script checks the archive against the release's `SHA256SUMS`, starts the
+binary once before it replaces anything, and replaces an existing install where
+it is. Then `anamnesis setup` inside a repository. Other ways in:
+[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md#installation).
+
 ### Build
 
 ```bash

@@ -8,6 +8,48 @@
 
 ## Installation
 
+### With the install script
+
+```bash
+# Linux and macOS
+curl -fsSL https://raw.githubusercontent.com/berketpbs/anamnesis/main/install.sh | sh
+```
+
+```powershell
+# Windows
+irm https://raw.githubusercontent.com/berketpbs/anamnesis/main/install.ps1 | iex
+```
+
+The script finds the latest release, downloads the archive for this machine,
+and refuses to go further unless the archive matches the release's
+`SHA256SUMS`. It then starts the new binary once, from where it was unpacked:
+a binary this machine cannot run fails there, in the loader's own words, and a
+working install is left as it was.
+
+Where it puts the binary follows from the hooks, the MCP registration and the
+service all naming it by its path. An `anamnesis` already on `PATH` — or, on
+Windows, in `%APPDATA%\anamnesis\bin` beside the data directory — is replaced
+in place (on Windows the old one is renamed to `anamnesis.exe.old-<stamp>`
+first, since a running server or MCP process holds it open, and Windows
+allows renaming a running program but not overwriting it). A first install
+goes to `~/.local/bin` or `%LOCALAPPDATA%\Programs\anamnesis`; the Windows
+script adds that directory to the user `PATH`, the POSIX one prints the line to
+add. A server that is already running keeps the old binary until it restarts.
+
+Both scripts read their settings from the environment, since a script piped
+into a shell takes no arguments:
+
+| Variable | Effect |
+|---|---|
+| `ANAMNESIS_VERSION` | a tag such as `v1.1.0` instead of the latest release |
+| `ANAMNESIS_INSTALL_DIR` | install here instead of the directory chosen above |
+| `ANAMNESIS_NO_PATH` | Windows only: leave the user `PATH` alone |
+
+Releases up to v1.1.0 are built on the newest runners, so the Linux binary
+needs glibc 2.39 or later (Ubuntu 24.04, Debian 13) and the Windows binary
+needs the Microsoft Visual C++ Redistributable. On a machine without them the
+script stops at the check above and says so.
+
 ### From a Release
 
 Every tagged version has binaries attached to it on the
