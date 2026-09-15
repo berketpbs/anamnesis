@@ -259,6 +259,29 @@ fn origin(name: &str) -> &'static str {
 }
 
 /// `anamnesis key check`.
+/// The server `key check` compares its answer with: the one the service runs.
+const SERVER: &str = "http://127.0.0.1:8080";
+
+/// What to say about a running server whose model refused its key, when this
+/// check found the key works.
+///
+/// The step between the two is the one most easily skipped. `key check` reads
+/// the credential store as it is now, and the server read it when it started:
+/// a check that passes says nothing about the process writing the pages, which
+/// goes on sending the refused key and counting every session until it is
+/// restarted — with `status` still naming the old refusal, which looks like the
+/// new key failing too.
+fn stale_server(every_key_works: bool, server_failure: Option<&str>) -> Option<String> {
+    let failure = server_failure?;
+    (every_key_works && crate::doctor::refuses_the_key(failure)).then(|| {
+        format!(
+            "the running server's last answer was a refused key ({failure}), and the key \
+             checked here works: it still has the key it started with. \
+             `anamnesis service restart` gives it this one"
+        )
+    })
+}
+
 pub fn cmd_key_check() -> anyhow::Result<()> {
     println!("🔑 Checking the model key");
     println!();
@@ -302,7 +325,16 @@ pub fn cmd_key_check() -> anyhow::Result<()> {
     println!("  This asked a one-line question. A model that answers it can still refuse a");
     println!("  real consolidation (2026-09-07: two models answered this and gave 503 to");
     println!("  every session), so read `anamnesis status` after the next session ends.");
-    println!("  A running server read its key when it started: restart it to use a new one.");
+    println!("  A running server read its key when it started: `anamnesis service restart`");
+    println!("  gives it a new one.");
+
+    let server_failure = crate::doctor::server_whoami(SERVER)
+        .as_ref()
+        .and_then(crate::doctor::model_failure);
+    if let Some(line) = stale_server(refused == 0, server_failure.as_deref()) {
+        println!();
+        println!("  ⚠ {line}");
+    }
 
     if refused > 0 {
         anyhow::bail!(
@@ -323,6 +355,31 @@ mod tests {
             kind: "unknown".to_owned(),
             message: message.to_owned(),
         })
+    }
+
+    /// The moment this is for: a new key stored and checked, and the server
+    /// still sending the one Google refused.
+    #[test]
+    fn a_server_still_holding_a_refused_key_is_named_once_the_key_works() {
+        let refused = "gemini-3.5-flash answered 400: Please pass a valid API key";
+        let line = stale_server(true, Some(refused)).expect("said");
+        assert!(line.contains("anamnesis service restart"), "{line}");
+        assert!(line.contains(refused), "{line}");
+
+        assert_eq!(
+            stale_server(false, Some(refused)),
+            None,
+            "a key that does not work here is the problem, not the server"
+        );
+        assert_eq!(
+            stale_server(
+                true,
+                Some("gemini-3.5-flash answered 503: The model is overloaded")
+            ),
+            None,
+            "a refusal that is not about the key is not fixed by a restart"
+        );
+        assert_eq!(stale_server(true, None), None);
     }
 
     /// The refusals this machine has actually had, and what each has to be

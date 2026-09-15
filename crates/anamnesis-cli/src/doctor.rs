@@ -508,7 +508,7 @@ fn judge_capture(symptoms: &Symptoms) -> Vec<Finding> {
             ),
             remedy: Some(
                 "the hook binary predates result capture; install the current build and \
-                 restart the server"
+                 restart the server with `anamnesis service restart`"
                     .to_owned(),
             ),
         });
@@ -560,10 +560,7 @@ fn judge_build(symptoms: &Symptoms) -> Vec<Finding> {
                     "the server is answering but cannot say which build it is, which means it predates the build stamp and is older than this one ({})",
                     symptoms.this_build
                 ),
-                remedy: Some(
-                    "install this build where the hooks and the server run, then restart the server"
-                        .to_owned(),
-                ),
+                remedy: Some(INSTALL_AND_RESTART.to_owned()),
             }];
         }
         return Vec::new();
@@ -585,12 +582,13 @@ fn judge_build(symptoms: &Symptoms) -> Vec<Finding> {
             "the server is running {server} and this is {} — it records what its own build knows how to record",
             symptoms.this_build
         ),
-        remedy: Some(
-            "install this build where the hooks and the server run, then restart the server"
-                .to_owned(),
-        ),
+        remedy: Some(INSTALL_AND_RESTART.to_owned()),
     }]
 }
+
+/// What to do about a server running another build.
+const INSTALL_AND_RESTART: &str = "install this build where the hooks and the server run, then \
+                                   restart the server with `anamnesis service restart`";
 
 /// What became of the sessions that were recorded.
 ///
@@ -638,8 +636,8 @@ fn judge_pages(symptoms: &Symptoms) -> Vec<Finding> {
         Some(failure) if refuses_the_key(failure) => (
             format!("; the server's model: {failure}"),
             "the key was refused: store a new one with `anamnesis key set ANAMNESIS_LLM_API_KEY`, \
-             confirm it with `anamnesis key check`, and restart the server — its next passes \
-             rewrite the counted pages"
+             confirm it with `anamnesis key check`, and restart the server with `anamnesis \
+             service restart` — its next passes rewrite the counted pages"
                 .to_owned(),
         ),
         Some(failure) => (
@@ -671,7 +669,7 @@ fn judge_pages(symptoms: &Symptoms) -> Vec<Finding> {
 
 /// Whether a reason the server reported is a refused credential: a 401 or a
 /// 403, or a 400 whose sentence names the key — Google's way of saying it.
-fn refuses_the_key(failure: &str) -> bool {
+pub(crate) fn refuses_the_key(failure: &str) -> bool {
     let lower = failure.to_ascii_lowercase();
     lower.contains("answered 401")
         || lower.contains("answered 403")
@@ -809,7 +807,7 @@ fn server_build(server: &str) -> Option<String> {
 /// tokens answers nothing without it. Any failure is `None`: for the embedder
 /// that judges every complaint row rather than none, and for the model it is
 /// no reason rather than a guessed one.
-fn server_whoami(server: &str) -> Option<serde_json::Value> {
+pub(crate) fn server_whoami(server: &str) -> Option<serde_json::Value> {
     let client = probe_client().ok()?;
     let mut request = client.get(format!("{server}/whoami"));
     if let Ok(token) = std::env::var(anamnesis_web::auth::TOKEN_ENV) {
@@ -823,7 +821,7 @@ fn server_whoami(server: &str) -> Option<serde_json::Value> {
 }
 
 /// `gemini-3.5-flash answered 400: ...`, from a `/whoami` body.
-fn model_failure(body: &serde_json::Value) -> Option<String> {
+pub(crate) fn model_failure(body: &serde_json::Value) -> Option<String> {
     let reason = body.get("consolidation_failure")?.get("reason")?.as_str()?;
     Some(
         match body

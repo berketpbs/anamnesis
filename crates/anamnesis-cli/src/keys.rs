@@ -178,7 +178,8 @@ pub fn cmd_key_set(name: &str, from_stdin: bool) -> anyhow::Result<()> {
     );
     println!("  Every anamnesis command reads it when {name} is not in its environment.");
     println!("  `anamnesis key check` asks the model with it, before a server depends on it.");
-    println!("  A running server read its settings when it started: restart it to use this.");
+    println!("  A running server read its settings when it started: `anamnesis service restart`");
+    println!("  gives it this one.");
     if std::env::var(name).is_ok() {
         println!();
         println!("  {name} is also set in this shell, and the environment wins here.");
@@ -225,7 +226,9 @@ pub fn cmd_key_forget(name: &str) -> anyhow::Result<()> {
     let removed = store::delete(&service(), name).map_err(|error| anyhow::anyhow!(error))?;
     if removed {
         println!("🔑 {name} removed from {}.", store::NAME);
-        println!("  A running server keeps the key it started with until it restarts.");
+        println!(
+            "  A running server keeps the key it started with until `anamnesis service restart`."
+        );
     } else {
         println!("🔑 {name} was not stored; nothing to remove.");
     }
