@@ -149,6 +149,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fallback counts the failed probe as its last attempt. The same search takes
   0.6 s; the server, the MCP server, `write-page` and `bootstrap` start the
   same way
+- **`improve` counts the pages asking for a missing page however each one
+  spelled the link.** A missing page is proposed once two pages link to it,
+  and the links were grouped as written: `[[windows-bom]]` on one page and
+  `[[windows-bom.md|the BOM trap]]` on another were two targets with one page
+  each, so the page two pages asked for was never proposed. They are grouped
+  by the page they ask for now — alias and heading off, `.md` on — and a page
+  linking twice in two spellings counts once
 - **A `[[link]]` is resolved the way Obsidian reads it.** The index accepted a
   link only as a path from the scope's root, `[[gotchas/windows-bom]]` or the
   same with `.md`, and nobody writes one that way: Obsidian resolves

@@ -190,7 +190,8 @@ pub struct PageStats {
 /// A link target that no page answers to, and the pages asking for it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MissingTarget {
-    /// The target exactly as it was written between the brackets.
+    /// The page the links ask for, spelled one way whichever way each link
+    /// wrote it ([`crate::links::link_page`]).
     pub target: String,
     /// Pages linking to it, in path order.
     pub sources: Vec<PagePath>,

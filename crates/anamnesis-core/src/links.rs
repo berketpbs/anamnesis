@@ -57,6 +57,25 @@ pub fn link_stem(path: &str) -> &str {
     name.strip_suffix(EXTENSION).unwrap_or(name)
 }
 
+/// The page a link asks for, spelled one way: alias and heading off, no
+/// leading slash, `.md` on.
+///
+/// For a link that resolves to nothing, where the question is not which page
+/// it is but whether two links want the same one: `[[windows-bom]]`,
+/// `[[windows-bom.md]]` and `[[windows-bom|the BOM trap]]` all ask for
+/// `windows-bom.md`. `None` for a link that names no page at all.
+pub fn link_page(raw: &str) -> Option<String> {
+    let target = link_target(raw).trim_start_matches('/');
+    if target.is_empty() {
+        return None;
+    }
+    Some(if target.ends_with(EXTENSION) {
+        target.to_owned()
+    } else {
+        format!("{target}{EXTENSION}")
+    })
+}
+
 /// Resolve a link written on the page at `from` to the path of the page it
 /// names, by the rules in the module documentation.
 ///
@@ -243,6 +262,24 @@ mod tests {
             None
         );
         assert_eq!(resolved(&pages, "sessions/today.md", "|"), None);
+    }
+
+    #[test]
+    fn every_spelling_of_a_link_asks_for_one_page() {
+        for raw in [
+            "windows-bom",
+            "windows-bom.md",
+            "windows-bom|the BOM trap",
+            "/windows-bom#why",
+        ] {
+            assert_eq!(link_page(raw).as_deref(), Some("windows-bom.md"), "{raw}");
+        }
+        assert_eq!(
+            link_page("gotchas/windows-bom").as_deref(),
+            Some("gotchas/windows-bom.md")
+        );
+        assert_eq!(link_page("#heading"), None);
+        assert_eq!(link_page(" | "), None);
     }
 
     #[test]

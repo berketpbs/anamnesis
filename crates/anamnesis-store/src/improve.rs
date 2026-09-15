@@ -110,32 +110,49 @@ impl Store {
     /// Grouped in Rust rather than in SQL because the group is a list of
     /// paths, and `group_concat` would hand back a string that has to be
     /// split on a separator a page path is allowed to contain.
+    ///
+    /// Grouped by the page a link asks for rather than by how it was written.
+    /// A proposal needs two pages asking, and two pages that wrote
+    /// `[[windows-bom]]` and `[[windows-bom.md|the BOM trap]]` are two pages
+    /// asking for one missing page — counted as two targets with one page
+    /// each, they were nobody asking at all.
     fn missing_targets(&self, project_id: ProjectId) -> Result<Vec<MissingTarget>> {
         let conn = self.connection();
         let mut statement = conn.prepare(
             "SELECT l.to_target, p.path
              FROM page_links l
              JOIN pages p ON p.id = l.from_page_id
-             WHERE p.project_id = ?1 AND l.to_page_id IS NULL
-             ORDER BY l.to_target, p.path",
+             WHERE p.project_id = ?1 AND l.to_page_id IS NULL",
         )?;
         let rows = statement.query_map(params![project_id.to_string()], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
 
-        let mut targets: Vec<MissingTarget> = Vec::new();
+        let mut grouped: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
         for row in rows {
             let (target, source) = row?;
-            let source = parse_page_path(&source);
-            match targets.last_mut() {
-                Some(last) if last.target == target => last.sources.push(source),
-                _ => targets.push(MissingTarget {
-                    target,
-                    sources: vec![source],
-                }),
-            }
+            let Some(asked) = anamnesis_core::links::link_page(&target) else {
+                continue;
+            };
+            grouped.entry(asked).or_default().push(source);
         }
-        Ok(targets)
+        Ok(grouped
+            .into_iter()
+            .map(|(target, mut sources)| {
+                // A page that links twice, in two spellings, is one page asking.
+                sources.sort();
+                sources.dedup();
+                MissingTarget {
+                    target,
+                    sources: sources
+                        .iter()
+                        .map(String::as_str)
+                        .map(parse_page_path)
+                        .collect(),
+                }
+            })
+            .collect())
     }
 
     /// File this pass's proposals, and resolve the ones it no longer makes.
@@ -436,6 +453,41 @@ mod tests {
         assert_eq!(missing[0].sources.len(), 2);
         assert_eq!(missing[1].target, "notes/solo.md");
         assert_eq!(missing[1].sources.len(), 1);
+    }
+
+    /// Two pages asking for one missing page in different spellings are two
+    /// pages asking, and one page asking twice is one.
+    #[test]
+    fn a_missing_page_is_counted_once_per_page_however_it_is_spelled() {
+        let (_dir, store, project, _workspace) = fixture();
+        let first = page(&store, project, "sessions/a.md", 1, 0);
+        let second = page(&store, project, "sessions/b.md", 1, 0);
+        store
+            .set_page_links(
+                project,
+                first.id,
+                &["windows-bom".to_owned(), "windows-bom.md#why".to_owned()],
+            )
+            .expect("links");
+        store
+            .set_page_links(project, second.id, &["windows-bom|the BOM trap".to_owned()])
+            .expect("links");
+
+        let missing = store.improve_facts(project).expect("facts").missing;
+        assert_eq!(missing.len(), 1, "{missing:?}");
+        assert_eq!(missing[0].target, "windows-bom.md");
+        assert_eq!(
+            missing[0]
+                .sources
+                .iter()
+                .map(|path| path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sessions/a.md", "sessions/b.md"]
+        );
+        assert!(
+            anamnesis_core::improve::propose_missing_page(&missing[0]).is_some(),
+            "two pages asking is enough to propose it"
+        );
     }
 
     #[test]
