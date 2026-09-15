@@ -156,6 +156,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each, so the page two pages asked for was never proposed. They are grouped
   by the page they ask for now — alias and heading off, `.md` on — and a page
   linking twice in two spellings counts once
+- **Every "restart the server" names the command, and `key check` notices a
+  server still holding a refused key.** `key set`, `key forget`, `key check`
+  and three of `doctor`'s remedies said to restart the server and not how,
+  which on Windows meant finding the right `anamnesis.exe` by its command
+  line; they now name `anamnesis service restart`. And the step is the one
+  most easily skipped after a new key: `key check` reads the credential store
+  as it is now, the server read it when it started, and a check that passes
+  said nothing about the process writing pages, which went on sending the
+  refused key while `status` named the old refusal as if the new key had
+  failed too. When every model answers the check and the running server's
+  last answer was a refused key, `key check` now says the server still has the
+  key it started with
 - **A `[[link]]` is resolved the way Obsidian reads it.** The index accepted a
   link only as a path from the scope's root, `[[gotchas/windows-bom]]` or the
   same with `.md`, and nobody writes one that way: Obsidian resolves
