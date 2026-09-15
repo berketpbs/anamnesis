@@ -144,6 +144,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session's note in each harness's shape — and `tests/mcp_stdio.rs` drives
   `anamnesis mcp` over stdio, with every stdout line required to be a protocol
   frame. Both run on every platform CI tests, Windows included
+- **`uninstall` removes a configuration file it leaves empty.** `setup`
+  creates `.mcp.json` and `.claude/settings.local.json` in a project that has
+  neither, and taking anamnesis back out wrote them back as `{}`: a `.mcp.json`
+  left in the project root for somebody to commit. A file with nothing left in
+  it is removed now, with the harness directory it was in (`.claude/`,
+  `.cursor/`, `.gemini/`, `.codex/`) when that is empty too; a file holding
+  anything else — another server, somebody's hook, a Codex setting — is written
+  back with that. Never the project directory itself: the first version took
+  any empty dot-directory, and a test whose project was `.tmpXXXX` lost it
 - **The image's health check can fail, and the development image builds.**
   `HEALTHCHECK` ran `anamnesis status`, which describes and always exits 0:
   a container whose server was frozen (`kill -STOP`) was still `healthy`
