@@ -132,6 +132,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   arguments the Dockerfile does not take, a Helm chart that does not exist, a
   `SQLITE_CONFIG` variable nothing reads, or `memory.db` as the index — a
   `VACUUM` against that name creates an empty database and succeeds
+- **A background pass that panics no longer ends its loop.** The reaper and
+  the enricher ran `loop { pass().await; sleep }`, so a panic anywhere in a
+  pass — a stored row that does not parse is enough — ended the task: the
+  server went on answering `/health` while no abandoned session was summarised
+  and no counted page was asked about again until a restart. Each pass now
+  runs on its own task, a panic is logged and the next pass runs on schedule,
+  and a panicking enricher pass counts as one in which nothing was written, so
+  it backs off rather than logging the same panic every minute. The session
+  list, each session's scope — a marker file read and a git repository opened,
+  from a checkout that may be on a slow drive — and the claim on a session are
+  read off the runtime, where every other index read already was
 - **A reply cut off part way through its body is asked again, and the log
   says what cut it.** Twice on 2026-09-13 the server logged `llm transport
   failed: error decoding response body` and fell back to a counted page on the

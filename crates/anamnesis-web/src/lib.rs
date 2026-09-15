@@ -226,6 +226,32 @@ impl AppState {
     }
 }
 
+/// Run one pass of a background loop on its own task, so that a panic ends the
+/// pass and not the loop.
+///
+/// The reaper and the enricher were `loop { pass().await; sleep }`, and a panic
+/// anywhere in a pass unwound through the loop: the task ended, the panic went
+/// to the log, and the server went on answering `/health` while no abandoned
+/// session was ever summarised again and no counted page was ever asked about
+/// again, until somebody restarted it. The auto-improve scheduler already ran
+/// its tick this way. `None` is a pass that panicked.
+pub(crate) async fn one_pass<T: Send + 'static>(
+    loop_name: &'static str,
+    pass: impl std::future::Future<Output = T> + Send + 'static,
+) -> Option<T> {
+    match tokio::spawn(pass).await {
+        Ok(value) => Some(value),
+        Err(error) => {
+            tracing::error!(
+                %error,
+                pass = loop_name,
+                "a background pass panicked; the next one runs on schedule"
+            );
+            None
+        }
+    }
+}
+
 /// Run work that touches the index, the wiki, or a model somewhere other than
 /// a runtime thread.
 ///
@@ -3336,6 +3362,35 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(&body_of(response).await).expect("json");
         assert_eq!(body["auth"], "token");
         assert_eq!(body["operator"], "bob");
+    }
+
+    /// A background loop's pass that panics — here with the message a stored
+    /// identifier that is not a uuid produces — comes back as `None`, and the
+    /// next pass on the same runtime still runs.
+    #[tokio::test]
+    async fn a_pass_that_panics_ends_the_pass_and_not_the_loop() {
+        assert_eq!(one_pass("test", async { 7 }).await, Some(7));
+        let panicked: Option<()> = one_pass("test", async {
+            panic!("stored identifier \"not-a-uuid\" is not a uuid");
+        })
+        .await;
+        assert_eq!(panicked, None);
+        assert_eq!(
+            one_pass("test", async { 8 }).await,
+            Some(8),
+            "the loop goes on"
+        );
+    }
+
+    /// The reaper's and the enricher's passes still do their work when the
+    /// blocking parts run off the runtime: on a current-thread runtime, where
+    /// a blocking call on the runtime would hold the only worker.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_background_passes_run_on_a_single_threaded_runtime() {
+        let harness = harness();
+        let report = reap::reap(&harness.state, now()).await;
+        assert!(report.failed.is_empty(), "{report:?}");
+        assert_eq!(enrich::sweep_awaiting(&harness.state, now()).await, 0);
     }
 
     #[tokio::test]
