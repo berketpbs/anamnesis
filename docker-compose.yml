@@ -38,7 +38,9 @@ services:
       - "8080:8080"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "anamnesis", "status"]
+      # Exits non-zero when memory would not be recorded; `status` always
+      # exits 0, so it could never report the container unhealthy.
+      test: ["CMD", "anamnesis", "hook", "--probe"]
       interval: 30s
       timeout: 10s
       retries: 3

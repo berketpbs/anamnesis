@@ -3,8 +3,13 @@ FROM rust:1.95-slim-trixie
 
 WORKDIR /app
 
-# Install development dependencies
-RUN apt-get update && apt-get install -y \
+# Install development dependencies.
+#
+# Not `cargo-watch`: Debian has no package by that name, and naming it here
+# made the whole install fail with "Unable to locate package cargo-watch", so
+# this image never built. It comes from crates.io below, built with the same
+# toolchain as everything else in the container.
+RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
     git \
@@ -12,8 +17,10 @@ RUN apt-get update && apt-get install -y \
     curl \
     jq \
     vim \
-    cargo-watch \
     && rm -rf /var/lib/apt/lists/*
+
+# `--locked`, so the watcher is the version its own lock file was tested with.
+RUN cargo install --locked cargo-watch
 
 # Copy workspace
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./

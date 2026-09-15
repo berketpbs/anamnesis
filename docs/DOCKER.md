@@ -122,10 +122,11 @@ docker build -t anamnesis:latest .
 
 # Build with specific version
 docker build -t anamnesis:0.1.0 .
-
-# Build with custom base image
-docker build --build-arg BASE_IMAGE=debian:bookworm .
 ```
+
+The Dockerfile takes no build arguments. Both stages name Debian trixie on
+purpose: a binary linked against the builder's glibc does not start on an older
+runtime, and nothing about that shows while building.
 
 ### Development Image
 
@@ -180,13 +181,17 @@ docker run -d \
 |----------|---------|-------------|
 | `ANAMNESIS_DATA_DIR` | `/root/.anamnesis` | Data directory root (`wiki/`, `raw/`, `db/`, `models/`, `logs/`) |
 | `RUST_LOG` | `info` | Logging level (debug, info, warn, error) |
-| `ANTHROPIC_API_KEY` | — | Enables model-written consolidation. Without it, summaries are compiled by counting. |
-| `ANAMNESIS_LLM_*` | see below | `PROVIDER`, `MODEL`, `BASE_URL`, `EFFORT`, `MAX_INPUT_TOKENS`, `MAX_OUTPUT_TOKENS`, `TIMEOUT_SECS`, `MAX_RETRIES`, `FALLBACKS` |
-| `ANAMNESIS_EMBED_ENABLED` | unset | `1` turns on the local embedder, which downloads a model into `models/` on first use |
+| `ANTHROPIC_API_KEY` | — | Enables model-written consolidation with Anthropic. Without a model, summaries are compiled by counting. |
+| `ANAMNESIS_LLM_*` | — | `PROVIDER`, `MODEL`, `API_KEY`, `BASE_URL`, `EFFORT`, `MAX_INPUT_TOKENS`, `MAX_OUTPUT_TOKENS`, `TIMEOUT_SECS`, `MAX_RETRIES`, `FALLBACKS`, `FALLBACK_PROVIDERS` |
+| `ANAMNESIS_EMBED_*` | unset | `ENABLED=1` turns vectors on; `PROVIDER`, `MODEL`, `URL`, `API_KEY` pick the embedder. The local one downloads a model into `models/` on first use |
+| `ANAMNESIS_TOKEN` / `ANAMNESIS_TOKENS` | unset | Require a bearer token on every route but `/health` |
 
-> `PORT` and `BIND` are **not** read. The entrypoint hardcodes
-> `anamnesis serve --bind 0.0.0.0 --port 8080`; to change either, override the
-> container command instead:
+A container has no credential store, so a key goes in the environment
+(`-e`, or an `--env-file` readable only by you), never in `settings.env`.
+
+> `PORT` and `BIND` are **not** read. The image's command is
+> `anamnesis serve --bind 0.0.0.0 --port 8080 --allow-anonymous`; to change
+> either, override the container command instead:
 >
 > ```bash
 > docker run anamnesis:latest anamnesis serve --bind 0.0.0.0 --port 9000
@@ -209,35 +214,34 @@ curl http://localhost:8080/health
 
 ### Inter-container Communication
 
-```bash
-# Services on the same network can communicate by name
-# e.g., anamnesis -> http://anamnesis:8080
-docker-compose up
-docker-compose exec postgres psql -h anamnesis -U user
-```
+Services on the same compose network reach the server by its service name, at
+`http://anamnesis:8080`. A hook running in another container points there with
+`ANAMNESIS_SERVER=http://anamnesis:8080`.
 
 ## Health Checks
 
+The image's `HEALTHCHECK` runs `anamnesis hook --probe`: it sends the server
+the event a hook would, asks it to record nothing, and exits non-zero when
+memory would not be recorded. It presents `ANAMNESIS_TOKEN` when the container
+has one.
+
 ```bash
-# Manual health check
-docker exec anamnesis anamnesis status
+# The same check by hand, and what it found
+docker exec anamnesis anamnesis hook --probe
 
-# View health status
-docker inspect anamnesis | grep -A 10 "Health"
+# What Docker has concluded
+docker inspect --format '{{.State.Health.Status}}' anamnesis
 
-# With curl
-curl http://localhost:8080/health || echo "Unhealthy"
+# Liveness only, from the host
+curl -fsS http://localhost:8080/health
 ```
+
+`anamnesis status` describes the server and always exits 0, so it is the
+command to read and not one to check.
 
 ## Troubleshooting
 
 ### Build Issues
-
-**Error: C++ build tools not found**
-```bash
-# Use vendored build
-docker build --build-arg PROFILE=vendored .
-```
 
 **Error: Link failure on Windows**
 ```bash
@@ -257,10 +261,10 @@ docker run -it anamnesis:latest /bin/bash
 ```
 
 **Permission denied in volume**
-```bash
-# Fix ownership
-docker exec anamnesis chown -R user:user /root/.anamnesis
-```
+
+The server runs as root in the container and writes under `/root/.anamnesis`.
+A bind mount from the host has the host's ownership; a named volume
+(`-v anamnesis-data:/root/.anamnesis`) avoids the question.
 
 **Out of disk space**
 ```bash
@@ -276,40 +280,27 @@ docker volume rm anamnesis-data
 ### Multi-stage Build Optimization
 
 The production Dockerfile uses multi-stage builds:
-- **Stage 1 (Builder)**: Compiles binary (1.5GB intermediate)
-- **Stage 2 (Runtime)**: Only includes binary and runtime deps (~60MB)
-
-### SQLite Performance
-
-For high-concurrency scenarios, consider:
-```bash
-# Increase WAL checkpoints
-docker run -e "SQLITE_CONFIG=wal_autocheckpoint=100000" anamnesis:latest
-```
+- **Stage 1 (Builder)**: compiles the binary
+- **Stage 2 (Runtime)**: Debian trixie slim with the binary, `sqlite3`,
+  `ca-certificates`, `tini` and `git`
 
 ### Database Size
 
 ```bash
-# Check database size
+# Check data directory size
 docker exec anamnesis du -sh /root/.anamnesis/
 
-# Vacuum database
-docker exec anamnesis sqlite3 /root/.anamnesis/memory.db VACUUM
+# Vacuum the index (stop writes first: the server holds it open)
+docker exec anamnesis sqlite3 /root/.anamnesis/db/anamnesis.db VACUUM
 ```
+
+The index is `db/anamnesis.db`. A command pointed at any other file name gets
+a new, empty database and reports success.
 
 ## Kubernetes Deployment
 
-### Helm Chart (Future)
-
-```bash
-# Install with Helm
-helm install anamnesis ./helm
-
-# Customize
-helm install anamnesis ./helm \
-  --set persistence.size=10Gi \
-  --set replicaCount=3
-```
+There is no Helm chart. Run **one** replica: the index is SQLite with a single
+writer, and two pods on one volume would contend for it.
 
 ### Manual Deployment
 
