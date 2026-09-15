@@ -143,6 +143,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   list, each session's scope — a marker file read and a git repository opened,
   from a checkout that may be on a slow drive — and the claim on a session are
   read off the runtime, where every other index read already was
+- **An OpenCode session is handed the note the last one left.** OpenCode has
+  no channel from a hook's stdout to the model, so its plugin runs `anamnesis
+  hook` with stdout ignored and asks `/handoff` itself, to put the note in the
+  system prompt. The hook command claimed the handoff at every session start,
+  whichever harness ran it, and a handoff is claimed once: the plugin reports
+  the start first, the note went to the ignored stdout, and the plugin's own
+  request found nothing. No OpenCode session had ever received one. The hook no
+  longer claims it for OpenCode. Found by running the plugin for the first
+  time: `crates/anamnesis-cli/tests/opencode-plugin/` installs it with
+  `install-hooks`, starts a server, and plays two OpenCode runs through it
+  under Bun — prompt, tool call, compaction, end, and a second run that must be
+  handed the first one's note once — and CI runs it in the image
 - **A reply cut off part way through its body is asked again, and the log
   says what cut it.** Twice on 2026-09-13 the server logged `llm transport
   failed: error decoding response body` and fell back to a counted page on the

@@ -112,6 +112,23 @@ jobs:
       - name: The binary in the image runs
         run: docker run --rm anamnesis:ci anamnesis --version
 
+      # The OpenCode plugin is JavaScript that runs under Bun, and until this
+      # step nothing had ever loaded it. Run end to end it showed that no
+      # OpenCode session had ever been handed a note: the hook it runs for a
+      # session start claimed the handoff onto a stdout the plugin ignores. The
+      # image supplies the binary under test and a real server; Bun is copied
+      # in from its own image.
+      - name: The OpenCode plugin works end to end
+        run: |
+          cid=$(docker create oven/bun:1)
+          docker cp "$cid:/usr/local/bin/bun" "$RUNNER_TEMP/bun"
+          docker rm "$cid"
+          docker run --rm \
+            -v "$PWD/crates/anamnesis-cli/tests/opencode-plugin:/check:ro" \
+            -v "$RUNNER_TEMP/bun:/usr/local/bin/bun:ro" \
+            --entrypoint sh anamnesis:ci \
+            /check/run.sh /usr/local/bin/anamnesis /usr/local/bin/bun
+
       # The health interval is shortened here, and only here, so the next step
       # does not wait out the image's thirty seconds; the command is the image's.
       - name: The server starts and answers

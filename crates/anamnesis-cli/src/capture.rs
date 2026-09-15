@@ -17,6 +17,7 @@
 use std::path::PathBuf;
 
 use anamnesis_core::datadir::DataDir;
+use anamnesis_core::session::AgentKind;
 
 use crate::spool;
 
@@ -411,8 +412,17 @@ pub fn cmd_hook(agent: &str, server: &str, token: Option<&str>, data_dir: Option
 /// which is the whole of the difference — so it is compared without regard to
 /// case rather than through a table. A harness that renames the moment
 /// outright would need one, and this is where it would go.
-fn is_starting(event: Option<&str>, _agent: &str) -> bool {
-    event.is_some_and(|event| event.eq_ignore_ascii_case("sessionstart"))
+///
+/// Except OpenCode, where this command is not what delivers the note. OpenCode
+/// has no channel from a command's stdout to the model, so its plugin runs this
+/// command with stdout ignored and asks `/handoff` itself, to put the note in
+/// the system prompt. A handoff is claimed once: collected here, at the start
+/// the plugin reports first, it went to a stdout nobody read, and the plugin's
+/// own request a moment later found nothing. No OpenCode session had ever been
+/// handed a note when the plugin was first run end to end.
+fn is_starting(event: Option<&str>, agent: &str) -> bool {
+    agent != AgentKind::OpenCode.as_str()
+        && event.is_some_and(|event| event.eq_ignore_ascii_case("sessionstart"))
 }
 
 /// How long one hook will spend delivering what earlier hooks could not.
@@ -1104,5 +1114,13 @@ mod tests {
         assert!(!is_starting(None, "gemini-cli"));
         // Cursor spells it differently, and it is still the same moment.
         assert!(is_starting(Some("sessionStart"), "cursor"));
+    }
+
+    /// OpenCode's plugin asks `/handoff` itself and ignores this command's
+    /// stdout, so the start it reports must not claim the note first.
+    #[test]
+    fn the_opencode_plugin_collects_its_own_handoff() {
+        assert!(!is_starting(Some("SessionStart"), "opencode"));
+        assert!(is_starting(Some("SessionStart"), "codex"));
     }
 }
