@@ -78,7 +78,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `brew bump-formula-pr` see a tagged release whose manifests have not been
   merged yet.
   `WINGET=1` also writes the three winget manifests, which are submitted to
-  `microsoft/winget-pkgs` rather than kept here
+  `microsoft/winget-pkgs` rather than kept here, and the directory they land
+  in is ignored so that a copy nothing regenerates cannot be committed by
+  accident
 
 ### Fixed
 - **`doctor` gives the server's reason for counted pages, and stops blaming

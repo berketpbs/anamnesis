@@ -5,6 +5,14 @@
 **/*.rs.bk
 **/*.rs.orig
 
+# `WINGET=1 packaging/render.sh` renders three manifests into the directory it
+# was given, which is the repository root unless one is named. They are
+# submitted to microsoft/winget-pkgs and deliberately not kept here — the tap
+# and the bucket are this repository, winget is not — so nothing regenerates a
+# copy that `git add -A` swept in, and a stale one would name a version and a
+# hash of its own.
+/winget/
+
 # Local environment overrides
 .env
 .env.local
