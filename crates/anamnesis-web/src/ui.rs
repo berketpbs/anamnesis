@@ -682,10 +682,15 @@ fn render_page(
         }
         let parsed = wiki.read_page(&found.scope, &page_path)?;
         let base = scope_href(&found.scope);
-        let links: HashMap<String, Option<String>> = anamnesis_wiki::extract_links(&parsed.body)
+        let targets = anamnesis_wiki::extract_links(&parsed.body);
+        // Listed once, and only when a link is not found from the root or
+        // beside this page: walking the scope is the one expensive lookup.
+        let mut pages: Option<Vec<String>> = None;
+        let links: HashMap<String, Option<String>> = targets
             .into_iter()
             .map(|target| {
-                let href = resolve_link(&wiki, &found.scope, &base, &target);
+                let href = resolve_link(&wiki, &found.scope, &page_path, &target, &mut pages)
+                    .map(|path| format!("{base}/{}", encode_path(&path)));
                 (target, href)
             })
             .collect();
@@ -742,26 +747,41 @@ fn find_scope(state: &AppState, workspace: &str, project: &str) -> Result<Projec
         .ok_or_else(|| UiError::Missing(format!("no scope named {workspace}/{project} here")))
 }
 
-/// Where a `[[wiki link]]` points, if it points at a page that exists.
+/// The path of the page a `[[wiki link]]` on `from` points at, if it exists.
 ///
-/// Both spellings the index resolves are accepted here too — `[[decisions]]`
-/// and `[[decisions.md]]` name the same page — so what the browser shows as a
-/// live link is what the link stream in retrieval sees as an edge.
+/// By the same rules the index resolves links with
+/// ([`anamnesis_core::links::resolve`]), asked of the files instead of the
+/// rows, so what the browser shows as a live link is what the link stream in
+/// retrieval sees as an edge. `pages` holds the scope's listing once a link has
+/// needed it.
 fn resolve_link(
     wiki: &anamnesis_wiki::Wiki,
     scope: &Scope,
-    base: &str,
+    from: &PagePath,
     target: &str,
+    pages: &mut Option<Vec<String>>,
 ) -> Option<String> {
-    for candidate in [target.to_owned(), format!("{target}.md")] {
-        let Ok(path) = PagePath::parse(&candidate) else {
-            continue;
-        };
-        if wiki.exists(scope, &path) {
-            return Some(format!("{base}/{}", encode_path(path.as_str())));
-        }
-    }
-    None
+    anamnesis_core::links::resolve::<std::convert::Infallible>(
+        from.as_str(),
+        target,
+        |path| Ok(PagePath::parse(path).is_ok_and(|path| wiki.exists(scope, &path))),
+        |suffix| {
+            let listed = pages.get_or_insert_with(|| {
+                wiki.pages(scope)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|path| path.as_str().to_owned())
+                    .collect()
+            });
+            let slashed = format!("/{suffix}");
+            Ok(listed
+                .iter()
+                .filter(|path| *path == suffix || path.ends_with(&slashed))
+                .cloned()
+                .collect())
+        },
+    )
+    .unwrap_or_else(|never| match never {})
 }
 
 /// What retention has in store for this page.
@@ -1387,6 +1407,33 @@ mod tests {
 
         assert!(
             body.contains("href=\"/ui/default/widget/notes/target.md\""),
+            "{body}"
+        );
+        assert!(body.contains("class=\"missing\""), "{body}");
+    }
+
+    /// The browser reads a link by the rules the index does, so a neighbour
+    /// named by its name alone is as live here as it is in retrieval.
+    #[tokio::test]
+    async fn a_link_by_name_alone_is_a_link_to_the_page_beside_it() {
+        let harness = harness();
+        write(&harness, "gotchas/target.md", "Target", "Body.\n");
+        write(&harness, "sessions/far.md", "Far", "Body.\n");
+        write(
+            &harness,
+            "gotchas/one.md",
+            "One",
+            "See [[target]], [[far|the far one]] and [[nothing]].\n",
+        );
+
+        let (_, body) = get_page(&harness.state, "/ui/default/widget/gotchas/one.md").await;
+
+        assert!(
+            body.contains("href=\"/ui/default/widget/gotchas/target.md\""),
+            "{body}"
+        );
+        assert!(
+            body.contains("href=\"/ui/default/widget/sessions/far.md\""),
             "{body}"
         );
         assert!(body.contains("class=\"missing\""), "{body}");

@@ -703,9 +703,13 @@ impl Store {
     ///
     /// * **outgoing** — every target this page names is resolved against the
     ///   pages that exist now;
-    /// * **incoming** — every *other* page's unresolved link naming this
-    ///   page's path is resolved to it, which is what makes writing pages in
+    /// * **incoming** — every *other* page's unresolved link that could name
+    ///   this page is resolved again, which is what makes writing pages in
     ///   any order safe.
+    ///
+    /// What a link names is decided by [`anamnesis_core::links::resolve`]:
+    /// from the root, then beside the linking page, then by a name only one
+    /// page has — the way Obsidian reads the same wiki.
     pub fn set_page_links(
         &self,
         project_id: ProjectId,
@@ -714,26 +718,24 @@ impl Store {
     ) -> Result<()> {
         let mut conn = self.connection();
         let tx = conn.transaction()?;
+        let project = project_id.to_string();
         tx.execute(
             "DELETE FROM page_links WHERE from_page_id = ?1",
             params![page_id.to_string()],
         )?;
+        let path: Option<String> = tx
+            .query_row(
+                "SELECT path FROM pages WHERE id = ?1",
+                params![page_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+
         for target in targets {
-            let resolved: Option<String> = tx
-                .query_row(
-                    // Not filtered by `is_latest`: a link naming a page that
-                    // has since been superseded still names a page that
-                    // exists. Whether it is the head of its chain decides how
-                    // it ranks, not whether it is there — and treating it as
-                    // missing would have the wiki asking for a page it
-                    // already holds.
-                    "SELECT id FROM pages
-                     WHERE project_id = ?1
-                       AND (path = ?2 OR path = ?2 || '.md')",
-                    params![project_id.to_string(), target],
-                    |row| row.get(0),
-                )
-                .optional()?;
+            // A page with no row yet has no folder to look beside; the other
+            // two rules still apply.
+            let from = path.as_deref().unwrap_or_default();
+            let resolved = resolve_link_in(&tx, &project, from, target)?;
             tx.execute(
                 "INSERT INTO page_links (from_page_id, to_target, to_page_id, to_project_id)
                  VALUES (?1, ?2, ?3, NULL)
@@ -742,24 +744,37 @@ impl Store {
             )?;
         }
 
-        // The `to_target || '.md'` half matches the extension-less form
-        // `[[gotchas/windows-bom]]`, the same two spellings the outgoing
-        // lookup above accepts.
-        let path: Option<String> = tx
-            .query_row(
-                "SELECT path FROM pages WHERE id = ?1",
-                params![page_id.to_string()],
-                |row| row.get(0),
-            )
-            .optional()?;
+        // Every rule finds a page whose name ends the way the link does, so
+        // only an unresolved link with this page's name can have been waiting
+        // for it. Compared here rather than in SQL: the name is what is left
+        // of a target after its alias, heading and extension come off.
         if let Some(path) = path {
-            tx.execute(
-                "UPDATE page_links SET to_page_id = ?1
-                 WHERE to_page_id IS NULL
-                   AND (to_target = ?2 OR to_target || '.md' = ?2)
-                   AND from_page_id IN (SELECT id FROM pages WHERE project_id = ?3)",
-                params![page_id.to_string(), path, project_id.to_string()],
-            )?;
+            let stem = anamnesis_core::links::link_stem(&path);
+            let waiting: Vec<(String, String, String)> = {
+                let mut statement = tx.prepare(
+                    "SELECT l.from_page_id, p.path, l.to_target
+                     FROM page_links l
+                     JOIN pages p ON p.id = l.from_page_id
+                     WHERE l.to_page_id IS NULL AND p.project_id = ?1",
+                )?;
+                let rows = statement.query_map(params![project], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            for (from_id, from, target) in waiting {
+                let named = anamnesis_core::links::link_target(&target);
+                if anamnesis_core::links::link_stem(named) != stem {
+                    continue;
+                }
+                if let Some(resolved) = resolve_link_in(&tx, &project, &from, &target)? {
+                    tx.execute(
+                        "UPDATE page_links SET to_page_id = ?1
+                         WHERE from_page_id = ?2 AND to_target = ?3",
+                        params![resolved, from_id, target],
+                    )?;
+                }
+            }
         }
 
         tx.commit()?;
@@ -971,6 +986,59 @@ impl Store {
         }
         Ok(out)
     }
+}
+
+/// The id of the page a link written on `from` names, within one project.
+///
+/// Not filtered by `is_latest`: a link naming a page that has since been
+/// superseded still names a page that exists. Whether it is the head of its
+/// chain decides how it ranks, not whether it is there — and treating it as
+/// missing would have the wiki asking for a page it already holds.
+fn resolve_link_in(
+    conn: &rusqlite::Connection,
+    project: &str,
+    from: &str,
+    target: &str,
+) -> Result<Option<String>> {
+    let path = anamnesis_core::links::resolve(
+        from,
+        target,
+        |path| {
+            conn.query_row(
+                "SELECT 1 FROM pages WHERE project_id = ?1 AND path = ?2",
+                params![project, path],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|found| found.is_some())
+        },
+        |suffix| {
+            // `substr` with a negative start counts characters from the end,
+            // as `length` counts them, so a name in any script compares whole.
+            // Two rows are enough to know there is not exactly one.
+            let mut statement = conn.prepare_cached(
+                "SELECT path FROM pages
+                 WHERE project_id = ?1
+                   AND (path = ?2 OR substr(path, -length(?3)) = ?3)
+                 LIMIT 2",
+            )?;
+            let rows = statement
+                .query_map(params![project, suffix, format!("/{suffix}")], |row| {
+                    row.get::<_, String>(0)
+                })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        },
+    )?;
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    conn.query_row(
+        "SELECT id FROM pages WHERE project_id = ?1 AND path = ?2",
+        params![project, path],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 /// Collect a query's rows into page ids, stopping at the first parse failure.
@@ -1587,6 +1655,123 @@ mod tests {
             )
             .unwrap();
         assert_eq!(resolved.as_deref(), Some(target.to_string().as_str()));
+    }
+
+    fn link_from(store: &Store, source: PageId, target: &str) -> Option<String> {
+        store
+            .connection()
+            .query_row(
+                "SELECT to_page_id FROM page_links WHERE from_page_id = ?1 AND to_target = ?2",
+                params![source.to_string(), target],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    /// The live wiki's shape: a gotcha naming its neighbour by name alone,
+    /// written in both orders. Eight such links sat unresolved in the index
+    /// that found this, and `improve` asked for a page the wiki already had.
+    #[test]
+    fn a_neighbour_named_by_its_name_alone_resolves_in_either_order() {
+        let (_dir, store, project, _workspace) = fixture();
+        let name = "the-model-lives-in-the-servers-environment-not-the-clis.md";
+
+        let early = write_page(
+            &store,
+            project,
+            "gotchas/early.md",
+            "Early",
+            "b",
+            Vec::new(),
+        );
+        store
+            .set_page_links(project, early, &[name.to_owned()])
+            .unwrap();
+        assert_eq!(
+            link_from(&store, early, name),
+            None,
+            "nothing to point at yet"
+        );
+
+        let target = write_page(
+            &store,
+            project,
+            &format!("gotchas/{name}"),
+            "The model lives in the server's environment",
+            "body",
+            Vec::new(),
+        );
+        store.set_page_links(project, target, &[]).unwrap();
+        assert_eq!(
+            link_from(&store, early, name).as_deref(),
+            Some(target.to_string().as_str()),
+            "resolved when its target arrived"
+        );
+
+        let late = write_page(&store, project, "gotchas/late.md", "Late", "b", Vec::new());
+        store
+            .set_page_links(
+                project,
+                late,
+                &["the-model-lives-in-the-servers-environment-not-the-clis|the model".to_owned()],
+            )
+            .unwrap();
+        assert_eq!(
+            link_from(
+                &store,
+                late,
+                "the-model-lives-in-the-servers-environment-not-the-clis|the model"
+            )
+            .as_deref(),
+            Some(target.to_string().as_str()),
+            "resolved at once, alias and all"
+        );
+    }
+
+    /// A page that shares its name with another is reached only from beside
+    /// it, and writing the second one does not claim links that meant the
+    /// first.
+    #[test]
+    fn a_shared_name_resolves_beside_the_link_and_nowhere_else() {
+        let (_dir, store, project, _workspace) = fixture();
+        let near = write_page(&store, project, "gotchas/setup.md", "G", "b", Vec::new());
+        store.set_page_links(project, near, &[]).unwrap();
+
+        let far = write_page(&store, project, "sessions/today.md", "S", "b", Vec::new());
+        store
+            .set_page_links(project, far, &["setup".to_owned()])
+            .unwrap();
+        assert_eq!(
+            link_from(&store, far, "setup").as_deref(),
+            Some(near.to_string().as_str()),
+            "one page has the name, so the name is enough"
+        );
+
+        let other = write_page(&store, project, "decisions/setup.md", "D", "b", Vec::new());
+        store.set_page_links(project, other, &[]).unwrap();
+        let beside = write_page(&store, project, "decisions/x.md", "X", "b", Vec::new());
+        store
+            .set_page_links(project, beside, &["setup".to_owned()])
+            .unwrap();
+        assert_eq!(
+            link_from(&store, beside, "setup").as_deref(),
+            Some(other.to_string().as_str())
+        );
+        assert_eq!(
+            link_from(&store, far, "setup").as_deref(),
+            Some(near.to_string().as_str()),
+            "an edge already made is not moved by a second page of the same name"
+        );
+
+        let elsewhere = write_page(&store, project, "notes/y.md", "Y", "b", Vec::new());
+        store
+            .set_page_links(project, elsewhere, &["setup".to_owned()])
+            .unwrap();
+        assert_eq!(
+            link_from(&store, elsewhere, "setup"),
+            None,
+            "two candidates and neither beside it: left for a person to disambiguate"
+        );
     }
 
     #[test]
