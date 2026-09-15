@@ -13,6 +13,12 @@
 # acceptable source for it is the file the release published beside them. An
 # archive missing from that file stops the script rather than leaving a
 # placeholder a package manager would reject a day later.
+#
+# The formula's caveat tells a person what to do after an upgrade rather than
+# what the binary does with paths. One script renders every release, and what a
+# given release writes into a hook is that release's business: v1.1.1 records
+# the Cellar path `brew upgrade` then deletes, which is the case the caveat
+# exists for.
 
 set -eu
 
@@ -85,8 +91,9 @@ class Anamnesis < Formula
     <<~TEXT
       Wire a repository from inside it with:
         anamnesis setup
-      Hooks and the MCP registration name #{HOMEBREW_PREFIX}/bin/anamnesis,
-      which brew upgrade keeps pointing at the current version.
+      Run it again after every brew upgrade. Hooks and the MCP registration
+      keep the path they were written with, an upgrade moves the binary, and
+      setup rewrites an entry that no longer leads to the binary running it.
     TEXT
   end
 
