@@ -28,6 +28,7 @@ pub mod error;
 pub mod handoff;
 pub mod ids;
 pub mod improve;
+pub mod links;
 pub mod observation;
 pub mod page;
 pub mod retrieval;

@@ -83,6 +83,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accident
 
 ### Fixed
+- **A `[[link]]` is resolved the way Obsidian reads it.** The index accepted a
+  link only as a path from the scope's root, `[[gotchas/windows-bom]]` or the
+  same with `.md`, and nobody writes one that way: Obsidian resolves
+  `[[windows-bom]]` to the page of that name wherever it is, and an agent
+  writing beside another page names it the same way. On 2026-09-15 the index
+  on this machine held eleven unresolved links and eight named a page that
+  existed, each written from one page in `gotchas/` to another; the
+  link-neighbour stream never saw those edges, and `anamnesis improve`
+  proposed writing a page the wiki had held for nine days. A link now resolves
+  from the root as before, then beside the page that makes it, then to the one
+  page whose path ends that way; a name two pages share and neither beside the
+  link is left unresolved rather than guessed. An alias (`[[page|shown]]`) or
+  heading (`[[page#part]]`) is set aside first. The wiki browser applies the
+  same rules to its live links. `anamnesis reindex` re-resolves what an index
+  already holds; on a copy of this machine's memory it left three unresolved
+  links, all naming pages that do not exist, and the proposal resolved itself
 - **`doctor` gives the server's reason for counted pages, and stops blaming
   the terminal.** Its "pages written by counting" finding said the terminal's
   `ANAMNESIS_LLM_PROVIDER` "the server does not inherit" and sent people to
