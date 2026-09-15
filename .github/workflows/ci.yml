@@ -112,9 +112,12 @@ jobs:
       - name: The binary in the image runs
         run: docker run --rm anamnesis:ci anamnesis --version
 
+      # The health interval is shortened here, and only here, so the next step
+      # does not wait out the image's thirty seconds; the command is the image's.
       - name: The server starts and answers
         run: |
-          docker run -d --name anamnesis-ci -p 8080:8080 anamnesis:ci
+          docker run -d --name anamnesis-ci -p 8080:8080 \
+            --health-interval 2s --health-start-period 1s anamnesis:ci
           answered=no
           for _ in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:8080/health >/dev/null; then
@@ -128,6 +131,29 @@ jobs:
           # container decided about auth, consolidation, and embedding.
           docker logs anamnesis-ci
           [ "$answered" = yes ]
+
+      # Both halves, because the check this replaced only ever had one: it ran
+      # `anamnesis status`, which exits 0 whatever it finds, so a container
+      # could not be reported unhealthy. The image's check must come back
+      # healthy against the running server, and the same command must fail
+      # where no server answers.
+      - name: The health check passes a server that records and fails one that does not
+        run: |
+          status=starting
+          for _ in $(seq 1 30); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' anamnesis-ci)
+            [ "$status" = healthy ] && break
+            sleep 2
+          done
+          docker inspect -f '{{json .State.Health}}' anamnesis-ci
+          if [ "$status" != healthy ]; then
+            echo "::error::the image's health check did not pass against a running server: $status"
+            exit 1
+          fi
+          if docker run --rm anamnesis:ci anamnesis hook --probe; then
+            echo "::error::the health check passed with no server to answer it"
+            exit 1
+          fi
 
       # SIGTERM is what `docker stop`, systemd, and a supervisor all send, and
       # it is the path nobody takes by hand — Ctrl-C in a terminal is the one
@@ -184,6 +210,22 @@ jobs:
       # file that is not there.
       - name: The compose file resolves
         run: docker compose config --quiet
+
+      # The dev image named a Debian package that does not exist and never
+      # built, and nothing noticed, because nothing built it. Built here, not
+      # run: what it runs is `cargo watch` over this checkout.
+      - name: The development image builds
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.dev
+          load: true
+          tags: anamnesis:dev-ci
+          cache-from: type=gha,scope=dev
+          cache-to: type=gha,scope=dev,mode=max
+
+      - name: The development image has its watcher
+        run: docker run --rm anamnesis:dev-ci cargo watch --version
 
   # The long-run eval needs an agent and a model and runs on a machine, not
   # here. What can run here is the part everything else rests on: that each

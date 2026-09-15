@@ -13,8 +13,10 @@ FROM rust:1.95-slim-trixie AS builder
 
 WORKDIR /app
 
-# Install build dependencies
-RUN apt-get update && apt-get install -y \
+# Install build dependencies. `--no-install-recommends`: what is named is what
+# the build needs, and apt's recommendations are a few hundred megabytes of
+# documentation and tools nothing here runs.
+RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
     git \
@@ -36,8 +38,9 @@ FROM debian:trixie-slim
 
 WORKDIR /root
 
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y \
+# Install runtime dependencies, and nothing they merely recommend: every package
+# in the image is one more thing to patch.
+RUN apt-get update && apt-get install -y --no-install-recommends \
     sqlite3 \
     ca-certificates \
     tini \
@@ -68,9 +71,16 @@ CMD ["anamnesis", "serve", "--bind", "0.0.0.0", "--port", "8080", "--allow-anony
 # Expose ports
 EXPOSE 8080
 
-# Health check
+# Health check.
+#
+# `hook --probe` sends the server the event a hook would, asks it to record
+# nothing, and exits non-zero when memory would not be recorded — the question
+# a health check is for. It used to be `anamnesis status`, which describes and
+# always exits 0: pointed at a server that answers nothing it printed
+# "unreachable" and passed, so the container could never be reported unhealthy.
+# The probe presents ANAMNESIS_TOKEN when the container has one.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD anamnesis status || exit 1
+    CMD ["anamnesis", "hook", "--probe"]
 
 # Labels
 LABEL org.opencontainers.image.title="Anamnesis" \
