@@ -139,6 +139,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Every commit now starts from HEAD's tree and applies only its own paths, and
   a HEAD another process moved in between is committed onto again rather than
   overwritten
+- **An embedding endpoint on this machine that is down costs half a second,
+  once.** With Ollama stopped, `anamnesis search` took 4.1 s on Windows: a
+  connection to a loopback port nothing listens on is refused there only after
+  two seconds of trying again (measured: 2.06 s, twice), and the command paid
+  it twice — once for the probe that found the endpoint down, and again for the
+  query, because the embedder it fell back to had not been told an attempt had
+  just failed. A loopback endpoint now gets a 500 ms connect timeout, and the
+  fallback counts the failed probe as its last attempt. The same search takes
+  0.6 s; the server, the MCP server, `write-page` and `bootstrap` start the
+  same way
 - **A `[[link]]` is resolved the way Obsidian reads it.** The index accepted a
   link only as a path from the scope's root, `[[gotchas/windows-bom]]` or the
   same with `.md`, and nobody writes one that way: Obsidian resolves
