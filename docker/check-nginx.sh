@@ -21,9 +21,13 @@ trap cleanup EXIT
 hostpath() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else echo "$1"; fi; }
 export MSYS_NO_PATHCONV=1
 
-docker run --rm -v "$(hostpath "$work"):/out" --entrypoint openssl alpine/openssl \
+# As the caller, so the key is the caller's to make readable and to delete:
+# written as the container's root, a Linux runner could do neither.
+docker run --rm --user "$(id -u):$(id -g)" -v "$(hostpath "$work"):/out" \
+  --entrypoint openssl alpine/openssl \
   req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=anamnesis.local" \
   -keyout /out/key.pem -out /out/cert.pem >/dev/null 2>&1
+# Readable by nginx, which does not run as the caller.
 chmod 644 "$work/key.pem"
 
 docker network create "$net" >/dev/null
