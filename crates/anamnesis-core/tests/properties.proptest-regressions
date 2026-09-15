@@ -8,3 +8,4 @@ cc 9919824ebf514306ab6abb837081bcc0ccc9c9d5f7723e351a7812637a757e33 # shrinks to
 cc 108b91bac0921ca220c2d43da377f7df70d82e4cf4893e3849a9d7781636336a # shrinks to before = "", open = " ", secret = "AIza_-aaaaaA00A0a0a00A-Aa_A_-_aAA-_-0A-", close = " ", after = ""
 cc f1c1951a739fc06e8cab7bf15d4d7853ffafca2280bdb6a565013e11f1498008 # shrinks to scheme = "https", user = "aaa", password = "@a^**^", host = "aaa.example"
 cc 474c553524abf2d569b3c4a994c12379e22266bb458a66897cbee19b31a4c39f # shrinks to title = "A", body = "```\n```\n# a a a\n# a a a\n# a a a a", limit = 6
+cc 0212f7b9d2e0b5a379706e866c347fb8a033b0fa3b80f8f3dcedb8ca9bcb1c40 # shrinks to key = "clientSecret", words = ["cre", "aaA"], joiner = " ", quote = "\"", separator = "="

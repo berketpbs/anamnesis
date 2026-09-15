@@ -348,9 +348,18 @@ proptest! {
         let value = words.join(joiner);
         let text = format!("{key}{separator}{quote}{value}{quote}\nnext line");
         let redacted = Redactor::new().redact(&text);
+        // Looked for in what is left once the parts that are meant to stay
+        // are taken out. A word is three letters or more, and `cre` is in
+        // `clientSecret`: searched for in the whole line, the key itself was
+        // reported as the secret surviving.
+        let rest = redacted
+            .text()
+            .replacen(key, "", 1)
+            .replace("[redacted]", "")
+            .replace("next line", "");
         for word in &words {
             prop_assert!(
-                !redacted.text().contains(word.as_str()),
+                !rest.contains(word.as_str()),
                 "{word:?} of {value:?} survived in {:?}",
                 redacted.text()
             );
