@@ -18,6 +18,12 @@ class Anamnesis < Formula
   end
 
   on_linux do
+    on_arm do
+      # No Linux arm64 build is published. Without this the formula simply has
+      # no url on such a machine, and brew fails on the missing url rather than
+      # on the reason for it.
+      depends_on arch: :x86_64
+    end
     on_intel do
       url "https://github.com/berketpbs/anamnesis/releases/download/v1.1.1/anamnesis-v1.1.1-x86_64-unknown-linux-gnu.tar.gz"
       sha256 "bb4d24cad2a8aef656bd929ed9366e40bba1a23aa03dea754d17fd030028349d"

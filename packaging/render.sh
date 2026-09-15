@@ -77,6 +77,12 @@ class Anamnesis < Formula
   end
 
   on_linux do
+    on_arm do
+      # No Linux arm64 build is published. Without this the formula simply has
+      # no url on such a machine, and brew fails on the missing url rather than
+      # on the reason for it.
+      depends_on arch: :x86_64
+    end
     on_intel do
       url "$base/anamnesis-$tag-x86_64-unknown-linux-gnu.tar.gz"
       sha256 "$linux"
