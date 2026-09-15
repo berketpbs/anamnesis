@@ -735,6 +735,43 @@ impl Store {
         Ok(failures)
     }
 
+    /// Pages in any project that have no vector under `model` because an
+    /// attempt to make one failed, oldest attempt first, at most `limit`.
+    ///
+    /// Only failures, not truncations: a truncated page has a vector, and
+    /// asking again gets the same one. And only pages somebody tried to
+    /// embed — a page written before embedding was switched on has no row
+    /// here, and filling in a whole index is what `reindex` is run for.
+    pub fn pages_missing_vectors(
+        &self,
+        model: &str,
+        limit: usize,
+    ) -> Result<Vec<(ProjectId, PagePath)>> {
+        let conn = self.connection();
+        let mut statement = conn.prepare(
+            "SELECT p.project_id, p.path
+             FROM page_embed_failures f
+             JOIN pages p ON p.id = f.page_id
+             WHERE f.model = ?1 AND f.kind = ?2
+             ORDER BY f.at ASC, p.path ASC
+             LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![
+                model,
+                EmbedFault::Failed.as_str(),
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        let mut pages = Vec::new();
+        for row in rows {
+            let (project, path) = row?;
+            pages.push((parse_id(project), crate::convert::parse_page_path(&path)));
+        }
+        Ok(pages)
+    }
+
     /// Insert or refresh the index row for a page.
     ///
     /// Also resolves the page's supersession, in both directions: what this
@@ -2181,6 +2218,52 @@ mod tests {
         assert!(
             store.embed_failures(project).expect("failures").is_empty(),
             "the page has a vector now, so the record of it not having one is false"
+        );
+    }
+
+    /// What the server's pass asks for: pages that failed under the model it
+    /// embeds with, and nothing a second try would not change.
+    #[test]
+    fn pages_missing_vectors_are_the_failures_under_one_model() {
+        let (_dir, store, project, _workspace) = fixture();
+        let page = indexable_page(project);
+        store
+            .index_page(project, &page, &[], Some(&BrokenEmbedder), now())
+            .expect("index");
+
+        let missing = store.pages_missing_vectors("broken", 10).expect("missing");
+        assert_eq!(missing, vec![(project, page.path.clone())]);
+        assert!(
+            store
+                .pages_missing_vectors("fake-embed-1", 10)
+                .expect("missing")
+                .is_empty(),
+            "a failure under one model says nothing about another"
+        );
+        assert!(
+            store
+                .pages_missing_vectors("broken", 0)
+                .expect("missing")
+                .is_empty(),
+            "the limit is kept"
+        );
+
+        store
+            .record_embed_truncation(
+                page.id,
+                "broken",
+                Overflow {
+                    tokens: 900,
+                    budget: 128,
+                },
+            )
+            .expect("truncation replaces the failure");
+        assert!(
+            store
+                .pages_missing_vectors("broken", 10)
+                .expect("missing")
+                .is_empty(),
+            "a truncated page has a vector, and asking again gets the same one"
         );
     }
 

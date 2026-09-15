@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The server gives a page the vector it was written without, once its
+  embedder answers.** A page written while the embedding endpoint is down is
+  indexed without a vector and filed for `doctor`, and only a hand-run
+  `anamnesis reindex` ever asked again. On 2026-09-15 this machine's server
+  came up twice before Ollama did, and `doctor` counted four session pages
+  missing from the vector stream by the evening. Every minute, when any page
+  is missing a vector under the model it embeds with, the server now sends the
+  endpoint one short string, and only when that is answered does it send the
+  pages, twenty at a time, each read from the wiki under the same hold a
+  consolidation takes. An endpoint still down costs one quiet request a minute
+  rather than a warning per page. `doctor`'s remedy says the server does this,
+  and `GETTING_STARTED.md` no longer claims `serve` refuses to start without
+  its endpoint, which stopped being true in 1.1.1
 - **`anamnesis key check`** asks each configured model one small question with
   the key a server started now would use, and says what came back: the key
   accepted, refused, or out of today's quota, a model that does not exist, a
