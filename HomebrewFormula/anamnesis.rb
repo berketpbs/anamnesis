@@ -32,8 +32,9 @@ class Anamnesis < Formula
     <<~TEXT
       Wire a repository from inside it with:
         anamnesis setup
-      Hooks and the MCP registration name #{HOMEBREW_PREFIX}/bin/anamnesis,
-      which brew upgrade keeps pointing at the current version.
+      Run it again after every brew upgrade. Hooks and the MCP registration
+      keep the path they were written with, an upgrade moves the binary, and
+      setup rewrites an entry that no longer leads to the binary running it.
     TEXT
   end
 

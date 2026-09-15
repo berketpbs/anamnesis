@@ -66,9 +66,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `brew` on Linux and macOS and `scoop` on Windows, fails when the
   committed files differ from what the script makes of the release they name,
   and installs with `cargo binstall` from the `[package.metadata.binstall]`
-  the CLI's manifest now carries. `WINGET=1` also writes the three winget
-  manifests, which are submitted to `microsoft/winget-pkgs` rather than kept
-  here
+  the CLI's manifest now carries. The formula's caveat asks for `anamnesis
+  setup` again after every `brew upgrade`, which is what a hook naming the
+  Cellar path of the version brew has just replaced needs; it no longer
+  promises that hooks name a path an upgrade keeps, since what a release
+  writes into a hook belongs to that release and not to the formula.
+  `WINGET=1` also writes the three winget manifests, which are submitted to
+  `microsoft/winget-pkgs` rather than kept here
 
 ### Fixed
 - **`doctor` gives the server's reason for counted pages, and stops blaming
