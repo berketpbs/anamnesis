@@ -586,6 +586,82 @@ mod tests {
         );
     }
 
+    /// A reply that stops part way through its body, once, and then a whole
+    /// one. What 2026-09-13's `error decoding response body` looked like from
+    /// the client: the model answered, and the answer did not all arrive.
+    #[tokio::test]
+    async fn a_reply_cut_off_mid_body_is_asked_again_and_says_what_cut_it() {
+        use std::io::{Read, Write};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counted = requests.clone();
+        let whole = reply(
+            json!({"role": "assistant", "content": "{\"title\": \"done\"}"}),
+            "stop",
+        )
+        .to_string();
+
+        std::thread::spawn(move || {
+            for socket in listener.incoming() {
+                let Ok(mut socket) = socket else { continue };
+                let mut buffer = [0_u8; 16_384];
+                let _ = socket.read(&mut buffer);
+                let n = counted.fetch_add(1, Ordering::SeqCst);
+                // The first two are cut: the client that does not retry, and
+                // the first attempt of the one that does.
+                let answer = if n < 2 {
+                    // Promises the whole reply and sends a third of it.
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{}",
+                        whole.len(),
+                        &whole[..whole.len() / 3]
+                    )
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{whole}",
+                        whole.len()
+                    )
+                };
+                let _ = socket.write_all(answer.as_bytes());
+            }
+        });
+
+        let config = |max_retries| LlmConfig {
+            provider: crate::config::ProviderKind::Google,
+            api_key: Some(secrecy::SecretString::from("AQ.test-key-not-a-real-one")),
+            model: "gemini-3.5-flash".to_owned(),
+            base_url: format!("http://{address}/v1beta/openai"),
+            max_retries,
+            ..LlmConfig::default()
+        };
+
+        let unretried = OpenAiCompatible::new(&config(0), "google").expect("builds");
+        let error = unretried
+            .complete(&request())
+            .await
+            .expect_err("the body was cut off");
+        assert!(error.is_retryable(), "{error}");
+        let said = error.to_string();
+        assert!(
+            said.matches(": ").count() > 1,
+            "the sentence names what cut it, not only that decoding failed: {said}"
+        );
+
+        let retried = OpenAiCompatible::new(&config(1), "google").expect("builds");
+        let output = retried
+            .complete(&request())
+            .await
+            .expect("the whole reply, the second time");
+        assert_eq!(output.json["title"], "done");
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+    }
+
     fn reply(message: Value, finish: &str) -> Value {
         json!({
             "model": "gpt-5",

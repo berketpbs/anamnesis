@@ -48,8 +48,13 @@ pub enum LlmError {
     #[error("llm is misconfigured: {0}")]
     Config(String),
 
-    /// The request never reached a verdict: connection refused, DNS, timeout.
-    #[error("llm transport failed: {0}")]
+    /// The request never reached a verdict: connection refused, DNS, timeout,
+    /// or a reply that stopped arriving part way through.
+    ///
+    /// Printed with what caused it. reqwest's own sentence is the outermost
+    /// one only, and on 2026-09-13 the log said `error decoding response body`
+    /// twice and nothing about why.
+    #[error("llm transport failed: {}", with_causes(.0))]
     Transport(#[from] reqwest::Error),
 
     /// The API answered, and the answer was an error.
@@ -90,6 +95,25 @@ pub enum LlmError {
     Malformed(String),
 }
 
+/// An error's sentence followed by each cause's, as `a: b: c`.
+///
+/// A cause that only repeats the sentence before it is left out.
+fn with_causes(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut said = error.to_string();
+    let mut last = said.clone();
+    let mut cause = error.source();
+    while let Some(next) = cause {
+        let sentence = next.to_string();
+        if !last.contains(&sentence) {
+            said.push_str(": ");
+            said.push_str(&sentence);
+        }
+        last = sentence;
+        cause = next.source();
+    }
+    said
+}
+
 impl LlmError {
     /// Whether trying the same request again could plausibly succeed.
     ///
@@ -99,8 +123,17 @@ impl LlmError {
     /// A quota spent for the day is not: see [`LlmError::is_spent_for_the_day`].
     pub fn is_retryable(&self) -> bool {
         match self {
+            // A body that stopped arriving is a dropped connection that
+            // happened later: the model answered, and the answer did not get
+            // here. Twice on 2026-09-13 that cost a session its model page on
+            // the first attempt, while a timeout at the same moment would have
+            // been asked again.
             Self::Transport(error) => {
-                error.is_timeout() || error.is_connect() || error.is_request()
+                error.is_timeout()
+                    || error.is_connect()
+                    || error.is_request()
+                    || error.is_body()
+                    || error.is_decode()
             }
             Self::Api { status, .. } => {
                 (matches!(status, 408 | 409 | 429) || *status >= 500)
