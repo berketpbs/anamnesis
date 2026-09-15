@@ -41,6 +41,30 @@ pub const DEFAULT_MODEL: &str = "text-embedding-3-small";
 /// that stream rather than costing the write.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a connection to an endpoint on this machine may take to open.
+///
+/// A loopback port that is listening accepts in well under a millisecond. One
+/// that is not is refused at once on Linux and macOS, and on Windows only after
+/// the connection is tried again for two seconds — measured on the machine
+/// this project runs on, with Ollama stopped: 2.06 s, twice in a row. Every
+/// page write and every query while Ollama is down paid that.
+const LOOPBACK_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Whether an endpoint's host is this machine.
+fn is_loopback(url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || bare
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
 /// An embeddings endpoint that speaks OpenAI's shape.
 pub struct HostedEmbedder {
     client: reqwest::blocking::Client,
@@ -65,13 +89,14 @@ impl HostedEmbedder {
     ) -> Result<Self, EmbedError> {
         let url = url.into();
         let model = model.into();
-        let client = reqwest::blocking::Client::builder()
-            .timeout(TIMEOUT)
-            .build()
-            .map_err(|error| EmbedError::Fetch {
-                model: model.clone(),
-                reason: error.to_string(),
-            })?;
+        let mut client = reqwest::blocking::Client::builder().timeout(TIMEOUT);
+        if is_loopback(&url) {
+            client = client.connect_timeout(LOOPBACK_CONNECT_TIMEOUT);
+        }
+        let client = client.build().map_err(|error| EmbedError::Fetch {
+            model: model.clone(),
+            reason: error.to_string(),
+        })?;
 
         let mut embedder = Self {
             client,
@@ -193,6 +218,27 @@ impl Reconnecting {
             retry_after,
             state: std::sync::Mutex::new(Connection::Waiting(None)),
         }
+    }
+
+    /// An embedder for an endpoint that did not answer a moment ago.
+    ///
+    /// For the caller that has just tried [`HostedEmbedder::connect`] and is
+    /// falling back to this. Built with [`Reconnecting::new`], the first query
+    /// asked the endpoint again at once — and on Windows a connection to a
+    /// loopback port nothing listens on takes two seconds to be refused, so
+    /// `anamnesis search` with Ollama down spent four seconds on two refusals
+    /// of the same question. The attempt it was built after counts as the
+    /// last one.
+    pub fn after_a_failed_attempt(
+        url: impl Into<String>,
+        model: impl Into<String>,
+        key: Option<SecretString>,
+    ) -> Self {
+        let embedder = Self::new(url, model, key);
+        if let Ok(mut state) = embedder.state.lock() {
+            *state = Connection::Waiting(Some(std::time::Instant::now()));
+        }
+        embedder
     }
 
     /// The connected embedder, connecting first if it is time to try.
@@ -418,6 +464,71 @@ mod tests {
                 body.len()
             )
             .as_bytes(),
+        );
+    }
+
+    #[test]
+    fn an_endpoint_on_this_machine_is_recognised_by_its_host() {
+        for url in [
+            "http://127.0.0.1:11434/v1/embeddings",
+            "http://localhost:11434/v1/embeddings",
+            "http://LOCALHOST/v1/embeddings",
+            "http://[::1]:11434/v1/embeddings",
+            "http://127.1.2.3/v1/embeddings",
+        ] {
+            assert!(is_loopback(url), "{url}");
+        }
+        for url in [
+            "https://api.openai.com/v1/embeddings",
+            "http://10.0.0.5:11434/v1/embeddings",
+            "http://localhost.example.com/v1/embeddings",
+            "not a url",
+        ] {
+            assert!(!is_loopback(url), "{url}");
+        }
+    }
+
+    /// With Ollama stopped on Windows, a refused loopback connection took
+    /// 2.06 s. Nothing listens on the port here; the refusal must come back
+    /// well inside that, whichever platform runs the test.
+    #[test]
+    fn a_loopback_port_nothing_listens_on_is_given_up_on_quickly() {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .expect("a free port")
+            .port();
+        let started = std::time::Instant::now();
+        let refused = HostedEmbedder::connect(
+            format!("http://127.0.0.1:{port}/v1/embeddings"),
+            "nomic-embed-text",
+            None,
+        );
+        assert!(refused.is_err());
+        assert!(
+            started.elapsed() < Duration::from_millis(1_500),
+            "took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Built right after a connection failed, the embedder does not ask again
+    /// for the next query: that attempt is the one it was built after.
+    #[test]
+    fn an_embedder_built_after_a_failure_does_not_ask_again_at_once() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let address = listener.local_addr().expect("address");
+
+        let embedder = Reconnecting::after_a_failed_attempt(
+            format!("http://{address}/v1/embeddings"),
+            "nomic-embed-text",
+            None,
+        );
+        let said = embedder.embed("why sqlite").expect_err("not asked yet");
+        assert!(said.contains("not asked again yet"), "{said}");
+        assert!(
+            listener.accept().is_err(),
+            "nothing connected to the endpoint"
         );
     }
 

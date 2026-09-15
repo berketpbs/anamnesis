@@ -234,11 +234,13 @@ pub(crate) fn embedder_for(
                  asking again when one is needed",
                 config.url
             ));
-            Ok(Some(Arc::new(anamnesis_llm::hosted::Reconnecting::new(
-                config.url.clone(),
-                config.model.clone(),
-                config.key.clone(),
-            ))))
+            Ok(Some(Arc::new(
+                anamnesis_llm::hosted::Reconnecting::after_a_failed_attempt(
+                    config.url.clone(),
+                    config.model.clone(),
+                    config.key.clone(),
+                ),
+            )))
         }
         Err(error) => Err(error.into()),
     }
