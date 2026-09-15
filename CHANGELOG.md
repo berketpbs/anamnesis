@@ -118,6 +118,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accident
 
 ### Fixed
+- **A reply cut off part way through its body is asked again, and the log
+  says what cut it.** Twice on 2026-09-13 the server logged `llm transport
+  failed: error decoding response body` and fell back to a counted page on the
+  first attempt: a timeout or a refused connection was retried, a body that
+  stopped arriving was not, though it is the same dropped connection a moment
+  later. It is retried now, and a transport error prints its causes, as
+  `error decoding response body: … error reading a body from connection: end
+  of file before message length reached`, where the log had only the first
+  clause
 - **A `[[link]]` is resolved the way Obsidian reads it.** The index accepted a
   link only as a path from the scope's root, `[[gotchas/windows-bom]]` or the
   same with `.md`, and nobody writes one that way: Obsidian resolves
