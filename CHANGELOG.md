@@ -70,7 +70,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   setup` again after every `brew upgrade`, which is what a hook naming the
   Cellar path of the version brew has just replaced needs; it no longer
   promises that hooks name a path an upgrade keeps, since what a release
-  writes into a hook belongs to that release and not to the formula.
+  writes into a hook belongs to that release and not to the formula. On Linux
+  arm64, which no release is built for, it asks for the x86-64 architecture so
+  that brew names the reason rather than failing on the url the platform
+  blocks left unset.
   `WINGET=1` also writes the three winget manifests, which are submitted to
   `microsoft/winget-pkgs` rather than kept here
 
