@@ -13,6 +13,32 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// One line of a starting server's banner, written only if somebody is reading.
+///
+/// `println!` panics when stdout is a closed pipe, and a server's stdout is
+/// closed by exactly the callers that start it programmatically: a wrapper
+/// reads the first line to learn the address, stops reading, and the next line
+/// of the banner killed the server (`failed printing to stdout: The pipe is
+/// being closed`, exit 101) — one start in ten on the machine this was found
+/// on, depending on which side got there first. The banner is a courtesy; the
+/// server is the point.
+macro_rules! banner {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout(), $($arg)*);
+    }};
+}
+
+/// The same for stderr, which the MCP server's banner goes to because stdout
+/// is the protocol's. A harness that closes the MCP server's stderr must not
+/// take its memory tools away.
+macro_rules! banner_stderr {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+
 use anamnesis_core::datadir::DataDir;
 use anamnesis_core::scope::resolve_scope;
 use anamnesis_store::Store;
@@ -103,20 +129,20 @@ pub fn cmd_serve(
     // request was port 0, and every line below is read as a place to go.
     let address = listener.local_addr()?;
 
-    println!("🌐 anamnesis serving on http://{address}");
-    println!("   data dir: {}", data.root().display());
-    println!("   POST /hook   GET /handoff   GET /whoami   GET /health");
+    banner!("🌐 anamnesis serving on http://{address}");
+    banner!("   data dir: {}", data.root().display());
+    banner!("   POST /hook   GET /handoff   GET /whoami   GET /health");
     if options.ui {
-        println!("   wiki browser: http://{address}/ui");
+        banner!("   wiki browser: http://{address}/ui");
     }
-    println!("   auth: {}", describe_serving_auth(&auth));
-    println!(
+    banner!("   auth: {}", describe_serving_auth(&auth));
+    banner!(
         "   auto-improve: every {}s, for projects whose marker asks for it",
         anamnesis_web::improve::TICK.as_secs()
     );
-    println!("   transcripts: {}", raw.root().display());
-    println!("   logs:        {}", data.logs().display());
-    println!(
+    banner!("   transcripts: {}", raw.root().display());
+    banner!("   logs:        {}", data.logs().display());
+    banner!(
         "   wiki edits:  {}",
         if options.watch_wiki {
             "watched — pages edited by hand are indexed as they are saved"
@@ -125,12 +151,12 @@ pub fn cmd_serve(
         }
     );
     match &settings {
-        Some(settings) => println!("   consolidation: {}", settings.provider.describe()),
-        None => println!("   consolidation: counted (no model configured)"),
+        Some(settings) => banner!("   consolidation: {}", settings.provider.describe()),
+        None => banner!("   consolidation: counted (no model configured)"),
     }
     match &embedder {
-        Some(embedder) => println!("   embedding:     {}", embedder.model()),
-        None => println!("   embedding:     off (set ANAMNESIS_EMBED_ENABLED=1)"),
+        Some(embedder) => banner!("   embedding:     {}", embedder.model()),
+        None => banner!("   embedding:     off (set ANAMNESIS_EMBED_ENABLED=1)"),
     }
     // The same two facts into the log file. The banner goes to stdout, and a
     // server started by a service manager has nobody reading stdout: under
@@ -343,18 +369,18 @@ pub fn cmd_mcp(repo: &std::path::Path, data_dir: Option<PathBuf>) -> anyhow::Res
     let embedder = embedder_for(
         &anamnesis_llm::EmbedConfig::from_vars(crate::settings::var),
         &data.models(),
-        |said| eprintln!("anamnesis: {said}"),
+        |said| banner_stderr!("anamnesis: {said}"),
     )?;
 
     // Never stdout: the MCP transport owns stdout for protocol frames, so a
     // stray print here would corrupt the stream the same way a log line would
     // corrupt the `hook` command's handoff channel.
-    eprintln!(
+    banner_stderr!(
         "anamnesis: mcp server for {} ({})",
         scope.scope,
         describe_source(&scope.source)
     );
-    eprintln!(
+    banner_stderr!(
         "   vector search: {}",
         match &embedder {
             Some(embedder) => format!("enabled ({})", embedder.model()),

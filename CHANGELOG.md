@@ -130,6 +130,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compares the same way
 
 ### Fixed
+- **A server nobody reads the banner of keeps serving, and a hook nobody
+  reads exits 0.** `serve` printed its banner with `println!`, which panics on
+  a closed pipe: a wrapper that read the first line to learn the address and
+  stopped reading killed the server one start in ten (`failed printing to
+  stdout: The pipe is being closed`, exit 101). The MCP server's stderr banner
+  had the same edge. The banners now skip a line nobody can receive. The hook
+  command promises exit 0 whatever happens, and a harness that stopped reading
+  before the handoff was printed made it exit 101; a panic inside the hook no
+  longer changes its exit status. Found by the first tests that run the built
+  binary: `tests/capture_loop.rs` starts a server and plays a Claude Code and a
+  Gemini CLI session through `anamnesis hook` — capture, the page, the next
+  session's note in each harness's shape — and `tests/mcp_stdio.rs` drives
+  `anamnesis mcp` over stdio, with every stdout line required to be a protocol
+  frame. Both run on every platform CI tests, Windows included
 - **The image's health check can fail, and the development image builds.**
   `HEALTHCHECK` ran `anamnesis status`, which describes and always exits 0:
   a container whose server was frozen (`kill -STOP`) was still `healthy`
