@@ -226,7 +226,7 @@ it. A page with no index row says so where somebody is reading it.
 **Proposals are shown, never offered.** Every proposal changes somebody's
 memory — promoting a page is a retention decision, since the durable tiers are
 the ones the decay sweep cannot reach — which is why `require_approval`
-defaults to true. Approval means a person running `anamnesis improve --apply`,
+defaults to true. Approval means a person running `anamnesis improve --apply <id>`,
 not a button on a page anyone who can reach the port could press, so the
 browser prints the command with the id already in it and stops there.
 
