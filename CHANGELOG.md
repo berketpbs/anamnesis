@@ -73,7 +73,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes into a hook belongs to that release and not to the formula. On Linux
   arm64, which no release is built for, it asks for the x86-64 architecture so
   that brew names the reason rather than failing on the url the platform
-  blocks left unset.
+  blocks left unset. It also carries a `livecheck` block, the formula's
+  counterpart of the bucket's `checkver`, so that `brew livecheck` and
+  `brew bump-formula-pr` see a tagged release whose manifests have not been
+  merged yet.
   `WINGET=1` also writes the three winget manifests, which are submitted to
   `microsoft/winget-pkgs` rather than kept here
 
