@@ -135,7 +135,8 @@ pub fn cmd_status(
     ) {
         println!("  Why:       {line}");
     }
-    if let Some(line) = describe_embedding(&facts.embedding) {
+    if let Some(line) = describe_embedding(&facts.embedding, facts.embedding_failure.as_ref(), now)
+    {
         println!("  Vectors:   {line}");
     }
     println!(
@@ -288,8 +289,9 @@ fn probe_server_facts(server: &str, token: Option<&str>, reachable: &ServerState
             ServerFacts {
                 auth,
                 consolidation: ServerModel::read(&body, "consolidation"),
-                consolidation_failure: ModelFailure::read(&body),
+                consolidation_failure: ModelFailure::read(&body, "consolidation_failure"),
                 embedding: ServerModel::read(&body, "embedding"),
+                embedding_failure: ModelFailure::read(&body, "embedding_failure"),
             }
         }
         // Anything else — including the 404 an older server returns — is a
@@ -336,6 +338,8 @@ struct ServerFacts {
     consolidation_failure: Option<ModelFailure>,
     /// The model it embeds pages with.
     embedding: ServerModel,
+    /// What that embedder said the last time it returned no vector.
+    embedding_failure: Option<ModelFailure>,
 }
 
 /// A request the server's model did not answer, as `/whoami` reports it.
@@ -348,11 +352,11 @@ struct ModelFailure {
 }
 
 impl ModelFailure {
-    /// Read `consolidation_failure`. Absent, `null` and unreadable all come
-    /// to nothing: the line this feeds is an explanation, and a server that
-    /// gave none has not said the model is fine.
-    fn read(body: &serde_json::Value) -> Option<Self> {
-        let failure = body.get("consolidation_failure")?;
+    /// Read `consolidation_failure` or `embedding_failure`. Absent, `null` and
+    /// unreadable all come to nothing: the line this feeds is an explanation,
+    /// and a server that gave none has not said the model is fine.
+    fn read(body: &serde_json::Value, field: &str) -> Option<Self> {
+        let failure = body.get(field)?;
         Some(Self {
             at: failure.get("at")?.as_str()?.parse().ok()?,
             reason: failure.get("reason")?.as_str()?.to_owned(),
@@ -497,14 +501,28 @@ fn describe_consolidation(model: &ServerModel) -> Option<String> {
 }
 
 /// Whether the server writes vectors for what it indexes.
-fn describe_embedding(model: &ServerModel) -> Option<String> {
-    match model {
-        ServerModel::Unstated => None,
-        ServerModel::Absent => Some(format!(
+///
+/// With what the embedder said, when its latest request returned no vector:
+/// a model that is configured and one that answers are different facts, and
+/// the pages written between them go into the index without a vector.
+fn describe_embedding(
+    model: &ServerModel,
+    failure: Option<&ModelFailure>,
+    now: Timestamp,
+) -> Option<String> {
+    match (model, failure) {
+        (ServerModel::Unstated, _) => None,
+        (ServerModel::Absent, _) => Some(format!(
             "off — retrieval runs without them (set {} on the server)",
             "ANAMNESIS_EMBED_ENABLED=1"
         )),
-        ServerModel::Named(model) => Some(model.clone()),
+        (ServerModel::Named(model), None) => Some(model.clone()),
+        (ServerModel::Named(model), Some(failure)) => Some(format!(
+            "{model} — not returning vectors: {}, {}; pages written meanwhile get theirs \
+             once it answers",
+            failure.reason,
+            crate::format::describe_age(failure.at, now)
+        )),
     }
 }
 
@@ -852,12 +870,55 @@ mod tests {
     #[test]
     fn a_server_that_did_not_say_is_not_reported_as_having_no_model() {
         assert_eq!(describe_consolidation(&ServerModel::Unstated), None);
-        assert_eq!(describe_embedding(&ServerModel::Unstated), None);
+        assert_eq!(
+            describe_embedding(&ServerModel::Unstated, None, Timestamp::UNIX_EPOCH),
+            None
+        );
+    }
+
+    /// 2026-09-15: Ollama had not started, and this line said
+    /// `nomic-embed-text` all afternoon while pages went into the index
+    /// without a vector.
+    #[test]
+    fn an_embedder_that_returned_no_vector_is_said_with_why_and_when() {
+        let body = serde_json::json!({
+            "embedding": "nomic-embed-text",
+            "embedding_failure": {
+                "at": "2026-09-15T18:23:52Z",
+                "status": null,
+                "reason": "failed: could not load model \"nomic-embed-text\"",
+            },
+        });
+        let failure = ModelFailure::read(&body, "embedding_failure").expect("a failure");
+        let line = describe_embedding(
+            &ServerModel::read(&body, "embedding"),
+            Some(&failure),
+            at("2026-09-15T18:25:52Z"),
+        )
+        .expect("a line");
+        assert!(
+            line.starts_with("nomic-embed-text — not returning vectors"),
+            "{line}"
+        );
+        assert!(line.contains("could not load model"), "{line}");
+        assert!(line.contains("2m ago"), "{line}");
+
+        assert_eq!(
+            describe_embedding(
+                &ServerModel::Named("nomic-embed-text".to_owned()),
+                None,
+                at("2026-09-15T18:25:52Z")
+            )
+            .as_deref(),
+            Some("nomic-embed-text"),
+            "an embedder that answered is only its name"
+        );
     }
 
     #[test]
     fn vectors_being_off_names_the_variable_that_turns_them_on() {
-        let line = describe_embedding(&ServerModel::Absent).expect("a line");
+        let line =
+            describe_embedding(&ServerModel::Absent, None, Timestamp::UNIX_EPOCH).expect("a line");
         assert!(line.contains("ANAMNESIS_EMBED_ENABLED"), "{line}");
     }
 
@@ -895,7 +956,7 @@ mod tests {
                 "reason": "answered 400: Please pass a valid API key",
             },
         });
-        let failure = ModelFailure::read(&body).expect("a failure");
+        let failure = ModelFailure::read(&body, "consolidation_failure").expect("a failure");
 
         assert_eq!(
             describe_model_failure(
@@ -917,9 +978,9 @@ mod tests {
         let older = serde_json::json!({"consolidation": "gemini-3.5-flash"});
         let garbled =
             serde_json::json!({"consolidation_failure": {"at": "yesterday", "reason": "x"}});
-        assert_eq!(ModelFailure::read(&answered), None);
-        assert_eq!(ModelFailure::read(&older), None);
-        assert_eq!(ModelFailure::read(&garbled), None);
+        assert_eq!(ModelFailure::read(&answered, "consolidation_failure"), None);
+        assert_eq!(ModelFailure::read(&older, "consolidation_failure"), None);
+        assert_eq!(ModelFailure::read(&garbled, "consolidation_failure"), None);
 
         let failure = ModelFailure {
             at: at("2026-09-14T21:47:35Z"),

@@ -35,6 +35,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `systemctl --user restart`, macOS `launchctl kickstart -k`. Run on this
   machine, it replaced the server in about a second, under the task's own
   `conhost --headless`
+- **`status` says when the embedder is not returning vectors.** The `Vectors:`
+  line named the server's embedding model and nothing else, so on 2026-09-15,
+  with Ollama not started, it read `nomic-embed-text` all afternoon while
+  every page written went into the index without a vector. The server now
+  watches its embedder the way #233 watches its model, reports the last
+  refusal in `/whoami` as `embedding_failure` and forgets it at the next
+  vector, and `status` prints `Vectors: nomic-embed-text — not returning
+  vectors: failed: could not load model "nomic-embed-text": …, 2m ago`
 - **`anamnesis key check`** asks each configured model one small question with
   the key a server started now would use, and says what came back: the key
   accepted, refused, or out of today's quota, a model that does not exist, a
