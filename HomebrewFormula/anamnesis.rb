@@ -6,6 +6,14 @@ class Anamnesis < Formula
   version "1.1.1"
   license "MIT"
 
+  # The counterpart of the bucket's checkver: what brew livecheck and
+  # brew bump-formula-pr read to see that a release has been tagged whose
+  # manifests are not merged yet.
+  livecheck do
+    url :homepage
+    strategy :github_latest
+  end
+
   on_macos do
     on_arm do
       url "https://github.com/berketpbs/anamnesis/releases/download/v1.1.1/anamnesis-v1.1.1-aarch64-apple-darwin.tar.gz"
