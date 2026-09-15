@@ -298,7 +298,17 @@ fn run() -> anyhow::Result<()> {
             if probe {
                 cmd_probe(&agent, &server, token.as_deref())?;
             } else {
-                cmd_hook(&agent, &server, token.as_deref(), cli.data_dir.clone());
+                // A hook exits 0 whatever happens, because a failed hook is
+                // one more thing wrong inside somebody's editing session. That
+                // promise did not cover a panic, and a panic was one closed
+                // pipe away: a harness that stops reading stdout before the
+                // handoff is printed made `print!` panic, and the hook exit
+                // 101. The panic is still reported on stderr by the standard
+                // hook; the exit status is the promise's.
+                let data_dir = cli.data_dir.clone();
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    cmd_hook(&agent, &server, token.as_deref(), data_dir);
+                }));
             }
         }
         Commands::InstallHooks {
