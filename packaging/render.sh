@@ -42,10 +42,24 @@ base="https://github.com/$REPO/releases/download/$tag"
 
 # The hash for one archive. sha256sum marks a file hashed in binary mode with a
 # leading `*`, and the Windows archive's line carries one.
+#
+# What comes back has to be one sha256 and nothing else. awk prints every
+# matching line, so a file naming an archive twice would hand back two hashes
+# joined by a newline, and a line of another shape would hand back its first
+# field: either is written into the manifest as a hash no download can match,
+# and the error surfaces on somebody else's machine days later. The release's
+# own tooling — sha256sum, or shasum on macOS — writes 64 lowercase hex
+# characters, and anything else is a file this script should not be reading.
 hash_of() {
     archive="anamnesis-$tag-$1.$2"
     found=$(awk -v name="$archive" '{ file = $2; sub(/^\*/, "", file); if (file == name) print $1 }' "$sums")
     [ -n "$found" ] || fail "$archive is not in $sums"
+    [ "$(printf '%s\n' "$found" | wc -l | tr -d ' ')" -eq 1 ] ||
+        fail "$archive is listed more than once in $sums"
+    case "$found" in
+        *[!0-9a-f]*) fail "the hash for $archive in $sums is not a sha256" ;;
+    esac
+    [ "${#found}" -eq 64 ] || fail "the hash for $archive in $sums is not a sha256"
     printf '%s' "$found"
 }
 
