@@ -127,6 +127,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `error decoding response body: … error reading a body from connection: end
   of file before message length reached`, where the log had only the first
   clause
+- **A wiki commit no longer drops what another process committed.** The
+  server, the MCP server a harness starts and every CLI command that writes a
+  page each open the wiki's repository, and a `git2::Repository` keeps the
+  index it first read. A commit wrote that index's tree: on 2026-09-09 the
+  server committed a session page from an index read before a `write-page`
+  and a `recompile` had committed, and its commit removed the gotcha from the
+  history and put the recompiled session page back to what it said before.
+  Both files stayed on disk, so nothing looked wrong until `git status` in the
+  wiki showed three session pages and two gotchas as changes nobody had made.
+  Every commit now starts from HEAD's tree and applies only its own paths, and
+  a HEAD another process moved in between is committed onto again rather than
+  overwritten
 - **A `[[link]]` is resolved the way Obsidian reads it.** The index accepted a
   link only as a path from the scope's root, `[[gotchas/windows-bom]]` or the
   same with `.md`, and nobody writes one that way: Obsidian resolves

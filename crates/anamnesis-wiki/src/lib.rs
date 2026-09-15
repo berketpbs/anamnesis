@@ -379,31 +379,17 @@ impl Wiki {
     }
 
     /// Stage one path and commit it onto HEAD.
+    ///
+    /// A page written with the text it already had is still a commit, as it
+    /// always was.
     fn commit(&self, relatives: &[PathBuf], message: &str) -> Result<String> {
-        let mut index = self.repo.index()?;
-        for relative in relatives {
-            index.add_path(relative)?;
-        }
-        index.write()?;
-        let tree = self.repo.find_tree(index.write_tree()?)?;
-
-        let signature = git2::Signature::now(COMMIT_NAME, COMMIT_EMAIL)?;
-        let parents = match self.repo.head() {
-            Ok(head) => vec![head.peel_to_commit()?],
-            // No HEAD yet: this is the first commit in a fresh repository.
-            Err(_) => Vec::new(),
-        };
-        let parent_refs: Vec<&git2::Commit<'_>> = parents.iter().collect();
-
-        let id = self.repo.commit(
-            Some("HEAD"),
-            &signature,
-            &signature,
-            message,
-            &tree,
-            &parent_refs,
-        )?;
-        Ok(id.to_string())
+        let id = self.commit_onto_head(message, true, |index| {
+            for relative in relatives {
+                index.add_path(relative)?;
+            }
+            Ok(())
+        })?;
+        Ok(id.unwrap_or_default())
     }
 
     /// Stage a set of removals and commit them together.
@@ -414,35 +400,82 @@ impl Wiki {
     /// made — an empty commit would claim a sweep changed something it did
     /// not.
     fn commit_removals(&self, relatives: &[PathBuf], message: &str) -> Result<Option<String>> {
-        let mut index = self.repo.index()?;
-        for relative in relatives {
-            let _ = index.remove_path(relative);
-        }
-        index.write()?;
-        let tree_id = index.write_tree()?;
+        self.commit_onto_head(message, false, |index| {
+            for relative in relatives {
+                let _ = index.remove_path(relative);
+            }
+            Ok(())
+        })
+    }
 
-        let parents = match self.repo.head() {
-            Ok(head) => vec![head.peel_to_commit()?],
-            Err(_) => Vec::new(),
-        };
-        if let Some(parent) = parents.first()
-            && parent.tree_id() == tree_id
-        {
-            return Ok(None);
-        }
-
-        let tree = self.repo.find_tree(tree_id)?;
+    /// Commit HEAD's tree with `change` applied, and nothing else.
+    ///
+    /// The index is rebuilt from HEAD every time rather than taken as this
+    /// process last left it. More than one process holds this repository — the
+    /// server, the MCP server a harness starts, and every CLI command that
+    /// writes a page — and a `git2::Repository` keeps the index it first read.
+    /// A server that read it in the morning and committed in the afternoon
+    /// wrote the morning's tree: on 2026-09-09 that removed a gotcha another
+    /// process had committed ten minutes earlier and put a rewritten session
+    /// page back to what it said before, with both files still on disk.
+    ///
+    /// And HEAD is checked again at the moment of committing: `repo.commit`
+    /// refuses to move a HEAD that is no longer the parent it was given, which
+    /// is another process committing in between, and the change is then made
+    /// again on top of that.
+    ///
+    /// `None` when the change leaves HEAD's tree as it was, unless `empty`
+    /// asks for a commit anyway.
+    fn commit_onto_head(
+        &self,
+        message: &str,
+        empty: bool,
+        change: impl Fn(&mut git2::Index) -> Result<()>,
+    ) -> Result<Option<String>> {
+        const ATTEMPTS: usize = 5;
         let signature = git2::Signature::now(COMMIT_NAME, COMMIT_EMAIL)?;
-        let parent_refs: Vec<&git2::Commit<'_>> = parents.iter().collect();
-        let id = self.repo.commit(
-            Some("HEAD"),
-            &signature,
-            &signature,
-            message,
-            &tree,
-            &parent_refs,
-        )?;
-        Ok(Some(id.to_string()))
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let parent = match self.repo.head() {
+                Ok(head) => Some(head.peel_to_commit()?),
+                // No HEAD yet: this is the first commit in a fresh repository.
+                Err(_) => None,
+            };
+
+            let mut index = self.repo.index()?;
+            match &parent {
+                Some(parent) => index.read_tree(&parent.tree()?)?,
+                None => index.clear()?,
+            }
+            change(&mut index)?;
+            index.write()?;
+            let tree_id = index.write_tree()?;
+
+            if !empty
+                && let Some(parent) = &parent
+                && parent.tree_id() == tree_id
+            {
+                return Ok(None);
+            }
+
+            let tree = self.repo.find_tree(tree_id)?;
+            let parents: Vec<&git2::Commit<'_>> = parent.iter().collect();
+            match self.repo.commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                message,
+                &tree,
+                &parents,
+            ) {
+                Ok(id) => return Ok(Some(id.to_string())),
+                Err(error) if error.code() == git2::ErrorCode::Modified && attempt < ATTEMPTS => {
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 
     /// Number of commits reachable from HEAD.
@@ -642,6 +675,87 @@ mod tests {
         assert_eq!(read.frontmatter.tier, Tier::Semantic);
         assert_eq!(read.frontmatter.status, PageStatus::Active);
         assert_eq!(read.body.trim(), page.body);
+    }
+
+    fn at(path: &str, body: &str) -> Page {
+        let mut page = sample(body);
+        page.path = PagePath::parse(path).unwrap();
+        page
+    }
+
+    /// The blob HEAD holds for a page, if HEAD holds it at all.
+    fn committed(wiki: &Wiki, path: &str) -> Option<String> {
+        let tree = wiki.repo.head().ok()?.peel_to_tree().ok()?;
+        let entry = tree
+            .get_path(&wiki.relative(&scope(), &PagePath::parse(path).unwrap()))
+            .ok()?;
+        let blob = wiki.repo.find_blob(entry.id()).ok()?;
+        Some(String::from_utf8_lossy(blob.content()).into_owned())
+    }
+
+    /// Two processes with the wiki open — the server, and a `reconsolidate` or
+    /// an MCP server beside it — as they were on 2026-09-09. The server had
+    /// read the index before the other process committed a gotcha and a
+    /// rewritten session page, and ten minutes later committed a page of its
+    /// own from what it had read: the gotcha left the history and the session
+    /// page went back to what it said before. The files stayed on disk, so
+    /// nothing looked wrong until `git status` showed them as changes nobody
+    /// had made.
+    #[test]
+    fn a_commit_keeps_what_another_process_committed_after_this_one_last_looked() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = Wiki::open(dir.path()).unwrap();
+        server
+            .write_page(
+                &scope(),
+                &at("sessions/one.md", "the counted page"),
+                "session",
+            )
+            .unwrap();
+
+        let cli = Wiki::open(dir.path()).unwrap();
+        cli.write_page(
+            &scope(),
+            &at("sessions/one.md", "the model's page"),
+            "recompile",
+        )
+        .unwrap();
+        cli.write_page(&scope(), &at("gotchas/new.md", "a gotcha"), "write")
+            .unwrap();
+
+        server
+            .write_page(
+                &scope(),
+                &at("sessions/two.md", "another session"),
+                "session",
+            )
+            .unwrap();
+        assert!(
+            committed(&server, "gotchas/new.md").is_some(),
+            "the gotcha the other process committed is still in the history"
+        );
+        assert!(
+            committed(&server, "sessions/one.md")
+                .unwrap()
+                .contains("the model's page"),
+            "and the page it rewrote was not put back"
+        );
+
+        cli.delete_pages(
+            &scope(),
+            &[PagePath::parse("sessions/two.md").unwrap()],
+            "forget",
+        )
+        .unwrap();
+        server
+            .write_page(&scope(), &at("sessions/three.md", "a third"), "session")
+            .unwrap();
+        assert_eq!(
+            committed(&server, "sessions/two.md"),
+            None,
+            "a page the other process removed does not come back either"
+        );
+        assert!(committed(&server, "sessions/three.md").is_some());
     }
 
     #[test]
