@@ -546,10 +546,11 @@ impl Store {
             Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
         })?;
 
+        let query_norm = norm(query_vector);
         let mut scored: Vec<(PageId, f32)> = Vec::new();
         for row in rows {
             let (id, bytes) = row?;
-            let similarity = cosine_similarity(query_vector, &bytes_to_vector(&bytes));
+            let similarity = cosine_similarity_to_bytes(query_vector, query_norm, &bytes);
             scored.push((parse_id(id), similarity));
         }
         // Ties by id, so two runs over the same index agree on an order.
@@ -598,8 +599,7 @@ impl Store {
                ON f.page_id = pe.page_id AND f.model = pe.model AND f.kind = 'truncated'
              WHERE pe.model = ?1 AND p.project_id = ?2
                AND p.is_latest = 1 AND p.status != 'superseded'
-               AND (?3 OR pe.part = 0)
-             ORDER BY pe.page_id, pe.part",
+               AND (?3 OR pe.part = 0)",
         )?;
         let rows =
             statement.query_map(params![model, project_id.to_string(), sections], |row| {
@@ -614,31 +614,45 @@ impl Store {
 
         // One entry per page: its best similarity, whether any section row
         // was seen, and the share its whole-page vector stands for.
-        let mut pages: Vec<(PageId, f32, bool, f64)> = Vec::new();
+        //
+        // Three costs taken out, measured over 5,000 pages of 768 dimensions
+        // (`vector_stream_cost`): the rows are grouped by page here rather
+        // than sorted by SQLite, which built a temporary B-tree of every row
+        // with its vector in it to do so; the query's norm, the same for every
+        // row, is taken once; and each stored vector is compared where it lies
+        // in the row's bytes instead of first being copied into one of its own.
+        let query_norm = norm(query_vector);
+        let mut index: HashMap<String, usize> = HashMap::new();
+        let mut pages: Vec<(String, f32, bool, f64)> = Vec::new();
         for row in rows {
             let (id, part, bytes, tokens, budget) = row?;
-            let id = parse_id(id);
-            let similarity = cosine_similarity(query_vector, &bytes_to_vector(&bytes));
-            match pages.last_mut() {
-                Some((page, best, has_sections, _)) if *page == id => {
+            let similarity = cosine_similarity_to_bytes(query_vector, query_norm, &bytes);
+            match index.get(&id) {
+                Some(&at) => {
+                    let (_, best, has_sections, _) = &mut pages[at];
                     *best = best.max(similarity);
                     *has_sections |= part > 0;
                 }
-                _ => pages.push((id, similarity, part > 0, coverage_of(tokens, budget))),
+                None => {
+                    index.insert(id.clone(), pages.len());
+                    pages.push((id, similarity, part > 0, coverage_of(tokens, budget)));
+                }
             }
         }
 
-        let mut scored: Vec<(PageId, f32, f64)> = pages
+        // Ties in page id order, which is the order the rows used to arrive in
+        // and so the order a stable sort left equal scores in.
+        pages.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        pages.truncate(limit);
+        Ok(pages
             .into_iter()
-            .map(|(id, best, has_sections, share)| {
-                (id, best, if has_sections { 1.0 } else { share })
+            .map(|(id, _, has_sections, share)| {
+                (parse_id(id), if has_sections { 1.0 } else { share })
             })
-            .collect();
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(limit);
-        Ok(scored
-            .into_iter()
-            .map(|(id, _, coverage)| (id, coverage))
             .collect())
     }
 
@@ -1094,6 +1108,7 @@ fn vector_to_bytes(vector: &[f32]) -> Vec<u8> {
 /// A byte count that is not a multiple of four means the row was not written
 /// by this crate; the trailing partial value is dropped rather than causing a
 /// panic, since a search stream is not worth failing a whole query over.
+#[cfg(test)]
 fn bytes_to_vector(bytes: &[u8]) -> Vec<f32> {
     bytes
         .chunks_exact(4)
@@ -1101,9 +1116,44 @@ fn bytes_to_vector(bytes: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+/// The Euclidean length of a vector.
+fn norm(vector: &[f32]) -> f32 {
+    vector.iter().map(|x| x * x).sum::<f32>().sqrt()
+}
+
+/// [`cosine_similarity`] of `query`, whose norm the caller has already taken,
+/// and a vector as [`vector_to_bytes`] stored it, without decoding the stored
+/// vector into one of its own first.
+///
+/// The same answers as decoding and calling [`cosine_similarity`], edge cases
+/// included: a length mismatch or a zero vector is `0.0`. A byte count that
+/// is not a multiple of four is a length mismatch here, where decoding would
+/// have dropped the partial value and compared the rest.
+fn cosine_similarity_to_bytes(query: &[f32], query_norm: f32, stored: &[u8]) -> f32 {
+    if query.is_empty() || stored.len() != query.len() * 4 {
+        return 0.0;
+    }
+    let mut dot = 0.0_f32;
+    let mut squares = 0.0_f32;
+    for (x, chunk) in query.iter().zip(stored.chunks_exact(4)) {
+        let y = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        dot += x * y;
+        squares += y * y;
+    }
+    let stored_norm = squares.sqrt();
+    if query_norm == 0.0 || stored_norm == 0.0 {
+        return 0.0;
+    }
+    dot / (query_norm * stored_norm)
+}
+
 /// Cosine similarity of two vectors. `0.0` for a length mismatch or either
 /// vector being zero, rather than a divide-by-zero `NaN` that would poison
 /// every sort it touches.
+///
+/// The reference [`cosine_similarity_to_bytes`] is held to; the streams use
+/// that one.
+#[cfg(test)]
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
@@ -1144,6 +1194,51 @@ mod tests {
             .set_page_entities(project_id, page.id, &entities)
             .expect("entities");
         page.id
+    }
+
+    /// How long the vector stream takes over a memory far larger than any this
+    /// project has: 5,000 pages of 768-dimensional vectors, nomic-embed-text's
+    /// width. Ignored, because it measures rather than asserts; run with
+    /// `cargo test --release -p anamnesis-store -- --ignored vector_stream_cost`.
+    #[test]
+    #[ignore]
+    fn vector_stream_cost() {
+        let (_dir, store, project, _workspace) = fixture();
+        const PAGES: usize = 5_000;
+        const DIM: usize = 768;
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % 2_000) as f32 / 1_000.0 - 1.0
+        };
+        for i in 0..PAGES {
+            let id = write_page(
+                &store,
+                project,
+                &format!("notes/page-{i}.md"),
+                "A page",
+                "body",
+                Vec::new(),
+            );
+            let vector: Vec<f32> = (0..DIM).map(|_| next()).collect();
+            store
+                .set_page_embedding(id, "nomic-embed-text", &vector)
+                .unwrap();
+        }
+        let query: Vec<f32> = (0..DIM).map(|_| next()).collect();
+
+        let rounds = 20;
+        let started = std::time::Instant::now();
+        for _ in 0..rounds {
+            let hits = store
+                .vector_stream(project, "nomic-embed-text", &query, 10, false)
+                .unwrap();
+            assert_eq!(hits.len(), 10);
+        }
+        let each = started.elapsed() / rounds;
+        println!("vector stream over {PAGES} pages x {DIM}: {each:?} per query");
     }
 
     /// The failure the cap exists for, measured before it was added: a query of
@@ -2207,6 +2302,51 @@ mod tests {
         assert_eq!(cosine_similarity(&[], &[]), 0.0);
         assert_eq!(cosine_similarity(&[1.0], &[1.0, 2.0]), 0.0);
         assert_eq!(cosine_similarity(&[0.0, 0.0], &[1.0, 1.0]), 0.0);
+    }
+
+    /// The comparison made in place in the stored bytes answers what decoding
+    /// them first did, over vectors of the width the index holds and over
+    /// every edge case the decoding version handles.
+    #[test]
+    fn comparing_stored_bytes_in_place_answers_what_decoding_them_did() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % 20_000) as f32 / 1_000.0 - 10.0
+        };
+        for _ in 0..200 {
+            let query: Vec<f32> = (0..768).map(|_| next()).collect();
+            let stored: Vec<f32> = (0..768).map(|_| next()).collect();
+            let decoded = cosine_similarity(&query, &stored);
+            let in_place =
+                cosine_similarity_to_bytes(&query, norm(&query), &vector_to_bytes(&stored));
+            assert!((decoded - in_place).abs() < 1e-5, "{decoded} vs {in_place}");
+        }
+
+        let bytes = |v: &[f32]| vector_to_bytes(v);
+        assert_eq!(cosine_similarity_to_bytes(&[], 0.0, &[]), 0.0);
+        assert_eq!(
+            cosine_similarity_to_bytes(&[1.0], 1.0, &bytes(&[1.0, 2.0])),
+            0.0,
+            "a length mismatch"
+        );
+        assert_eq!(
+            cosine_similarity_to_bytes(&[0.0, 0.0], 0.0, &bytes(&[1.0, 1.0])),
+            0.0,
+            "a zero query"
+        );
+        assert_eq!(
+            cosine_similarity_to_bytes(&[1.0, 1.0], 2.0_f32.sqrt(), &bytes(&[0.0, 0.0])),
+            0.0,
+            "a zero stored vector"
+        );
+        assert_eq!(
+            cosine_similarity_to_bytes(&[1.0], 1.0, &[0, 0, 128, 63, 7]),
+            0.0,
+            "a byte count that is not a multiple of four is not this vector"
+        );
     }
 
     #[test]

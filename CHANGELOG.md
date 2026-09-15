@@ -117,6 +117,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in is ignored so that a copy nothing regenerates cannot be committed by
   accident
 
+### Changed
+- **The vector stream answers in less than half the time.** Measured over
+  5,000 pages of 768-dimensional vectors (`vector_stream_cost`, an ignored
+  test): 19.4 ms a query before, 8.9 ms after. Most of it was SQLite building a
+  temporary B-tree of every row, vector included, only so the rows of one page
+  arrived together; they are grouped by page in Rust instead, and equal scores
+  still come out in page id order. The rest was decoding each stored vector
+  into a vector of its own and taking the query's norm again for every row;
+  the comparison is now made in the stored bytes with the norm taken once,
+  held by a test to the answers the decoding version gave. The abstract stream
+  compares the same way
+
 ### Fixed
 - **The image's health check can fail, and the development image builds.**
   `HEALTHCHECK` ran `anamnesis status`, which describes and always exits 0:
