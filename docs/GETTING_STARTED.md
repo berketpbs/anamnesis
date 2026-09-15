@@ -1245,14 +1245,19 @@ A registered MCP server whose endpoint does not answer when the harness starts
 it — Ollama not up yet after a reboot — starts anyway, says so on stderr, and
 asks the endpoint again when a query needs a vector, at most every thirty
 seconds. Queries in between go without the vector stream rather than the agent
-going without its memory tools. `anamnesis serve` still refuses to start
-without an answer, because it is started by something that restarts it and
-writes the refusal where it can be read.
+going without its memory tools. `anamnesis serve` does the same: a service
+manager's refusal log is written nowhere anybody reads, and a server that would
+not start without Ollama recorded nothing for as long as Ollama stayed down.
+It says so in its log (`going on without vectors, asking again when one is
+needed`).
 
-The server checks the endpoint while it starts, by embedding one short string
-— so a wrong key or a model that does not exist is an error you see at startup
-rather than a log line hours later, after sessions have been summarised
-without a vector each.
+A page the server writes while the endpoint is down is indexed without a
+vector, and `anamnesis doctor` names it. Once a minute the server sends the
+endpoint one short string, and when that is answered it embeds those pages
+again, twenty at a time — so starting Ollama is the whole fix, without a
+restart or a `reindex`. An endpoint that answers and refuses, a wrong key or a
+model that does not exist, is treated the same way and says why in the same
+log line, so read it when `doctor` keeps naming the same pages.
 
 **Switching providers does not corrupt anything, and does not migrate
 anything.** Every vector is stored beside the name of the model that produced

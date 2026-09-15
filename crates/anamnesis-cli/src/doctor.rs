@@ -273,13 +273,17 @@ fn judge_failed(failed: &[&EmbedFailure]) -> Finding {
              vector stream ({}, under {})",
             first.path, first.model
         ),
+        // A running server sends these pages again within a minute of its
+        // embedder answering, so the first thing to fix is the embedder; the
+        // rebuild is for a memory no server is running for.
         remedy: Some(match reasons.as_slice() {
             [only] => format!(
-                "every one failed the same way: {only} — fix that, then `anamnesis reindex` \
-                 re-embeds them"
+                "every one failed the same way: {only} — fix that, and a running server \
+                 re-embeds them within a minute (`anamnesis reindex` does it without one)"
             ),
             many => format!(
-                "{} different errors, the first being: {} — `anamnesis reindex` retries them all",
+                "{} different errors, the first being: {} — a running server retries them \
+                 once its embedder answers, and `anamnesis reindex` retries them all now",
                 many.len(),
                 first.reason
             ),
@@ -1089,6 +1093,11 @@ mod tests {
             "{embeddings:#?}"
         );
         assert!(embeddings.verdict.contains("1 page"), "{embeddings:#?}");
+        let remedy = embeddings.remedy.as_deref().expect("a remedy");
+        assert!(
+            remedy.contains("running server re-embeds them"),
+            "the server fills these in by itself now, so fixing the embedder is the step: {remedy}"
+        );
     }
 
     /// A page embedded from only its opening tokens is in every stream and

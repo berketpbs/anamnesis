@@ -38,6 +38,7 @@ pub mod enrich;
 pub mod improve;
 mod pipeline;
 pub mod reap;
+pub mod revector;
 mod shutdown;
 pub mod ui;
 pub mod watch;
@@ -530,6 +531,11 @@ pub async fn serve_on(
     // page is a tally because a model answered 503 for an afternoon is a fault
     // nobody would think to go looking for.
     tokio::spawn(enrich::run_enricher(state.clone()));
+
+    // The same net for vectors: a page written while the embedder was down is
+    // filed as missing one, and this sends it again once the embedder answers.
+    // It returns at once on a server with no embedder.
+    tokio::spawn(revector::run_revectoring(state.clone()));
 
     // On by default, unlike the scheduler, and the difference is what each one
     // does: auto-improve makes decisions about someone's memory, so it waits to
