@@ -118,6 +118,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accident
 
 ### Fixed
+- **The image's health check can fail, and the development image builds.**
+  `HEALTHCHECK` ran `anamnesis status`, which describes and always exits 0:
+  a container whose server was frozen (`kill -STOP`) was still `healthy`
+  thirty seconds later. It runs `anamnesis hook --probe` now — the event a hook
+  would send, recorded nowhere, exiting non-zero when memory would not be
+  recorded — and the same container went `unhealthy`; the compose file's check
+  is the same command. `Dockerfile.dev` installed `cargo-watch` from apt, which
+  has no such package, so the image never built (`Unable to locate package
+  cargo-watch`); it comes from crates.io now. Both images install packages
+  without apt's recommendations. CI checks the health check both ways and
+  builds the development image. `DOCKER.md` no longer documents build
+  arguments the Dockerfile does not take, a Helm chart that does not exist, a
+  `SQLITE_CONFIG` variable nothing reads, or `memory.db` as the index — a
+  `VACUUM` against that name creates an empty database and succeeds
 - **A reply cut off part way through its body is asked again, and the log
   says what cut it.** Twice on 2026-09-13 the server logged `llm transport
   failed: error decoding response body` and fell back to a counted page on the
