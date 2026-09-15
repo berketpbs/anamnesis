@@ -168,6 +168,10 @@ pub struct AppState {
     /// vector, so the stream covers the memory rather than the corner of it an
     /// agent happened to write through MCP.
     pub embedder: Option<Arc<dyn Embedder>>,
+    /// What the embedder said the last time it did not return a vector, for
+    /// `/whoami`. Filled by the watcher [`AppState::with_embedder`] puts
+    /// around the embedder.
+    pub embedding_failure: answering::LastFailure,
     /// Work that outlives the request that started it.
     ///
     /// Only *finite* work goes here — a session being summarised by a model,
@@ -187,6 +191,7 @@ impl AppState {
             llm: None,
             auth: Auth::open(),
             embedder: None,
+            embedding_failure: answering::LastFailure::default(),
             tasks: TaskTracker::new(),
         }
     }
@@ -210,8 +215,13 @@ impl AppState {
     }
 
     /// Embed the pages this server writes, when an embedder is enabled.
+    ///
+    /// Watched, so `status` can say when it stopped returning vectors.
     pub fn with_embedder(mut self, embedder: Option<Arc<dyn Embedder>>) -> Self {
-        self.embedder = embedder;
+        let last = self.embedding_failure.clone();
+        self.embedder = embedder.map(|embedder| {
+            Arc::new(answering::WatchedEmbedder::new(embedder, last)) as Arc<dyn Embedder>
+        });
         self
     }
 }
@@ -420,6 +430,10 @@ struct WhoAmI {
     consolidation_failure: Option<answering::ModelFailure>,
     /// The model pages are embedded with. `null` means vector search is off.
     embedding: Option<String>,
+    /// What that embedder said the last time it returned no vector. `null`
+    /// when its latest request returned one, when none has been made since the
+    /// server started, and when there is no embedder.
+    embedding_failure: Option<answering::ModelFailure>,
 }
 
 /// Report the caller's identity back to them, and what this server does.
@@ -457,6 +471,10 @@ async fn whoami(
             .embedder
             .as_ref()
             .map(|embedder| embedder.model().to_owned()),
+        embedding_failure: state
+            .embedder
+            .as_ref()
+            .and_then(|_| state.embedding_failure.get()),
     })
 }
 
@@ -3359,6 +3377,8 @@ mod tests {
             "present and null, so a client can tell 'answering' from 'an older server'"
         );
         assert_eq!(body["consolidation_failure"], serde_json::Value::Null);
+        assert!(body.get("embedding_failure").is_some(), "{body}");
+        assert_eq!(body["embedding_failure"], serde_json::Value::Null);
     }
 
     /// The reason `status` could not give on 2026-09-14. A session ends, the
@@ -3423,6 +3443,71 @@ mod tests {
             whoami(state).await["consolidation_failure"],
             serde_json::Value::Null,
             "an answer forgets the refusal"
+        );
+    }
+
+    /// The same for the embedder: an Ollama that has not started is named in
+    /// `/whoami` from the first vector it did not return, and forgotten at the
+    /// first one it does.
+    #[tokio::test]
+    async fn whoami_says_what_the_embedder_answered_until_it_answers() {
+        struct Switched(std::sync::atomic::AtomicBool);
+        impl anamnesis_core::embedding::Embed for Switched {
+            fn model(&self) -> &str {
+                "nomic-embed-text"
+            }
+            fn embed(&self, _: &str) -> Result<Vec<f32>, String> {
+                if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+                    Ok(vec![1.0])
+                } else {
+                    Err(
+                        "could not load model \"nomic-embed-text\": error sending request"
+                            .to_owned(),
+                    )
+                }
+            }
+        }
+        impl Embedder for Switched {
+            fn dimension(&self) -> usize {
+                1
+            }
+        }
+
+        let harness = harness();
+        let inner = Arc::new(Switched(std::sync::atomic::AtomicBool::new(false)));
+        let state = harness
+            .state
+            .clone()
+            .with_embedder(Some(inner.clone() as Arc<dyn Embedder>));
+        let whoami = |state: AppState| async move {
+            let response = send(
+                &state,
+                with_token(HttpRequest::builder().uri("/whoami"), None),
+            )
+            .await;
+            serde_json::from_str::<serde_json::Value>(&body_of(response).await).expect("json")
+        };
+        assert_eq!(
+            whoami(state.clone()).await["embedding_failure"],
+            serde_json::Value::Null,
+            "nothing asked yet"
+        );
+
+        let embedder = state.embedder.clone().expect("an embedder");
+        assert!(embedder.embed("a page").is_err());
+        let body = whoami(state.clone()).await;
+        assert_eq!(body["embedding"], "nomic-embed-text");
+        assert_eq!(
+            body["embedding_failure"]["reason"],
+            "failed: could not load model \"nomic-embed-text\": error sending request"
+        );
+
+        inner.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(embedder.embed("a page").is_ok());
+        assert_eq!(
+            whoami(state).await["embedding_failure"],
+            serde_json::Value::Null,
+            "a vector forgets the refusal"
         );
     }
 

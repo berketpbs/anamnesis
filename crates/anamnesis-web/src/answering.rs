@@ -18,8 +18,9 @@
 
 use std::sync::Arc;
 
+use anamnesis_core::embedding::{Embed, Overflow};
 use anamnesis_core::sanitize::Redactor;
-use anamnesis_llm::{Completion, CompletionOutput, LlmError, Provider};
+use anamnesis_llm::{Completion, CompletionOutput, Embedder, LlmError, Provider};
 use async_trait::async_trait;
 use jiff::Timestamp;
 use parking_lot::Mutex;
@@ -71,6 +72,19 @@ impl ModelFailure {
                 (None, format!("answered with something unusable: {message}"))
             }
         };
+        Self::kept(at, status, reason)
+    }
+
+    /// The failure an embedder's refusal amounts to, at `at`.
+    ///
+    /// An embedder's error is a sentence rather than a status and a body, so
+    /// the clause is `failed:` and the sentence.
+    pub fn from_embedding(message: &str, at: Timestamp) -> Self {
+        Self::kept(at, None, format!("failed: {message}"))
+    }
+
+    /// Redacted and shortened, the two things every kept reason needs.
+    fn kept(at: Timestamp, status: Option<u16>, reason: String) -> Self {
         let reason = Redactor::new().redact(&reason).into_text();
         let reason = match reason.char_indices().nth(MAX_REASON_CHARS) {
             Some((end, _)) => format!("{}…", &reason[..end]),
@@ -131,6 +145,52 @@ impl Provider for Watched {
                 .set(Some(ModelFailure::from_error(error, Timestamp::now()))),
         }
         answer
+    }
+}
+
+/// An embedder that remembers how its last request went.
+///
+/// The same question for the other model a server depends on. On 2026-09-15
+/// this machine's Ollama had not started, `status` said `Vectors:
+/// nomic-embed-text` all afternoon, and the pages written meanwhile went into
+/// the index without a vector; the only trace was a warning per page in the log.
+pub struct WatchedEmbedder {
+    inner: Arc<dyn Embedder>,
+    last: LastFailure,
+}
+
+impl WatchedEmbedder {
+    /// Watch `inner`, reporting into `last`.
+    pub fn new(inner: Arc<dyn Embedder>, last: LastFailure) -> Self {
+        Self { inner, last }
+    }
+}
+
+impl Embed for WatchedEmbedder {
+    fn model(&self) -> &str {
+        self.inner.model()
+    }
+
+    fn embed(&self, text: &str) -> Result<Vec<f32>, String> {
+        let answer = self.inner.embed(text);
+        match &answer {
+            Ok(_) => self.last.set(None),
+            Err(message) => self.last.set(Some(ModelFailure::from_embedding(
+                message,
+                Timestamp::now(),
+            ))),
+        }
+        answer
+    }
+
+    fn overflow(&self, text: &str) -> Option<Overflow> {
+        self.inner.overflow(text)
+    }
+}
+
+impl Embedder for WatchedEmbedder {
+    fn dimension(&self) -> usize {
+        self.inner.dimension()
     }
 }
 
