@@ -21,6 +21,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than a warning per page. `doctor`'s remedy says the server does this,
   and `GETTING_STARTED.md` no longer claims `serve` refuses to start without
   its endpoint, which stopped being true in 1.1.1
+- **`anamnesis service restart`** stops the server the service keeps running
+  and waits until the one started in its place answers, which a new key, a
+  changed `settings.env` and a new binary all need. On Windows there was no
+  verb for it: `schtasks /End` ends the task and not the server — measured
+  here, the task went `Ready` while the same process went on answering,
+  outside the task — and the documented step was to find the `serve` process
+  by its command line and stop only that one, since the MCP server a harness
+  starts is also `anamnesis.exe`. The command finds the process listening on
+  the port (by its remote end being port zero, not by the state column Windows
+  prints in the machine's language), stops it only if it is `anamnesis.exe`,
+  runs the task, and waits for a different process to answer. Linux runs
+  `systemctl --user restart`, macOS `launchctl kickstart -k`. Run on this
+  machine, it replaced the server in about a second, under the task's own
+  `conhost --headless`
 - **`anamnesis key check`** asks each configured model one small question with
   the key a server started now would use, and says what came back: the key
   accepted, refused, or out of today's quota, a model that does not exist, a
