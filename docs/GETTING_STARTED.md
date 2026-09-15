@@ -268,11 +268,12 @@ Putting a new key in, in order:
 2. `anamnesis key check` — every model ✅. A refused key reads `the key was
    refused (400): ...`; Google words it `Please pass a valid API key` or
    `Invalid Auth key.` depending on the key's shape.
-3. Restart the server, which reads its key only when it starts. Under
-   `anamnesis service`: on Windows stop the process whose command line ends in
-   `serve` — not the `mcp` one a harness started — and the task starts it again
-   within a minute; on Linux `systemctl --user restart anamnesis.service`; on
-   macOS `launchctl kickstart -k gui/$(id -u)/dev.anamnesis.server`.
+3. `anamnesis service restart`, since the server reads its key only when it
+   starts. It stops the server the service keeps running and waits until the
+   one started in its place answers. On Windows that is the process listening
+   on the port, stopped only if it is `anamnesis.exe` — never the `mcp` one a
+   harness started, and never by `schtasks /End`, which ends the task and
+   leaves the server running outside it.
 4. `anamnesis status`. Sessions whose pages were counted while the key was
    refused are asked about again by the server's next pass, a few at a time;
    `Why:` disappears once a request is answered, and the `Summaries:` count
@@ -525,6 +526,7 @@ of the binary the service should run:
 anamnesis service install            # show what would be registered, and what the server will start with
 anamnesis service install --write    # register it, read it back, start the server
 anamnesis service status             # registered? what does it run? does a server answer?
+anamnesis service restart            # after a new key, settings.env or binary: stop it, wait for the new one
 anamnesis service uninstall --write
 ```
 

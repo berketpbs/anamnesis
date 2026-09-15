@@ -330,6 +330,9 @@ fn run() -> anyhow::Result<()> {
             cli::ServiceAction::Status { port } => {
                 service::cmd_service_status(port, cli.data_dir.clone())?
             }
+            cli::ServiceAction::Restart { port } => {
+                service::cmd_service_restart(port, cli.data_dir.clone())?
+            }
         },
         Commands::Key { action } => match action {
             cli::KeyAction::Set { name, stdin } => keys::cmd_key_set(&name, stdin)?,

@@ -771,6 +771,171 @@ pub fn cmd_service_status(port: u16, data_dir: Option<PathBuf>) -> anyhow::Resul
     Ok(())
 }
 
+/// `anamnesis service restart`: stop the server the service keeps running, and
+/// wait until the one it starts in its place answers.
+///
+/// What a new key, a changed `settings.env` and a new binary all need, since
+/// the server reads each of them once, when it starts. Every manager but one
+/// has a verb for it. Task Scheduler's `/End` ends the task and not the server:
+/// measured on this machine, the task went `Ready` and the server went on
+/// answering from the same process — no longer the task's, so the one-minute
+/// restart tried to start a second server on a port the first still held. The
+/// documented answer was to find the server's process by its command line and
+/// stop only that one, because the MCP server a harness starts is also
+/// `anamnesis.exe`, and stopping it takes an agent's memory tools away.
+///
+/// So on Windows this finds the process by the port it listens on, stops it
+/// only if that process is `anamnesis.exe`, and runs the task. The stop is
+/// forced, which a console process without a window leaves as the only kind:
+/// a summary being written at that moment is not lost, because the counted
+/// page is written before a model is asked and the enricher asks again.
+pub fn cmd_service_restart(port: u16, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
+    let Some(manager) = Manager::here() else {
+        anyhow::bail!("no service manager anamnesis knows on this platform");
+    };
+    let data = DataDir::resolve(data_dir)?;
+    println!("🛎  Restarting the anamnesis service");
+    println!();
+
+    let stopped = match manager {
+        Manager::TaskScheduler => {
+            if run("schtasks", &["/Query", "/TN", TASK_NAME]).is_err() {
+                anyhow::bail!(
+                    "no scheduled task {TASK_NAME:?} is registered, so nothing would start a \
+                     server again. `anamnesis service install --write` registers one; a server \
+                     started by hand is restarted where it was started"
+                );
+            }
+            let stopped = stop_listener(port)?;
+            // Ready once its child is gone, and started at once rather than at
+            // the next minute. A task still `Running` ignores this, and its
+            // one-minute trigger starts the server instead.
+            let _ = run("schtasks", &["/Run", "/TN", TASK_NAME]);
+            stopped
+        }
+        Manager::Systemd => {
+            let before = listening_pid_here(port);
+            run("systemctl", &["--user", "restart", UNIT_NAME])?;
+            before
+        }
+        Manager::Launchd => {
+            let before = listening_pid_here(port);
+            let uid = run("id", &["-u"])?.trim().to_owned();
+            run(
+                "launchctl",
+                &["kickstart", "-k", &format!("gui/{uid}/{AGENT_LABEL}")],
+            )?;
+            before
+        }
+    };
+
+    // Answering is not enough on its own: for the first moments it can still
+    // be the old process, and a restart that reported the server it was asked
+    // to replace would be the confusion this command exists to end.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    while std::time::Instant::now() < deadline {
+        if server_answers(port) {
+            let now = listening_pid_here(port);
+            if stopped.is_none() || now.is_none() || now != stopped {
+                match now {
+                    Some(pid) => println!("  Answering on port {port} again (process {pid})."),
+                    None => println!("  Answering on port {port} again."),
+                }
+                println!("  It has read settings.env and the credential store afresh;");
+                println!("  `anamnesis status` says what its model answers.");
+                return Ok(());
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    println!("  Nothing new answered on port {port} within 90 seconds.");
+    if let Some(word) = crate::server_log::last_word(&data.logs()) {
+        println!(
+            "  Log says:  {}",
+            crate::server_log::describe(&word, jiff::Timestamp::now())
+        );
+    }
+    anyhow::bail!("the service did not bring the server back")
+}
+
+/// Stop the process listening on `port`, if it is anamnesis, and return its id.
+///
+/// `None` when nothing listens, which is a server already down and a restart
+/// that only has to start one.
+fn stop_listener(port: u16) -> anyhow::Result<Option<u32>> {
+    let Some(pid) = listening_pid_here(port) else {
+        println!("  Nothing listens on port {port}; starting the server.");
+        return Ok(None);
+    };
+    let listing = run(
+        "tasklist",
+        &["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"],
+    )?;
+    let image = image_name(&listing).unwrap_or_default();
+    if !image.eq_ignore_ascii_case("anamnesis.exe") {
+        anyhow::bail!(
+            "port {port} is held by {} (process {pid}), which is not anamnesis; it was left alone",
+            if image.is_empty() {
+                "a process tasklist could not name"
+            } else {
+                &image
+            }
+        );
+    }
+    run("taskkill", &["/PID", &pid.to_string(), "/F"])?;
+    println!("  Stopped the server on port {port} (process {pid}).");
+    // The port has to be let go before the task's server can take it.
+    for _ in 0..20 {
+        if listening_pid_here(port) != Some(pid) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    Ok(Some(pid))
+}
+
+/// The process listening on `port` on this machine, where that can be asked.
+fn listening_pid_here(port: u16) -> Option<u32> {
+    if cfg!(windows) {
+        run("netstat", &["-ano", "-p", "TCP"])
+            .ok()
+            .and_then(|table| listening_pid(&table, port))
+    } else {
+        run("lsof", &["-t", "-sTCP:LISTEN", &format!("-iTCP:{port}")])
+            .ok()
+            .and_then(|out| out.lines().next().and_then(|line| line.trim().parse().ok()))
+    }
+}
+
+/// The process listening on `port`, read from `netstat -ano -p TCP`.
+///
+/// A listening row is the one whose remote address is port zero. Read by that
+/// rather than by the state column, which Windows prints in the machine's
+/// language.
+fn listening_pid(table: &str, port: u16) -> Option<u32> {
+    let suffix = format!(":{port}");
+    table.lines().find_map(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        match fields.as_slice() {
+            [proto, local, remote, .., pid]
+                if proto.eq_ignore_ascii_case("TCP")
+                    && local.ends_with(&suffix)
+                    && remote.ends_with(":0") =>
+            {
+                pid.parse().ok()
+            }
+            _ => None,
+        }
+    })
+}
+
+/// The image name in one row of `tasklist /FO CSV /NH`.
+fn image_name(listing: &str) -> Option<String> {
+    let row = listing.lines().find(|line| line.starts_with('"'))?;
+    let name = row.strip_prefix('"')?.split('"').next()?;
+    Some(name.to_owned())
+}
+
 /// The text between two markers, the first time they appear.
 fn between<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str> {
     let start = text.find(open)? + open.len();
@@ -790,6 +955,44 @@ mod tests {
     use super::*;
 
     const CONHOST: &str = r"C:\Windows\System32\conhost.exe";
+
+    /// The table as this machine printed it, with a client's connections to
+    /// the same port around the listener — which a match on the port alone
+    /// would take for it.
+    #[test]
+    fn the_listener_is_the_row_whose_remote_end_is_port_zero() {
+        let table = "\r\nActive Connections\r\n\r\n  Proto  Local Address          Foreign Address        State           PID\r\n\
+                     \x20 TCP    127.0.0.1:54879        127.0.0.1:8080         TIME_WAIT       0\r\n\
+                     \x20 TCP    127.0.0.1:8080         0.0.0.0:0              LISTENING       7836\r\n\
+                     \x20 TCP    127.0.0.1:18080        0.0.0.0:0              DİNLEME         4242\r\n\
+                     \x20 TCP    [::1]:9090             [::]:0                 LISTENING       99\r\n";
+        assert_eq!(listening_pid(table, 8080), Some(7836));
+        assert_eq!(
+            listening_pid(table, 18080),
+            Some(4242),
+            "whatever language the state column is printed in"
+        );
+        assert_eq!(listening_pid(table, 9090), Some(99));
+        assert_eq!(
+            listening_pid(table, 80),
+            None,
+            "a port that ends the same way is not it"
+        );
+        assert_eq!(listening_pid(table, 8081), None);
+    }
+
+    #[test]
+    fn the_image_name_is_the_first_field_of_the_row() {
+        assert_eq!(
+            image_name("\"anamnesis.exe\",\"7836\",\"Console\",\"1\",\"9.712 K\"\r\n").as_deref(),
+            Some("anamnesis.exe")
+        );
+        assert_eq!(
+            image_name("INFO: No tasks are running which match the specified criteria.\r\n"),
+            None,
+            "no row, in whatever language tasklist says so"
+        );
+    }
 
     fn launch() -> Launch {
         Launch::new(

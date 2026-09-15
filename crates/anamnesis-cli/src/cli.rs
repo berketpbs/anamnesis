@@ -874,4 +874,10 @@ pub enum ServiceAction {
         #[arg(long, default_value = "8080")]
         port: u16,
     },
+    /// Stop the server the service keeps running, so it starts again with a new key or settings
+    Restart {
+        /// Port the server listens on
+        #[arg(long, default_value = "8080")]
+        port: u16,
+    },
 }
