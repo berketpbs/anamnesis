@@ -130,7 +130,7 @@ pub fn cmd_uninstall(apply: bool, data_dir: Option<PathBuf>) -> anyhow::Result<(
     }
 
     for change in changes {
-        change.write()?;
+        change.write(&root)?;
     }
 
     println!();
@@ -157,16 +157,63 @@ enum Change {
 }
 
 impl Change {
-    fn write(self) -> anyhow::Result<()> {
+    /// Carry the change out.
+    ///
+    /// A file with nothing left in it once ours is out is removed rather than
+    /// written back as `{}`. `setup` creates `.mcp.json` and
+    /// `.claude/settings.local.json` when a project has neither, and an
+    /// uninstall that left them as empty shells left a `.mcp.json` in the
+    /// project root for somebody to commit — the file whose warning is that it
+    /// names paths on one machine. A file with anything else in it, somebody's
+    /// hook or another server, is written back with that and only that.
+    fn write(self, root: &std::path::Path) -> anyhow::Result<()> {
         match self {
-            Self::Json { path, settings } => hooks::write_settings(&path, &settings),
-            Self::Toml { path, document } => mcp_config::write_toml(&path, &document),
+            Self::Json { path, settings } => {
+                if settings.as_object().is_some_and(serde_json::Map::is_empty) {
+                    remove_emptied(&path, root)
+                } else {
+                    hooks::write_settings(&path, &settings)
+                }
+            }
+            Self::Toml { path, document } => {
+                // By the text, not the table: a TOML file can hold comments
+                // and nothing else, and those are somebody's.
+                if document.to_string().trim().is_empty() {
+                    remove_emptied(&path, root)
+                } else {
+                    mcp_config::write_toml(&path, &document)
+                }
+            }
             Self::Delete { path } => {
                 std::fs::remove_file(&path)?;
                 Ok(())
             }
         }
     }
+}
+
+/// The directories harnesses keep their project settings in, and the only ones
+/// an uninstall may remove once it has emptied them.
+const HARNESS_DIRS: &[&str] = &[".claude", ".cursor", ".gemini", ".codex"];
+
+/// Remove a configuration file with nothing left in it, and the harness's
+/// directory it was in if that is now empty too.
+///
+/// Only a directory named in [`HARNESS_DIRS`], and never `root`: the first
+/// version took any empty directory whose name began with a dot, and in a test
+/// whose project directory was `.tmpXXXX` it removed the project. `remove_dir`
+/// refuses a directory with anything in it, which is the other half.
+fn remove_emptied(path: &std::path::Path, root: &std::path::Path) -> anyhow::Result<()> {
+    std::fs::remove_file(path)?;
+    if let Some(parent) = path.parent()
+        && parent != root
+        && parent
+            .file_name()
+            .is_some_and(|name| HARNESS_DIRS.iter().any(|dir| name == *dir))
+    {
+        let _ = std::fs::remove_dir(parent);
+    }
+    Ok(())
 }
 
 /// Where memory is, and what this command deliberately did not do to it.
@@ -294,5 +341,130 @@ mod tests {
         assert!(written.contains("model = \"o3\""), "{written}");
         assert!(written.contains("[mcp_servers.other]"), "{written}");
         assert!(!written.contains("anamnesis"), "{written}");
+    }
+
+    /// `setup` made these files; with ours out they hold nothing, and a
+    /// `.mcp.json` of `{}` left in a project root is a file somebody commits.
+    #[test]
+    fn a_file_left_with_nothing_in_it_is_removed() {
+        let dir = tempfile::tempdir().expect("dir");
+        let mcp = dir.path().join(".mcp.json");
+        std::fs::write(
+            &mcp,
+            r#"{"mcpServers": {"anamnesis": {"command": "anamnesis"}}}"#,
+        )
+        .expect("write");
+        let mut config = hooks::read_settings(&mcp).expect("read");
+        assert!(mcp_config::unregister(&mut config, mcp_config::SERVER_NAME));
+        Change::Json {
+            path: mcp.clone(),
+            settings: config,
+        }
+        .write(dir.path())
+        .expect("write");
+        assert!(!mcp.exists(), "an empty .mcp.json is gone");
+
+        let codex = dir.path().join("config.toml");
+        std::fs::write(&codex, "[mcp_servers.anamnesis]\ncommand = \"anamnesis\"\n")
+            .expect("write");
+        let mut document = mcp_config::read_toml(&codex).expect("read");
+        assert!(mcp_config::unregister_toml(
+            &mut document,
+            mcp_config::SERVER_NAME
+        ));
+        Change::Toml {
+            path: codex.clone(),
+            document,
+        }
+        .write(dir.path())
+        .expect("write");
+        assert!(!codex.exists(), "an empty config.toml is gone");
+
+        // The harness directory goes with its last file, and only then.
+        let claude = dir.path().join(".claude");
+        std::fs::create_dir(&claude).expect("dir");
+        let settings = claude.join("settings.local.json");
+        std::fs::write(&settings, "{}").expect("write");
+        std::fs::write(claude.join("keep.md"), "somebody's").expect("write");
+        remove_emptied(&settings, dir.path()).expect("remove");
+        assert!(
+            claude.exists(),
+            "a directory with anything else in it stays"
+        );
+        std::fs::remove_file(claude.join("keep.md")).expect("remove");
+        std::fs::write(&settings, "{}").expect("write");
+        remove_emptied(&settings, dir.path()).expect("remove");
+        assert!(!claude.exists(), "an emptied harness directory goes");
+    }
+
+    /// What the first version of the directory rule got wrong: a project whose
+    /// own directory starts with a dot — `~/.dotfiles` — and holds only the
+    /// `.mcp.json` being removed. The project stays, and so does any dotted
+    /// directory that is not a harness's.
+    #[test]
+    fn a_project_named_with_a_dot_is_never_taken_for_a_harness_directory() {
+        let dir = tempfile::tempdir().expect("dir");
+        let root = dir.path().join(".dotfiles");
+        std::fs::create_dir(&root).expect("dir");
+        let mcp = root.join(".mcp.json");
+        std::fs::write(&mcp, "{}").expect("write");
+        remove_emptied(&mcp, &root).expect("remove");
+        assert!(root.exists(), "the project directory is not the harness's");
+
+        let elsewhere = root.join(".vscode");
+        std::fs::create_dir(&elsewhere).expect("dir");
+        let file = elsewhere.join("settings.json");
+        std::fs::write(&file, "{}").expect("write");
+        remove_emptied(&file, &root).expect("remove");
+        assert!(
+            elsewhere.exists(),
+            "a dotted directory no harness here owns stays"
+        );
+    }
+
+    /// Anything else in the file keeps the file: another server in JSON, a
+    /// setting of the harness's own in TOML.
+    #[test]
+    fn a_file_with_anything_else_in_it_is_written_back() {
+        let dir = tempfile::tempdir().expect("dir");
+        let mcp = dir.path().join(".mcp.json");
+        std::fs::write(
+            &mcp,
+            r#"{"mcpServers": {"anamnesis": {"command": "anamnesis"}, "other": {"command": "other"}}}"#,
+        )
+        .expect("write");
+        let mut config = hooks::read_settings(&mcp).expect("read");
+        assert!(mcp_config::unregister(&mut config, mcp_config::SERVER_NAME));
+        Change::Json {
+            path: mcp.clone(),
+            settings: config,
+        }
+        .write(dir.path())
+        .expect("write");
+        let left = std::fs::read_to_string(&mcp).expect("still there");
+        assert!(
+            left.contains("other") && !left.contains("anamnesis"),
+            "{left}"
+        );
+
+        let codex = dir.path().join("config.toml");
+        std::fs::write(
+            &codex,
+            "# keep this note\nmodel = \"o3\"\n\n[mcp_servers.anamnesis]\ncommand = \"anamnesis\"\n",
+        )
+        .expect("write");
+        let mut document = mcp_config::read_toml(&codex).expect("read");
+        assert!(mcp_config::unregister_toml(
+            &mut document,
+            mcp_config::SERVER_NAME
+        ));
+        Change::Toml {
+            path: codex.clone(),
+            document,
+        }
+        .write(dir.path())
+        .expect("write");
+        let left = std::fs::read_to_string(&codex).expect("still there");
+        assert!(left.contains("# keep this note"), "{left}");
     }
 }
