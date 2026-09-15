@@ -244,6 +244,13 @@ jobs:
       - name: The development image has its watcher
         run: docker run --rm anamnesis:dev-ci cargo watch --version
 
+      # The proxy template refused every hook event over nginx's default 1 MB
+      # with 413, added an X-Frame-Options that contradicted the server's, and
+      # rate limited a search path the API does not have. Run in front of the
+      # image, with what a hook, the API and a browser send.
+      - name: The nginx template proxies what the server is sent
+        run: sh docker/check-nginx.sh anamnesis:ci
+
   # The long-run eval needs an agent and a model and runs on a machine, not
   # here. What can run here is the part everything else rests on: that each
   # probe's check passes a repository that got it right and fails one that
