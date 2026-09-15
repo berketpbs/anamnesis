@@ -167,6 +167,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `install-hooks`, starts a server, and plays two OpenCode runs through it
   under Bun — prompt, tool call, compaction, end, and a second run that must be
   handed the first one's note once — and CI runs it in the image
+- **The Docker templates describe a server that exists.** Behind
+  `docker/nginx.conf.example`, every hook event over nginx's default 1 MB body
+  came back 413 — a large `Read` is past that, and the server reads 16 MB — so
+  it was set aside and never recorded. The template also added an
+  `X-Frame-Options: SAMEORIGIN` beside the server's `DENY`, a conflict a
+  browser may resolve by ignoring both, rate limited `/api/search`, which the
+  API does not have (search is `/api/v1/scopes/<ws>/<project>/search`), and
+  used the deprecated `listen … http2`. `docker/check-nginx.sh` now runs the
+  template in front of the image and sends it a 2 MB hook event, an API call
+  and a browser request; the old template fails three of its five checks, and
+  CI runs it. `docker/.env.example` offered `ANAMNESIS_DB`, `PORT`, `BIND`,
+  `STORAGE_TYPE`, `DEBUG` and `MCP_BEARER_TOKEN`, none of which anything reads
+  — the last one a server left open by whoever set it; it now names only
+  variables that are read, and a test fails when it names one that is not.
+  `docker/README.md` described a `docker-compose.prod.yml` that is not in the
+  repository, `/api/status` and `/metrics` endpoints that do not exist, a
+  database at `memory.db`, and scaling to three replicas of a single-writer
+  index; it is rewritten to what is there
 - **A reply cut off part way through its body is asked again, and the log
   says what cut it.** Twice on 2026-09-13 the server logged `llm transport
   failed: error decoding response body` and fell back to a counted page on the

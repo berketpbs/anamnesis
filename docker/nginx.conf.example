@@ -1,5 +1,8 @@
 # Nginx configuration for anamnesis reverse proxy
-# Copy to docker/nginx.conf and customize
+# Copy to docker/nginx.conf and customize.
+#
+# CI runs this file in front of the image and sends it what a hook sends, so
+# what is written here is what was checked to work.
 
 user nginx;
 worker_processes auto;
@@ -51,7 +54,8 @@ http {
     }
 
     server {
-        listen 443 ssl http2;
+        listen 443 ssl;
+        http2 on;
         server_name anamnesis.local;
 
         # SSL configuration (update paths to your certificates)
@@ -61,42 +65,49 @@ http {
         ssl_ciphers HIGH:!aNULL:!MD5;
         ssl_prefer_server_ciphers on;
 
-        # Security headers
+        # The largest hook event the server reads is 16 MB — one Read of a big
+        # file is already past nginx's default of 1 MB. Below the server's
+        # limit, a large tool output is refused here with 413 and the hook
+        # sets the event aside, so it is never recorded.
+        client_max_body_size 16m;
+
+        # Only what the server cannot know. It sets Content-Security-Policy,
+        # X-Frame-Options, X-Content-Type-Options and Referrer-Policy itself,
+        # and a second, different value from here (SAMEORIGIN beside its DENY)
+        # is a conflict a browser may resolve by ignoring both. HSTS is the
+        # proxy's, because TLS ends here.
         add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-        add_header X-Frame-Options "SAMEORIGIN" always;
-        add_header X-Content-Type-Options "nosniff" always;
-        add_header X-XSS-Protection "1; mode=block" always;
-        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 
-        # API endpoints
-        location /api/ {
-            limit_req zone=api_limit burst=20;
-            proxy_pass http://anamnesis;
-            proxy_http_version 1.1;
-            proxy_set_header Upgrade $http_upgrade;
-            proxy_set_header Connection "upgrade";
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
-        }
-
-        # Search endpoint
-        location /api/search {
+        # Search, with a tighter limit of its own. The route is
+        # /api/v1/scopes/<workspace>/<project>/search, which no prefix
+        # names, and a matching regular expression is chosen over /api/.
+        location ~ ^/api/v1/scopes/[^/]+/[^/]+/search$ {
             limit_req zone=search_limit burst=10;
             proxy_pass http://anamnesis;
             proxy_http_version 1.1;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
         }
 
-        # Web UI
+        # API endpoints
+        location /api/ {
+            limit_req zone=api_limit burst=20;
+            proxy_pass http://anamnesis;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        # Hooks, handoffs and the wiki browser. Not rate limited: a session's
+        # hooks arrive in bursts, one per tool call, and a hook refused here
+        # is an event lost.
         location / {
             proxy_pass http://anamnesis;
             proxy_http_version 1.1;
-            proxy_set_header Upgrade $http_upgrade;
-            proxy_set_header Connection "upgrade";
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;

@@ -1,287 +1,77 @@
 # Anamnesis Docker Deployment
 
-This directory contains Docker configurations for running anamnesis in various environments.
+Templates for running the image behind a reverse proxy. The full guide —
+image, compose profiles, volumes, health checks, environment — is
+[docs/DOCKER.md](../docs/DOCKER.md).
 
 ## Files
 
-- **docker-compose.prod.yml** - Production deployment with nginx reverse proxy
-- **nginx.conf.example** - Nginx configuration template
-- **.env.example** - Environment variables template
-- **README.md** - This file
+- **nginx.conf.example** — nginx as a TLS reverse proxy in front of the
+  server. CI runs it in front of the image and sends it a 2 MB hook event, a
+  search and a health check.
+- **.env.example** — the variables the server reads. A test fails the build
+  when it names one nothing reads.
+- **README.md** — this file.
+
+The compose file is `docker-compose.yml` at the repository root, with a `prod`
+and a `dev` profile.
 
 ## Quick Start
 
-### 1. Setup Environment
+```bash
+cp docker/.env.example docker/.env      # edit: at least ANAMNESIS_TOKEN
+docker run -d --name anamnesis --env-file docker/.env \
+  -p 127.0.0.1:8080:8080 -v anamnesis-data:/root/.anamnesis \
+  ghcr.io/berketpbs/anamnesis:latest
+
+# Is it recording? Exits non-zero when it would not be.
+docker exec anamnesis anamnesis hook --probe
+```
+
+`--env-file` on `docker run` puts the file's variables in the container.
+`docker compose --env-file` does not: it only fills in `${...}` in the compose
+file, so with compose set them under the service's `environment:`.
+
+## Behind nginx
 
 ```bash
-cd docker
-cp .env.example .env
-# Edit .env with your settings
+mkdir -p docker/ssl
+openssl req -x509 -newkey rsa:4096 -nodes -days 365 \
+  -keyout docker/ssl/key.pem -out docker/ssl/cert.pem -subj "/CN=anamnesis.local"
+cp docker/nginx.conf.example docker/nginx.conf
 ```
 
-### 2. Production Deployment
+Run nginx on the same network as a container named `anamnesis`, with
+`docker/nginx.conf` at `/etc/nginx/nginx.conf` and `docker/ssl` at
+`/etc/nginx/ssl`. Hooks then point at the proxy with
+`ANAMNESIS_SERVER=https://anamnesis.local`.
+
+Three settings in the template are there because the server needs them:
+
+- `client_max_body_size 16m` — the server reads hook events up to 16 MB, and
+  nginx's default of 1 MB refuses a large tool output with 413.
+- No rate limit on `/` — hooks arrive one per tool call, in bursts, and a hook
+  refused by the proxy is an event lost.
+- Only `Strict-Transport-Security` is added. The server sets its own
+  `Content-Security-Policy`, `X-Frame-Options`, `X-Content-Type-Options` and
+  `Referrer-Policy`; a second, different value is a conflict.
+
+## One replica
+
+The index is SQLite with a single writer. Do not scale the service past one
+container on one volume.
+
+## Where the data is
+
+Inside the container, `/root/.anamnesis`:
+
+- `db/anamnesis.db` — the index, rebuildable with `anamnesis reindex`
+- `wiki/` — the pages, a git repository
+- `raw/` — the transcripts
+- `logs/` — the server's own log
+
+`anamnesis backup` writes all of it (but `models/` and `logs/`) to one archive:
 
 ```bash
-docker-compose -f docker-compose.prod.yml up -d
+docker exec anamnesis anamnesis backup --out /root/.anamnesis/backup.tar.gz
 ```
-
-This starts:
-- **anamnesis**: Main memory server on port 8080
-- **nginx**: Reverse proxy on ports 80/443 (optional)
-
-### 3. Verify Deployment
-
-```bash
-# Check status
-docker-compose -f docker-compose.prod.yml exec anamnesis anamnesis status
-
-# View logs
-docker-compose -f docker-compose.prod.yml logs -f anamnesis
-
-# Test API
-curl http://localhost:8080/api/status
-```
-
-## Scaling
-
-### Horizontal Scaling with Docker Swarm
-
-```bash
-# Initialize swarm
-docker swarm init
-
-# Deploy stack
-docker stack deploy -c docker-compose.prod.yml anamnesis
-
-# Scale service
-docker service scale anamnesis_anamnesis=3
-```
-
-### Kubernetes
-
-See the [Kubernetes deployment guide](../docs/DOCKER.md#kubernetes-deployment).
-
-## Monitoring
-
-### Health Checks
-
-```bash
-# Manual check
-docker-compose -f docker-compose.prod.yml exec anamnesis \
-  anamnesis status
-
-# Automated monitoring (Prometheus)
-curl http://localhost:8080/metrics
-```
-
-### Logs
-
-```bash
-# Follow logs
-docker-compose -f docker-compose.prod.yml logs -f
-
-# Filter by service
-docker-compose -f docker-compose.prod.yml logs -f anamnesis
-
-# Export logs
-docker-compose -f docker-compose.prod.yml logs > logs.txt
-```
-
-### Metrics
-
-```bash
-# Check memory usage
-docker stats anamnesis
-
-# Check disk usage
-docker exec anamnesis du -sh /data/anamnesis
-```
-
-## Backup & Restore
-
-### Backup
-
-```bash
-# Backup database
-docker-compose -f docker-compose.prod.yml exec anamnesis \
-  tar czf - /data/anamnesis | gzip > anamnesis-backup.tar.gz
-
-# Backup entire volume
-docker run --rm \
-  -v anamnesis-data:/data \
-  -v $(pwd):/backup \
-  alpine tar czf /backup/anamnesis-volume.tar.gz /data
-```
-
-### Restore
-
-```bash
-# Restore database
-docker-compose -f docker-compose.prod.yml exec anamnesis \
-  tar xzf - /data/anamnesis < anamnesis-backup.tar.gz
-
-# Restore volume
-docker run --rm \
-  -v anamnesis-data:/data \
-  -v $(pwd):/backup \
-  alpine tar xzf /backup/anamnesis-volume.tar.gz -C /
-```
-
-## SSL/TLS Setup
-
-### Self-Signed Certificates
-
-```bash
-# Generate certificate (valid for 365 days)
-openssl req -x509 -newkey rsa:4096 -nodes -out cert.pem \
-  -keyout key.pem -days 365 \
-  -subj "/CN=anamnesis.local"
-
-# Place in ssl directory
-mkdir -p ssl
-mv cert.pem key.pem ssl/
-```
-
-### Let's Encrypt
-
-```bash
-# Using certbot
-certbot certonly --standalone -d anamnesis.example.com
-
-# Copy certificates
-cp /etc/letsencrypt/live/anamnesis.example.com/fullchain.pem ssl/cert.pem
-cp /etc/letsencrypt/live/anamnesis.example.com/privkey.pem ssl/key.pem
-```
-
-## Network Setup
-
-### Internal Network
-
-Services communicate via the `anamnesis` network:
-```bash
-docker network inspect anamnesis
-```
-
-### External Access
-
-Via nginx reverse proxy:
-- **HTTP**: http://anamnesis.local (redirects to HTTPS)
-- **HTTPS**: https://anamnesis.local
-- **API**: https://anamnesis.local/api/
-
-## Database
-
-### SQLite (Default)
-
-Located at `/data/anamnesis/memory.db`
-
-```bash
-# Access database
-docker-compose -f docker-compose.prod.yml exec anamnesis \
-  sqlite3 /data/anamnesis/memory.db
-
-# Vacuum database
-docker-compose -f docker-compose.prod.yml exec anamnesis \
-  sqlite3 /data/anamnesis/memory.db "VACUUM;"
-```
-
-### PostgreSQL (Optional)
-
-To enable PostgreSQL instead of SQLite:
-
-```yaml
-# In docker-compose.prod.yml
-services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: anamnesis
-      POSTGRES_USER: anamnesis
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-```
-
-## Performance Tuning
-
-### Container Resources
-
-```yaml
-deploy:
-  resources:
-    limits:
-      cpus: '2'
-      memory: 1G
-    reservations:
-      cpus: '1'
-      memory: 512M
-```
-
-### Database Optimization
-
-```bash
-# Optimize SQLite
-docker-compose exec anamnesis sqlite3 /data/anamnesis/memory.db << EOF
-PRAGMA journal_mode=WAL;
-PRAGMA synchronous=NORMAL;
-PRAGMA cache_size=-64000;
-VACUUM;
-ANALYZE;
-EOF
-```
-
-## Troubleshooting
-
-### Container Won't Start
-
-```bash
-# Check logs
-docker-compose -f docker-compose.prod.yml logs anamnesis
-
-# Verify volume
-docker volume inspect anamnesis-data
-
-# Clean and retry
-docker-compose -f docker-compose.prod.yml down -v
-docker-compose -f docker-compose.prod.yml up
-```
-
-### High Memory Usage
-
-```bash
-# Check process memory
-docker stats --no-stream
-
-# Reduce cache
-docker exec anamnesis sqlite3 /data/anamnesis/memory.db \
-  "PRAGMA cache_size=-4000;"
-```
-
-### Slow Queries
-
-```bash
-# Enable query logging
-docker exec anamnesis \
-  sqlite3 /data/anamnesis/memory.db \
-  "PRAGMA query_only=0; SELECT * FROM pages LIMIT 10;"
-```
-
-## Cleanup
-
-```bash
-# Remove containers
-docker-compose -f docker-compose.prod.yml down
-
-# Remove data (⚠️ careful!)
-docker-compose -f docker-compose.prod.yml down -v
-
-# Remove images
-docker rmi anamnesis:latest
-
-# Clean all unused resources
-docker system prune -a --volumes
-```
-
-## Related Documentation
-
-- [Docker deployment guide](../docs/DOCKER.md)
-- [Getting started](../docs/GETTING_STARTED.md)
-- [Architecture](../docs/ARCHITECTURE.md)
