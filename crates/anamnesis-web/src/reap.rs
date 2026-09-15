@@ -130,7 +130,12 @@ async fn close(
 pub async fn reap(state: &AppState, now: Timestamp) -> ReapReport {
     let mut report = ReapReport::default();
 
-    let open = match state.store.open_sessions() {
+    // Off the runtime, like everything below that touches the index or a
+    // checkout: resolving a scope reads a marker file and opens a git
+    // repository, and a checkout on a slow or unmounted drive held a runtime
+    // worker for as long as that took.
+    let store = state.store.clone();
+    let open = match crate::off_runtime(move || Ok::<_, WebError>(store.open_sessions()?)).await {
         Ok(open) => open,
         Err(error) => {
             tracing::error!(%error, "could not list the open sessions");
@@ -139,7 +144,10 @@ pub async fn reap(state: &AppState, now: Timestamp) -> ReapReport {
     };
 
     for session in open {
-        let Ok(scope) = resolve_scope(&session.checkout_path) else {
+        let checkout = session.checkout_path.clone();
+        let resolved =
+            crate::off_runtime(move || Ok::<_, WebError>(resolve_scope(&checkout).ok())).await;
+        let Ok(Some(scope)) = resolved else {
             // Logged at debug: a checkout that has moved is somebody's normal
             // Tuesday, and this would otherwise be a warning on every tick for
             // the rest of the server's life.
@@ -161,7 +169,9 @@ pub async fn reap(state: &AppState, now: Timestamp) -> ReapReport {
             continue;
         }
 
-        match state.store.begin_ending(session.id) {
+        let store = state.store.clone();
+        let id = session.id;
+        match crate::off_runtime(move || Ok::<_, WebError>(store.begin_ending(id)?)).await {
             Ok(true) => {}
             Ok(false) => {
                 report.left.push((session.id, Left::Claimed));
@@ -215,7 +225,11 @@ pub async fn reap(state: &AppState, now: Timestamp) -> ReapReport {
 /// reboot that the server is now starting up from.
 pub async fn run_reaper(state: AppState) {
     loop {
-        reap(&state, Timestamp::now()).await;
+        let passing = state.clone();
+        crate::one_pass("reaper", async move {
+            reap(&passing, Timestamp::now()).await;
+        })
+        .await;
         tokio::time::sleep(TICK).await;
     }
 }

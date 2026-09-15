@@ -236,7 +236,7 @@ const QUIET_WAIT_CAP: Duration = Duration::from_secs(60 * 60);
 /// few requests an hour instead of three a minute. A page written resets both.
 /// Held in memory: a restart asks straight away, which is what somebody who
 /// restarted a server after fixing its key expects.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Pacing {
     waiting: HashMap<SessionId, (u32, Timestamp)>,
     quiet_passes: u32,
@@ -302,7 +302,14 @@ pub async fn sweep_paced(state: &AppState, now: Timestamp, pacing: &mut Pacing) 
         return 0;
     };
 
-    let waiting = match state.store.sessions_awaiting_enrichment(CANDIDATES) {
+    // Off the runtime, as every other read of the index is: the pass runs
+    // beside the handlers, and a query held a worker they share.
+    let store = state.store.clone();
+    let waiting = match crate::off_runtime(move || {
+        Ok::<_, WebError>(store.sessions_awaiting_enrichment(CANDIDATES)?)
+    })
+    .await
+    {
         Ok(waiting) => waiting,
         Err(error) => {
             tracing::error!(%error, "could not list the sessions awaiting a model");
@@ -323,7 +330,10 @@ pub async fn sweep_paced(state: &AppState, now: Timestamp, pacing: &mut Pacing) 
         // way the reaper resolves one. A working copy that has since been
         // moved or unmounted leaves the session where it is: the page it would
         // be written to is the thing that cannot be located.
-        let Ok(scope) = resolve_scope(&session.checkout_path) else {
+        let checkout = session.checkout_path.clone();
+        let resolved =
+            crate::off_runtime(move || Ok::<_, WebError>(resolve_scope(&checkout).ok())).await;
+        let Ok(Some(scope)) = resolved else {
             tracing::debug!(
                 session = %session.id,
                 path = %session.checkout_path.display(),
@@ -384,7 +394,28 @@ pub async fn run_enricher(state: AppState) {
             );
         }
         tokio::time::sleep(wait).await;
-        sweep_paced(&state, Timestamp::now(), &mut pacing).await;
+
+        // The pass owns the pacing while it runs and hands it back. A pass
+        // that panics loses what it learned, so the pacing it started with is
+        // kept, and the panic counts as a pass in which nothing was written:
+        // whatever panicked is likely to again, and a minute apart forever is
+        // a log of the same panic.
+        let before = pacing.clone();
+        let passing = state.clone();
+        pacing = match crate::one_pass("enricher", async move {
+            let mut pacing = pacing;
+            sweep_paced(&passing, Timestamp::now(), &mut pacing).await;
+            pacing
+        })
+        .await
+        {
+            Some(after) => after,
+            None => {
+                let mut kept = before;
+                kept.finished(1, 0);
+                kept
+            }
+        };
     }
 }
 
