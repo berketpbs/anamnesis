@@ -303,6 +303,16 @@ pub fn cmd_key_check() -> anyhow::Result<()> {
         }
     }
 
+    // Said before any verdict, because the verdict is what misleads: a key
+    // stored minutes ago is not the key being asked about, and a refusal here
+    // reads as that new key being bad.
+    if let Some(shadowed) = config.shadowed_key {
+        println!("  {shadowed} is stored and is not the key checked below:");
+        println!("  ANAMNESIS_LLM_API_KEY is set, and it is the configured provider's.");
+        println!("  `anamnesis key forget ANAMNESIS_LLM_API_KEY` makes {shadowed} the one.");
+        println!();
+    }
+
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;

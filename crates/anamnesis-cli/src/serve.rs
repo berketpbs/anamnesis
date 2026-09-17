@@ -101,6 +101,11 @@ pub fn cmd_serve(
              so it was not sent anywhere and pages are counted; name the provider in settings.env"
         );
     }
+    if let Some(key) = llm.shadowed_key {
+        tracing::warn!(
+            "{key} is stored and not used: ANAMNESIS_LLM_API_KEY is set and is the configured              provider's key; `anamnesis key forget ANAMNESIS_LLM_API_KEY` makes {key} the one"
+        );
+    }
     // The same opt-in embedder the MCP server builds, on the same terms. Without
     // one here, the vector stream covered only the pages an agent wrote through
     // MCP — not a single session summary, and nothing anybody edited by hand.
