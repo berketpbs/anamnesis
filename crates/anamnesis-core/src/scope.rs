@@ -14,7 +14,8 @@
 use std::path::{Component, Path, PathBuf};
 
 use crate::config::{
-    AutoImproveConfig, CaptureConfig, DecayConfig, MarkerConfig, SessionsConfig, SlotsConfig,
+    AutoImproveConfig, CaptureConfig, DecayConfig, MarkerConfig, RecallConfig, SessionsConfig,
+    SlotsConfig,
 };
 use crate::error::{CoreError, Result};
 use crate::ids::{ProjectId, WorkspaceId};
@@ -255,6 +256,8 @@ pub struct ResolvedScope {
     pub slots: SlotsConfig,
     /// When this project's abandoned sessions are summarised anyway.
     pub sessions: SessionsConfig,
+    /// What a prompt in this project is handed back from its own pages.
+    pub recall: RecallConfig,
     /// Marker tables this build has no name for, and therefore did not apply.
     ///
     /// Carried rather than discarded because the file and the binary drift
@@ -328,6 +331,7 @@ impl ResolvedScope {
             auto_improve: AutoImproveConfig::default(),
             slots: SlotsConfig::default(),
             sessions: SessionsConfig::default(),
+            recall: RecallConfig::default(),
             unrecognized: Vec::new(),
         }
     }
@@ -364,7 +368,7 @@ pub fn resolve_scope(cwd: &Path) -> Result<ResolvedScope> {
     // Taken apart here rather than at each use: `config` is consumed by the
     // scope fields above, and a later reader should not have to prove that
     // two `map`s over the same `Option` see the same marker file.
-    let (capture, decay, auto_improve, slots, sessions, unrecognized) = match config {
+    let (capture, decay, auto_improve, slots, sessions, recall, unrecognized) = match config {
         Some(config) => {
             let unrecognized = config
                 .unrecognized()
@@ -377,10 +381,11 @@ pub fn resolve_scope(cwd: &Path) -> Result<ResolvedScope> {
                 Some(config.auto_improve),
                 Some(config.slots),
                 Some(config.sessions),
+                Some(config.recall),
                 unrecognized,
             )
         }
-        None => (None, None, None, None, None, Vec::new()),
+        None => (None, None, None, None, None, None, Vec::new()),
     };
 
     // Relative patterns belong to whoever wrote them: the marker's directory
@@ -406,6 +411,7 @@ pub fn resolve_scope(cwd: &Path) -> Result<ResolvedScope> {
         auto_improve: auto_improve.unwrap_or_default(),
         slots: slots.unwrap_or_default(),
         sessions: sessions.unwrap_or_default(),
+        recall: recall.unwrap_or_default(),
         unrecognized,
     })
 }

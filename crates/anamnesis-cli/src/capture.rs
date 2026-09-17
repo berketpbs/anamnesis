@@ -241,6 +241,7 @@ pub fn cmd_hook(agent: &str, server: &str, token: Option<&str>, data_dir: Option
         });
 
     let starting = is_starting(event.as_deref(), agent);
+    let prompting = is_prompting(event.as_deref(), agent);
 
     // This delivery's name, minted before the first attempt and reused by
     // every later one. The server records an event once under a name it has
@@ -403,6 +404,63 @@ pub fn cmd_hook(agent: &str, server: &str, token: Option<&str>, data_dir: Option
                 );
             }
         }
+    } else if prompting {
+        // The other half of the handoff, and the reason it exists: a handoff
+        // carries what the session before this one did, and a question five
+        // sessions after its answer was written needs what the project knows,
+        // not what it last did. Asked for the agent, because measured across
+        // twenty-four eval sessions with the tools connected and allowed, an
+        // agent asked once.
+        //
+        // Best-effort throughout. A server that is down, slow, older than this
+        // command, or answering about a project with nothing to say all end
+        // the same way: nothing printed, nothing said, the prompt goes on. The
+        // event itself was delivered before this ran.
+        let (session_id, cwd) = session_and_cwd(&payload);
+        let asked = asked_in(&payload);
+        if asked.is_empty() {
+            announce(agent, false, "");
+            return;
+        }
+        let mut request = client
+            .get(format!("{server}/recall"))
+            .timeout(RECALL_BUDGET)
+            .query(&[
+                ("agent", agent),
+                ("session_id", &session_id),
+                ("cwd", &cwd),
+                ("q", &asked),
+            ]);
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        match request.send() {
+            // The status is checked before the body is read, for the reason
+            // the handoff checks it: this goes to stdout, and stdout is
+            // context. An error page injected as memory would be believed.
+            Ok(response) if response.status().is_success() => match response.text() {
+                Ok(text) => print!("{}", handoff_reply(agent, &text)),
+                Err(error) => {
+                    eprintln!("anamnesis: recall unavailable: {error}");
+                    announce(agent, false, "");
+                }
+            },
+            // A 404 is a server older than this command, which is exactly the
+            // shape of "this server has no recall" and needs no words. Anything
+            // else goes to stderr: nothing is injected either way, and a prompt
+            // block that stops appearing should not do so in silence.
+            Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => {
+                announce(agent, false, "");
+            }
+            Ok(response) => {
+                eprintln!("anamnesis: recall refused ({})", response.status());
+                announce(agent, false, "");
+            }
+            Err(error) => {
+                eprintln!("anamnesis: recall unavailable: {error}");
+                announce(agent, false, "");
+            }
+        }
     } else {
         // Every other event. Says nothing, except to the harness that wants an
         // object per call.
@@ -428,6 +486,57 @@ fn is_starting(event: Option<&str>, agent: &str) -> bool {
     agent != AgentKind::OpenCode.as_str()
         && event.is_some_and(|event| event.eq_ignore_ascii_case("sessionstart"))
 }
+
+/// Whether this event is the one that collects a recall block.
+///
+/// The names are not compared here: `anamnesis_hooks::classify_event` already
+/// knows every spelling of this moment across four harnesses, including the
+/// two that do not say "prompt" at all, and a second copy of that table would
+/// be one that drifts. OpenCode is out for the same reason it is out of
+/// [`is_starting`] — nothing reads this command's stdout there.
+fn is_prompting(event: Option<&str>, agent: &str) -> bool {
+    agent != AgentKind::OpenCode.as_str()
+        && event.is_some_and(|event| {
+            anamnesis_hooks::classify_event(event)
+                == anamnesis_core::observation::EventKind::UserPrompt
+        })
+}
+
+/// What the session just asked, for the query that answers it.
+///
+/// Trimmed, because this travels as a query parameter and a prompt can be a
+/// pasted file. Retrieval reads the first words for what they are about, and a
+/// URL that a proxy or a shell truncates somewhere of its own choosing is a
+/// worse failure than one this code chose.
+fn asked_in(payload: &str) -> String {
+    let value: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
+    let prompt = value
+        .get("prompt")
+        .or_else(|| value.get("user_prompt"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim();
+    match prompt.char_indices().nth(PROMPT_QUERY_CHARS) {
+        Some((index, _)) => prompt[..index].to_owned(),
+        None => prompt.to_owned(),
+    }
+}
+
+/// How much of a prompt is used to ask memory about it.
+const PROMPT_QUERY_CHARS: usize = 1_000;
+
+/// How long the recall request may take, against one second for everything
+/// else this command sends.
+///
+/// The budget in [`cmd_hook`] is tight because those hooks run before every
+/// tool call, and a delay there is multiplied by hundreds within one session.
+/// This one runs once per prompt, and it asks for something the prompt has to
+/// wait for anyway: the server embeds the question before it can compare it to
+/// anything. Measured here on 2026-09-17, that round trip took **1.03 seconds
+/// against a cold Ollama and 0.05 against a warm one** — so under the capture
+/// budget the first prompt after an idle embedder came back empty, every time,
+/// and said nothing about why.
+const RECALL_BUDGET: std::time::Duration = std::time::Duration::from_millis(5_000);
 
 /// How long one hook will spend delivering what earlier hooks could not.
 ///
@@ -1126,5 +1235,43 @@ mod tests {
     fn the_opencode_plugin_collects_its_own_handoff() {
         assert!(!is_starting(Some("SessionStart"), "opencode"));
         assert!(is_starting(Some("SessionStart"), "codex"));
+    }
+
+    /// Every spelling of the moment a prompt arrives, including the two that
+    /// do not say "prompt" — read from the same table the parser uses.
+    #[test]
+    fn a_prompt_collects_recall_whatever_the_harness_calls_it() {
+        assert!(is_prompting(Some("UserPromptSubmit"), "claude-code"));
+        assert!(is_prompting(Some("user_prompt_submit"), "codex"));
+        assert!(is_prompting(Some("BeforeAgent"), "gemini-cli"));
+        assert!(is_prompting(Some("beforeSubmitPrompt"), "cursor"));
+        assert!(!is_prompting(Some("PostToolUse"), "claude-code"));
+        assert!(!is_prompting(Some("SessionStart"), "claude-code"));
+        assert!(!is_prompting(None, "claude-code"));
+        // Same reason as the handoff: nothing reads this stdout there.
+        assert!(!is_prompting(Some("UserPromptSubmit"), "opencode"));
+    }
+
+    #[test]
+    fn the_question_is_the_prompt_the_payload_carried() {
+        let payload =
+            r#"{"hook_event_name":"UserPromptSubmit","prompt":"  add logging to the importer  "}"#;
+        assert_eq!(asked_in(payload), "add logging to the importer");
+        assert_eq!(
+            asked_in(r#"{"user_prompt":"the other spelling"}"#),
+            "the other spelling"
+        );
+        assert_eq!(asked_in(r#"{"hook_event_name":"Stop"}"#), "");
+        assert_eq!(asked_in("not json at all"), "");
+    }
+
+    /// A pasted file is a prompt too, and it travels as a query parameter.
+    /// The cut lands on a character boundary, which a byte count would not.
+    #[test]
+    fn a_very_long_prompt_is_cut_to_a_length_this_code_chose() {
+        let long = "ı".repeat(PROMPT_QUERY_CHARS * 2);
+        let payload = serde_json::json!({ "prompt": long }).to_string();
+        let asked = asked_in(&payload);
+        assert_eq!(asked.chars().count(), PROMPT_QUERY_CHARS);
     }
 }

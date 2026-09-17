@@ -40,6 +40,31 @@ Every check runs the fixture's code or reads its files; none asks a model.
 thing and one that makes the mistake the probe is there for, and fails unless
 it tells them apart. CI runs that.
 
+## What the agent may do
+
+Both arms are started with the same `--allowedTools`, since a difference there
+would be a difference between the arms. Nobody is there to answer a prompt, so
+a tool left off the list is refused rather than asked about, and every refusal
+costs the session a turn. `report` counts them: a probe that failed after
+several of them is telling you about this list, not about memory.
+
+`git add`, `git commit`, deleting and installing are left off on purpose — the
+harness commits each session itself, an unattended nightly run should not hold
+an unbounded `rm`, and a run that installs a package measures that machine's
+network. The first complete run refused 59 calls, and the rest of them were
+this list being wrong rather than strict:
+
+- On Windows a session has a **PowerShell tool** beside Bash, and it was on
+  neither list: 31 calls, 27 refused. A rule does not narrow that tool — with
+  only `PowerShell(python:*)` allowed, `Get-ChildItem` ran — so it is taken
+  away with `--disallowedTools` instead. Asked, an agent started this way
+  answers that it has no PowerShell tool, and uses the shell both arms share.
+- The fixture's tests read `LEDGER_FIXTURES` from the environment, so
+  `LEDGER_FIXTURES=tests/fixtures python -m unittest ...` does not begin with
+  `python` and was refused four times, while `python tools/check.py`, which
+  sets it, was allowed. The scenario plants nothing about how the tests are
+  run, so `env`, `export` and that variable are allowed now.
+
 ## Running
 
 ```bash
@@ -61,6 +86,28 @@ under a refused key every page is counted, every probe is excluded, and the
 run measures nothing for two hours. What the check said is in
 `runs/<run>/model-check/key-check.txt` and `results.json`.
 `--skip-model-check` starts anyway.
+
+That check is one small question, and a model out of quota can still answer
+it. So the run asks the same question of the work: when a **planting**
+session's page comes back written by counting, or does not come back at all,
+the run stops there and exits 5. `report` excludes every probe behind such a
+page anyway, and a model that refused one session refuses the rest of the
+hour — on 2026-09-17 a repeat started against a spent quota wrote its first
+page by counting, and the eleven sessions after it would have cost two hours
+and $1.59 to measure nothing. `--keep-going` runs the whole scenario anyway.
+
+## The model the memory arm writes with
+
+A repeat is twelve consolidation requests plus whatever the enrich pass asks
+again, against a Google free tier of 20 per day per model that is shared with
+any server already running on the same key. The first complete run spent it by
+S10. `settings.local.env.example` points the arm at a local Ollama model
+instead: no key, no quota, and measured here on 2026-09-17 a session's page
+came back written by the model. A small local model writes thinner pages than
+the hosted one, so the arm is weaker than a real install and a difference it
+still shows is a floor — which is worth more than a nightly repeat that
+measures nothing. Point a run at it with `--settings-env`, and leave it off to
+measure the setup this machine actually runs.
 
 One repeat takes one to two hours with Haiku 4.5 and costs a few dollars of
 agent usage. It also asks the consolidation model about twelve sessions, which

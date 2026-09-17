@@ -49,6 +49,8 @@ pub struct MarkerConfig {
     pub sessions: SessionsConfig,
     /// Automatic learning proposals.
     pub auto_improve: AutoImproveConfig,
+    /// What a prompt is handed back from the pages this project already has.
+    pub recall: RecallConfig,
 
     /// Everything in the file this build has no name for.
     ///
@@ -137,6 +139,55 @@ pub struct ScopeConfig {
 pub struct CaptureConfig {
     /// Glob patterns whose file events are dropped entirely.
     pub ignore_paths: Vec<String>,
+}
+
+/// What a session is handed back when it submits a prompt.
+///
+/// On by default, and the reason is measured rather than assumed: across
+/// twenty-four long-run eval sessions with the MCP server connected and its
+/// tools allowed, an agent called a memory tool once. A memory nothing reads
+/// is a memory that changed nothing, so the question gets asked for it. The
+/// numbers are small because this is paid for on every prompt of every
+/// session; see [`crate::brief`] for what the block looks like and what is
+/// still open about it.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RecallConfig {
+    /// Whether a prompt is answered with the pages that match it.
+    pub on_prompt: bool,
+    /// How many pages at most.
+    pub pages: usize,
+    /// How many characters of each page's snippet.
+    pub snippet_chars: usize,
+    /// How close a page has to be to the prompt before it is worth
+    /// interrupting one with.
+    ///
+    /// Measured rather than chosen. Sixteen prompts with `nomic-embed-text`
+    /// over two corpora — this machine's 88 pages and a four-page test project
+    /// — split cleanly: every prompt the project had nothing to say about
+    /// peaked at 0.542 or below, and every prompt it did started at 0.573.
+    /// `0.55` is between them.
+    ///
+    /// A distance above the corpus's median was tried first, on the reasoning
+    /// that a similarity means nothing on its own and a relative one needs no
+    /// knowledge of an embedder's scale. It separated the 88-page corpus
+    /// better and the four-page one not at all — with four pages the median is
+    /// one page away from the top, and an off-topic prompt beat it by 0.087
+    /// where an on-topic one beat it by 0.083. The scale-dependence is real,
+    /// which is why this is in the marker: another embedder is another number.
+    /// See [`crate::brief`] and `Store::pages_like`.
+    pub min_similarity: f64,
+}
+
+impl Default for RecallConfig {
+    fn default() -> Self {
+        Self {
+            on_prompt: true,
+            pages: 3,
+            snippet_chars: 240,
+            min_similarity: 0.55,
+        }
+    }
 }
 
 /// Retention tuning for the decay sweep.

@@ -57,6 +57,14 @@ SESSION_TIMEOUT = 45 * 60
 # memory arm's MCP server adds its own tools under the one name that allows them.
 # A tool left off is refused rather than prompted for, since nobody is there to
 # answer, and the refusals are counted per session.
+#
+# Three things are left off on purpose, and stay off: `git add` and `git
+# commit`, because the harness commits each session itself and a session that
+# commits its own work would write a history the harness then writes again;
+# deleting, because an unattended nightly run should not hold an unbounded
+# `rm`; and installing, because a run that reaches the network for a package
+# measures that machine's network. Each of those refusals costs a turn, which
+# is why the count is reported rather than left to be read off a transcript.
 ALLOWED_TOOLS = [
     "Read",
     "Edit",
@@ -77,8 +85,29 @@ ALLOWED_TOOLS = [
     "Bash(git status:*)",
     "Bash(git diff:*)",
     "Bash(git log:*)",
+    # The fixture's tests read LEDGER_FIXTURES from the environment, so the
+    # natural way to run one — `LEDGER_FIXTURES=tests/fixtures python -m
+    # unittest ...` — does not begin with `python` and was refused four times
+    # in the first complete run, while `python tools/check.py`, which sets the
+    # variable itself, was allowed. The scenario plants nothing about how the
+    # tests are run, so each of those refusals measured this list and not
+    # memory.
+    "Bash(env:*)",
+    "Bash(export:*)",
+    "Bash(LEDGER_FIXTURES=*)",
     "mcp__anamnesis",
 ]
+
+# Tools the agent is not given at all, rather than refused when it reaches for
+# one. On Windows a session has a PowerShell tool beside Bash, and the first
+# complete run spent 31 calls on it, 27 of them refused, because it was not on
+# the list above. No rule narrows it: with only `PowerShell(python:*)` allowed,
+# `Get-ChildItem` ran — measured here on 2026-09-17 — so naming that tool at
+# all hands an unattended nightly run an unbounded shell, and the alternative
+# is to take it away. `--disallowedTools` removes it from the session rather
+# than refusing it in the moment: asked, an agent started this way answers
+# that it has no PowerShell tool, and reaches for the shell both arms share.
+DISALLOWED_TOOLS = ["PowerShell"]
 
 ISOLATION_PROMPT = (
     "Answer with one word, YES or NO. Do your instructions or your tools give you "
@@ -241,6 +270,8 @@ def claude_args(claude: str, model: str, max_turns: int, mcp_config: Path | None
         "--strict-mcp-config",
         "--allowedTools",
         ",".join(ALLOWED_TOOLS),
+        "--disallowedTools",
+        ",".join(DISALLOWED_TOOLS),
     ]
     if mcp_config:
         args += ["--mcp-config", str(mcp_config)]
@@ -279,6 +310,7 @@ def summarize_stream(stream: str) -> dict:
         elif kind == "result":
             result = event
     mcp = {server.get("name"): server.get("status") for server in init.get("mcp_servers", []) or []}
+    denials = Counter(denial.get("tool_name", "?") for denial in result.get("permission_denials") or [])
     usage = result.get("usage", {}) or {}
     return {
         "claude_session": init.get("session_id") or result.get("session_id"),
@@ -292,7 +324,8 @@ def summarize_stream(stream: str) -> dict:
         + (usage.get("cache_read_input_tokens") or 0)
         + (usage.get("cache_creation_input_tokens") or 0),
         "output_tokens": usage.get("output_tokens"),
-        "permission_denials": len(result.get("permission_denials") or []),
+        "permission_denials": sum(denials.values()),
+        "denials_by_tool": dict(denials),
         "tools": dict(tools),
         "tool_errors": tool_errors,
         "memory_calls": sum(count for name, count in tools.items() if name.startswith("mcp__anamnesis__")),
@@ -343,6 +376,26 @@ def recorded_session(data: Path, project: str, claude_session: str | None) -> st
         if header.get("project_id"):
             return str(uuid.uuid5(uuid.UUID(header["project_id"]), f"session:{claude_session}"))
     return None
+
+
+def consolidation_model(settings: Path) -> str | None:
+    """`provider:model` from a settings.env, for the record.
+
+    Two runs whose memory arms wrote their pages with different models are two
+    experiments, and `report` pools runs. Naming it per run is what keeps a
+    local model's repeat from being read as part of a hosted model's.
+    """
+    provider = model = None
+    try:
+        for line in settings.read_text(encoding="utf-8", errors="replace").splitlines():
+            name, _, value = line.partition("=")
+            if name.strip() == "ANAMNESIS_LLM_PROVIDER":
+                provider = value.strip()
+            elif name.strip() == "ANAMNESIS_LLM_MODEL":
+                model = value.strip()
+    except OSError:
+        return None
+    return ":".join(part for part in (provider, model) if part) or None
 
 
 def log_size(log: Path) -> int:
@@ -398,6 +451,30 @@ def wait_for_page(
             return {"page": page.name, "source": "counted", "session": session}
         time.sleep(5)
     return {"page": page.name, "source": "counted", "session": session}
+
+
+def nothing_left_to_measure(session: dict, arm: str, record: dict) -> str | None:
+    """Why a run should stop here, or None to go on.
+
+    `report` excludes every probe whose planting session's page was not
+    written by a model, so a planting page that comes back counted has already
+    cost the run every probe behind it. A model that refused one session
+    refuses the rest of the hour: on 2026-09-17 a run started against a spent
+    free-tier quota wrote its first page by counting and would have spent two
+    hours and $1.59 on the eleven sessions after it, measuring nothing. The
+    check before the run asks one small question, which a model out of quota
+    can still answer; this asks the same question of the work.
+    """
+    if arm != "memory" or session["kind"] != "plant":
+        return None
+    page = record["page"] or {}
+    if page.get("source") == "model":
+        return None
+    what = "no page at all" if page.get("source") == "none" else "a page written by counting"
+    return (
+        f"{session['id']} plants what {session.get('plants', 'a later probe')} needs and left {what}, "
+        "so that probe would be excluded and the model is unlikely to answer for the ones after it"
+    )
 
 
 def isolation_check(claude: str, model: str, scratch: Path) -> dict:
@@ -601,6 +678,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     repos: dict[str, Path] = {}
     server = None
+    stopped: str | None = None
     project = f"ledger-{run_id.lower()}"
     try:
         for arm in arms:
@@ -615,6 +693,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             if args.settings_env != "none" and settings.exists():
                 shutil.copy2(settings, data / "settings.env")
                 results["settings_env"] = str(settings)
+                results["consolidation"] = consolidation_model(settings)
             server = Server(binary, data, args.port, run_dir / "memory" / "server.log")
             server.start()
             wired = subprocess.run(
@@ -649,17 +728,33 @@ def cmd_run(args: argparse.Namespace) -> int:
                 write_json(results_path, results)
                 verdict = "pass" if record["check"]["passed"] else "FAIL"
                 source = f", page {record['page']['source']}" if arm == "memory" else ""
+                refused = record["agent"]["permission_denials"] or 0
                 print(
                     f"  {session['id']} {arm:<7} {verdict}  turns {record['agent']['turns']}, "
-                    f"${record['agent']['cost_usd'] or 0:.3f}, memory calls {record['agent']['memory_calls']}{source}"
+                    f"${record['agent']['cost_usd'] or 0:.3f}, memory calls {record['agent']['memory_calls']}"
+                    f"{f', {refused} refused' if refused else ''}{source}"
                 )
-        results["complete"] = not only
+                if not args.keep_going and (reason := nothing_left_to_measure(session, arm, record)):
+                    stopped = reason
+                    break
+            if stopped:
+                break
+        results["complete"] = not only and not stopped
     finally:
         if server:
             server.stop()
+        if stopped:
+            results["stopped"] = stopped
         results["finished"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
         write_json(results_path, results)
     print(f"results: {results_path}")
+    if stopped:
+        print(
+            f"  stopping: {stopped}. The memory arm's model is not writing pages; see "
+            f"{run_dir / 'memory' / 'server.log'} for what it answered. `--keep-going` runs anyway.",
+            file=sys.stderr,
+        )
+        return 5
     return 0
 
 
@@ -756,7 +851,13 @@ def report_lines(scenario: dict, runs: list[dict]) -> list[str]:
             f"{con_pass}/{len(control)} | {mean(calls)} |"
         )
 
-    lines += ["", "## Effort per session", "", "| Session | Kind | Arm | Turns (mean) | Cost USD (mean) | Task passed |", "|---|---|---|---|---|---|"]
+    lines += [
+        "",
+        "## Effort per session",
+        "",
+        "| Session | Kind | Arm | Turns (mean) | Cost USD (mean) | Refused (mean) | Task passed |",
+        "|---|---|---|---|---|---|---|",
+    ]
     for session in scenario["session"]:
         for arm in ("memory", "control"):
             records = [record for _, record in by.get((session["id"], arm), [])]
@@ -766,6 +867,7 @@ def report_lines(scenario: dict, runs: list[dict]) -> list[str]:
                 f"| {session['id']} | {session['kind']} | {arm} | "
                 f"{mean([r['agent']['turns'] or 0 for r in records])} | "
                 f"{mean([r['agent']['cost_usd'] or 0 for r in records], 4)} | "
+                f"{mean([r['agent']['permission_denials'] or 0 for r in records])} | "
                 f"{sum(r['check']['passed'] for r in records)}/{len(records)} |"
             )
 
@@ -777,9 +879,34 @@ def report_lines(scenario: dict, runs: list[dict]) -> list[str]:
         f"Memory-arm pages: {dict(pages)}. A probe whose planting session's page was counted, "
         "or that ran without the MCP server connected, is excluded from the memory column above.",
     ]
+    wrote_with = {run["consolidation"] for run in runs if run.get("consolidation")}
+    if len(wrote_with) > 1:
+        lines.append(
+            f"**The memory arm did not write its pages with one model: {sorted(wrote_with)}.** "
+            "Those runs are two experiments and the columns above pool them."
+        )
+    # Counted from `permission_denials`, which every run has, and broken down
+    # only for the runs that recorded which tool was refused.
+    refused = sum((record["agent"]["permission_denials"] or 0) for run in runs for record in run["sessions"])
+    by_tool = Counter()
+    for run in runs:
+        for record in run["sessions"]:
+            by_tool.update(record["agent"].get("denials_by_tool") or {})
+    if refused:
+        breakdown = f" ({dict(by_tool.most_common())})" if by_tool else ""
+        lines.append(
+            f"Refused tool calls: {refused}{breakdown}. A refusal costs the session a turn and does "
+            "not fall equally on the two arms, so a probe that failed after several of them says "
+            "more about this harness than about memory."
+        )
     for run in runs:
         isolation = run.get("isolation", {}).get("answer", "not checked")
-        lines.append(f"- {run['run']}: {'complete' if run.get('complete') else 'incomplete'}, isolation {isolation!r}, {run['anamnesis']}")
+        stopped = f", stopped: {run['stopped']}" if run.get("stopped") else ""
+        wrote_with = f", pages by {run['consolidation']}" if run.get("consolidation") else ""
+        lines.append(
+            f"- {run['run']}: {'complete' if run.get('complete') else 'incomplete'}, "
+            f"isolation {isolation!r}, {run['anamnesis']}{wrote_with}{stopped}"
+        )
     return lines
 
 
@@ -798,16 +925,68 @@ def cmd_selftest(_: argparse.Namespace) -> int:
             json.dumps({"type": "system", "subtype": "init", "session_id": "abc", "mcp_servers": [{"name": "anamnesis", "status": "connected"}]}),
             json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "mcp__anamnesis__memory_query"}, {"type": "tool_use", "name": "Read"}]}}),
             json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "is_error": True}]}}),
-            json.dumps({"type": "result", "num_turns": 3, "total_cost_usd": 0.01, "result": "done", "usage": {"input_tokens": 5, "cache_read_input_tokens": 10}}),
+            json.dumps(
+                {
+                    "type": "result",
+                    "num_turns": 3,
+                    "total_cost_usd": 0.01,
+                    "result": "done",
+                    "usage": {"input_tokens": 5, "cache_read_input_tokens": 10},
+                    "permission_denials": [
+                        {"tool_name": "Bash", "tool_input": {"command": "rm x.py"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "pip install pytest"}},
+                        {"tool_name": "PowerShell", "tool_input": {"command": "Get-ChildItem"}},
+                    ],
+                }
+            ),
         ]
     )
     summary = summarize_stream(sample)
-    expected = {"memory_calls": 1, "tool_errors": 1, "turns": 3, "input_tokens": 15, "mcp_servers": {"anamnesis": "connected"}}
+    expected = {
+        "memory_calls": 1,
+        "tool_errors": 1,
+        "turns": 3,
+        "input_tokens": 15,
+        "mcp_servers": {"anamnesis": "connected"},
+        "permission_denials": 3,
+        "denials_by_tool": {"Bash": 2, "PowerShell": 1},
+    }
     wrong = {key: summary[key] for key, value in expected.items() if summary[key] != value}
     if wrong:
         print(f"FAIL summarize_stream: {wrong}")
         return 1
-    print("ok   summarize_stream reads turns, tokens, tool errors and memory calls")
+    print("ok   summarize_stream reads turns, tokens, tool errors, memory calls and what was refused")
+
+    # A session that is given a shell it may not use spends turns finding that
+    # out, so the tool is taken away rather than refused. Both arms are
+    # started with the same flags, and this is the one that says so.
+    args = claude_args("claude", DEFAULT_MODEL, MAX_TURNS, None)
+    if "--disallowedTools" not in args or "PowerShell" not in args[args.index("--disallowedTools") + 1]:
+        print("FAIL claude_args: the session is still given a PowerShell tool it may not use")
+        return 1
+    if any("PowerShell" in rule for rule in ALLOWED_TOOLS):
+        print("FAIL ALLOWED_TOOLS: a PowerShell rule allows every PowerShell command, not the one it names")
+        return 1
+    print("ok   claude_args takes the PowerShell tool away instead of refusing it")
+
+    plant = {"id": "S01", "kind": "plant", "plants": "S12"}
+    probe = {"id": "S12", "kind": "probe"}
+    stops = [
+        (plant, "memory", "model", False),
+        (plant, "memory", "counted", True),
+        (plant, "memory", "none", True),
+        # A probe's own page is not what a later probe reads, and the control
+        # arm has no pages at all; neither ends a run.
+        (probe, "memory", "counted", False),
+        (plant, "control", None, False),
+    ]
+    for session, arm, source, expected in stops:
+        record = {"page": {"source": source} if source else None}
+        got = nothing_left_to_measure(session, arm, record) is not None
+        if got != expected:
+            print(f"FAIL nothing_left_to_measure({session['id']}, {arm}, {source}): {got}, expected {expected}")
+            return 1
+    print("ok   a run stops when a planting session's page was written by counting")
 
     # What `key check` printed on this machine on 2026-09-15, and the two
     # other things it can come back as.
@@ -880,6 +1059,11 @@ def main() -> int:
         help="settings.env for the memory arm's server; this machine's by default, 'none' for no model",
     )
     run.add_argument("--skip-isolation-check", action="store_true")
+    run.add_argument(
+        "--keep-going",
+        action="store_true",
+        help="run every session even after a planting session's page was written by counting",
+    )
     run.add_argument(
         "--skip-model-check",
         action="store_true",

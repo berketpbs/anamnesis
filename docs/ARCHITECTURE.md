@@ -163,6 +163,10 @@ The HTTP server hooks deliver to.
   because the body is buffered whole and scanned for secrets before any of it
   is kept
 - `GET /handoff` — hand the next session what the last one left
+- `GET /recall?q=` — hand a prompt the pages this project already has on it,
+  when any of them is close enough to be worth the interruption. Takes nothing
+  and claims nothing, unlike the handoff, so asking twice answers twice; empty
+  when there is nothing to say. See "Recall at Prompt Time"
 - `GET /whoami` — what the server makes of the caller's token
 - `GET /health`
 - `GET /api/v1/...` — the same facts the browser renders, as JSON: `scopes`,
@@ -585,6 +589,54 @@ restarting the server does not restart everyone's clock, and a project whose
 marker file cannot be found or read is skipped with a reason rather than
 improved on defaults it never chose.
 
+## Recall at Prompt Time
+
+A handoff says what the session before this one did. It is delivered once, at
+`SessionStart`, and it is the only thing that has ever reached a model without
+being asked for. Everything else in memory waits for `memory_query`, and the
+long-run eval measured how often that comes: across twenty-four sessions with
+the MCP server connected and its tools allowed, an agent called a memory tool
+**once**, and that call was a write. A question five sessions after its answer
+was written never found it.
+
+So the question is asked for the agent, at the one moment there is a question
+in hand. `UserPromptSubmit` — and whatever the other three harnesses call it —
+already reaches the server as an event; the hook now also asks `GET /recall`
+with the first thousand characters of the prompt, and prints what comes back
+on stdout, where a harness injects it into the model's context. The same path
+the handoff has always used, with three differences: it takes nothing and
+claims nothing, so asking twice gives the same answer; it fires on every
+prompt rather than once; and it is allowed five seconds where capture is
+allowed one, because it runs once per prompt rather than before every tool
+call, and the server has to embed the question before it can compare it.
+
+**The hard part is not finding pages, it is not offering them.** A block that
+appears on every prompt whether or not it has anything to say teaches an agent
+to skip it. The ordinary fused query cannot tell the two apart: Reciprocal
+Rank Fusion keeps ranks and throws the scores away, so on this machine's 88
+pages `what is the weather in Istanbul` came back with three pages and the
+same 0.333 at the top as a question about the project's centre. Cosine
+similarity keeps the score, and sixteen prompts over two corpora with
+`nomic-embed-text` split on it: the best page for a prompt the project had
+nothing to say about never passed 0.542, and the best page for one it did
+never fell below 0.573. `[recall] min_similarity` sits between them, in the
+marker rather than in the code, because it is a number about one embedder. A
+server with no embedder says nothing rather than guessing.
+
+Three more properties, each one a decision:
+
+- **Framed as evidence, every time.** The block says, in its first sentence,
+  that what follows is stored notes to check rather than instructions to
+  follow. It lands in a context window beside the user's own words, and a
+  model reading it has no memory of having been told once.
+- **Nothing is renewed by being offered.** The decay sweep reads access
+  counters to decide what to keep, and `memory_query` bumps them because a
+  page it returned is a page somebody asked for. Recall does not: a block that
+  renewed every page it mentioned would make the top of the ranking immortal
+  without anyone having read a word of it.
+- **Bounded.** Three pages, a line each, trimmed to a character budget, paid
+  for on every prompt of every session.
+
 ## Storage Schema
 
 The authoritative copy is `crates/anamnesis-store/migrations/`, and the count
@@ -804,6 +856,14 @@ require_approval = true
 [auto_improve.scheduler]
 enabled = false
 interval_minutes = 60
+
+# What a prompt is handed back from this project's own pages. `min_similarity`
+# is a number about one embedder — see "Recall at prompt time" above.
+[recall]
+on_prompt = true
+pages = 3
+snippet_chars = 240
+min_similarity = 0.55
 ```
 
 Unknown keys are an error, so a typo surfaces instead of quietly sending memory

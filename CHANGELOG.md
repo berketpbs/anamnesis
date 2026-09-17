@@ -7,7 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A prompt is answered with what this project already knows about it.** The
+  handoff says what the session before this one did, and it was the only thing
+  in memory that ever reached a model without being asked for. Everything else
+  waited for `memory_query`, and the long-run eval measured how often that
+  comes: across **twenty-four sessions with the MCP server connected and its
+  tools allowed, an agent called a memory tool once**, and that call was a
+  write. A question five sessions after its answer was written never found it.
+  So the question is asked for the agent, at the one moment there is a question
+  in hand: the prompt hook — `UserPromptSubmit` and whatever the other three
+  harnesses call it — now also asks `GET /recall`, and prints what comes back
+  where the harness injects it. It takes nothing and claims nothing, unlike the
+  handoff, and it gets five seconds where capture gets one, because it runs
+  once per prompt rather than before every tool call and the server has to
+  embed the question first: measured here, that round trip took 1.03s against a
+  cold Ollama and 0.05s against a warm one, so under the capture budget the
+  first prompt after an idle embedder came back empty and said nothing about
+  why.
+
+  The hard part is not finding pages, it is not offering them — a block that
+  fires on every prompt whether or not it has anything to say teaches an agent
+  to skip it. The ordinary fused query cannot tell those apart: rank fusion
+  keeps ranks and throws the scores away, so on this machine's 88 pages `what
+  is the weather in Istanbul` came back with three pages and the same 0.333 at
+  the top as a question about the project's centre. Cosine similarity keeps the
+  score, and sixteen prompts over two corpora with `nomic-embed-text` split on
+  it: a prompt the project had nothing to say about peaked at 0.542, one it did
+  started at 0.573. `[recall] min_similarity` sits between them, in the marker
+  because it is a number about one embedder, beside `on_prompt`, `pages` and
+  `snippet_chars`. A server with no embedder says nothing rather than guessing.
+  What is offered is framed as evidence rather than instruction in its own
+  first sentence, and being offered does not renew a page against the decay
+  sweep — a block that renewed everything it mentioned would make the top of
+  the ranking immortal without anyone reading a word of it
+
+
 ### Fixed
+- **A run whose first planting page was written by counting stops there.** The
+  check before a run asks each model one small question, and a model out of
+  quota can still answer it: on 2026-09-17 `key check` said every model
+  answered, the run started, and its first page came back counted. `report`
+  excludes every probe whose planting session's page was not written by a
+  model, and a model that refused one session refuses the rest of the hour, so
+  the eleven sessions after it would have spent two hours and $1.59 measuring
+  nothing. A run now asks the same question of the work rather than of a ping:
+  when a planting session leaves a counted page, or no page, it says which
+  probe that costs and exits 5. `--keep-going` runs the whole scenario anyway.
+  `settings.local.env.example` is the other half — a repeat is twelve
+  consolidation requests against a free tier of twenty a day, shared with
+  whatever server is already running on the same key, so the memory arm can be
+  pointed at a local model instead; measured here, a session's page came back
+  written by that model and spent no quota
+
+- **The long-run eval stops refusing what its own scenario asks for.** Both
+  arms are started with one `--allowedTools` list, and nobody is there to
+  answer a prompt, so a tool left off it is refused and the session spends a
+  turn finding that out. The first complete run refused **59 of its 338 tool
+  calls**. Most were the list being wrong rather than strict: on Windows a
+  session also has a PowerShell tool, which was on no list, so 31 calls went
+  to it and 27 came back refused — and no rule narrows it, since with only
+  `PowerShell(python:*)` allowed `Get-ChildItem` ran, which would hand an
+  unattended nightly run an unbounded shell. It is taken away with
+  `--disallowedTools` now, so it is not there to reach for. The fixture's
+  tests read `LEDGER_FIXTURES` from the environment, so the natural
+  `LEDGER_FIXTURES=tests/fixtures python -m unittest ...` does not begin with
+  `python` and was refused four more times, while `python tools/check.py`,
+  which sets the variable itself, was allowed; the scenario plants nothing
+  about how the tests are run, so `env`, `export` and that variable are
+  allowed. Refusals do not fall equally on the two arms — in the first run one
+  probe cost the memory arm five and the control arm none — so `results.json`
+  now records them per tool and `report` prints the total and a column per
+  session. Run again on one session, the same prompt went from five refusals
+  to two
 - **A key stored under a provider's own name is no longer stored in silence
   while the generic one outranks it.** `ANAMNESIS_LLM_API_KEY` is the
   configured provider's key, so with a provider named it wins over

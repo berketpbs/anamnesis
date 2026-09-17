@@ -266,6 +266,115 @@ impl Store {
         Ok(hits)
     }
 
+    /// Pages close enough to a prompt to be worth interrupting it with.
+    ///
+    /// A fused rank answers "which of these is the best match", which is the
+    /// right question once somebody has decided to ask one. Prompt-time recall
+    /// asks a different question — "is any of this worth saying at all" — and
+    /// a fused score cannot answer it: measured on this machine's 88 pages on
+    /// 2026-09-17, `what is the weather in Istanbul` and a question about this
+    /// project's own centre both came back with 0.333 at the top, because
+    /// Reciprocal Rank Fusion keeps ranks and throws the scores away.
+    ///
+    /// Cosine similarity keeps them, and sixteen prompts over two corpora —
+    /// these 88 pages and a four-page test project, both with
+    /// `nomic-embed-text` — split on it: the best page for a prompt the
+    /// project had nothing to say about never passed 0.542, and the best page
+    /// for one it did never fell below 0.573.
+    ///
+    /// The first attempt gated on a *relative* quantity instead, how far the
+    /// best page stood above its corpus's median, on the reasoning that it
+    /// would survive an embedder with a different scale. It separated the
+    /// 88-page corpus more widely and the four-page one not at all: with four
+    /// pages the median is one page from the top, and there an off-topic
+    /// prompt beat it by 0.087 while an on-topic one beat it by 0.083. A
+    /// baseline needs a corpus to be a baseline; a threshold does not. So the
+    /// gate is `min_similarity`, and because it is a number about one
+    /// embedder, it lives in the marker.
+    ///
+    /// **Nothing here records an access**, for the reason `explain` does not:
+    /// the sweep reads those counters to decide what to keep, and a block that
+    /// renewed every page it mentioned would make the top of this ranking
+    /// immortal without anyone having read a word of it.
+    pub fn pages_like(
+        &self,
+        project_id: ProjectId,
+        model: &str,
+        query_vector: &[f32],
+        limit: usize,
+        min_similarity: f64,
+    ) -> Result<Vec<PageHit>> {
+        // The connection is taken and given back inside this block, because
+        // `load_page_rows` below takes it too and the lock behind it does not
+        // hand the same thread a second one. Held across that call, this
+        // function deadlocks the moment it has something to return — which is
+        // every call that matters and no call that returns nothing.
+        let best = {
+            let conn = self.connection();
+            let mut statement = conn.prepare(
+                "SELECT pe.page_id, pe.vector FROM page_embeddings pe
+                 JOIN pages p ON p.id = pe.page_id
+                 WHERE pe.model = ?1 AND p.project_id = ?2
+                   AND p.is_latest = 1 AND p.status != 'superseded'",
+            )?;
+            let rows = statement.query_map(params![model, project_id.to_string()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?;
+
+            // Best part per page, the way the vector stream reads a page that
+            // was embedded in sections.
+            let query_norm = norm(query_vector);
+            let mut best: HashMap<String, f32> = HashMap::new();
+            for row in rows {
+                let (id, bytes) = row?;
+                let similarity = cosine_similarity_to_bytes(query_vector, query_norm, &bytes);
+                let entry = best.entry(id).or_insert(f32::MIN);
+                *entry = entry.max(similarity);
+            }
+            best
+        };
+        if best.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut standing: Vec<(PageId, f64)> = best
+            .into_iter()
+            .map(|(id, score)| (parse_id(id), f64::from(score)))
+            .filter(|(_, score)| *score >= min_similarity)
+            .collect();
+        // Ties by id, so two runs over the same index agree on an order.
+        standing.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        standing.truncate(limit);
+        if standing.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let ids: Vec<PageId> = standing.iter().map(|(id, _)| *id).collect();
+        let page_rows = self.load_page_rows(&ids)?;
+        Ok(standing
+            .into_iter()
+            .filter_map(|(id, score)| {
+                let row = page_rows.get(&id)?;
+                Some(PageHit {
+                    page_id: id,
+                    project_id: row.project_id,
+                    path: row.path.clone(),
+                    title: row.title.clone(),
+                    tier: row.tier,
+                    status: row.status,
+                    pinned: row.pinned,
+                    canonical: row.canonical,
+                    score,
+                    snippet: snippet_of(&row.body),
+                })
+            })
+            .collect())
+    }
+
     /// Run each stream and return them unfused.
     ///
     /// The diagnostic counterpart to [`Store::query_pages`], which this
