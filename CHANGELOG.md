@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-09-18
+
+Until this release one thing in memory reached a model without being asked for:
+the handoff, delivered once at the start of a session, saying what the session
+before it did. Everything else waited for `memory_query`, and the long-run eval
+measured how long that wait is — across twenty-four sessions with the MCP
+server connected and its tools allowed, an agent called a memory tool **once**,
+and that call was a write. A question five sessions after its answer was
+written never found it.
+
+So the question is asked for the agent now, at the one moment there is a
+question in hand. A prompt goes to `/recall`, and the pages this project
+already has on it come back where the harness injects them, framed as evidence
+to check rather than instruction to follow.
+
+Most prompts get nothing back, and that is the part that took the measuring. A
+block that fires whether or not it has anything to say teaches an agent to skip
+it, and the ordinary fused query cannot tell those apart: rank fusion keeps
+ranks and throws the scores away, so on this machine's own pages `what is the
+weather in Istanbul` came back with three pages and the same 0.333 at the top
+as a question about the project's centre. Cosine similarity keeps the score,
+and sixteen prompts over two corpora split on it — a prompt the project had
+nothing to say about peaked at 0.542, one it did started at 0.573 — so
+`[recall] min_similarity` sits between them, in the marker rather than the code
+because it is a number about one embedder. A server with no embedder says
+nothing rather than guessing.
+
+The rest is the day that measurement took, and the four fixes already waiting
+for a release. The eval's own allowlist refused 59 of its 338 tool calls, most
+of them a PowerShell tool that was on no list and a way of running the
+fixture's tests that the scenario had planted nothing about; a run whose first
+planting page comes back written by counting now stops there rather than
+spending two hours and $1.59 to measure nothing; and the memory arm can be
+pointed at a model that is not on somebody's daily quota. `install-hooks`
+writes where the harness reads rather than where the command was typed, a key
+stored under a name nothing will read says so, and the nginx check says why it
+stopped.
+
+The index schema is unchanged at 18; nothing written by 1.2.0, 1.1 or 1.0 needs
+converting. A 1.2.0 build reads the new `[recall]` table as one it does not
+understand and says so in `status`, so a machine whose marker is upgraded
+before its binary keeps working.
+
 ### Added
 - **A prompt is answered with what this project already knows about it.** The
   handoff says what the session before this one did, and it was the only thing
