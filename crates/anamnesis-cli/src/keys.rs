@@ -184,6 +184,18 @@ pub fn cmd_key_set(name: &str, from_stdin: bool) -> anyhow::Result<()> {
         println!();
         println!("  {name} is also set in this shell, and the environment wins here.");
     }
+    // The same settings every command reads, so this sees the key just stored.
+    // Without it, storing a key under a name nothing will read looks exactly
+    // like storing one that works, until a refusal hours later says otherwise.
+    let shadowed = anamnesis_llm::LlmConfig::from_vars(crate::settings::var)
+        .ok()
+        .and_then(|config| config.shadowed_key);
+    if shadowed == Some(name) {
+        println!();
+        println!("  ANAMNESIS_LLM_API_KEY is also stored, and it is the configured provider's,");
+        println!("  so {name} is not used while it is there.");
+        println!("  `anamnesis key forget ANAMNESIS_LLM_API_KEY` makes this the key.");
+    }
     Ok(())
 }
 

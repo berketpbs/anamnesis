@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A key stored under a provider's own name is no longer stored in silence
+  while the generic one outranks it.** `ANAMNESIS_LLM_API_KEY` is the
+  configured provider's key, so with a provider named it wins over
+  `GEMINI_API_KEY` and the rest. That precedence is deliberate and was
+  invisible. On 2026-09-17 a key revoked three days earlier was still stored
+  under the generic name; a new one was written with `anamnesis key set
+  GEMINI_API_KEY`, `key check` answered with the same `400 Please pass a valid
+  API key`, and nothing anywhere said the new key had not been sent to
+  anything. A refusal that means "the old key is still the live one" is
+  indistinguishable from one that means "your new key is bad", and reading it
+  the second way cost three days. `key set` now says when the name just
+  written is not the name that will be read, `key check` says it above the
+  verdict instead of leaving it to be inferred from the variable it names, and
+  `serve` warns at startup, beside the warning for the opposite case
+
 ## [1.2.0] - 2026-09-16
 
 On 2026-09-14 the model key this project's own memory runs on stopped being

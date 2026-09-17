@@ -285,6 +285,15 @@ pub struct LlmConfig {
     /// belongs to. Something to say at startup: from the outside it looks the
     /// same as a configured model that is not answering.
     pub ignored_key: Option<&'static str>,
+    /// A provider's own key that is stored and not used, because
+    /// `ANAMNESIS_LLM_API_KEY` is set and is the configured provider's.
+    ///
+    /// The mirror of [`Self::ignored_key`], and the costlier one: a key
+    /// written under the provider's own name changes nothing while the
+    /// generic one is stored, so the refusal that follows reads as a bad new
+    /// key rather than an old one outranking it. Found on 2026-09-17, three
+    /// days after the old key was revoked.
+    pub shadowed_key: Option<&'static str>,
 }
 
 impl Default for LlmConfig {
@@ -302,6 +311,7 @@ impl Default for LlmConfig {
             server_side_fallbacks: true,
             fallbacks: Vec::new(),
             ignored_key: None,
+            shadowed_key: None,
         }
     }
 }
@@ -372,7 +382,10 @@ impl LlmConfig {
             None => ProviderKind::None,
         };
         config.api_key = match (&named, stored) {
-            (Some(_), Some(stored)) => Some(stored),
+            (Some(_), Some(stored)) => {
+                config.shadowed_key = own_key_named(config.provider, &var).map(|(name, _)| name);
+                Some(stored)
+            }
             (None, Some(_)) => {
                 config.ignored_key = Some("ANAMNESIS_LLM_API_KEY");
                 own_key(config.provider, &var)
@@ -597,15 +610,32 @@ fn fallbacks(
     Ok(links)
 }
 
+/// A provider's key from that provider's own variables, and the variable it
+/// came from, in the order those variables are preferred.
+///
+/// The names live here and nowhere else: a second copy of this order is a
+/// second opinion about which key is live, which is the whole trap this
+/// reports.
+fn own_key_named(
+    provider: ProviderKind,
+    var: &impl Fn(&str) -> Option<String>,
+) -> Option<(&'static str, String)> {
+    let names: &[&'static str] = match provider {
+        ProviderKind::Anthropic => &["ANTHROPIC_API_KEY"],
+        ProviderKind::OpenAi => &["OPENAI_API_KEY"],
+        ProviderKind::Google => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        ProviderKind::Ollama | ProviderKind::None => &[],
+    };
+    names.iter().find_map(|name| {
+        var(name)
+            .filter(|key| !key.trim().is_empty())
+            .map(|key| (*name, key))
+    })
+}
+
 /// A provider's key from that provider's own variables, and from nothing else.
 fn own_key(provider: ProviderKind, var: &impl Fn(&str) -> Option<String>) -> Option<String> {
-    match provider {
-        ProviderKind::Anthropic => var("ANTHROPIC_API_KEY"),
-        ProviderKind::OpenAi => var("OPENAI_API_KEY"),
-        ProviderKind::Google => var("GEMINI_API_KEY").or_else(|| var("GOOGLE_API_KEY")),
-        ProviderKind::Ollama | ProviderKind::None => None,
-    }
-    .filter(|key| !key.trim().is_empty())
+    own_key_named(provider, var).map(|(_, key)| key)
 }
 
 /// Parse a numeric setting, naming the variable when it does not parse.
@@ -815,6 +845,40 @@ mod tests {
             "AQ.google-key"
         );
         assert_eq!(config.ignored_key, None);
+    }
+
+    /// The trap that cost three days on 2026-09-17. A new key was written
+    /// under the provider's own name while the revoked one was still stored
+    /// under the generic name; the generic name won, the new key was never
+    /// sent, and the same 400 came back looking like a second bad key.
+    /// Nothing said which name was read. Now the configuration does.
+    #[test]
+    fn the_providers_own_key_is_named_when_the_stored_key_outranks_it() {
+        let config = LlmConfig::from_vars(vars(&[
+            ("ANAMNESIS_LLM_PROVIDER", "google"),
+            ("ANAMNESIS_LLM_API_KEY", "AQ.revoked-key"),
+            ("GEMINI_API_KEY", "AQ.new-key"),
+        ]))
+        .expect("config");
+        assert_eq!(
+            config.api_key.expect("a key").expose_secret(),
+            "AQ.revoked-key"
+        );
+        assert_eq!(config.shadowed_key, Some("GEMINI_API_KEY"));
+        assert_eq!(config.ignored_key, None);
+    }
+
+    /// And once the generic name is forgotten, the provider's own key is the
+    /// one sent and there is nothing left to report.
+    #[test]
+    fn nothing_is_shadowed_once_the_stored_key_is_forgotten() {
+        let config = LlmConfig::from_vars(vars(&[
+            ("ANAMNESIS_LLM_PROVIDER", "google"),
+            ("GEMINI_API_KEY", "AQ.new-key"),
+        ]))
+        .expect("config");
+        assert_eq!(config.api_key.expect("a key").expose_secret(), "AQ.new-key");
+        assert_eq!(config.shadowed_key, None);
     }
 
     /// Before, a named provider with no stored key took `ANTHROPIC_API_KEY`
