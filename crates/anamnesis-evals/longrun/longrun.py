@@ -378,6 +378,26 @@ def recorded_session(data: Path, project: str, claude_session: str | None) -> st
     return None
 
 
+def consolidation_model(settings: Path) -> str | None:
+    """`provider:model` from a settings.env, for the record.
+
+    Two runs whose memory arms wrote their pages with different models are two
+    experiments, and `report` pools runs. Naming it per run is what keeps a
+    local model's repeat from being read as part of a hosted model's.
+    """
+    provider = model = None
+    try:
+        for line in settings.read_text(encoding="utf-8", errors="replace").splitlines():
+            name, _, value = line.partition("=")
+            if name.strip() == "ANAMNESIS_LLM_PROVIDER":
+                provider = value.strip()
+            elif name.strip() == "ANAMNESIS_LLM_MODEL":
+                model = value.strip()
+    except OSError:
+        return None
+    return ":".join(part for part in (provider, model) if part) or None
+
+
 def log_size(log: Path) -> int:
     return log.stat().st_size if log.exists() else 0
 
@@ -673,6 +693,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             if args.settings_env != "none" and settings.exists():
                 shutil.copy2(settings, data / "settings.env")
                 results["settings_env"] = str(settings)
+                results["consolidation"] = consolidation_model(settings)
             server = Server(binary, data, args.port, run_dir / "memory" / "server.log")
             server.start()
             wired = subprocess.run(
@@ -858,6 +879,12 @@ def report_lines(scenario: dict, runs: list[dict]) -> list[str]:
         f"Memory-arm pages: {dict(pages)}. A probe whose planting session's page was counted, "
         "or that ran without the MCP server connected, is excluded from the memory column above.",
     ]
+    wrote_with = {run["consolidation"] for run in runs if run.get("consolidation")}
+    if len(wrote_with) > 1:
+        lines.append(
+            f"**The memory arm did not write its pages with one model: {sorted(wrote_with)}.** "
+            "Those runs are two experiments and the columns above pool them."
+        )
     # Counted from `permission_denials`, which every run has, and broken down
     # only for the runs that recorded which tool was refused.
     refused = sum((record["agent"]["permission_denials"] or 0) for run in runs for record in run["sessions"])
@@ -875,9 +902,10 @@ def report_lines(scenario: dict, runs: list[dict]) -> list[str]:
     for run in runs:
         isolation = run.get("isolation", {}).get("answer", "not checked")
         stopped = f", stopped: {run['stopped']}" if run.get("stopped") else ""
+        wrote_with = f", pages by {run['consolidation']}" if run.get("consolidation") else ""
         lines.append(
             f"- {run['run']}: {'complete' if run.get('complete') else 'incomplete'}, "
-            f"isolation {isolation!r}, {run['anamnesis']}{stopped}"
+            f"isolation {isolation!r}, {run['anamnesis']}{wrote_with}{stopped}"
         )
     return lines
 
