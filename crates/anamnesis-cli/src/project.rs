@@ -53,3 +53,17 @@ pub fn open_project(
     store.migrate()?;
     Ok((scope, data, store))
 }
+
+/// The directory this project's harness configuration belongs in.
+///
+/// Identity is already answered by walking up to the marker or the repository
+/// root, and the files a harness reads are answered the same way: `setup` has
+/// named them from the project root since it was written. A command that
+/// anchors them at the working directory instead writes
+/// `.claude/settings.local.json` into whatever subdirectory it happened to be
+/// run from, where the harness will never look, and a diagnosis run from that
+/// same subdirectory calls the project unwired while it is recording.
+pub fn project_root() -> anyhow::Result<PathBuf> {
+    let cwd = std::env::current_dir()?;
+    Ok(resolve_scope(&cwd)?.root)
+}

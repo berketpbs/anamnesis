@@ -32,7 +32,11 @@ pub struct Removal {
 
 /// Take anamnesis out of every harness configuration under `root`.
 pub fn cmd_uninstall(apply: bool, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
-    let root = std::env::current_dir()?;
+    // The project root, because that is where `install-hooks` and
+    // `install-mcp` put these files. Run from a subdirectory against the
+    // working directory, uninstall found nothing and said so, which reads
+    // exactly like a project that was never wired.
+    let root = crate::project::project_root()?;
     let data = DataDir::resolve(data_dir).ok();
 
     let mut found: Vec<Removal> = Vec::new();

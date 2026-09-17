@@ -23,6 +23,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verdict instead of leaving it to be inferred from the variable it names, and
   `serve` warns at startup, beside the warning for the opposite case
 
+- **A command that writes a harness's configuration now writes it where the
+  harness reads it.** `install-hooks`, `install-mcp` and `uninstall` anchored
+  those files at the working directory, while identity has always been
+  resolved by walking up to the project's marker, so the two disagreed the
+  moment anything ran from a subdirectory. On 2026-09-17 `doctor`, run in
+  `crates/anamnesis-evals/longrun`, reported `no harness in this project is
+  wired to anamnesis` about the project it was at that moment recording, and
+  sent the person to `install-hooks` — which wrote
+  `.claude/settings.local.json` into that subdirectory, where Claude Code
+  never looks, after which `doctor` called the same project healthy from the
+  same place. Both dry runs printed `.\.claude\settings.local.json`: one
+  sentence for two different files, so there was nothing to notice. All four
+  resolve the project root the way `setup` always has, and the dry runs name
+  the absolute path they would write. `--settings`, `--config` and `--repo`
+  are still taken exactly as given
+
 ## [1.2.0] - 2026-09-16
 
 On 2026-09-14 the model key this project's own memory runs on stopped being

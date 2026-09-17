@@ -98,7 +98,7 @@ fn install_opencode_plugin(
     let source = opencode::plugin(&binary, server);
     let path = match settings {
         Some(path) => path,
-        None => opencode::plugin_path(&std::env::current_dir()?),
+        None => opencode::plugin_path(&crate::project::project_root()?),
     };
 
     if !write {
@@ -186,11 +186,17 @@ pub fn cmd_install_hooks(
     let binary = crate::binary::stable_command();
     let config = hooks::hook_config(&harness, &hooks::hook_command(&binary, agent, server));
 
+    // Resolved once, and before the dry run, so that what is printed is the
+    // file `--write` would touch. It named `.\.claude\settings.local.json`
+    // either way before, which is the same sentence from the project root and
+    // from a subdirectory of it, and only one of them was ever read.
+    let path = match settings {
+        Some(path) => path,
+        None => hooks::default_settings_path(&harness, &crate::project::project_root()?),
+    };
+
     if !write {
-        println!(
-            "Add this to {}:",
-            hooks::default_settings_path(&harness, std::path::Path::new(".")).display()
-        );
+        println!("Add this to {}:", path.display());
         println!();
         println!("{}", serde_json::to_string_pretty(&config)?);
         println!();
@@ -205,11 +211,6 @@ pub fn cmd_install_hooks(
         println!("out of the settings file.");
         return Ok(());
     }
-
-    let path = match settings {
-        Some(path) => path,
-        None => hooks::default_settings_path(&harness, &std::env::current_dir()?),
-    };
 
     // Read failures stop here rather than starting a fresh file over the top of
     // one we could not parse. Printing the configuration leaves the person a
@@ -400,18 +401,22 @@ pub fn cmd_install_mcp(
     };
 
     let binary = crate::binary::stable_path().unwrap_or_else(|_| PathBuf::from("anamnesis"));
+    // Both from the project root: the file a harness reads is the one beside
+    // the marker, and `--repo` is what the subprocess resolves its scope from.
+    let root = crate::project::project_root()?;
     let repo = match repo {
         Some(repo) => repo,
-        None => std::env::current_dir()?,
+        None => root.clone(),
     };
     let (env, embedding) = mcp_environment(data_dir.as_deref());
     let entry = mcp_config::server_entry(&binary, &repo, &env);
+    let path = match config_path {
+        Some(path) => path,
+        None => mcp_config::config_path(&target, &root),
+    };
 
     if !write {
-        println!(
-            "Add this to {}:",
-            mcp_config::config_path(&target, std::path::Path::new(".")).display()
-        );
+        println!("Add this to {}:", path.display());
         println!();
         println!("{}", mcp_config::render(&target, &entry)?);
         println!();
@@ -421,11 +426,6 @@ pub fn cmd_install_mcp(
         println!("store directly. Hooks are the half that needs the server.");
         return Ok(());
     }
-
-    let path = match config_path {
-        Some(path) => path,
-        None => mcp_config::config_path(&target, &std::env::current_dir()?),
-    };
 
     let outcome = match mcp_config::apply(&target, &path, mcp_config::SERVER_NAME, &entry) {
         Ok(outcome) => outcome,
