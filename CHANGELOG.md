@@ -39,6 +39,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the absolute path they would write. `--settings`, `--config` and `--repo`
   are still taken exactly as given
 
+- **The long-run eval stops when what it writes is not where it says it is.**
+  A Microsoft Store Python runs inside its package's filesystem redirection:
+  everything it writes under %LOCALAPPDATA% lands in that package's LocalCache
+  instead, and nothing says so. The anamnesis binary is not in the package, so
+  it reads the path it was handed and finds it empty. On 2026-09-17 a run
+  stopped at its model check with `no model is configured`, about a
+  settings.env the harness had copied a second earlier. The model check was
+  the only reason that run cost nothing; every later path would have been
+  wrong the same way, and a run whose memory arm has no model measures
+  nothing for two hours. A run now writes one probe into its own directory
+  before anything else and stops if it did not land there, naming both paths
+  and what to use instead
+
 ## [1.2.0] - 2026-09-16
 
 On 2026-09-14 the model key this project's own memory runs on stopped being

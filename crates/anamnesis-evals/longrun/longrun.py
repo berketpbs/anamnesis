@@ -430,6 +430,44 @@ def version_of(command: list[str]) -> str:
         return f"unavailable: {error}"
 
 
+def redirection_reason(asked: Path, real: Path) -> str | None:
+    """Whether what was written at `asked` really landed somewhere else.
+
+    A Microsoft Store Python runs inside its package's filesystem
+    redirection: everything it writes under %LOCALAPPDATA% lands in that
+    package's LocalCache instead. Nothing tells it so — `exists()` is true,
+    reads come back — and the anamnesis binary, which is not in the package,
+    reads the path it was handed and finds it empty.
+
+    On 2026-09-17 that stopped a run at the model check with `no model is
+    configured`, about a settings.env this harness had copied a second
+    earlier. Every later path would have been wrong the same way: the memory
+    arm's data directory, its server log, both repositories.
+    """
+    if os.path.normcase(str(asked)) == os.path.normcase(str(real)):
+        return None
+    # ASCII, for the same reason the refusals above are read without their
+    # mark: this is printed on the console that stopped the run, and this
+    # machine's is cp1254.
+    return (
+        f"this Python writes {asked} to {real} instead, and the anamnesis binary "
+        f"reads the first, so its data directory, its server log and both "
+        f"repositories would be written where nothing else can see them. It is a "
+        f"Microsoft Store Python if `sys.base_prefix` is under WindowsApps; use one "
+        f"that is not, or pass --root a directory outside %LOCALAPPDATA%"
+    )
+
+
+def redirected(run_dir: Path) -> str | None:
+    """`redirection_reason` for a directory this run is about to fill."""
+    probe = run_dir / ".probe"
+    probe.write_text("probe", encoding="utf-8")
+    try:
+        return redirection_reason(probe, Path(os.path.realpath(probe)))
+    finally:
+        probe.unlink(missing_ok=True)
+
+
 def model_check_verdict(returncode: int, output: str) -> tuple[bool, str]:
     """Read `anamnesis key check`: whether the memory arm's model can be shown
     to work, and one line saying why not.
@@ -492,6 +530,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir = Path(args.root) / "runs" / run_id
     run_dir.mkdir(parents=True)
+
+    # Before the binary is copied, because a copy nothing else can see is the
+    # first thing that goes wrong and the last thing that gets blamed.
+    if reason := redirected(run_dir):
+        print(f"  {reason}", file=sys.stderr)
+        return 4
     arms = [arm for arm in ("memory", "control") if arm in args.arms.split(",")]
     only = set(args.only.split(",")) if args.only else None
 
@@ -783,6 +827,23 @@ def cmd_selftest(_: argparse.Namespace) -> int:
             print(f"FAIL model_check_verdict({returncode}): {got!r}, expected {expected!r}")
             return 1
     print("ok   model_check_verdict stops a run on a refused key and on a binary without key check")
+
+    here = Path("C:/Users/x/AppData/Local/anamnesis-longrun/runs/r/.probe")
+    elsewhere = Path(
+        "C:/Users/x/AppData/Local/Packages/PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0"
+        "/LocalCache/Local/anamnesis-longrun/runs/r/.probe"
+    )
+    if redirection_reason(here, here) is not None:
+        print("FAIL redirection_reason: a path that is where it says it is was called redirected")
+        return 1
+    if redirection_reason(here, Path(str(here).upper())) is not None:
+        print("FAIL redirection_reason: Windows case difference read as redirection")
+        return 1
+    reason = redirection_reason(here, elsewhere)
+    if reason is None or "LocalCache" not in reason:
+        print(f"FAIL redirection_reason: a redirected path was not reported: {reason!r}")
+        return 1
+    print("ok   redirection_reason catches a Store Python writing the run somewhere else")
     return checks.selftest()
 
 
