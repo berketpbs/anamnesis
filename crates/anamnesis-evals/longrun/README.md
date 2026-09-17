@@ -40,6 +40,31 @@ Every check runs the fixture's code or reads its files; none asks a model.
 thing and one that makes the mistake the probe is there for, and fails unless
 it tells them apart. CI runs that.
 
+## What the agent may do
+
+Both arms are started with the same `--allowedTools`, since a difference there
+would be a difference between the arms. Nobody is there to answer a prompt, so
+a tool left off the list is refused rather than asked about, and every refusal
+costs the session a turn. `report` counts them: a probe that failed after
+several of them is telling you about this list, not about memory.
+
+`git add`, `git commit`, deleting and installing are left off on purpose — the
+harness commits each session itself, an unattended nightly run should not hold
+an unbounded `rm`, and a run that installs a package measures that machine's
+network. The first complete run refused 59 calls, and the rest of them were
+this list being wrong rather than strict:
+
+- On Windows a session has a **PowerShell tool** beside Bash, and it was on
+  neither list: 31 calls, 27 refused. A rule does not narrow that tool — with
+  only `PowerShell(python:*)` allowed, `Get-ChildItem` ran — so it is taken
+  away with `--disallowedTools` instead. Asked, an agent started this way
+  answers that it has no PowerShell tool, and uses the shell both arms share.
+- The fixture's tests read `LEDGER_FIXTURES` from the environment, so
+  `LEDGER_FIXTURES=tests/fixtures python -m unittest ...` does not begin with
+  `python` and was refused four times, while `python tools/check.py`, which
+  sets it, was allowed. The scenario plants nothing about how the tests are
+  run, so `env`, `export` and that variable are allowed now.
+
 ## Running
 
 ```bash

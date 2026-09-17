@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **The long-run eval stops refusing what its own scenario asks for.** Both
+  arms are started with one `--allowedTools` list, and nobody is there to
+  answer a prompt, so a tool left off it is refused and the session spends a
+  turn finding that out. The first complete run refused **59 of its 338 tool
+  calls**. Most were the list being wrong rather than strict: on Windows a
+  session also has a PowerShell tool, which was on no list, so 31 calls went
+  to it and 27 came back refused — and no rule narrows it, since with only
+  `PowerShell(python:*)` allowed `Get-ChildItem` ran, which would hand an
+  unattended nightly run an unbounded shell. It is taken away with
+  `--disallowedTools` now, so it is not there to reach for. The fixture's
+  tests read `LEDGER_FIXTURES` from the environment, so the natural
+  `LEDGER_FIXTURES=tests/fixtures python -m unittest ...` does not begin with
+  `python` and was refused four more times, while `python tools/check.py`,
+  which sets the variable itself, was allowed; the scenario plants nothing
+  about how the tests are run, so `env`, `export` and that variable are
+  allowed. Refusals do not fall equally on the two arms — in the first run one
+  probe cost the memory arm five and the control arm none — so `results.json`
+  now records them per tool and `report` prints the total and a column per
+  session. Run again on one session, the same prompt went from five refusals
+  to two
 - **A key stored under a provider's own name is no longer stored in silence
   while the generic one outranks it.** `ANAMNESIS_LLM_API_KEY` is the
   configured provider's key, so with a provider named it wins over
