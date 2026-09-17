@@ -459,7 +459,16 @@ def redirection_reason(asked: Path, real: Path) -> str | None:
 
 
 def redirected(run_dir: Path) -> str | None:
-    """`redirection_reason` for a directory this run is about to fill."""
+    """`redirection_reason` for a directory this run is about to fill.
+
+    Windows only, and not because the other platforms are trusted: there a
+    resolved path that differs from the asked one is ordinarily a symlink,
+    which is not this failure. `/tmp` is `/private/tmp` on macOS, and a run
+    rooted there is fine — another process handed the first path finds the
+    file. A package redirection is the case where it does not.
+    """
+    if os.name != "nt":
+        return None
     probe = run_dir / ".probe"
     probe.write_text("probe", encoding="utf-8")
     try:
@@ -836,7 +845,10 @@ def cmd_selftest(_: argparse.Namespace) -> int:
     if redirection_reason(here, here) is not None:
         print("FAIL redirection_reason: a path that is where it says it is was called redirected")
         return 1
-    if redirection_reason(here, Path(str(here).upper())) is not None:
+    # Only where the filesystem says so: `os.path.normcase` folds case on
+    # Windows and is the identity on POSIX, where two spellings really are two
+    # paths. CI runs this selftest on ubuntu.
+    if os.name == "nt" and redirection_reason(here, Path(str(here).upper())) is not None:
         print("FAIL redirection_reason: Windows case difference read as redirection")
         return 1
     reason = redirection_reason(here, elsewhere)
