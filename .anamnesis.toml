@@ -81,3 +81,24 @@ require_approval = true
 [auto_improve.scheduler]
 enabled = false
 interval_minutes = 60
+
+# What a prompt in this project is handed back from its own pages.
+#
+# A handoff says what the session before this one did. This says what the
+# project knows about the thing being asked right now, which is the half that
+# was missing: across twenty-four long-run eval sessions with the MCP server
+# connected and its tools allowed, an agent called a memory tool once. So the
+# question is asked for it, at the one moment there is a question.
+#
+# `min_similarity` is the gate, and it is a number about one embedder:
+# sixteen prompts with `nomic-embed-text` over two corpora split at 0.542
+# (nothing to say) against 0.573 (something to say). Below it nothing is
+# printed, which is the point — a block that fires on every prompt whether or
+# not it has anything to say teaches an agent to skip it. A server with no
+# embedder prints nothing at all: the keyword streams rank by position once
+# fused and cannot tell a good match from a stopword.
+[recall]
+on_prompt = true
+pages = 3
+snippet_chars = 240
+min_similarity = 0.55

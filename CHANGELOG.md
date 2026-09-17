@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A prompt is answered with what this project already knows about it.** The
+  handoff says what the session before this one did, and it was the only thing
+  in memory that ever reached a model without being asked for. Everything else
+  waited for `memory_query`, and the long-run eval measured how often that
+  comes: across **twenty-four sessions with the MCP server connected and its
+  tools allowed, an agent called a memory tool once**, and that call was a
+  write. A question five sessions after its answer was written never found it.
+  So the question is asked for the agent, at the one moment there is a question
+  in hand: the prompt hook — `UserPromptSubmit` and whatever the other three
+  harnesses call it — now also asks `GET /recall`, and prints what comes back
+  where the harness injects it. It takes nothing and claims nothing, unlike the
+  handoff, and it gets five seconds where capture gets one, because it runs
+  once per prompt rather than before every tool call and the server has to
+  embed the question first: measured here, that round trip took 1.03s against a
+  cold Ollama and 0.05s against a warm one, so under the capture budget the
+  first prompt after an idle embedder came back empty and said nothing about
+  why.
+
+  The hard part is not finding pages, it is not offering them — a block that
+  fires on every prompt whether or not it has anything to say teaches an agent
+  to skip it. The ordinary fused query cannot tell those apart: rank fusion
+  keeps ranks and throws the scores away, so on this machine's 88 pages `what
+  is the weather in Istanbul` came back with three pages and the same 0.333 at
+  the top as a question about the project's centre. Cosine similarity keeps the
+  score, and sixteen prompts over two corpora with `nomic-embed-text` split on
+  it: a prompt the project had nothing to say about peaked at 0.542, one it did
+  started at 0.573. `[recall] min_similarity` sits between them, in the marker
+  because it is a number about one embedder, beside `on_prompt`, `pages` and
+  `snippet_chars`. A server with no embedder says nothing rather than guessing.
+  What is offered is framed as evidence rather than instruction in its own
+  first sentence, and being offered does not renew a page against the decay
+  sweep — a block that renewed everything it mentioned would make the top of
+  the ranking immortal without anyone reading a word of it
+
+
 ### Fixed
 - **A run whose first planting page was written by counting stops there.** The
   check before a run asks each model one small question, and a model out of

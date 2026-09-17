@@ -323,6 +323,7 @@ pub fn router(state: AppState, ui: bool) -> Router {
             post(receive_hook).layer(DefaultBodyLimit::max(MAX_HOOK_BODY)),
         )
         .route("/handoff", get(deliver_handoff))
+        .route("/recall", get(deliver_recall))
         .route("/whoami", get(whoami))
         // `route_layer`, not `layer`: a request for a path this server does not
         // serve should be a 404, not a 401 that implies the path exists.
@@ -691,6 +692,8 @@ struct AgentQuery {
     probe: Option<String>,
     /// The sender's own name for this delivery, so a repeat of it is one event.
     event: Option<String>,
+    /// What a session just asked, for the recall endpoint.
+    q: Option<String>,
 }
 
 impl AgentQuery {
@@ -914,6 +917,84 @@ async fn deliver_handoff(
     .await?;
 
     Ok(handoff.unwrap_or_default())
+}
+
+/// Answer a prompt with the pages this project already has on it.
+///
+/// The other half of the handoff. A handoff says what the session before this
+/// one did; this says what the project learnt, whenever it learnt it, about
+/// the thing being asked right now — which is what a question five sessions
+/// after the answer was written actually needs.
+///
+/// Like the handoff, the body goes straight to the hook's stdout and from
+/// there into a model's context, so it is plain text, empty when there is
+/// nothing to say, and framed as evidence by [`anamnesis_core::brief`] rather
+/// than as instruction. Unlike the handoff it takes nothing and claims
+/// nothing: asking twice gives the same answer, and a session that never asks
+/// loses nothing.
+///
+/// A prompt is one moment in a session, not hundreds, so this can afford a
+/// query where a tool-call hook could not. It still holds to the same bargain:
+/// a broken or slow embedder costs the search its vector stream, not the
+/// search, and any failure here costs the prompt its block and nothing else.
+async fn deliver_recall(
+    State(state): State<AppState>,
+    Extension(_identity): Extension<Identity>,
+    Query(query): Query<AgentQuery>,
+) -> Result<String, WebError> {
+    let cwd = query
+        .cwd
+        .clone()
+        .ok_or_else(|| WebError::BadRequest("cwd is required".to_owned()))?;
+    let asked = query.q.clone().unwrap_or_default();
+    let asked = asked.trim().to_owned();
+    if asked.is_empty() {
+        return Ok(String::new());
+    }
+
+    off_runtime(move || -> Result<String, WebError> {
+        let scope = pipeline::scope_for(&cwd)?;
+        let config = scope.recall;
+        if !config.on_prompt || config.pages == 0 {
+            return Ok(String::new());
+        }
+
+        // No embedder, no recall. The gate this depends on is how close the
+        // prompt and the page are, and the keyword streams cannot stand in:
+        // fused, they rank by position, so a prompt about nothing this project
+        // knows comes back with the same score at the top as a prompt about
+        // its centre — 0.333 for both, measured on this machine's 88 pages.
+        // `status` already says when the embedder is not returning vectors.
+        let Some(embedder) = state.embedder.as_ref() else {
+            return Ok(String::new());
+        };
+        let vector = match embedder.embed(&asked) {
+            Ok(vector) => vector,
+            Err(error) => {
+                tracing::warn!(%error, "recall embedding failed; this prompt gets no block");
+                return Ok(String::new());
+            }
+        };
+
+        let hits = state.store.pages_like(
+            scope.project_id,
+            embedder.model(),
+            &vector,
+            config.pages,
+            config.min_similarity,
+        )?;
+
+        let pages: Vec<anamnesis_core::brief::Recalled> = hits
+            .into_iter()
+            .map(|hit| anamnesis_core::brief::Recalled {
+                path: hit.path.to_string(),
+                title: hit.title,
+                snippet: hit.snippet,
+            })
+            .collect();
+        Ok(anamnesis_core::brief::brief(&pages, &config))
+    })
+    .await
 }
 
 #[cfg(test)]
