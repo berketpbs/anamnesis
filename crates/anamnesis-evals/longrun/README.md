@@ -87,6 +87,28 @@ run measures nothing for two hours. What the check said is in
 `runs/<run>/model-check/key-check.txt` and `results.json`.
 `--skip-model-check` starts anyway.
 
+That check is one small question, and a model out of quota can still answer
+it. So the run asks the same question of the work: when a **planting**
+session's page comes back written by counting, or does not come back at all,
+the run stops there and exits 5. `report` excludes every probe behind such a
+page anyway, and a model that refused one session refuses the rest of the
+hour — on 2026-09-17 a repeat started against a spent quota wrote its first
+page by counting, and the eleven sessions after it would have cost two hours
+and $1.59 to measure nothing. `--keep-going` runs the whole scenario anyway.
+
+## The model the memory arm writes with
+
+A repeat is twelve consolidation requests plus whatever the enrich pass asks
+again, against a Google free tier of 20 per day per model that is shared with
+any server already running on the same key. The first complete run spent it by
+S10. `settings.local.env.example` points the arm at a local Ollama model
+instead: no key, no quota, and measured here on 2026-09-17 a session's page
+came back written by the model. A small local model writes thinner pages than
+the hosted one, so the arm is weaker than a real install and a difference it
+still shows is a floor — which is worth more than a nightly repeat that
+measures nothing. Point a run at it with `--settings-env`, and leave it off to
+measure the setup this machine actually runs.
+
 One repeat takes one to two hours with Haiku 4.5 and costs a few dollars of
 agent usage. It also asks the consolidation model about twelve sessions, which
 on a free Gemini tier is most of a day's quota, so repeats are meant to run

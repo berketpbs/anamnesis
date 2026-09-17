@@ -433,6 +433,30 @@ def wait_for_page(
     return {"page": page.name, "source": "counted", "session": session}
 
 
+def nothing_left_to_measure(session: dict, arm: str, record: dict) -> str | None:
+    """Why a run should stop here, or None to go on.
+
+    `report` excludes every probe whose planting session's page was not
+    written by a model, so a planting page that comes back counted has already
+    cost the run every probe behind it. A model that refused one session
+    refuses the rest of the hour: on 2026-09-17 a run started against a spent
+    free-tier quota wrote its first page by counting and would have spent two
+    hours and $1.59 on the eleven sessions after it, measuring nothing. The
+    check before the run asks one small question, which a model out of quota
+    can still answer; this asks the same question of the work.
+    """
+    if arm != "memory" or session["kind"] != "plant":
+        return None
+    page = record["page"] or {}
+    if page.get("source") == "model":
+        return None
+    what = "no page at all" if page.get("source") == "none" else "a page written by counting"
+    return (
+        f"{session['id']} plants what {session.get('plants', 'a later probe')} needs and left {what}, "
+        "so that probe would be excluded and the model is unlikely to answer for the ones after it"
+    )
+
+
 def isolation_check(claude: str, model: str, scratch: Path) -> dict:
     """Ask the control arm's setup whether it carries memory, before trusting it.
 
@@ -634,6 +658,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     repos: dict[str, Path] = {}
     server = None
+    stopped: str | None = None
     project = f"ledger-{run_id.lower()}"
     try:
         for arm in arms:
@@ -688,13 +713,27 @@ def cmd_run(args: argparse.Namespace) -> int:
                     f"${record['agent']['cost_usd'] or 0:.3f}, memory calls {record['agent']['memory_calls']}"
                     f"{f', {refused} refused' if refused else ''}{source}"
                 )
-        results["complete"] = not only
+                if not args.keep_going and (reason := nothing_left_to_measure(session, arm, record)):
+                    stopped = reason
+                    break
+            if stopped:
+                break
+        results["complete"] = not only and not stopped
     finally:
         if server:
             server.stop()
+        if stopped:
+            results["stopped"] = stopped
         results["finished"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
         write_json(results_path, results)
     print(f"results: {results_path}")
+    if stopped:
+        print(
+            f"  stopping: {stopped}. The memory arm's model is not writing pages; see "
+            f"{run_dir / 'memory' / 'server.log'} for what it answered. `--keep-going` runs anyway.",
+            file=sys.stderr,
+        )
+        return 5
     return 0
 
 
@@ -835,7 +874,11 @@ def report_lines(scenario: dict, runs: list[dict]) -> list[str]:
         )
     for run in runs:
         isolation = run.get("isolation", {}).get("answer", "not checked")
-        lines.append(f"- {run['run']}: {'complete' if run.get('complete') else 'incomplete'}, isolation {isolation!r}, {run['anamnesis']}")
+        stopped = f", stopped: {run['stopped']}" if run.get("stopped") else ""
+        lines.append(
+            f"- {run['run']}: {'complete' if run.get('complete') else 'incomplete'}, "
+            f"isolation {isolation!r}, {run['anamnesis']}{stopped}"
+        )
     return lines
 
 
@@ -897,6 +940,25 @@ def cmd_selftest(_: argparse.Namespace) -> int:
         print("FAIL ALLOWED_TOOLS: a PowerShell rule allows every PowerShell command, not the one it names")
         return 1
     print("ok   claude_args takes the PowerShell tool away instead of refusing it")
+
+    plant = {"id": "S01", "kind": "plant", "plants": "S12"}
+    probe = {"id": "S12", "kind": "probe"}
+    stops = [
+        (plant, "memory", "model", False),
+        (plant, "memory", "counted", True),
+        (plant, "memory", "none", True),
+        # A probe's own page is not what a later probe reads, and the control
+        # arm has no pages at all; neither ends a run.
+        (probe, "memory", "counted", False),
+        (plant, "control", None, False),
+    ]
+    for session, arm, source, expected in stops:
+        record = {"page": {"source": source} if source else None}
+        got = nothing_left_to_measure(session, arm, record) is not None
+        if got != expected:
+            print(f"FAIL nothing_left_to_measure({session['id']}, {arm}, {source}): {got}, expected {expected}")
+            return 1
+    print("ok   a run stops when a planting session's page was written by counting")
 
     # What `key check` printed on this machine on 2026-09-15, and the two
     # other things it can come back as.
@@ -969,6 +1031,11 @@ def main() -> int:
         help="settings.env for the memory arm's server; this machine's by default, 'none' for no model",
     )
     run.add_argument("--skip-isolation-check", action="store_true")
+    run.add_argument(
+        "--keep-going",
+        action="store_true",
+        help="run every session even after a planting session's page was written by counting",
+    )
     run.add_argument(
         "--skip-model-check",
         action="store_true",

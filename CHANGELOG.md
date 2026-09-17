@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **A run whose first planting page was written by counting stops there.** The
+  check before a run asks each model one small question, and a model out of
+  quota can still answer it: on 2026-09-17 `key check` said every model
+  answered, the run started, and its first page came back counted. `report`
+  excludes every probe whose planting session's page was not written by a
+  model, and a model that refused one session refuses the rest of the hour, so
+  the eleven sessions after it would have spent two hours and $1.59 measuring
+  nothing. A run now asks the same question of the work rather than of a ping:
+  when a planting session leaves a counted page, or no page, it says which
+  probe that costs and exits 5. `--keep-going` runs the whole scenario anyway.
+  `settings.local.env.example` is the other half — a repeat is twelve
+  consolidation requests against a free tier of twenty a day, shared with
+  whatever server is already running on the same key, so the memory arm can be
+  pointed at a local model instead; measured here, a session's page came back
+  written by that model and spent no quota
+
 - **The long-run eval stops refusing what its own scenario asks for.** Both
   arms are started with one `--allowedTools` list, and nobody is there to
   answer a prompt, so a tool left off it is refused and the session spends a
