@@ -697,11 +697,13 @@ pub fn cmd_doctor(server: &str, data_dir: Option<PathBuf>) -> anyhow::Result<()>
         ..Symptoms::default()
     };
 
+    // From the project root, not the working directory: a diagnosis run in a
+    // subdirectory of a wired project would otherwise find no settings there,
+    // call the project unwired while it is recording, and send the person to
+    // `install-hooks` — which used to write the file into that subdirectory,
+    // where no harness reads it, and silence the alarm with nothing behind it.
     for harness in hooks::HARNESSES {
-        let settings: PathBuf = harness
-            .settings
-            .iter()
-            .fold(cwd.clone(), |path, part| path.join(part));
+        let settings: PathBuf = hooks::default_settings_path(&harness, &scope.root);
         if !settings.exists() {
             continue;
         }

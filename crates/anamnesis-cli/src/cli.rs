@@ -467,9 +467,9 @@ pub enum Commands {
 
         /// Repository the server should resolve its scope from
         ///
-        /// Defaults to the current directory. Passed explicitly rather than
-        /// left to the subprocess's working directory, which the harness
-        /// chooses.
+        /// Defaults to this project's root, the directory its marker or its
+        /// repository is at. Passed explicitly rather than left to the
+        /// subprocess's working directory, which the harness chooses.
         #[arg(long)]
         repo: Option<PathBuf>,
     },
