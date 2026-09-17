@@ -52,6 +52,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before anything else and stops if it did not land there, naming both paths
   and what to use instead
 
+- **The nginx check says why it stopped.** Its first step makes the
+  certificate it runs behind, in a container, and sent both its output and its
+  error to /dev/null. When the image could not be pulled on 2026-09-17 the
+  script ended there under `set -e`, and the job failed with exit 125 and an
+  empty log — which reads like the check itself failing rather than a pull. It
+  now keeps that output and prints it only if the step fails, naming what
+  could not be made
+
 ## [1.2.0] - 2026-09-16
 
 On 2026-09-14 the model key this project's own memory runs on stopped being
