@@ -23,10 +23,19 @@ export MSYS_NO_PATHCONV=1
 
 # As the caller, so the key is the caller's to make readable and to delete:
 # written as the container's root, a Linux runner could do neither.
-docker run --rm --user "$(id -u):$(id -g)" -v "$(hostpath "$work"):/out" \
+#
+# Kept rather than discarded, and printed only if it fails. Sent to /dev/null
+# this was the one step that could end the check without saying anything: on
+# 2026-09-17 the image could not be pulled, `set -e` stopped here, and the job
+# failed with exit 125 and an empty log, which reads like the check itself.
+if ! certificate=$(docker run --rm --user "$(id -u):$(id -g)" -v "$(hostpath "$work"):/out" \
   --entrypoint openssl alpine/openssl \
   req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=anamnesis.local" \
-  -keyout /out/key.pem -out /out/cert.pem >/dev/null 2>&1
+  -keyout /out/key.pem -out /out/cert.pem 2>&1); then
+  echo "FAIL the certificate this check runs behind could not be made"
+  echo "$certificate"
+  exit 1
+fi
 # Readable by nginx, which does not run as the caller.
 chmod 644 "$work/key.pem"
 
