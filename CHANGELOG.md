@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-16
+
+On 2026-09-14 the model key this project's own memory runs on stopped being
+accepted. Every session that day was written by counting tool calls instead of
+by a model, the server sent 820 refused requests before 15:05, and the sentence
+saying why — `Please pass a valid API key` — sat on the fifth line of a log
+entry nobody was reading. Finding it out took a day. Most of this release is
+the answer to that day, and none of it is the key.
+
+A refusal is now read for what it says. The log gives Google's status and its
+sentence on one line instead of eight; `status` names what the model last
+answered and what the embedder last refused; `doctor` gives the server's reason
+for pages written by counting rather than sending people to compare
+environments. `anamnesis key check` asks every model in the chain one question
+with the key a server started now would use, says which variable it came from,
+and notices when the running server is still holding a refused one. A model
+that will not answer is asked again with a widening pause rather than every
+minute, and a quota spent for the day is not retried at all. `anamnesis service
+restart` is the step between a new key and a server that has read it, which on
+Windows had no command before this.
+
+The other half is what running things for the first time found. No OpenCode
+session had ever been handed the note the one before it left. `serve` printed
+its banner with `println!`, so a wrapper that stopped reading killed the server
+one start in ten. A background pass that panicked ended its loop, and the
+server went on answering `/health` with nothing being summarised behind it. A
+wiki commit wrote the index it first read, so one process's commit could remove
+another's. A `[[link]]` resolved only as a path from the scope root, which is
+not how anyone writes one — eleven links in this machine's memory named pages
+that existed. And the Docker templates described endpoints, variables and a
+compose file that are not there, behind an nginx that set aside every hook
+event over 1 MB.
+
+Installing it is now `brew`, `scoop` or `cargo binstall` as well as the
+scripts, from manifests rendered out of a release's checksums rather than
+written by hand.
+
+The index schema is unchanged at 18; nothing written by 1.1 or 1.0 needs
+converting.
+
 ### Added
 - **The server gives a page the vector it was written without, once its
   embedder answers.** A page written while the embedding endpoint is down is
