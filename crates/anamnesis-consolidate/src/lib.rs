@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 
-use anamnesis_core::observation::{EventKind, Observation};
+use anamnesis_core::observation::{EventKind, Observation, is_harness_prompt};
 use anamnesis_core::page::{Entity, PagePath, Tier};
 use anamnesis_core::session::Session;
 
@@ -638,36 +638,13 @@ fn render_body(session: &Session, counted: &Counted<'_>) -> String {
     out
 }
 
-/// Openers that mark a prompt as the harness talking, not a person.
-///
-/// A hook records `UserPromptSubmit` as it arrives, and a harness submits
-/// through the same door it gives a person: a background task finishing
-/// reaches the session as a prompt like any other. In this project's own
-/// index that is 18 of 71 recorded prompts, one in four.
-///
-/// They belong on the session page — they are part of what happened. They do
-/// not belong on the one line of the handoff that says what was last asked
-/// for, which is how a session that ended on `doğrulayalım` handed the next
-/// one `Last request: <task-notification> <task-id>b1yxanpb2</task-id>`.
-///
-/// Only what has actually been seen is listed. A harness that injects
-/// something else adds a line here, after somebody has looked at a real one.
-const HARNESS_PROMPT_OPENERS: &[&str] = &["<task-notification>"];
-
-/// Whether the harness generated this prompt rather than a person.
-///
-/// Matched at the start only. A person quoting a notification in the middle
-/// of a question is asking a question.
-fn is_harness_generated(prompt: &str) -> bool {
-    let start = prompt.trim_start();
-    HARNESS_PROMPT_OPENERS
-        .iter()
-        .any(|opener| start.starts_with(opener))
-}
-
 /// The last thing a person asked for, if a person asked for anything.
+///
+/// A notification the harness submitted is part of what happened, and stays on
+/// the session page; it is not what anybody asked for. See
+/// [`anamnesis_core::observation::is_harness_prompt`].
 fn last_human_prompt(prompts: &[String]) -> Option<&String> {
-    prompts.iter().rev().find(|p| !is_harness_generated(p))
+    prompts.iter().rev().find(|p| !is_harness_prompt(p))
 }
 
 /// The bounded note handed to the next session.

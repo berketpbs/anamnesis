@@ -949,7 +949,10 @@ async fn deliver_recall(
         .ok_or_else(|| WebError::BadRequest("cwd is required".to_owned()))?;
     let asked = query.q.clone().unwrap_or_default();
     let asked = asked.trim().to_owned();
-    if asked.is_empty() {
+    // A notification the harness submitted is not a question. The hook that
+    // ships with this server does not ask about one; this is for every hook
+    // that does, including a 1.2.1 one talking to a newer server.
+    if asked.is_empty() || anamnesis_core::observation::is_harness_prompt(&asked) {
         return Ok(String::new());
     }
 

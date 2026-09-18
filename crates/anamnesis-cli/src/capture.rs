@@ -508,6 +508,11 @@ fn is_prompting(event: Option<&str>, agent: &str) -> bool {
 /// pasted file. Retrieval reads the first words for what they are about, and a
 /// URL that a proxy or a shell truncates somewhere of its own choosing is a
 /// worse failure than one this code chose.
+///
+/// Empty for a prompt the harness wrote. A background task finishing arrives
+/// through the same hook as a person's question, and on 2026-09-18 one was
+/// answered with three pages about nothing it said, injected where the agent
+/// reads its instructions.
 fn asked_in(payload: &str) -> String {
     let value: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
     let prompt = value
@@ -516,6 +521,9 @@ fn asked_in(payload: &str) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .trim();
+    if anamnesis_core::observation::is_harness_prompt(prompt) {
+        return String::new();
+    }
     match prompt.char_indices().nth(PROMPT_QUERY_CHARS) {
         Some((index, _)) => prompt[..index].to_owned(),
         None => prompt.to_owned(),
@@ -1263,6 +1271,20 @@ mod tests {
         );
         assert_eq!(asked_in(r#"{"hook_event_name":"Stop"}"#), "");
         assert_eq!(asked_in("not json at all"), "");
+    }
+
+    /// The shape Claude Code submitted on 2026-09-18 when a background command
+    /// finished, taken from the raw spool. Asking about it put three unrelated
+    /// pages in front of the agent; now there is no question, so no request.
+    #[test]
+    fn a_notification_the_harness_submitted_asks_nothing() {
+        let payload = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "<task-notification>\n<task-id>bepctcmyp</task-id>\n\
+                       <status>completed</status>\n</task-notification>",
+        })
+        .to_string();
+        assert_eq!(asked_in(&payload), "");
     }
 
     /// A pasted file is a prompt too, and it travels as a query parameter.

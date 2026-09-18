@@ -39,6 +39,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it could not. Recall by name gave 1 false alarm in 171. The same count runs in
   CI as a test, so a change that makes recall chatty fails there.
 
+### Fixed
+- **A notification the harness submitted is not asked about.** A background
+  task finishing reaches a Claude Code session as a prompt, through the same
+  hook as a person's question, and the prompt hook sent it to `/recall` like
+  one. On 2026-09-18 a finished command's `<task-notification>` came back with
+  three pages about nothing it said, injected where the agent reads what it is
+  being asked — and in this project's own index one recorded prompt in four is
+  a notification. The handoff already told the two apart; the test it used now
+  lives in `anamnesis-core` and both paths use it. The hook does not ask, and
+  the server does not answer when an older hook does.
+
 ### Security
 - **A password typed on a command line was stored whole.** Redaction knew
   provider keys by their prefix and any other value by the `=` or `:` in front
