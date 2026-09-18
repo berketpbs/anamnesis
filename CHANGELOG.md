@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The long-run eval records what recall showed each session.** The first
+  run with recall tied the control arm 2/5 to 2/5, and taken apart by hand it
+  said three different things: recall had put the page each probe's knowledge
+  was planted in in front of four probes out of five, the local model writing
+  those pages had left the knowledge out of three of them, and one probe read
+  the warning, looked the page up, and made the mistake anyway. A pass rate
+  says none of that. Each memory-arm session now records the pages its recall
+  block named and which session wrote each, read from Claude Code's own
+  transcript since `stream-json` carries nothing a prompt hook printed, and
+  `report` splits every probe by whether it was shown its plant. A transcript
+  that cannot be found is recorded as unknown, not as nothing offered.
+
 - **`anamnesis setup` wires every installed agent by default.** A bare setup
   used to wire Claude Code even when Codex was installed beside it, so the
   memory held a waiting handoff that the next agent never received. Setup now
