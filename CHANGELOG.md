@@ -40,6 +40,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI as a test, so a change that makes recall chatty fails there.
 
 ### Fixed
+- **Recall answers where the harness can hear it, under the event it
+  answers.** 1.2.1 said the prompt hook asks `/recall` under whatever each
+  harness calls a prompt, and prints the answer where the harness injects it.
+  For Cursor there is no such place: `beforeSubmitPrompt` takes back
+  `continue` and `user_message` and nothing else, so every Cursor prompt was
+  embedded and queried for a block Cursor never read. Cursor now keeps its
+  handoff at `sessionStart`, which does take `additional_context`, and is not
+  asked about its prompts. And Gemini CLI's `BeforeAgent` reply named itself
+  `SessionStart`, the only event that reply had answered before recall; Gemini
+  reads the context without checking the name today and declares it per
+  event in its own types, so the reply now names the event it answers. Checked
+  against each harness's documentation and, for Codex and Gemini CLI, their
+  source.
+
 - **A Cursor session claims its handoff under its own name.** The hook
   command asked the server for a handoff by `session_id` and `cwd`, read from
   the payload itself, while capture read the same payload by the rules that
