@@ -114,6 +114,25 @@ pub fn parse(agent: &AgentKind, raw: &Value) -> Result<ParsedHook> {
     })
 }
 
+/// Which session a payload belongs to and where it is working, read exactly
+/// as [`parse`] reads them.
+///
+/// Public for the hook command, which asks the server for a handoff and a
+/// recall block by these two and used to read them itself — `session_id` and
+/// `cwd`, and nothing else. Cursor sends neither on the events that ask: it
+/// names the session `conversation_id` and the directory `workspace_roots`.
+/// So capture recorded a Cursor session under its own name, and the same
+/// session then claimed its handoff under an empty one — recorded as a session
+/// id derived from nothing, the same for every Cursor session there will ever
+/// be, with an audit entry about nobody. A second reading of one payload is a
+/// reading that drifts; this is the first one, shared.
+pub fn session_and_cwd(raw: &Value) -> (Option<String>, Option<PathBuf>) {
+    match raw.as_object() {
+        Some(object) => (correlation_id(object), working_directory(object)),
+        None => (None, None),
+    }
+}
+
 /// The identifier that ties one harness's events into one session.
 ///
 /// `conversation_id` comes first, and only Cursor sends it. It sends it on
@@ -957,6 +976,39 @@ mod tests {
         });
         let parsed = parse(&AgentKind::Cursor, &payload).expect("parse");
         assert_eq!(parsed.cwd, Some(std::path::PathBuf::from("/repo/sub")));
+    }
+
+    /// The two things the hook command asks the server by must be the two
+    /// things capture recorded, for every harness. Cursor's `sessionStart`
+    /// carries neither `session_id` nor `cwd`, and asking by those spellings
+    /// claimed every Cursor handoff under one empty name.
+    #[test]
+    fn the_session_is_asked_for_by_the_name_it_was_captured_under() {
+        let cursor = json!({
+            "hook_event_name": "sessionStart",
+            "conversation_id": "conversation-1",
+            "generation_id": "generation-1",
+            "workspace_roots": ["/repo", "/other"],
+        });
+        let captured = parse(&AgentKind::Cursor, &cursor).expect("parse");
+        let (session, cwd) = session_and_cwd(&cursor);
+        assert_eq!(session.as_deref(), Some(captured.agent_session_id.as_str()));
+        assert_eq!(cwd, captured.cwd);
+        assert_eq!(cwd, Some(std::path::PathBuf::from("/repo")));
+
+        let claude = json!({
+            "hook_event_name": "SessionStart",
+            "session_id": "session-1",
+            "cwd": "/repo",
+        });
+        assert_eq!(
+            session_and_cwd(&claude),
+            (
+                Some("session-1".to_owned()),
+                Some(std::path::PathBuf::from("/repo"))
+            )
+        );
+        assert_eq!(session_and_cwd(&json!("not an object")), (None, None));
     }
 
     /// Cursor serialises the tool result before sending it. Read as an opaque

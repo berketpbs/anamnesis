@@ -891,22 +891,22 @@ fn handoff_reply(agent: &str, handoff: &str) -> String {
 }
 
 /// Pull the session id and working directory out of a hook payload.
+///
+/// Read by the same function the server reads them with, so a session asks for
+/// its handoff under the name it was captured under — see
+/// [`anamnesis_hooks::session_and_cwd`] for what reading them twice cost
+/// Cursor. A payload that names no directory is answered for the one the
+/// harness ran this command in, which for a project's hooks is its root.
 fn session_and_cwd(payload: &str) -> (String, String) {
     let value: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
-    let field = |key: &str| {
-        value
-            .get(key)
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_owned()
-    };
-    let cwd = match field("cwd") {
-        empty if empty.is_empty() => std::env::current_dir()
+    let (session, cwd) = anamnesis_hooks::session_and_cwd(&value);
+    let cwd = match cwd {
+        Some(cwd) => cwd.to_string_lossy().into_owned(),
+        None => std::env::current_dir()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default(),
-        found => found,
     };
-    (field("session_id"), cwd)
+    (session.unwrap_or_default(), cwd)
 }
 
 #[cfg(test)]
@@ -1226,6 +1226,26 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&reply).expect("valid JSON");
         assert_eq!(parsed["additional_context"], "Last request: wire it up");
         assert_eq!(handoff_reply("cursor", ""), "");
+    }
+
+    /// Cursor's `sessionStart`, as its documentation gives the fields. The
+    /// handoff is claimed by the conversation that was captured, in the first
+    /// workspace root — not by an empty name in whatever directory this runs.
+    #[test]
+    fn a_cursor_session_asks_by_its_conversation_and_its_workspace() {
+        let payload = serde_json::json!({
+            "hook_event_name": "sessionStart",
+            "conversation_id": "44444444-4444-4444-8444-444444444444",
+            "generation_id": "g1",
+            "workspace_roots": ["/work/ledger"],
+        })
+        .to_string();
+        let (session, cwd) = session_and_cwd(&payload);
+        assert_eq!(session, "44444444-4444-4444-8444-444444444444");
+        assert_eq!(
+            std::path::Path::new(&cwd),
+            std::path::Path::new("/work/ledger")
+        );
     }
 
     #[test]
