@@ -54,9 +54,9 @@ Twenty were, twenty were not. Kept at each gate:
 | Gate | Right page kept | Wrong page kept | Share of blocks that are right |
 |---|---|---|---|
 | 0.55, as shipped | 20/20 | 20/20 | 50% |
-| 0.65 | 19/20 | 15/20 | 56% |
+| 0.65 | 19/20 | 17/20 | 53% |
 | 0.70 | 14/20 | 6/20 | 70% |
-| 0.75 | 11/20 | 2/20 | 85% |
+| 0.75 | 10/20 | 2/20 | 83% |
 
 Most wrong pages went to prompts asking where the work had got to or what to do
 next — which is what the handoff is for — and they were the same few pages
@@ -96,6 +96,16 @@ live corpus sit at 0.63–0.81. No single cosine separates them, and a gate at
   when it is nearer to one of them than to its best page. Plainly compared it
   still let 29 of 49 subjectless short prompts through; with a margin of 0.10
   it let 13 through and dropped 25 of 152 prompts that had a subject.
+- **nomic's task prefixes.** `nomic-embed-text` was trained with
+  `search_query: ` and `search_document: ` before the text, and anamnesis
+  embeds with neither. The 93 pages and the forty labelled prompts were
+  embedded again with them — the same pages embedded again without them
+  matched all 93 stored vectors, so the setup is the server's. Every score
+  moved up by about 0.05 and nothing came apart: right pages 0.627–0.892, wrong
+  ones 0.647–0.814, against 0.620–0.862 and 0.627–0.810 without. The best page
+  changed for 13 of the 40 prompts and its label for none of them, and in the
+  eval every planting page kept its rank but one (S10, fifth to sixth). Not
+  worth re-embedding every index for.
 
 ## What lands
 
