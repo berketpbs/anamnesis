@@ -121,6 +121,18 @@ knowledge was written by a model and the MCP server was connected. A counted
 page is a page of tool counts; a probe after one measures the counter, not
 memory, and `report` excludes it and says how many it excluded.
 
+Since 1.2.1 the prompt hook shows the agent what memory already has on each
+prompt, and a pass rate alone cannot say whether a probe that failed was ever
+shown what it needed. So each memory-arm session records `recall`: the pages
+its recall block named, and the session that wrote each. It is read from
+Claude Code's own transcript of the session, because `stream-json` carries
+what the SessionStart hook printed and nothing a prompt hook did. `report`
+splits every probe by whether it was shown a page its planting session wrote.
+Failed without it is a retrieval result; failed with it in front of the agent
+is about what the page said or what the agent did with it — the first run with
+recall, on 2026-09-18, showed four of five probes their plant, and two of
+those four still failed.
+
 The agent and the scenario are both fixed, so a difference between arms is
 memory's; the number of repeats is what says whether the difference is more
 than one model's variance.
