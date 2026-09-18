@@ -295,6 +295,109 @@ fn builtin_rules() -> &'static [Rule] {
                 r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*://)[^/\s:]+:[^/\s]*@",
                 "${scheme}[redacted]@",
             ),
+            // A password handed to a program on its command line. None of these
+            // has a separator the assignment rule reads — `-p` is glued to its
+            // value, `--password` and `-u` are followed by a space — so a shell
+            // command that carried one was stored whole, and shell commands are
+            // most of what a tool call records.
+            //
+            // Every value below stops at a quote, a backtick and a backslash as
+            // well as at a space, because the text a hook redacts is the tool
+            // input rendered as JSON: the command is one string field among
+            // others, a line break in it is the two characters `\n`, and a value
+            // that ran on would take the rest of the object with it. The stretch
+            // between the program and its flag stops at a backslash for the same
+            // reason, or it reaches across an escaped line break into another
+            // line — measured on the spool, a comment naming `curl` reached a
+            // `docker run -u 1000:1000` three lines down.
+            //
+            // And no value may open with `[`, so a masked value is not masked
+            // again, nor with `<`, `$`, `{` or `-`, which are a placeholder, a
+            // variable, a format argument and the next flag: `--password
+            // <PASSWORD>` in a usage line and `-p{password}` in code name no
+            // password.
+            context(
+                // `mysql -pSECRET`: the value is glued to the flag, and a bare `-p`
+                // asks for it instead. Lower-case only — `-P` is the port.
+                "command-line-credential",
+                r#"(?P<head>\b(?i:mysql|mysqladmin|mysqldump|mariadb)\b[^\n"\\]{0,120}?\s-p)[^\s'"`\\\[<$\-{][^\s'"`\\]{2,}"#,
+                "${head}[redacted]",
+            ),
+            context(
+                "command-line-credential",
+                r#"(?P<head>\bsshpass\b[^\n"\\]{0,64}?\s-p\s?)[^\s'"`\\\[<$\-{][^\s'"`\\]{2,}"#,
+                "${head}[redacted]",
+            ),
+            context(
+                // `curl -u user:secret`. Only after an HTTP client: `-u` is a uid
+                // to `docker run -u 1000:1000`, and there it names no one.
+                "command-line-credential",
+                r#"(?P<head>\b(?i:curl|wget|http|xh)\b[^\n"\\]{0,200}?\s(?:-u|--user)[ =]['"]?[^\s:'"\\]{1,64}:)[^\s'"`\\\[@{][^\s'"`\\]{2,}"#,
+                "${head}[redacted]",
+            ),
+            context(
+                // `-p` is the password to `docker login` and the port to
+                // `redis-cli`, whose password is `-a`; each flag is read only
+                // after the program it means that to.
+                "command-line-credential",
+                r#"(?P<head>(?:\b(?i:docker|podman)\s+login\b[^\n"\\]{0,120}?\s-p|\bredis-cli\b[^\n"\\]{0,120}?\s-a)\s+)[^\s'"`\\\[<$\-{][^\s'"`\\]{2,}"#,
+                "${head}[redacted]",
+            ),
+            context(
+                // `--password SECRET`, with a space; the `=` form is an
+                // assignment and the rule below takes it. A space is also how
+                // prose names a flag — "pass the --token flag" — so the value
+                // has to hold something other than lower-case letters, which
+                // every word of a sentence is and nearly no credential is.
+                "command-line-credential",
+                r#"(?P<head>(?:^|\s)--(?:password|passwd|pwd|passphrase|db-password|token|auth-token|access-token|api-key|apikey|client-secret)\s+['"]?)[a-z]*[^a-z\s'"`\\\[<$\-{][^\s'"`\\]*"#,
+                "${head}[redacted]",
+            ),
+            context(
+                // A header copied out of a browser or a `curl -v` is a session,
+                // and a session is a login. The whole value goes: which of its
+                // pairs is the one that authenticates is the server's business.
+                // It has to open on `name=`, which every cookie header does and
+                // a sentence about cookies — "Cookie: the session lives here" —
+                // does not.
+                "cookie-header",
+                r#"(?i)(?P<head>\b(?:set-)?cookie:[ \t]*)[^\s"'\\=;\[]{1,64}=[^"'\\\n]{4,400}"#,
+                "${head}[redacted]",
+            ),
+            context(
+                // A `.netrc` line, whole: `login` and `password` are ordinary
+                // words, and only this order of all three is the file.
+                "netrc-password",
+                r#"(?i)(?P<head>\bmachine\s+\S+\s+login\s+\S+\s+password\s+)[^\s'"`\\\[<$][^\s'"`\\]{2,}"#,
+                "${head}[redacted]",
+            ),
+            context(
+                // A password said in a sentence — "the admin password is …" —
+                // has no separator for the rules above to find. What keeps "the
+                // password is wrong" out is the value: it has to hold a letter
+                // and a digit or a symbol, and it ends at the first space. The
+                // letter is what leaves "the password is 12 characters long"
+                // alone, and a date after the word, which the spool had.
+                "stated-password",
+                r#"(?i)(?P<head>\b(?:password|passphrase|passwd)\s+(?:is|was)\s+[`'"]?)(?:\p{L}[^\s'"`\\]*?[\p{N}!#$%&*+=?@^_~]|[\p{N}!#$%&*+=?@^_~][^\s'"`\\]*?\p{L})[^\s'"`\\]*"#,
+                "${head}[redacted]",
+            ),
+            context(
+                // The same said in Turkish, which is how the person this runs
+                // for writes: `şifre: …`, `veritabanı parolası …`, `API anahtarı
+                // …`, with a colon, an equals sign or a space. The bare word
+                // `anahtar` is too common to go on — `anahtar kelime` is a
+                // keyword — so only the API key is named. The same value rule as
+                // above keeps `şifre yok` and `parola gerekli` as they are; a
+                // hyphen and a slash do not count as the symbol, or `şifre
+                // e-postayla gelir` would lose its `e-postayla`.
+                //
+                // The word's start is a character that cannot be part of it,
+                // taken and put back: the pattern language has no lookbehind.
+                "stated-password",
+                r#"(?i)(?P<head>(?:^|[^\p{L}\p{N}_])(?:[şs]ifre(?:si|m|miz|niz|yi)?|parola(?:s[ıi]|m|m[ıi]z|n[ıi]z|y[ıi])?|api\s+anahtar[ıi]?)\s*(?:[:=]\s*|\s)[`'"]?)(?:\p{L}[^\s'"`\\]*?[\p{N}!#$%&*+=?@^_~]|[\p{N}!#$%&*+=?@^_~][^\s'"`\\]*?\p{L})[^\s'"`\\]*"#,
+                "${head}[redacted]",
+            ),
             context(
                 // A quoted value is everything between its quotes. The
                 // unquoted rule below stops at a space, a comma or a
@@ -305,12 +408,12 @@ fn builtin_rules() -> &'static [Rule] {
                 // pattern language has no backreference to say "the same
                 // quote again".
                 "assignment",
-                r#"(?i)(?P<head>[A-Za-z0-9_.\-]*(?:api[_\-]?key|access[_\-]?key|secret|token|password|passwd|pwd|credential|passphrase)[A-Za-z0-9_.\-]*["']?\s*[:=]\s*)"[^"\n]{6,}""#,
+                r#"(?i)(?P<head>[A-Za-z0-9_.\-]*(?:api[_\-]?key|access[_\-]?key|secret|token|password|passwd|pwd|credential|passphrase|[_.\-]pass\b)[A-Za-z0-9_.\-]*["']?\s*[:=]\s*)"[^"\n]{6,}""#,
                 "${head}\"[redacted]\"",
             ),
             context(
                 "assignment",
-                r#"(?i)(?P<head>[A-Za-z0-9_.\-]*(?:api[_\-]?key|access[_\-]?key|secret|token|password|passwd|pwd|credential|passphrase)[A-Za-z0-9_.\-]*["']?\s*[:=]\s*)'[^'\n]{6,}'"#,
+                r#"(?i)(?P<head>[A-Za-z0-9_.\-]*(?:api[_\-]?key|access[_\-]?key|secret|token|password|passwd|pwd|credential|passphrase|[_.\-]pass\b)[A-Za-z0-9_.\-]*["']?\s*[:=]\s*)'[^'\n]{6,}'"#,
                 "${head}'[redacted]'",
             ),
             context(
@@ -322,7 +425,12 @@ fn builtin_rules() -> &'static [Rule] {
                 // because `_` is itself a word character. An optional quote sits
                 // on both sides of the separator so JSON (`"api_key": "…"`) is
                 // caught as well as shell (`API_KEY=…`).
-                r#"(?i)(?P<head>[A-Za-z0-9_.\-]*(?:api[_\-]?key|access[_\-]?key|secret|token|password|passwd|pwd|credential|passphrase)[A-Za-z0-9_.\-]*["']?\s*[:=]\s*["']?)[^\s"',;]{6,}"#,
+                //
+                // `pass` alone is a word inside `bypass` and `compass`, so it
+                // counts only as the last part of a name — `DB_PASS`,
+                // `smtp.pass` — which is how it is spelled when it is short for
+                // password.
+                r#"(?i)(?P<head>[A-Za-z0-9_.\-]*(?:api[_\-]?key|access[_\-]?key|secret|token|password|passwd|pwd|credential|passphrase|[_.\-]pass\b)[A-Za-z0-9_.\-]*["']?\s*[:=]\s*["']?)[^\s"',;]{6,}"#,
                 "${head}[redacted]",
             ),
         ]
@@ -601,6 +709,203 @@ mod tests {
 
         let json = redact(r#"{"clientSecret": "two words here", "id": 7}"#);
         assert!(json.text().contains(r#""id": 7"#), "{}", json.text());
+    }
+
+    /// Each of these was stored whole: the separator is a glued flag or a
+    /// space, which the assignment rule does not read, and a shell command is
+    /// most of what a tool call records.
+    #[test]
+    fn a_password_on_a_command_line_is_removed() {
+        for (line, secret, kept) in [
+            ("mysql -u root -pS3cretPass9 mydb", "S3cretPass9", "mydb"),
+            (
+                "run `mysql -u root -pS3cretPass9` now",
+                "S3cretPass9",
+                "` now",
+            ),
+            (
+                "mysqldump -h db -u app -pS3cretPass9 app > dump.sql",
+                "S3cretPass9",
+                "dump.sql",
+            ),
+            (
+                "sshpass -p hunter2xyz ssh deploy@box",
+                "hunter2xyz",
+                "deploy@box",
+            ),
+            ("sshpass -phunter2xyz scp a b", "hunter2xyz", "scp a b"),
+            (
+                "curl -u admin:Pa55word9 https://api.example",
+                "Pa55word9",
+                "https://api.example",
+            ),
+            (
+                "curl -s --user 'admin:Pa55word9' https://api.example",
+                "Pa55word9",
+                "admin:",
+            ),
+            ("psql --password Hunter22x -h db", "Hunter22x", "-h db"),
+            (
+                "tool --api-key AbCd1234EfGh --verbose",
+                "AbCd1234EfGh",
+                "--verbose",
+            ),
+            (
+                "docker login -u me -p Regi5tryPass registry.example",
+                "Regi5tryPass",
+                "registry.example",
+            ),
+            ("redis-cli -h cache -a R3disPass ping", "R3disPass", "ping"),
+        ] {
+            let found = redact(line);
+            assert!(!found.text().contains(secret), "{line} → {}", found.text());
+            assert!(found.text().contains(kept), "{line} → {}", found.text());
+            assert!(
+                found.hits().contains(&"command-line-credential"),
+                "{line}: {:?}",
+                found.hits()
+            );
+        }
+    }
+
+    /// The flags that carry a password elsewhere carry something else here,
+    /// and a flag named in a sentence carries nothing at all.
+    #[test]
+    fn a_command_line_that_holds_no_password_is_left_alone() {
+        for line in [
+            "mysql -u root -p mydb",
+            "mysql -h db -P3306 -u app",
+            "redis-cli -h cache -p 6379 ping",
+            "docker run -u 1000:1000 image",
+            "git push -u origin main",
+            "pass the --token flag to authenticate",
+            "usage: tool --password <PASSWORD>",
+            "tool --token $GITHUB_TOKEN",
+            "echo $PASS | docker login -u me --password-stdin",
+            "bypass_cache=enabled_everywhere",
+            r#"format!("mysql -u root -p{password} app")"#,
+            // A line break inside a JSON-rendered body is two characters, and
+            // the program on the line above is not this line's program.
+            r#"run curl first\n// then `docker run -u 1000:1000 image`"#,
+        ] {
+            let found = redact(line);
+            assert_eq!(found.text(), line, "{:?}", found.hits());
+        }
+    }
+
+    /// The text a hook redacts is the tool input rendered as JSON, so a value
+    /// that ran past its closing quote would take the other fields with it.
+    #[test]
+    fn a_command_line_value_stops_at_the_quote_that_closes_the_command() {
+        let rendered = r#"{"command":"mysql -u root -pS3cretPass9 mydb","description":"connect"}"#;
+        let found = redact(rendered);
+
+        assert!(!found.text().contains("S3cretPass9"), "{}", found.text());
+        assert!(
+            found.text().ends_with(r#" mydb","description":"connect"}"#),
+            "{}",
+            found.text()
+        );
+    }
+
+    #[test]
+    fn a_cookie_header_and_a_netrc_line_lose_their_values() {
+        let cookie = redact("Cookie: session=9f8e7d6c5b4a39281706f5e4d3c2b1a0; theme=dark");
+        assert!(!cookie.text().contains("9f8e7d6c"), "{}", cookie.text());
+        assert!(cookie.text().starts_with("Cookie: "), "{}", cookie.text());
+
+        let set = redact("< Set-Cookie: sid=abc123def456ghi; Path=/; HttpOnly");
+        assert!(!set.text().contains("abc123def456ghi"), "{}", set.text());
+
+        let netrc = redact("machine api.example login bob password Zx9plm42");
+        assert!(!netrc.text().contains("Zx9plm42"), "{}", netrc.text());
+        assert!(netrc.text().contains("login bob"), "{}", netrc.text());
+
+        for line in [
+            "Cookie: the session lives here",
+            "the login page asks for the password first",
+        ] {
+            assert!(redact(line).is_clean(), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_password_stated_in_a_sentence_is_removed() {
+        for (line, secret) in [
+            ("the admin password is Qw3rty!9 for now", "Qw3rty!9"),
+            ("the passphrase was `blue7horse` yesterday", "blue7horse"),
+            ("veritabanı şifresi: Gizli123!x", "Gizli123!x"),
+            ("sifre=Gizli123!x", "Gizli123!x"),
+            ("Şifre Gizli123!x olarak ayarlandı", "Gizli123!x"),
+            ("parola: Kx8$mn2pq", "Kx8$mn2pq"),
+            ("sunucunun parolası Kx8$mn2pq, değiştirme", "Kx8$mn2pq"),
+            ("API anahtarı: AbCdEf1234567890XyZ", "AbCdEf1234567890XyZ"),
+        ] {
+            let found = redact(line);
+            assert!(!found.text().contains(secret), "{line} → {}", found.text());
+            assert!(
+                found.hits().contains(&"stated-password"),
+                "{line}: {:?}",
+                found.hits()
+            );
+        }
+    }
+
+    /// A value has to hold a digit or a symbol to be taken for a password,
+    /// which is what keeps a sentence about one whole.
+    #[test]
+    fn a_sentence_about_a_password_is_left_alone() {
+        for line in [
+            "the password is wrong",
+            "the password was changed.",
+            "şifre yok",
+            "parola gerekli",
+            "şifremi unuttum",
+            "şifre e-postayla gelir",
+            "şifre 3 kez yanlış girildi",
+            "API anahtarı 2026-09-14'te reddedildi",
+            "the password is 12 characters long",
+            "anahtar kelime: rust2024",
+        ] {
+            let found = redact(line);
+            assert_eq!(found.text(), line, "{:?}", found.hits());
+        }
+    }
+
+    /// `pass` counts only as the last part of a name, which is how it is
+    /// spelled when it is short for password.
+    #[test]
+    fn a_name_ending_in_pass_is_a_password() {
+        for (line, secret) in [
+            ("export DB_PASS=Zq8wErt6yU", "Zq8wErt6yU"),
+            ("smtp.pass: Zq8wErt6yU", "Zq8wErt6yU"),
+        ] {
+            let found = redact(line);
+            assert!(!found.text().contains(secret), "{line} → {}", found.text());
+        }
+    }
+
+    /// The spool, the index and a page each run redaction over text that may
+    /// already have been through it, so none of the rules above may match
+    /// what it masked.
+    #[test]
+    fn the_rules_for_stated_and_typed_passwords_do_not_mask_twice() {
+        for line in [
+            "mysql -u root -pS3cretPass9 mydb",
+            "sshpass -p hunter2xyz ssh deploy@box",
+            "curl -u admin:Pa55word9 https://api.example",
+            "psql --password Hunter22x -h db",
+            "redis-cli -a R3disPass ping",
+            "Cookie: session=9f8e7d6c5b4a39281706f5e4d3c2b1a0",
+            "machine api.example login bob password Zx9plm42",
+            "the admin password is Qw3rty!9",
+            "şifre: Gizli123!x",
+        ] {
+            let once = redact(line);
+            let twice = redact(once.text());
+            assert_eq!(once.text(), twice.text(), "{line}");
+            assert!(twice.is_clean(), "{line}: {:?}", twice.hits());
+        }
     }
 
     #[test]

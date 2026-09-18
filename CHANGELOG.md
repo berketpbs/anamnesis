@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **A password typed on a command line was stored whole.** Redaction knew
+  provider keys by their prefix and any other value by the `=` or `:` in front
+  of it, and a shell command — most of what a tool call records — has neither:
+  `mysql -pS3cret` glues the value to its flag, `sshpass -p`, `psql --password`,
+  `docker login -p` and `redis-cli -a` put a space in front of it, and
+  `curl -u user:pass` hides it behind a user name. Of thirteen ordinary shapes
+  of secret tried, the redactor masked none. Twelve are masked now: those, a
+  `Cookie:` or `Set-Cookie:` header, a `.netrc` line, a name ending in `_PASS`,
+  and a password said in a sentence — "the admin password is …", or in
+  Turkish, `şifre: …`, `veritabanı parolası …`, `API anahtarı …` — where the
+  value has to hold a letter and a digit or a symbol, so "the password is
+  wrong", `şifre yok` and a date after the word stay as written. The
+  thirteenth, a bare forty-character hex string, is what a commit hash looks
+  like, and stays. Every value stops at a quote, a backtick and a backslash,
+  because the text a hook redacts is the tool input rendered as JSON. Run over
+  this machine's whole spool — 122,000 strings — the new rules matched nothing
+  but the synthetic values and placeholders of their own tests and comments.
+  What was captured before this is untouched until `anamnesis redact --apply`
+  runs the current rules over it
+
 ## [1.2.1] - 2026-09-18
 
 Until this release one thing in memory reached a model without being asked for:
