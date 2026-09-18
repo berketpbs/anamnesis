@@ -375,7 +375,7 @@ pub fn cmd_hook(agent: &str, server: &str, token: Option<&str>, data_dir: Option
         // would be believed.
         match request.send() {
             Ok(response) if response.status().is_success() => match response.text() {
-                Ok(text) => print!("{}", handoff_reply(agent, &text)),
+                Ok(text) => print!("{}", handoff_reply(agent, "SessionStart", &text)),
                 Err(error) => {
                     eprintln!("anamnesis: handoff unavailable: {error}");
                     announce(
@@ -439,7 +439,10 @@ pub fn cmd_hook(agent: &str, server: &str, token: Option<&str>, data_dir: Option
             // the handoff checks it: this goes to stdout, and stdout is
             // context. An error page injected as memory would be believed.
             Ok(response) if response.status().is_success() => match response.text() {
-                Ok(text) => print!("{}", handoff_reply(agent, &text)),
+                Ok(text) => print!(
+                    "{}",
+                    handoff_reply(agent, event.as_deref().unwrap_or_default(), &text)
+                ),
                 Err(error) => {
                     eprintln!("anamnesis: recall unavailable: {error}");
                     announce(agent, false, "");
@@ -494,8 +497,16 @@ fn is_starting(event: Option<&str>, agent: &str) -> bool {
 /// two that do not say "prompt" at all, and a second copy of that table would
 /// be one that drifts. OpenCode is out for the same reason it is out of
 /// [`is_starting`] — nothing reads this command's stdout there.
+///
+/// Cursor is out because its prompt hook has no way to hear an answer.
+/// `beforeSubmitPrompt` takes back `continue` and `user_message` and nothing
+/// else — its documentation lists those two fields and no other, while
+/// `sessionStart` and `postToolUse` list `additional_context`. A block printed
+/// there was an embedding and a query on every prompt, sent to a field Cursor
+/// does not read.
 fn is_prompting(event: Option<&str>, agent: &str) -> bool {
     agent != AgentKind::OpenCode.as_str()
+        && agent != AgentKind::Cursor.as_str()
         && event.is_some_and(|event| {
             anamnesis_hooks::classify_event(event)
                 == anamnesis_core::observation::EventKind::UserPrompt
@@ -778,9 +789,9 @@ fn keep(queue: Option<&spool::Queue>, agent: &str, event: &str, payload: &str) -
 /// place to learn that capture is down is the top of the session, once.
 fn announce(agent: &str, starting: bool, text: &str) {
     if starting {
-        print!("{}", handoff_reply(agent, text));
+        print!("{}", handoff_reply(agent, "SessionStart", text));
     } else if agent == "gemini-cli" {
-        print!("{}", handoff_reply(agent, ""));
+        print!("{}", handoff_reply(agent, "", ""));
     }
 }
 
@@ -839,17 +850,20 @@ fn handoff_notice(reason: &str) -> String {
     )
 }
 
-/// The handoff, in the shape the harness reads back.
+/// The handoff or a recall block, in the shape the harness reads back.
 ///
-/// Claude Code and Codex inject whatever a hook prints, so the handoff is
-/// printed as it is and nothing is printed when there is none. Gemini CLI
-/// parses stdout as one JSON object and rejects anything else, so it gets one
-/// — carrying the handoff as `hookSpecificOutput.additionalContext`, or empty
-/// when there is nothing to hand over.
+/// Claude Code and Codex inject whatever a hook prints, so the text is printed
+/// as it is and nothing is printed when there is none. Gemini CLI parses stdout
+/// as one JSON object and rejects anything else, so it gets one — carrying the
+/// text as `hookSpecificOutput.additionalContext`, or empty when there is
+/// nothing to say — under `hookEventName`, the event being answered. That was
+/// `SessionStart` for every reply until recall began answering `BeforeAgent`
+/// through here; Gemini CLI reads the context without checking the name today,
+/// and declares the name per event in its own types.
 ///
 /// The trailing newline matters only for the plain form, where stdout is
 /// spliced into a prompt.
-fn handoff_reply(agent: &str, handoff: &str) -> String {
+fn handoff_reply(agent: &str, event: &str, handoff: &str) -> String {
     let handoff = handoff.trim();
 
     if agent == "gemini-cli" {
@@ -858,7 +872,7 @@ fn handoff_reply(agent: &str, handoff: &str) -> String {
         } else {
             serde_json::json!({
                 "hookSpecificOutput": {
-                    "hookEventName": "SessionStart",
+                    "hookEventName": event,
                     "additionalContext": handoff,
                 }
             })
@@ -1148,7 +1162,8 @@ mod tests {
         let notice = capture_notice("http://127.0.0.1:8080", "could not be reached", false);
 
         let gemini: serde_json::Value =
-            serde_json::from_str(&handoff_reply("gemini-cli", &notice)).expect("valid JSON");
+            serde_json::from_str(&handoff_reply("gemini-cli", "SessionStart", &notice))
+                .expect("valid JSON");
         assert!(
             gemini["hookSpecificOutput"]["additionalContext"]
                 .as_str()
@@ -1157,7 +1172,8 @@ mod tests {
         );
 
         let cursor: serde_json::Value =
-            serde_json::from_str(&handoff_reply("cursor", &notice)).expect("valid JSON");
+            serde_json::from_str(&handoff_reply("cursor", "SessionStart", &notice))
+                .expect("valid JSON");
         assert!(
             cursor["additional_context"]
                 .as_str()
@@ -1165,7 +1181,7 @@ mod tests {
                 .contains("NOT being recorded")
         );
 
-        assert!(handoff_reply("claude-code", &notice).starts_with("[anamnesis]"));
+        assert!(handoff_reply("claude-code", "SessionStart", &notice).starts_with("[anamnesis]"));
     }
 
     /// The harness that shapes this: Gemini CLI parses stdout as one JSON
@@ -1173,7 +1189,7 @@ mod tests {
     /// degraded handoff — it is a parse error inside somebody's agent.
     #[test]
     fn gemini_gets_one_json_object_whether_or_not_there_is_a_handoff() {
-        let with = handoff_reply("gemini-cli", "Last request: wire it up\n");
+        let with = handoff_reply("gemini-cli", "SessionStart", "Last request: wire it up\n");
         let parsed: serde_json::Value = serde_json::from_str(&with).expect("valid JSON");
         assert_eq!(
             parsed["hookSpecificOutput"]["additionalContext"],
@@ -1185,7 +1201,8 @@ mod tests {
         );
 
         let without: serde_json::Value =
-            serde_json::from_str(&handoff_reply("gemini-cli", "")).expect("valid JSON");
+            serde_json::from_str(&handoff_reply("gemini-cli", "SessionStart", ""))
+                .expect("valid JSON");
         assert_eq!(without, serde_json::json!({}));
     }
 
@@ -1195,18 +1212,18 @@ mod tests {
     #[test]
     fn the_other_harnesses_get_the_handoff_as_it_is() {
         assert_eq!(
-            handoff_reply("claude-code", "Last request: wire it up"),
+            handoff_reply("claude-code", "SessionStart", "Last request: wire it up"),
             "Last request: wire it up\n"
         );
-        assert_eq!(handoff_reply("codex", "  "), "");
-        assert_eq!(handoff_reply("claude-code", ""), "");
+        assert_eq!(handoff_reply("codex", "SessionStart", "  "), "");
+        assert_eq!(handoff_reply("claude-code", "SessionStart", ""), "");
     }
 
     /// A refused or unreachable handoff must not leave Gemini with an empty
     /// stdout it was told never to expect.
     #[test]
     fn a_failed_handoff_still_leaves_gemini_a_valid_object() {
-        let reply = handoff_reply("gemini-cli", "");
+        let reply = handoff_reply("gemini-cli", "SessionStart", "");
         serde_json::from_str::<serde_json::Value>(&reply).expect("valid JSON");
     }
 
@@ -1214,10 +1231,10 @@ mod tests {
     /// unlike Gemini it is content with silence when there is none.
     #[test]
     fn cursor_gets_its_own_field_and_nothing_when_there_is_nothing() {
-        let reply = handoff_reply("cursor", "Last request: wire it up");
+        let reply = handoff_reply("cursor", "SessionStart", "Last request: wire it up");
         let parsed: serde_json::Value = serde_json::from_str(&reply).expect("valid JSON");
         assert_eq!(parsed["additional_context"], "Last request: wire it up");
-        assert_eq!(handoff_reply("cursor", ""), "");
+        assert_eq!(handoff_reply("cursor", "SessionStart", ""), "");
     }
 
     #[test]
@@ -1244,12 +1261,45 @@ mod tests {
         assert!(is_prompting(Some("UserPromptSubmit"), "claude-code"));
         assert!(is_prompting(Some("user_prompt_submit"), "codex"));
         assert!(is_prompting(Some("BeforeAgent"), "gemini-cli"));
-        assert!(is_prompting(Some("beforeSubmitPrompt"), "cursor"));
         assert!(!is_prompting(Some("PostToolUse"), "claude-code"));
         assert!(!is_prompting(Some("SessionStart"), "claude-code"));
         assert!(!is_prompting(None, "claude-code"));
         // Same reason as the handoff: nothing reads this stdout there.
         assert!(!is_prompting(Some("UserPromptSubmit"), "opencode"));
+    }
+
+    /// Cursor's `beforeSubmitPrompt` answers with `continue` and
+    /// `user_message` and has no field for context, so there is nobody to
+    /// hand a recall block to and no reason to embed the prompt.
+    #[test]
+    fn a_cursor_prompt_is_not_asked_about_since_cursor_cannot_hear_the_answer() {
+        assert!(!is_prompting(Some("beforeSubmitPrompt"), "cursor"));
+        // Its session start can hear one, and still collects the handoff.
+        assert!(is_starting(Some("sessionStart"), "cursor"));
+    }
+
+    /// A recall block answers Gemini CLI's `BeforeAgent`, and says so; the
+    /// handoff answers `SessionStart`. Both carry the text the same way.
+    #[test]
+    fn gemini_is_answered_under_the_event_it_asked_on() {
+        let recall = handoff_reply(
+            "gemini-cli",
+            "BeforeAgent",
+            "📚 anamnesis recall — one page",
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&recall).expect("valid JSON");
+        assert_eq!(parsed["hookSpecificOutput"]["hookEventName"], "BeforeAgent");
+        assert_eq!(
+            parsed["hookSpecificOutput"]["additionalContext"],
+            "📚 anamnesis recall — one page"
+        );
+
+        let handoff = handoff_reply("gemini-cli", "SessionStart", "Last request: wire it up");
+        let parsed: serde_json::Value = serde_json::from_str(&handoff).expect("valid JSON");
+        assert_eq!(
+            parsed["hookSpecificOutput"]["hookEventName"],
+            "SessionStart"
+        );
     }
 
     #[test]
