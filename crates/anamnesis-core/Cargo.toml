@@ -20,6 +20,7 @@ git2.workspace = true
 regex.workspace = true
 globset.workspace = true
 dirs.workspace = true
+unicode-segmentation.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

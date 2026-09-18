@@ -981,6 +981,11 @@ async fn deliver_recall(
         if !config.on_prompt || config.pages == 0 {
             return Ok(String::new());
         }
+        // Before the embedder, which is the expensive part: a reply too short
+        // to be about anything is not asked about. See `RecallConfig::min_words`.
+        if anamnesis_core::config::words_in(&asked) < config.min_words {
+            return Ok(String::new());
+        }
 
         // With an embedder, a page is offered when it is close enough to the
         // prompt. Without one — none configured, or one that failed on this
