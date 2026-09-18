@@ -367,6 +367,35 @@ proptest! {
         prop_assert!(redacted.text().contains("next line"), "{:?}", redacted.text());
     }
 
+    /// A password handed to a program on its command line is removed, whatever
+    /// the program and wherever in the text the command sits — and what is
+    /// left is not masked again.
+    #[test]
+    fn a_password_on_a_command_line_does_not_survive_redaction(
+        before in prose(),
+        password in "[A-Za-z]{2,8}[0-9!#%&*+=?@^_~][A-Za-z0-9]{2,8}",
+        form in 0usize..6,
+        after in prose(),
+    ) {
+        let command = match form {
+            0 => format!("mysql -u root -p{password} app"),
+            1 => format!("sshpass -p {password} ssh deploy@box"),
+            2 => format!("curl -u admin:{password} https://api.example"),
+            3 => format!("psql --password {password} -h db"),
+            4 => format!("docker login -u me -p {password} registry.example"),
+            _ => format!("redis-cli -h cache -a {password} ping"),
+        };
+        let redactor = Redactor::new();
+        let once = redactor.redact(&format!("{before} {command} {after}"));
+        prop_assert!(
+            !once.text().contains(&password),
+            "{password:?} survived in {:?}",
+            once.text()
+        );
+        let twice = redactor.redact(once.text());
+        prop_assert_eq!(once.text(), twice.text());
+    }
+
     /// Redacting twice changes nothing the first pass did not. The spool, the
     /// index and a page each run redaction over text that may already have
     /// been through it.
