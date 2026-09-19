@@ -113,6 +113,9 @@ regex = "1"
 
 # Capture exclusions: gitignore-style glob matching for `[capture] ignore_paths`.
 globset = "0.4"
+# Counting the words of a prompt by Unicode's rules rather than by spaces, so a
+# sentence in a script written without them is not one word.
+unicode-segmentation = "1.13"
 
 # Wiki git versioning.
 git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }

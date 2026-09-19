@@ -40,6 +40,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI as a test, so a change that makes recall chatty fails there.
 
 ### Fixed
+- **A reply too short to be about anything is not asked about.** Recall's
+  similarity gate came from sixteen prompts written for it, and on the 201
+  real prompts this machine's sessions had recorded it let a block through for
+  184 of them — every prompt of five words or more, and ten of the twenty-two
+  one- and two-word replies like `devam et` or `onay`, all of which had no
+  subject; the one-word `yaptım` had 57 pages above the gate. The gate cannot
+  simply be raised: in the long-run eval a probe's planting page scored 0.64 to
+  0.73 against it, inside the band where the wrong pages sit on the live
+  corpus. So a prompt now needs `[recall] min_words` words, three by default,
+  counted by Unicode's boundaries so a sentence in a script written without
+  spaces is not one word, before anything is embedded. The measurement, what
+  else was tried, and what is still open are in
+  `docs/measurements/2026-09-18-recall-on-real-prompts.md`. A marker that sets
+  `min_words` is refused by a 1.2.1 build, whose `[recall]` table does not know
+  the key — upgrade the binary before the marker.
+
 - **A notification the harness submitted is not asked about.** A background
   task finishing reaches a Claude Code session as a prompt, through the same
   hook as a person's question, and the prompt hook sent it to `/recall` like

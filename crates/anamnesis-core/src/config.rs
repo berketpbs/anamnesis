@@ -176,6 +176,16 @@ pub struct RecallConfig {
     /// where an on-topic one beat it by 0.083. The scale-dependence is real,
     /// which is why this is in the marker: another embedder is another number.
     /// See [`crate::brief`] and `Store::pages_like`.
+    ///
+    /// **On real prompts it separates much less than those sixteen said.**
+    /// Measured on 2026-09-18 over the 201 distinct prompts this machine's
+    /// own sessions had recorded, against its 93 pages: every prompt of five
+    /// words or more had a page above 0.55, and in a random forty of them the
+    /// best page was about the prompt's subject for twenty and about something
+    /// else for the other twenty, at scores from 0.63 to 0.81. It cannot simply
+    /// be raised: in the long-run eval the page a probe's knowledge was
+    /// planted in scored 0.64 to 0.73 against that probe, inside the same
+    /// band. See `docs/measurements/2026-09-18-recall-on-real-prompts.md`.
     pub min_similarity: f64,
     /// Answer from the words a prompt names when there is no embedder to
     /// answer from, or it fails.
@@ -194,6 +204,21 @@ pub struct RecallConfig {
     /// share, from 0 to 1, and a page at 0.5 carries as much of what the prompt
     /// names as the project is missing.
     pub min_coverage: f64,
+    /// How many words a prompt needs before it is asked about at all.
+    ///
+    /// A reply like `devam et`, `continue` or `onay` carries nothing to look
+    /// up, and against a corpus written in its language it still lands near
+    /// everything: on this machine's pages the one-word `yaptım` had 57 pages
+    /// above the similarity gate. All twenty-two one- and two-word prompts
+    /// in the measurement above were replies of that kind, and ten of them
+    /// were answered with a block. Three is where that measurement stops
+    /// finding them without costing a prompt that had a subject; three- and
+    /// four-word prompts are a mix, and are left to the similarity gate.
+    ///
+    /// Words by Unicode's rules rather than by spaces, so a sentence in a
+    /// script written without them is counted a word per character rather
+    /// than as one. See [`words_in`].
+    pub min_words: usize,
 }
 
 impl Default for RecallConfig {
@@ -205,8 +230,19 @@ impl Default for RecallConfig {
             min_similarity: 0.55,
             by_name: true,
             min_coverage: 0.5,
+            min_words: 3,
         }
     }
+}
+
+/// How many words `text` has, by Unicode's word boundaries (UAX #29).
+///
+/// Punctuation and spacing are not words, and a script written without spaces
+/// is not one long word: each ideograph stands on its own, which is what keeps
+/// a whole question in Chinese or Japanese from counting as a one-word reply.
+pub fn words_in(text: &str) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+    text.unicode_words().count()
 }
 
 /// Retention tuning for the decay sweep.
@@ -622,5 +658,41 @@ stale_after_minutes = 720
         let config = MarkerConfig::from_toml("[scope]\nproject = \"anamnesis\"\n").expect("parses");
 
         assert!(config.unrecognized().is_empty());
+    }
+
+    /// The replies the measurement found, and the words a prompt with a
+    /// subject spends. A version number is one word, not three.
+    #[test]
+    fn words_are_counted_the_way_a_reader_would() {
+        assert_eq!(words_in("devam et"), 2);
+        assert_eq!(words_in("onay"), 1);
+        assert_eq!(words_in("  ...  "), 0);
+        assert_eq!(words_in("tamamdır devam et"), 3);
+        assert_eq!(words_in("v1.0.0 etiketini at"), 3);
+        assert_eq!(words_in("nomic'i canlıya al"), 3);
+    }
+
+    /// Counted by spaces, a whole question in a script written without them
+    /// is one word and would never be asked about.
+    #[test]
+    fn a_sentence_without_spaces_is_not_one_word() {
+        let question = "如何部署到暂存环境";
+        assert!(
+            words_in(question) >= RecallConfig::default().min_words,
+            "{}",
+            words_in(question)
+        );
+    }
+
+    #[test]
+    fn a_project_can_ask_about_short_prompts_too() {
+        assert_eq!(RecallConfig::default().min_words, 3);
+        let config = MarkerConfig::from_toml("[recall]\nmin_words = 1\n").expect("parses");
+        assert_eq!(config.recall.min_words, 1);
+        assert_eq!(
+            config.recall.min_similarity,
+            RecallConfig::default().min_similarity,
+            "setting one leaves the others at their defaults"
+        );
     }
 }
