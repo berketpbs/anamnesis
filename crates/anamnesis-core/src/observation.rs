@@ -252,9 +252,56 @@ pub struct Observation {
     pub sanitized: bool,
 }
 
+/// Openers that mark a prompt as the harness talking, not a person.
+///
+/// A hook records `UserPromptSubmit` as it arrives, and a harness submits
+/// through the same door it gives a person: a background task finishing
+/// reaches the session as a prompt like any other. In this project's own
+/// index that is 18 of 71 recorded prompts, one in four.
+///
+/// They belong on the session page — they are part of what happened. They do
+/// not belong anywhere a prompt stands for what somebody wants: the one line
+/// of the handoff that says what was last asked for, which is how a session
+/// that ended on `doğrulayalım` handed the next one `Last request:
+/// <task-notification> <task-id>b1yxanpb2</task-id>`; or the recall query,
+/// which on 2026-09-18 answered a finished background command with three
+/// pages about nothing it said.
+///
+/// Only what has actually been seen is listed. A harness that injects
+/// something else adds a line here, after somebody has looked at a real one.
+const HARNESS_PROMPT_OPENERS: &[&str] = &["<task-notification>"];
+
+/// Whether the harness generated this prompt rather than a person.
+///
+/// Matched at the start only. A person quoting a notification in the middle
+/// of a question is asking a question.
+pub fn is_harness_prompt(prompt: &str) -> bool {
+    let start = prompt.trim_start();
+    HARNESS_PROMPT_OPENERS
+        .iter()
+        .any(|opener| start.starts_with(opener))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_task_notification_is_the_harness() {
+        assert!(is_harness_prompt(
+            "<task-notification>\n<task-id>bepctcmyp</task-id>\n<status>completed</status>"
+        ));
+        assert!(is_harness_prompt("   \n<task-notification> indented"));
+    }
+
+    #[test]
+    fn a_question_about_a_notification_is_a_person() {
+        assert!(!is_harness_prompt(
+            "what does <task-notification> mean when the id is missing"
+        ));
+        assert!(!is_harness_prompt("ne yapalım sırada"));
+        assert!(!is_harness_prompt(""));
+    }
 
     #[test]
     fn short_bodies_pass_through_untouched() {

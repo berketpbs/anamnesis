@@ -290,6 +290,24 @@ by_name = false
     assert!(body.is_empty(), "{body}");
 }
 
+/// A background task finishing reaches the hook through the same door as a
+/// person's question. With the gate open wide enough that anything at all is
+/// offered something, a notification is still offered nothing — and the same
+/// words from a person still are, so it is the frame that was refused.
+#[test]
+fn a_notification_the_harness_submitted_is_not_asked_about() {
+    let open = format!("{MARKER}\n[recall]\nmin_similarity = 0.0\n");
+    let notification = "<task-notification>\n<task-id>bepctcmyp</task-id>\n\
+         <status>completed</status>\n\
+         <summary>add logging to the importer</summary>\n</task-notification>";
+    let (status, body) = recall(&open, notification, true);
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.is_empty(), "{body}");
+
+    let (_, body) = recall(&open, "add logging to the importer", true);
+    assert!(!body.is_empty(), "a person's question should be answered");
+}
+
 /// An empty question is not a question. Every harness sends this event; not
 /// every one of them fills the field.
 #[test]
