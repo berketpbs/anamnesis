@@ -169,8 +169,8 @@ pub enum Commands {
     /// commands that do each on its own, and then probes the server so the last
     /// thing said is whether the next session will be recorded.
     Setup {
-        /// Harness to wire; repeat for more than one
-        #[arg(long = "agent", value_name = "AGENT", default_value = "claude-code")]
+        /// Harness to wire; repeat to override the installed harnesses detected by default
+        #[arg(long = "agent", value_name = "AGENT")]
         agents: Vec<String>,
 
         /// Server the hooks deliver to; follows --port when not given

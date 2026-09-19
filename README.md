@@ -26,10 +26,10 @@ Anamnesis is organized as a Rust workspace with modular crates:
 
 ## What Works Today
 
-- `anamnesis setup` wires a project in one command: it says which of memory,
-  hooks, MCP registration, a kept-running server and seed pages are already
-  done, does the rest with `--write`, and ends by probing whether an event
-  would be recorded
+- `anamnesis setup` wires a project in one command: it detects the installed
+  agent harnesses, says which of memory, hooks, MCP registration, a kept-running
+  server and seed pages are already done, does the rest with `--write`, and ends
+  by probing whether an event would be recorded
 - Lifecycle capture from Claude Code hooks, sanitized before anything is stored
 - Every observation appended to an immutable transcript under `raw/`, so the
   index can be thrown away and rebuilt (`anamnesis reindex`)

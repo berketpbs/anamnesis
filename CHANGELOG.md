@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`anamnesis setup` wires every installed agent by default.** A bare setup
+  used to wire Claude Code even when Codex was installed beside it, so the
+  memory held a waiting handoff that the next agent never received. Setup now
+  detects launchers on `PATH` and harness configuration already in the project,
+  and plans hooks and MCP registration for each one. Repeated `--agent` flags
+  still override detection, and a machine where no harness is visible keeps
+  the original Claude Code default
 - **A prompt is answered with no model running.** Recall at prompt time needed
   an embedder, and without one it said nothing — in a setup this system
   supports, and whenever a local model was down. Now a server with no embedder,
