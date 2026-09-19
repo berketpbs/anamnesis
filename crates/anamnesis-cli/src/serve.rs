@@ -109,10 +109,14 @@ pub fn cmd_serve(
     // The same opt-in embedder the MCP server builds, on the same terms. Without
     // one here, the vector stream covered only the pages an agent wrote through
     // MCP — not a single session summary, and nothing anybody edited by hand.
+    let mut initial_embedding_failure = None;
     let embedder = embedder_for(
         &anamnesis_llm::EmbedConfig::from_vars(crate::settings::var),
         &data.models(),
-        |said| tracing::warn!("{said}"),
+        |said| {
+            tracing::warn!("{said}");
+            initial_embedding_failure = Some(said.to_owned());
+        },
     )?;
     // Watched, so `status` can say what the model answered when it did not
     // answer with a page.
@@ -185,7 +189,8 @@ pub fn cmd_serve(
             .with_raw(Some(raw))
             .with_llm(settings)
             .with_auth(auth)
-            .with_embedder(embedder),
+            .with_embedder(embedder)
+            .with_initial_embedding_failure(initial_embedding_failure.as_deref()),
         options,
     ));
 

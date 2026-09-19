@@ -104,7 +104,7 @@ impl LastFailure {
         self.0.lock().clone()
     }
 
-    fn set(&self, failure: Option<ModelFailure>) {
+    pub(crate) fn set(&self, failure: Option<ModelFailure>) {
         *self.0.lock() = failure;
     }
 }

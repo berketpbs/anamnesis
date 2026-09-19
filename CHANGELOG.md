@@ -177,6 +177,12 @@ before its binary keeps working.
 
 
 ### Fixed
+- **`status` reports a hosted embedder that failed during startup.** The first
+  connection attempt happens before the server's failure watcher exists, so a
+  server that continued with its reconnecting embedder exposed
+  `embedding_failure: null` until another embedding request failed. The startup
+  refusal now seeds that watcher and a later successful request still clears it
+
 - **A run whose first planting page was written by counting stops there.** The
   check before a run asks each model one small question, and a model out of
   quota can still answer it: on 2026-09-17 `key check` said every model
