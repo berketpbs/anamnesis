@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A prompt is answered with no model running.** Recall at prompt time needed
+  an embedder, and without one it said nothing — in a setup this system
+  supports, and whenever a local model was down. Now a server with no embedder,
+  or one whose embedder fails on this prompt, answers from the words the prompt
+  names. Each word is weighed by how few pages carry it. A page is offered when
+  it carries at least half of what the prompt names, counting words the project
+  has never written against it. A session summary is offered only through a
+  name it carries (a file, a command, a version), because its other words are
+  the conversation's own. Over 201 real prompts on this project's pages it
+  gave a block 8 times, where the cosine gate gives one 184 times. Asked of a
+  project they were not about, 213 prompts got none. It cannot see a
+  paraphrase, so a server with an embedder keeps the cosine gate. `[recall]
+  by_name = false` turns it off, and `min_coverage` sets the share
 - **`anamnesis eval --gate` measures whether recall keeps quiet, with no
   labels.** Recall at prompt time has to say nothing when the project has
   nothing to say, and that half is usually judged by reading prompts and

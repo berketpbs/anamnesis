@@ -177,6 +177,23 @@ pub struct RecallConfig {
     /// which is why this is in the marker: another embedder is another number.
     /// See [`crate::brief`] and `Store::pages_like`.
     pub min_similarity: f64,
+    /// Answer from the words a prompt names when there is no embedder to
+    /// answer from, or it fails.
+    ///
+    /// Running no model is a setup this system supports, and until this
+    /// recall said nothing in it. Naming is quieter than the cosine gate — it
+    /// cannot see a paraphrase — and that is the trade it makes: over 201 real
+    /// prompts on this machine's own pages it gave a block 8 times where the
+    /// cosine gate gave one 184 times, and asked of a project they were not
+    /// about, 213 prompts got none. See `Store::pages_named_by`.
+    pub by_name: bool,
+    /// The share of what a prompt names that a page has to carry before it is
+    /// offered by name.
+    ///
+    /// Unlike `min_similarity` this is not a number about a model: it is a
+    /// share, from 0 to 1, and a page at 0.5 carries as much of what the prompt
+    /// names as the project is missing.
+    pub min_coverage: f64,
 }
 
 impl Default for RecallConfig {
@@ -186,6 +203,8 @@ impl Default for RecallConfig {
             pages: 3,
             snippet_chars: 240,
             min_similarity: 0.55,
+            by_name: true,
+            min_coverage: 0.5,
         }
     }
 }

@@ -620,8 +620,38 @@ similarity keeps the score, and sixteen prompts over two corpora with
 `nomic-embed-text` split on it: the best page for a prompt the project had
 nothing to say about never passed 0.542, and the best page for one it did
 never fell below 0.573. `[recall] min_similarity` sits between them, in the
-marker rather than in the code, because it is a number about one embedder. A
-server with no embedder says nothing rather than guessing.
+marker rather than in the code, because it is a number about one embedder.
+
+**Without a model, a prompt is answered from the words it names.** Running no
+model is a setup this system supports, and a server with no embedder — or one
+whose embedder failed on this prompt — answers by naming instead
+(`Store::pages_named_by`). Each word of the prompt is weighed by how few pages
+carry it, and a page is scored by the share of that weight it carries: a
+coverage from 0 to 1 that means the same thing on any prompt and any project,
+which a rank never does. Three rules carry most of it:
+
+- A word the project has **never written** counts against every page. That is
+  what keeps `how do I deploy the service to kubernetes` quiet on a project
+  whose pages say `deploy` and `service` everywhere and `kubernetes` nowhere.
+  Function words in English and Turkish are dropped first, so a page is not
+  held to `why` or `neden`.
+- A name — a path, an identifier, a version — is looked up as the phrase the
+  index stores it as, and a page it matches is not held to ordinary words the
+  project happens not to use. A name the project has never written is never
+  excused: that is somebody else's code.
+- A session summary is recalled only through a name it carries. Summaries are
+  written in the words of the conversation, so a page titled `nerede
+  kalmıştık` is the echo of a reply and matches every later one exactly. On
+  this machine's pages, 22 of 23 blocks for real prompts of three words or
+  more came from that echo.
+
+It is quieter than the cosine gate, and that is the trade: it cannot see a
+paraphrase. Over this machine's 201 real prompts it gave a block 8 times where
+the cosine gate gave one 184 times. Asked of a project they were not about —
+this project's prompts against the long-run eval's pages, and the reverse —
+213 prompts got none. `anamnesis eval --gate` asks every built-in suite's
+questions of every other suite's corpus, where every block is a false alarm by
+construction, and needs no labels to do it.
 
 Three more properties, each one a decision:
 
@@ -858,12 +888,16 @@ enabled = false
 interval_minutes = 60
 
 # What a prompt is handed back from this project's own pages. `min_similarity`
-# is a number about one embedder — see "Recall at prompt time" above.
+# is a number about one embedder; `by_name` answers from the prompt's words when
+# there is no embedder or it fails, and `min_coverage` is a share, not a number
+# about a model — see "Recall at prompt time" above.
 [recall]
 on_prompt = true
 pages = 3
 snippet_chars = 240
 min_similarity = 0.55
+by_name = true
+min_coverage = 0.5
 ```
 
 Unknown keys are an error, so a typo surfaces instead of quietly sending memory

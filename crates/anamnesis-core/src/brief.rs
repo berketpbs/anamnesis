@@ -29,7 +29,9 @@
 //!
 //! What decides whether there is anything to say at all is not here: it is the
 //! gate in `Store::pages_like`, which offers a page only when the prompt is
-//! close enough to it. This module is handed what passed. The first attempt
+//! close enough to it, or — with no embedder — the one in
+//! `Store::pages_named_by`, which offers a page only when the prompt names it.
+//! This module is handed what passed. The first attempt
 //! had no gate and used the ordinary fused query, and on this machine's own
 //! pages `what is the weather in Istanbul` came back with three pages and the
 //! same 0.333 at the top as a question about the project's centre — rank
