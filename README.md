@@ -40,6 +40,10 @@ Anamnesis is organized as a Rust workspace with modular crates:
   matching, link neighbours, and optional embeddings
   (`ANAMNESIS_EMBED_ENABLED=1`) — from a local model by default, or from any
   OpenAI-compatible endpoint with `ANAMNESIS_EMBED_PROVIDER=openai`
+- Recall at prompt time: each prompt is answered with the pages this project
+  already has on it. With an embedder, a page has to be close enough to the
+  prompt. Without one, the prompt has to name it. Either way, nothing is shown
+  when the project has nothing to say
 - `anamnesis install-hooks` wires Claude Code, Codex CLI, Gemini CLI, Cursor,
   and OpenCode — the same five lifecycle events, each in the file, spelling,
   payload, and reply format that harness uses. OpenCode takes a plugin module
@@ -79,6 +83,28 @@ Anamnesis is organized as a Rust workspace with modular crates:
   audit — behind the same tokens, read-only on purpose
 - [Running a server other machines reach](docs/REMOTE.md): tokens, TLS,
   per-operator handoffs, and a checklist
+
+## With No Model Running
+
+No LLM and no embedder is a supported setup, not a degraded one. Without a
+model, anamnesis still:
+
+- captures, sanitizes and transcribes every lifecycle event
+- writes a page and a handoff for each session by counting what happened:
+  files touched, commands run, what failed
+- retrieves over full text, entities and links (`memory_query`)
+- answers each prompt from the words it names. Over 201 real prompts on this
+  project's own pages that gave a block 8 times. Asked of a project they were
+  not about, 213 prompts got none
+- seeds a project's memory from its git history (`anamnesis bootstrap`)
+- measures all of the above (`anamnesis eval`, including `--gate`)
+
+What a model adds is reading. Consolidation can say *why* something was done,
+and recall can find a page the prompt describes in other words. Without a model,
+decisions and gotchas reach memory when the agent writes them with
+`memory_write_page`. See
+[docs/measurements/2026-09-19-recall-by-name.md](docs/measurements/2026-09-19-recall-by-name.md)
+for where recall by name stops.
 
 ## Not Built Yet
 
