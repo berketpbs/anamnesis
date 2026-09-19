@@ -41,11 +41,11 @@ mod sweep;
 mod workstream;
 
 pub use improve::{Filed, ProjectRow, StoredProposal};
+pub use named::Naming;
 pub use ops::{
     EmbedFailure, EmbedFault, OpenSession, SessionSummary, SummarySource, new_handoff,
     new_observation, new_session,
 };
-pub use named::Naming;
 pub use purge::Purged;
 // `StreamBreakdown` travels with `PageHit` because `Store::query_streams` is
 // public and returns one: without this a caller outside the crate can call the
