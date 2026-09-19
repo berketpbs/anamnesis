@@ -353,6 +353,15 @@ impl Store {
             return Ok(Vec::new());
         }
 
+        self.hits_for(standing)
+    }
+
+    /// Scored pages as hits, in the order given, leaving out any that is gone.
+    ///
+    /// The page rows are loaded in one query after the connection used to
+    /// score them has been given back — see [`Store::pages_like`] on why that
+    /// order is not a choice.
+    pub(crate) fn hits_for(&self, standing: Vec<(PageId, f64)>) -> Result<Vec<PageHit>> {
         let ids: Vec<PageId> = standing.iter().map(|(id, _)| *id).collect();
         let page_rows = self.load_page_rows(&ids)?;
         Ok(standing

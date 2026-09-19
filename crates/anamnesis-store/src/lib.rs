@@ -30,6 +30,7 @@ mod audit;
 mod convert;
 mod improve;
 mod migrations;
+mod named;
 mod ops;
 mod purge;
 mod query;
@@ -40,6 +41,7 @@ mod sweep;
 mod workstream;
 
 pub use improve::{Filed, ProjectRow, StoredProposal};
+pub use named::Naming;
 pub use ops::{
     EmbedFailure, EmbedFault, OpenSession, SessionSummary, SummarySource, new_handoff,
     new_observation, new_session,
