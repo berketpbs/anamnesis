@@ -381,9 +381,12 @@ projects are two sources — and a canonical page in a five-page global scope
 should not outrank one in a five-hundred-page project merely for having less
 competition. Ties go to the project, which is the more specific answer.
 
-Tier is a bounded signal applied *after* candidates are generated, never an
-independent retriever: otherwise a targeted search for something said once in
-one session would be buried under durable pages that merely outrank it.
+Tier is metadata carried with each hit; it is not currently a ranking signal.
+The post-fusion multiplier rewards the page namespace, canonical status and
+pinned status, while tier remains available to explain or filter a result.
+Keeping that distinction explicit matters: a targeted search for something
+said once in one session must not be silently buried under durable pages merely
+because the page has a different tier.
 
 The numbers fusion is built from live in `anamnesis_core::retrieval::Tuning`,
 and since 2026-08-29 they are measured rather than argued (see **Evaluation**):
