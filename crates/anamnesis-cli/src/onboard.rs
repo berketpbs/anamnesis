@@ -20,6 +20,8 @@
 //! "done" when the command it stands for would change nothing, asked with the
 //! same inputs that command uses.
 
+use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use anamnesis_core::datadir::DataDir;
@@ -98,6 +100,8 @@ struct Step {
 pub fn cmd_setup(options: Options, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let scope = resolve_scope(&cwd)?;
+    let (agents, detected) = setup_agents(&options.agents, &scope.root);
+    let options = Options { agents, ..options };
     let data = DataDir::resolve(data_dir.clone())?;
     let binary = crate::binary::stable_path()?;
     let server = options
@@ -107,6 +111,12 @@ pub fn cmd_setup(options: Options, data_dir: Option<PathBuf>) -> anyhow::Result<
 
     println!("🧭 anamnesis setup — {}", scope.scope);
     println!("   {}", scope.root.display());
+    if detected {
+        println!(
+            "   agents: {} (detected; use --agent to override)",
+            options.agents.join(", ")
+        );
+    }
     println!();
     service::describe_readiness(
         &service::Launch::new(binary.clone(), data_dir.as_deref(), options.port),
@@ -246,6 +256,126 @@ pub fn cmd_setup(options: Options, data_dir: Option<PathBuf>) -> anyhow::Result<
         println!("  Nothing to do: this project is wired.");
     }
     Ok(())
+}
+
+/// Harnesses a bare `setup` should wire.
+///
+/// An explicit list is an override. Without one, setup follows the harnesses
+/// this machine can actually start, plus any whose project configuration
+/// already exists. That keeps the one-command promise across agent switches
+/// without leaving configuration directories for tools nobody installed. A
+/// machine where neither fact is visible keeps the original Claude Code
+/// default.
+fn setup_agents(requested: &[String], root: &Path) -> (Vec<String>, bool) {
+    let path = std::env::var_os("PATH");
+    setup_agents_on_path(requested, root, path.as_deref(), &executable_extensions())
+}
+
+/// The testable half of detection: the caller supplies the executable search
+/// path rather than changing the process environment shared by every test.
+fn setup_agents_on_path(
+    requested: &[String],
+    root: &Path,
+    path: Option<&OsStr>,
+    extensions: &[OsString],
+) -> (Vec<String>, bool) {
+    if !requested.is_empty() {
+        return (deduplicate(requested.iter().cloned()), false);
+    }
+
+    let mut detected = hooks::HARNESSES
+        .iter()
+        .map(|harness| harness.agent)
+        .chain(std::iter::once("opencode"))
+        .filter(|agent| {
+            configured_for(agent, root)
+                || crate::run::program_for(agent)
+                    .is_some_and(|program| program_on_path(program, path, extensions))
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+
+    if detected.is_empty() {
+        detected.push("claude-code".to_owned());
+    }
+    (detected, true)
+}
+
+/// Preserve the order the person gave while avoiding duplicate work and
+/// duplicate report lines.
+fn deduplicate(agents: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    agents
+        .into_iter()
+        .filter(|agent| seen.insert(agent.clone()))
+        .collect()
+}
+
+/// Whether this project already carries the file a harness reads.
+fn configured_for(agent: &str, root: &Path) -> bool {
+    if agent == "opencode" {
+        return opencode::plugin_path(root).is_file();
+    }
+    hooks::harness(agent)
+        .is_some_and(|harness| hooks::default_settings_path(&harness, root).is_file())
+        || mcp_config::target(agent)
+            .is_some_and(|target| mcp_config::config_path(&target, root).is_file())
+}
+
+/// Find a launcher without running it. Starting an agent to ask whether it is
+/// installed can prompt for login or open a UI, neither of which belongs in a
+/// setup dry run.
+fn program_on_path(program: &str, path: Option<&OsStr>, extensions: &[OsString]) -> bool {
+    let Some(path) = path else {
+        return false;
+    };
+    std::env::split_paths(path).any(|directory| {
+        let candidate = directory.join(program);
+        executable_file(&candidate)
+            || (candidate.extension().is_none()
+                && extensions.iter().any(|extension| {
+                    let mut name = candidate.as_os_str().to_os_string();
+                    name.push(extension);
+                    executable_file(Path::new(&name))
+                }))
+    })
+}
+
+#[cfg(unix)]
+fn executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
+fn executable_extensions() -> Vec<OsString> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("PATHEXT")
+            .map(|value| {
+                value
+                    .to_string_lossy()
+                    .split(';')
+                    .filter(|extension| !extension.is_empty())
+                    .map(OsString::from)
+                    .collect()
+            })
+            .filter(|extensions: &Vec<OsString>| !extensions.is_empty())
+            .unwrap_or_else(|| {
+                [".COM", ".EXE", ".BAT", ".CMD"]
+                    .map(OsString::from)
+                    .to_vec()
+            })
+    }
+
+    #[cfg(not(windows))]
+    Vec::new()
 }
 
 /// Where every part of the wiring stands, asked the way each command would.
@@ -519,6 +649,93 @@ mod tests {
 
     const BINARY: &str = "C:/tools/anamnesis.exe";
     const SERVER: &str = "http://127.0.0.1:8080";
+
+    fn make_launcher(directory: &Path, name: &str) {
+        #[cfg(windows)]
+        let path = directory.join(format!("{name}.EXE"));
+        #[cfg(not(windows))]
+        let path = directory.join(name);
+
+        std::fs::write(&path, "test launcher").expect("launcher");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(path, permissions).expect("executable");
+        }
+    }
+
+    #[test]
+    fn path_lookup_finds_launchers_without_running_them() {
+        let bin = tempfile::tempdir().expect("bin");
+        make_launcher(bin.path(), "codex");
+        let path = std::env::join_paths([bin.path()]).expect("PATH");
+        let extensions = if cfg!(windows) {
+            vec![OsString::from(".EXE")]
+        } else {
+            Vec::new()
+        };
+
+        assert!(program_on_path("codex", Some(&path), &extensions));
+        assert!(!program_on_path("claude", Some(&path), &extensions));
+    }
+
+    #[test]
+    fn a_bare_setup_selects_every_launcher_it_finds() {
+        let root = tempfile::tempdir().expect("root");
+        let bin = tempfile::tempdir().expect("bin");
+        make_launcher(bin.path(), "claude");
+        make_launcher(bin.path(), "codex");
+        let path = std::env::join_paths([bin.path()]).expect("PATH");
+        let extensions = if cfg!(windows) {
+            vec![OsString::from(".EXE")]
+        } else {
+            Vec::new()
+        };
+
+        let (agents, detected) = setup_agents_on_path(&[], root.path(), Some(&path), &extensions);
+
+        assert!(detected);
+        assert_eq!(agents, ["claude-code", "codex"]);
+    }
+
+    #[test]
+    fn a_bare_setup_keeps_the_original_default_when_nothing_is_visible() {
+        let root = tempfile::tempdir().expect("root");
+
+        let (agents, detected) = setup_agents_on_path(&[], root.path(), None, &[]);
+
+        assert!(detected);
+        assert_eq!(agents, ["claude-code"]);
+    }
+
+    #[test]
+    fn an_existing_project_configuration_counts_as_detected() {
+        let root = tempfile::tempdir().expect("root");
+        let harness = hooks::harness("codex").expect("codex");
+        let settings = hooks::default_settings_path(&harness, root.path());
+        std::fs::create_dir_all(settings.parent().expect("parent")).expect("directory");
+        std::fs::write(settings, "{}").expect("settings");
+
+        assert!(configured_for("codex", root.path()));
+        assert!(!configured_for("gemini-cli", root.path()));
+    }
+
+    #[test]
+    fn explicit_agents_override_detection_and_duplicates_are_removed() {
+        let root = tempfile::tempdir().expect("root");
+        let requested = vec![
+            "codex".to_owned(),
+            "claude-code".to_owned(),
+            "codex".to_owned(),
+        ];
+
+        let (agents, detected) = setup_agents(&requested, root.path());
+
+        assert!(!detected);
+        assert_eq!(agents, ["codex", "claude-code"]);
+    }
 
     /// A project with nothing in it is four things to do, and the line for
     /// each names the file it will touch.

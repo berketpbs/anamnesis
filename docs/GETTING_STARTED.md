@@ -139,10 +139,14 @@ server, so the last thing it says is whether an event would be recorded. A
 step is only ever marked done when the command behind it would change nothing,
 so running `setup` again is how to check a project later.
 
-`--agent codex` (repeatable) wires another harness, `--no-service` leaves the
-service manager alone, `--no-seed` leaves an empty memory empty. A model is not
-something `setup` configures, since it needs a key; the `Model:` line it prints
-says what the server would use, and step 2 below is how to change it.
+With no `--agent`, setup detects the harness executables on `PATH` and harness
+configuration already present in the project. On a machine with Claude Code and
+Codex installed, the same invocation wires both. `--agent codex` is repeatable
+and overrides detection when only named harnesses should be wired.
+`--no-service` leaves the service manager alone, and `--no-seed` leaves an empty
+memory empty. A model is not something `setup` configures, since it needs a key;
+the `Model:` line it prints says what the server would use, and step 2 below is
+how to change it.
 
 The rest of this section is the same ground one command at a time.
 
