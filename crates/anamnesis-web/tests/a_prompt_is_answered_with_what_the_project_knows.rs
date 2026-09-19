@@ -308,6 +308,25 @@ fn a_notification_the_harness_submitted_is_not_asked_about() {
     assert!(!body.is_empty(), "a person's question should be answered");
 }
 
+/// A reply too short to be about anything is not asked about, however close
+/// the embedder puts it: with the gate open, `log it` is offered nothing and
+/// `log it please` is offered the page. A project that wants short prompts
+/// asked about says so in the marker.
+#[test]
+fn a_reply_too_short_to_be_about_anything_is_not_asked_about() {
+    let open = format!("{MARKER}\n[recall]\nmin_similarity = 0.0\n");
+    let (status, body) = recall(&open, "log it", true);
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.is_empty(), "{body}");
+
+    let (_, body) = recall(&open, "log it please", true);
+    assert!(body.contains("notes/logging.md"), "{body}");
+
+    let short = format!("{MARKER}\n[recall]\nmin_similarity = 0.0\nmin_words = 1\n");
+    let (_, body) = recall(&short, "log it", true);
+    assert!(body.contains("notes/logging.md"), "{body}");
+}
+
 /// An empty question is not a question. Every harness sends this event; not
 /// every one of them fills the field.
 #[test]
