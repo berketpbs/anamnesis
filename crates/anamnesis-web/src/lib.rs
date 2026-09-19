@@ -224,6 +224,25 @@ impl AppState {
         });
         self
     }
+
+    /// Remember that the configured embedder already failed while it was built.
+    ///
+    /// Hosted embedders make one connection attempt before the web state exists.
+    /// When that attempt fails, the reconnecting embedder is still kept so that
+    /// capture can start. Seed the same watcher used by later requests so
+    /// `/whoami` does not call that first refusal healthy.
+    pub fn with_initial_embedding_failure(self, message: Option<&str>) -> Self {
+        if self.embedder.is_some()
+            && let Some(message) = message
+        {
+            self.embedding_failure
+                .set(Some(answering::ModelFailure::from_embedding(
+                    message,
+                    Timestamp::now(),
+                )));
+        }
+        self
+    }
 }
 
 /// Run one pass of a background loop on its own task, so that a panic ends the
@@ -3599,8 +3618,8 @@ mod tests {
     }
 
     /// The same for the embedder: an Ollama that has not started is named in
-    /// `/whoami` from the first vector it did not return, and forgotten at the
-    /// first one it does.
+    /// `/whoami`, including when its refusal came before the web state existed,
+    /// and forgotten at the first vector it does return.
     #[tokio::test]
     async fn whoami_says_what_the_embedder_answered_until_it_answers() {
         struct Switched(std::sync::atomic::AtomicBool);
@@ -3643,6 +3662,15 @@ mod tests {
             whoami(state.clone()).await["embedding_failure"],
             serde_json::Value::Null,
             "nothing asked yet"
+        );
+
+        let state = state.with_initial_embedding_failure(Some(
+            "http://127.0.0.1:11434 did not answer during startup",
+        ));
+        assert_eq!(
+            whoami(state.clone()).await["embedding_failure"]["reason"],
+            "failed: http://127.0.0.1:11434 did not answer during startup",
+            "the connection attempt made before AppState is still visible"
         );
 
         let embedder = state.embedder.clone().expect("an embedder");
