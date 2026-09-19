@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`anamnesis eval --gate` measures whether recall keeps quiet, with no
+  labels.** Recall at prompt time has to say nothing when the project has
+  nothing to say, and that half is usually judged by reading prompts and
+  labelling them by hand. The built-in suites are four unrelated systems, so a
+  question written for one has no answer in the others. Asked there, every
+  block it gets is a false alarm. `--gate` asks every suite's questions of
+  every corpus and prints both halves: how often a corpus answered its own
+  questions and led with the right page, and how often it answered questions
+  it could not. Recall by name gave 1 false alarm in 171. The same count runs in
+  CI as a test, so a change that makes recall chatty fails there.
+
 ### Security
 - **A password typed on a command line was stored whole.** Redaction knew
   provider keys by their prefix and any other value by the `=` or `:` in front

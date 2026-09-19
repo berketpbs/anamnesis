@@ -36,6 +36,7 @@
 pub mod ablation;
 pub mod compare;
 pub mod corpus;
+pub mod gate;
 pub mod run;
 pub mod score;
 pub mod sensitivity;
@@ -46,6 +47,7 @@ pub mod sweep;
 pub use ablation::{Ablation, StreamScore, ablate, ablate_with};
 pub use compare::{Comparison, Moved, ScoreRow, compare, parse_variant};
 pub use corpus::Corpus;
+pub use gate::{GateRow, gate};
 pub use run::{
     CaseOutcome, CategoryScore, Report, Truncated, VectorCoverage, run, run_embedded, run_on,
 };

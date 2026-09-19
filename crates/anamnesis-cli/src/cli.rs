@@ -417,6 +417,17 @@ pub enum Commands {
         #[arg(long)]
         k_sensitivity: bool,
 
+        /// Ask every suite's questions of every other suite's corpus, through
+        /// recall by naming, and count the blocks that should not be there
+        ///
+        /// Recall at prompt time has to keep quiet when the project has
+        /// nothing to say, and that is usually measured by labelling prompts
+        /// by hand. Across unrelated corpora it needs no labels: a question
+        /// written for one has no answer in another, so every block there is
+        /// a false alarm. Needs at least two suites.
+        #[arg(long)]
+        gate: bool,
+
         /// Score what ships against a variant, and name every question that moved
         ///
         /// Takes `name=value` pairs — `--compare rrf_k=5,links=0.5`. The rule

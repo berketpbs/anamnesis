@@ -35,6 +35,9 @@ pub struct EvalOptions {
     pub sweep: bool,
     /// Score once per `rrf_k`, and say what moved.
     pub k_sensitivity: bool,
+    /// Ask each suite's questions of the others' corpora through recall by
+    /// naming, and count what should have stayed quiet.
+    pub gate: bool,
     /// Score what ships against a variant, as `name=value` pairs.
     pub compare: Option<String>,
     /// Score with the embedding stream switched on.
@@ -56,6 +59,7 @@ pub fn cmd_eval(
         streams,
         sweep,
         k_sensitivity,
+        gate,
         compare,
         embed,
         pages_from,
@@ -152,6 +156,27 @@ pub fn cmd_eval(
                 suites.len()
             );
         }
+        return Ok(());
+    }
+
+    if gate {
+        anyhow::ensure!(
+            suites.len() >= 2,
+            "--gate asks each suite's questions of the other suites' corpora, \
+             and needs at least two"
+        );
+        println!(
+            "Asking every question of every corpus, through recall by naming. \
+             Nothing here changes what ships."
+        );
+        println!();
+        let loaded: Vec<anamnesis_evals::Suite> =
+            suites.into_iter().map(|(_, suite)| suite).collect();
+        print_gate(&anamnesis_evals::gate(
+            &loaded,
+            &anamnesis_store::Naming::default(),
+            now,
+        )?);
         return Ok(());
     }
 
@@ -339,6 +364,36 @@ fn print_moves(heading: &str, moved: &[anamnesis_evals::Moved]) {
 /// The verdict is printed under the table rather than over it, because the
 /// table is the evidence and somebody reading a claim wants to have seen the
 /// numbers it is drawn from first.
+fn print_gate(rows: &[anamnesis_evals::GateRow]) {
+    println!(
+        "{:<14} {:>12} {:>14} {:>16}",
+        "corpus", "own: block", "block right", "others: block"
+    );
+    let (mut cross, mut cross_fired) = (0, 0);
+    for row in rows {
+        println!(
+            "{:<14} {:>5}/{:<3} {:>3.0}% {:>5}/{:<3} {:>3.0}% {:>6}/{:<4} {:>4.1}%",
+            row.corpus,
+            row.home_fired,
+            row.home,
+            row.home_rate() * 100.0,
+            row.home_right,
+            row.home_fired,
+            row.precision() * 100.0,
+            row.cross_fired,
+            row.cross,
+            row.cross_rate() * 100.0,
+        );
+        cross += row.cross;
+        cross_fired += row.cross_fired;
+    }
+    println!();
+    println!(
+        "{cross_fired} of {cross} questions asked of a corpus that cannot answer them got a \
+         block. Each one is a false alarm."
+    );
+}
+
 fn print_k_sensitivity(measured: &anamnesis_evals::KSensitivity, verbose: bool) {
     println!(
         "📏 {} — {} pages, {} questions",
