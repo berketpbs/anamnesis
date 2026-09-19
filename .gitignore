@@ -40,6 +40,7 @@ perf.data*
 # Sandbox marker (not project content)
 .ai-jail
 .claude/
+.codex/
 .slim/deepwork/
 crates/anamnesis-evals/runs/
 
