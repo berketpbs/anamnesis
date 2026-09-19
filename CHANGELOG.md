@@ -40,6 +40,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI as a test, so a change that makes recall chatty fails there.
 
 ### Fixed
+- **A Cursor session claims its handoff under its own name.** The hook
+  command asked the server for a handoff by `session_id` and `cwd`, read from
+  the payload itself, while capture read the same payload by the rules that
+  know Cursor names the session `conversation_id` and the directory
+  `workspace_roots`. Cursor sends neither of the first two on `sessionStart`,
+  so a Cursor session was recorded under its own name and then claimed its
+  handoff under an empty one: the handoff row pointed at a session id derived
+  from nothing — the same one for every Cursor session — and the audit entry
+  named nobody. Found by driving one project through Claude Code, Codex,
+  Gemini CLI and Cursor in turn with each one's own payloads. The hook now
+  asks by the same function capture reads with.
+
 - **A notification the harness submitted is not asked about.** A background
   task finishing reaches a Claude Code session as a prompt, through the same
   hook as a person's question, and the prompt hook sent it to `/recall` like
