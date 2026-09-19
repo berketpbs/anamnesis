@@ -359,6 +359,7 @@ fn run() -> anyhow::Result<()> {
             streams,
             sweep,
             k_sensitivity,
+            gate,
             compare,
             embed,
         } => {
@@ -370,6 +371,7 @@ fn run() -> anyhow::Result<()> {
                     streams,
                     sweep,
                     k_sensitivity,
+                    gate,
                     compare,
                     embed,
                     pages_from,
