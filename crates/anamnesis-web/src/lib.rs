@@ -935,8 +935,9 @@ async fn deliver_handoff(
 ///
 /// A prompt is one moment in a session, not hundreds, so this can afford a
 /// query where a tool-call hook could not. It still holds to the same bargain:
-/// a broken or slow embedder costs the search its vector stream, not the
-/// search, and any failure here costs the prompt its block and nothing else.
+/// a broken or slow embedder costs the prompt its closeness gate and leaves it
+/// the naming one, and any failure here costs the prompt its block and nothing
+/// else.
 async fn deliver_recall(
     State(state): State<AppState>,
     Extension(_identity): Extension<Identity>,
@@ -959,30 +960,42 @@ async fn deliver_recall(
             return Ok(String::new());
         }
 
-        // No embedder, no recall. The gate this depends on is how close the
-        // prompt and the page are, and the keyword streams cannot stand in:
-        // fused, they rank by position, so a prompt about nothing this project
-        // knows comes back with the same score at the top as a prompt about
-        // its centre — 0.333 for both, measured on this machine's 88 pages.
-        // `status` already says when the embedder is not returning vectors.
-        let Some(embedder) = state.embedder.as_ref() else {
-            return Ok(String::new());
-        };
-        let vector = match embedder.embed(&asked) {
-            Ok(vector) => vector,
-            Err(error) => {
-                tracing::warn!(%error, "recall embedding failed; this prompt gets no block");
-                return Ok(String::new());
+        // With an embedder, a page is offered when it is close enough to the
+        // prompt. Without one — none configured, or one that failed on this
+        // prompt — it is offered when the prompt names it. The fused query
+        // cannot stand in for either: it ranks by position, so a prompt about
+        // nothing this project knows comes back with the same score at the
+        // top as a prompt about its centre — 0.333 for both, measured on this
+        // machine's 88 pages. `status` already says when the embedder is not
+        // returning vectors.
+        let by_name = || -> Result<Vec<anamnesis_store::PageHit>, WebError> {
+            if !config.by_name {
+                return Ok(Vec::new());
             }
+            let naming = anamnesis_store::Naming {
+                min_coverage: config.min_coverage,
+                ..anamnesis_store::Naming::default()
+            };
+            Ok(state
+                .store
+                .pages_named_by(scope.project_id, &asked, config.pages, &naming)?)
         };
-
-        let hits = state.store.pages_like(
-            scope.project_id,
-            embedder.model(),
-            &vector,
-            config.pages,
-            config.min_similarity,
-        )?;
+        let hits = match state.embedder.as_ref() {
+            None => by_name()?,
+            Some(embedder) => match embedder.embed(&asked) {
+                Ok(vector) => state.store.pages_like(
+                    scope.project_id,
+                    embedder.model(),
+                    &vector,
+                    config.pages,
+                    config.min_similarity,
+                )?,
+                Err(error) => {
+                    tracing::warn!(%error, "recall embedding failed; answering this prompt by name");
+                    by_name()?
+                }
+            },
+        };
 
         let pages: Vec<anamnesis_core::brief::Recalled> = hits
             .into_iter()

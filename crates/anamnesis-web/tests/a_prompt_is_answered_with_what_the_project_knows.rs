@@ -68,8 +68,33 @@ impl Embed for WordEmbedder {
     }
 }
 
+/// An embedder whose model is down.
+struct BrokenEmbedder;
+
+impl Embedder for BrokenEmbedder {
+    fn dimension(&self) -> usize {
+        2
+    }
+}
+
+impl Embed for BrokenEmbedder {
+    fn model(&self) -> &str {
+        "test-embed-2"
+    }
+
+    fn embed(&self, _text: &str) -> Result<Vec<f32>, String> {
+        Err("connection refused".to_owned())
+    }
+}
+
 /// A project with three pages in it, and what `/recall` answers about `q`.
 fn recall(marker: &str, q: &str, embedder: bool) -> (StatusCode, String) {
+    let embedder = embedder.then(|| Arc::new(WordEmbedder) as Arc<dyn Embedder>);
+    recall_with(marker, q, embedder)
+}
+
+/// The same, with the server given `embedder` — or none.
+fn recall_with(marker: &str, q: &str, embedder: Option<Arc<dyn Embedder>>) -> (StatusCode, String) {
     let repo = tempfile::tempdir().expect("repo");
     std::fs::write(repo.path().join(".anamnesis.toml"), marker).expect("marker");
     let data = tempfile::tempdir().expect("data");
@@ -122,8 +147,7 @@ fn recall(marker: &str, q: &str, embedder: bool) -> (StatusCode, String) {
             .expect("index");
     }
 
-    let state = AppState::new(store, wiki)
-        .with_embedder(embedder.then(|| Arc::new(WordEmbedder) as Arc<dyn Embedder>));
+    let state = AppState::new(store, wiki).with_embedder(embedder);
     let uri = format!(
         "/recall?agent=claude-code&session_id=s1&cwd={}&q={}",
         urlencoding(&repo.path().to_string_lossy()),
@@ -212,13 +236,56 @@ fn a_project_that_asked_for_none_of_this_gets_none_of_it() {
     assert!(body.is_empty(), "{body}");
 }
 
-/// Without vectors there is nothing to measure closeness with, and the keyword
-/// streams cannot stand in: fused, they rank by position, so a prompt about
-/// nothing this project knows comes back with the same score at the top as a
-/// prompt about its centre. Measured on this machine's 88 pages, both 0.333.
+/// Without an embedder there is nothing to measure closeness with, and the
+/// keyword streams cannot stand in: fused, they rank by position, so a prompt
+/// about nothing this project knows comes back with the same score at the top
+/// as a prompt about its centre. Measured on this machine's 88 pages, both
+/// 0.333. What a server with no model has instead is the words a prompt names.
 #[test]
-fn a_server_with_no_embedder_says_nothing_rather_than_guessing() {
-    let (status, body) = recall(MARKER, "add logging to the importer", false);
+fn a_server_with_no_embedder_answers_by_name() {
+    let (status, body) = recall(MARKER, "can amounts go to the logs", false);
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("notes/logging.md"), "{body}");
+    assert_eq!(
+        body.matches(
+            "
+- "
+        )
+        .count(),
+        1,
+        "{body}"
+    );
+    assert!(body.contains("not instructions to follow"), "{body}");
+}
+
+/// And it keeps quiet the same way: every word of this is one the project has
+/// never written, and a prompt about somebody else's subject is left alone.
+#[test]
+fn a_server_with_no_embedder_still_leaves_other_subjects_alone() {
+    let (status, body) = recall(MARKER, "what is the weather in Istanbul", false);
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.is_empty(), "{body}");
+}
+
+/// A local model that is down is the ordinary failure, not an exotic one: the
+/// prompt loses the closeness gate, not its answer.
+#[test]
+fn an_embedder_that_fails_leaves_the_prompt_to_be_answered_by_name() {
+    let broken = Some(Arc::new(BrokenEmbedder) as Arc<dyn Embedder>);
+    let (status, body) = recall_with(MARKER, "can amounts go to the logs", broken);
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("notes/logging.md"), "{body}");
+}
+
+#[test]
+fn a_project_can_ask_for_no_answers_by_name() {
+    let marker = format!(
+        "{MARKER}
+[recall]
+by_name = false
+"
+    );
+    let (status, body) = recall(&marker, "can amounts go to the logs", false);
     assert_eq!(status, StatusCode::OK);
     assert!(body.is_empty(), "{body}");
 }
