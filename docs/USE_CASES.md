@@ -1,5 +1,9 @@
 # Anamnesis Use Cases
 
+For current evidence and execution priorities, see [READINESS.md](READINESS.md).
+The flows below describe supported mechanisms and intended outcomes; they do
+not establish lossless capture or measured productivity gains.
+
 ## 1. Single Developer, Single Agent
 
 **Scenario**: Developer using Claude Code to work on a project.
@@ -17,7 +21,8 @@ Session 2: Claude Code resumes
   → Continues without re-explanation
 ```
 
-**Value**: No context loss between sessions. Faster problem-solving.
+**Value**: Recover recorded decisions and reduce repeated explanation. Summaries
+and retrieval are bounded; important context can still be missed.
 
 ## 2. Developer Switching Agents
 
@@ -30,10 +35,10 @@ Session 1: Claude Code analyzes schema design
   → Writes decision page to wiki
   → Session ends with handoff
   
-Session 2: Codex starts via ai-memory run codex
+Session 2: Codex starts via anamnesis run codex
   → Receives handoff summary
   → Knows postgres was chosen and why
-  → Implements with full context
+  → Reads the relevant pages before implementing
 ```
 
 **Value**: Cross-agent continuity. Preserves architectural decisions.
@@ -73,33 +78,25 @@ Opens <data_dir>/wiki in Obsidian or any editor
 ```
 
 The wiki is plain markdown in a git repository, so any editor works. There is
-no built-in browser UI.
+also a read-only browser at `/ui` when enabled on the server.
 
 **Value**: Faster onboarding. Centralized knowledge base.
 
-## 5. LLM-Powered Auto-Improvement
+## 5. Consolidation and Auto-Improvement
 
-**Scenario**: System learns from sessions and improves documentation.
+**Scenario**: Sessions leave reusable knowledge as well as a session account.
 
-**Flow**:
-```
-Session ends
-  → Consolidation runs                          [implemented]
-  → LLM reads the session's observations        [implemented]
-  → Generates a summary page and a handoff      [implemented]
-  → Sweeps and updates other wiki entries       [not implemented]
+Model-based consolidation can write a session page, a handoff, and bounded
+additional durable pages such as decisions and gotchas. Without a model, the
+deterministic fallback records what happened without claiming to have extracted
+those lessons.
 
-Developer reviews changes
-  → Approves or rejects suggestions             [not implemented]
-```
+Separately, rule-based auto-improve proposes promotions and missing link targets
+from recorded signals. `require_approval` is honored and defaults to true;
+`anamnesis improve` exposes proposals for review. This is not autonomous
+model-based rewriting of the entire wiki.
 
-Consolidation writes one page for the session that just ended, and commits it.
-It never rewrites another page, and there is no approval queue: the
-`require_approval` setting is parsed and unused. A model is optional
-throughout — without one the page is compiled by counting what happened, and
-says so in its footer.
-
-**Value**: Living documentation. Stays in sync with reality.
+**Value**: Preserve reusable lessons while keeping maintenance reviewable.
 
 ## 6. Multi-Project Context Sharing
 
@@ -142,14 +139,14 @@ Attempt 1: Claude Code analyzes logs
   → Documents failed hypothesis
   → Session ends
   
-Attempt 2: Continue with full context
+Attempt 2: Continue with the recorded context
   → Agent reads what was tried
   → Knows why it failed
   → Tries different approach
   
 Attempt 3: Finally finds root cause
   → Writes solution to wiki
-  → Future devs have complete debug story
+  → Future developers can inspect the recorded debugging history
 ```
 
 **Value**: Better debugging. Documented problem-solving process.
@@ -200,7 +197,8 @@ than a hopeful one.
       hooks; OpenCode through a plugin module, since it extends by module and
       has no stdout channel for a handoff to answer on
 - [x] `anamnesis run` / `continue` — start a harness with memory wired, and
-      refuse to start one whose session would not be recorded
+      check installed wiring and server reachability; client trust and actual
+      runtime execution still need verification
 
 ### Phase 3: LLM & Consolidation
 - [x] LLM provider abstraction (Anthropic Messages API)
@@ -227,7 +225,8 @@ than a hopeful one.
       browser
 
 ### Phase 5: Multi-Agent & DevOps
-- [x] Cross-harness workstreams
+- [x] Workstream primitives and MCP controls
+- [ ] Automatic workstream attribution through the complete cross-harness hook path
 - [x] CI on every push and pull request
 - [x] Managed session resume — `anamnesis continue` starts whichever harness
       this project last used
@@ -257,13 +256,16 @@ Reached:
 
 - ✅ Developer can capture decisions in memory
 - ✅ Developer can search and find relevant context
-- ✅ Switching agents preserves handoff context — five harnesses read the
-  same handoff, and `anamnesis continue` picks up the one that ran last
+- ✅ Handoff delivery mechanisms and integration tests exist;
+  `anamnesis continue` selects the harness that ran last
 - ✅ Project architecture decisions are documented
-- ✅ A session that would not be recorded does not start quietly — the
-  failure that cost this project two afternoons now stops the launch
+- ✅ Managed launches detect missing wiring and an unreachable server
 
 Not yet demonstrated:
+
+- ? Fresh Claude ? Codex ? Claude continuity in this installation after the
+  current repairs, including actual hook execution and preservation of decisions
+- ? Improved task outcomes across repeated paired agent runs
 
 - ⬜ Team shares knowledge without duplication — everything it needs exists
   now (tokens, per-operator handoffs, an audit log, a JSON API, a guide for

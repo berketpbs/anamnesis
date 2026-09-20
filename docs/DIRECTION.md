@@ -1,5 +1,10 @@
 # Direction
 
+> Current execution plan: [Readiness and next work, 2026-09-20](READINESS.md).
+> The discussion below preserves the dated measurements and subsequent
+> experiments that led here. Its original feature counts and descriptions of
+> missing capabilities are historical, not the current support matrix.
+
 What this project is betting on, what a comparable project is betting on
 instead, and the order the next work should happen in.
 
