@@ -282,6 +282,9 @@ pub struct ReadPageRequest {
     /// Project-relative path, exactly as `memory_query` reported it, e.g.
     /// `decisions/0001-storage.md`.
     pub path: String,
+    /// Copy the hit's `global` flag: true reads only the workspace's shared
+    /// scope, false only this project. Omit for legacy project-first lookup.
+    pub global: Option<bool>,
 }
 
 /// Response for [`AnamnesisMcp::memory_read_page`].
@@ -508,12 +511,12 @@ impl AnamnesisMcp {
     /// sentences, and the usual repair — querying again with narrower words to
     /// shake loose a better snippet — asks retrieval to do a job reading does.
     ///
-    /// The page is looked up in this project first and in the workspace's
-    /// shared `_global` scope second, so a path copied straight out of a
-    /// `memory_query` hit resolves whichever scope it came from.
+    /// Copy both `path` and `global` from the query hit to read that exact
+    /// scope, even when the other scope holds a page at the same path.
+    /// Omitting `global` preserves the legacy project-first lookup.
     #[tool(
         name = "memory_read_page",
-        description = "Read one page of the memory wiki in full, by the path memory_query reported."
+        description = "Read one page of the memory wiki in full. Copy both path and global from the memory_query hit to select the same page."
     )]
     pub async fn memory_read_page(
         &self,
@@ -588,7 +591,7 @@ impl ServerHandler for AnamnesisMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "Long-term memory for this project. Call memory_query before starting work that \
              might already have prior decisions, gotchas, or context recorded. It returns \
-             snippets: when a hit looks like the answer, call memory_read_page with its path \
+             snippets: when a hit looks like the answer, call memory_read_page with its path and global flag \
              to read the page in full rather than querying again with different words — a \
              snippet is enough to choose a page and not enough to act on one. Call \
              memory_write_page to record durable knowledge — decisions, gotchas, procedures — \
@@ -812,13 +815,26 @@ impl AnamnesisMcp {
     fn read_page(&self, request: ReadPageRequest) -> Result<ReadPageResponse, McpError> {
         let path = PagePath::parse(&request.path)?;
 
-        // This project first, the shared scope second. A path arrives here
-        // copied out of a `memory_query` hit, and that hit may have come from
-        // either — the `global` flag tells the caller which, but nothing
-        // requires the caller to hand it back.
+        // An explicit scope must not fall through: a query may have found the
+        // shared policy while this project holds a different page at its path.
+        // Keep project-first fallback only for callers of the original API.
         let global = self.global_scope();
-        let (parsed, scope_project_id, from_global) =
-            match self.read_from_scope(&self.scope.scope, &path)? {
+        let (parsed, scope_project_id, from_global) = match request.global {
+            Some(from_global) => {
+                let scope = if from_global { &global } else { &self.scope };
+                let parsed = self.read_from_scope(&scope.scope, &path)?.ok_or_else(|| {
+                    McpError::Invalid(format!(
+                        "no page at {path} in {}",
+                        if from_global {
+                            "the workspace's shared scope"
+                        } else {
+                            "this project"
+                        }
+                    ))
+                })?;
+                (parsed, scope.project_id, from_global)
+            }
+            None => match self.read_from_scope(&self.scope.scope, &path)? {
                 Some(parsed) => (parsed, self.scope.project_id, false),
                 None => match self.read_from_scope(&global.scope, &path)? {
                     Some(parsed) => (parsed, global.project_id, true),
@@ -828,7 +844,8 @@ impl AnamnesisMcp {
                         )));
                     }
                 },
-            };
+            },
+        };
 
         // Reading a page is using it, which is the same thing the decay sweep
         // reads `access_count` to find out — so a page an agent opens and acts
@@ -1603,6 +1620,7 @@ mod tests {
         let page = server
             .read_page(ReadPageRequest {
                 path: "decisions/0001-storage.md".to_owned(),
+                global: None,
             })
             .expect("read");
 
@@ -1648,6 +1666,7 @@ mod tests {
         let page = server
             .read_page(ReadPageRequest {
                 path: "gotchas/stale.md".to_owned(),
+                global: None,
             })
             .expect("read");
 
@@ -1682,6 +1701,7 @@ mod tests {
         let read = server
             .read_page(ReadPageRequest {
                 path: "_rules/style.md".to_owned(),
+                global: None,
             })
             .expect("the shared scope is searched after this project");
 
@@ -1718,11 +1738,139 @@ mod tests {
         let read = server
             .read_page(ReadPageRequest {
                 path: "_rules/style.md".to_owned(),
+                global: None,
             })
             .expect("read");
 
         assert!(!read.global);
         assert_eq!(read.title, "Local style");
+    }
+
+    #[test]
+    fn a_shared_query_hit_reads_the_shared_page_even_when_a_local_path_collides() {
+        let (_repo, _data, server) = harness();
+        let global = server.global_scope();
+        let path = PagePath::parse("_rules/style.md").expect("path");
+        let shared = anamnesis_wiki::page(
+            global.project_id,
+            path.clone(),
+            Frontmatter::new("Shared style", Vec::new()).expect("frontmatter"),
+            "Every project uses eighty columns.",
+        );
+        server
+            .wiki
+            .lock()
+            .write_page(&global.scope, &shared, "test")
+            .unwrap();
+        server
+            .store
+            .upsert_project(&global, Timestamp::now())
+            .unwrap();
+        server
+            .store
+            .index_page(global.project_id, &shared, &[], None, Timestamp::now())
+            .unwrap();
+        write_page(
+            &server,
+            path.as_str(),
+            "Local style",
+            "This project uses tabs.",
+        );
+
+        let found = server
+            .query(QueryRequest {
+                text: "eighty columns".to_owned(),
+                limit: None,
+                explain: None,
+            })
+            .unwrap();
+        let hit = found
+            .hits
+            .iter()
+            .find(|hit| hit.global)
+            .expect("shared hit");
+        let before = server
+            .store
+            .sweep_row(global.project_id, &path)
+            .unwrap()
+            .unwrap();
+        let local_before = server
+            .store
+            .sweep_row(server.scope.project_id, &path)
+            .unwrap()
+            .unwrap();
+        let read = server
+            .read_page(ReadPageRequest {
+                path: hit.path.clone(),
+                global: Some(hit.global),
+            })
+            .unwrap();
+        assert!(read.global);
+        assert!(read.body.contains("eighty columns"));
+        assert_eq!(
+            server
+                .store
+                .sweep_row(global.project_id, &path)
+                .unwrap()
+                .unwrap()
+                .facts
+                .access_count,
+            before.facts.access_count + 1
+        );
+        assert_eq!(
+            server
+                .store
+                .sweep_row(server.scope.project_id, &path)
+                .unwrap()
+                .unwrap()
+                .facts
+                .access_count,
+            local_before.facts.access_count,
+            "reading the shared page must not renew the local one"
+        );
+
+        let local = server
+            .read_page(ReadPageRequest {
+                path: path.to_string(),
+                global: Some(false),
+            })
+            .unwrap();
+        assert!(!local.global);
+        assert!(local.body.contains("tabs"));
+    }
+
+    #[test]
+    fn an_explicit_read_scope_never_substitutes_a_page_from_the_other_scope() {
+        let (_repo, _data, server) = harness();
+        write_page(&server, "notes/local.md", "Local", "Local content.");
+        let global = server.global_scope();
+        let shared = anamnesis_wiki::page(
+            global.project_id,
+            PagePath::parse("notes/shared.md").unwrap(),
+            Frontmatter::new("Shared", Vec::new()).unwrap(),
+            "Shared content.",
+        );
+        server
+            .wiki
+            .lock()
+            .write_page(&global.scope, &shared, "test")
+            .unwrap();
+        for (path, from_global, scope) in [
+            ("notes/local.md", true, "shared scope"),
+            ("notes/shared.md", false, "this project"),
+        ] {
+            let error = server
+                .read_page(ReadPageRequest {
+                    path: path.to_owned(),
+                    global: Some(from_global),
+                })
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(path) && error.contains(scope), "{error}");
+        }
+        let legacy: ReadPageRequest =
+            serde_json::from_value(serde_json::json!({"path": "notes/shared.md"})).unwrap();
+        assert!(server.read_page(legacy).unwrap().global);
     }
 
     /// Reading a page is using it, so it renews the page against the decay
@@ -1743,6 +1891,7 @@ mod tests {
         server
             .read_page(ReadPageRequest {
                 path: "notes/a.md".to_owned(),
+                global: None,
             })
             .expect("read");
 
@@ -1982,6 +2131,7 @@ mod tests {
         let error = server
             .read_page(ReadPageRequest {
                 path: "notes/absent.md".to_owned(),
+                global: None,
             })
             .expect_err("no such page");
         let message = error.to_string();
