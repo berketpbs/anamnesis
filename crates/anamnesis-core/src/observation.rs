@@ -94,7 +94,10 @@ impl EventKind {
     /// Whether this event only marks a boundary and carries no content worth
     /// consolidating. A session made only of these is closed without a page.
     pub fn is_boundary_only(&self) -> bool {
-        matches!(self, Self::SessionStart | Self::SessionEnd)
+        matches!(
+            self,
+            Self::SessionStart | Self::PreCompact | Self::PostCompact | Self::SessionEnd
+        )
     }
 
     /// Byte budget that applies to bodies of this kind.
@@ -344,6 +347,8 @@ mod tests {
     #[test]
     fn boundary_only_events_are_identified() {
         assert!(EventKind::SessionStart.is_boundary_only());
+        assert!(EventKind::PreCompact.is_boundary_only());
+        assert!(EventKind::PostCompact.is_boundary_only());
         assert!(EventKind::SessionEnd.is_boundary_only());
         assert!(!EventKind::UserPrompt.is_boundary_only());
     }
