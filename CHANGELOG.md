@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Open sessions are checkpointed before context compaction.** A
+  `PreCompact` event now refreshes the session's deterministic wiki page in the
+  background without closing the session, creating a handoff, or waiting on a
+  model. Repeated compactions and the eventual `SessionEnd` replace that same
+  page, so checkpoints do not accumulate as duplicate memories.
+
 - **The long-run eval records what recall showed each session.** The first
   run with recall tied the control arm 2/5 to 2/5, and taken apart by hand it
   said three different things: recall had put the page each probe's knowledge

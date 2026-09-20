@@ -87,10 +87,12 @@ continuity and measured usefulness are the next acceptance criteria.
    events, preserve a decision and a rejected approach, and deliver the expected
    scoped page/handoff. Synthetic integration tests and probes are necessary
    checks, not substitutes for this trace. Test restart and queue replay too.
-2. **Protect work before the session ends.** Design a bounded, idempotent
-   compaction checkpoint. Preserve the nonblocking capture budget, raw replay
-   and deterministic fallback. Define when a newer checkpoint supersedes a
-   prior one and how a final summary avoids duplicates before implementing it.
+2. **Protect work before the session ends.** `PreCompact` now schedules a
+   deterministic checkpoint after capture: it keeps the session open, leaves
+   no handoff, and rewrites the one session path that finalization later
+   replaces. Validate it against real client compaction and a server restart;
+   decide from that evidence whether model-written checkpoints add enough over
+   the deterministic page to justify another provider call.
 3. **Prove useful memory.** Repeat paired long-run experiments, recording capture,
    consolidation, recall exposure and fact use separately. Diagnose failed
    paraphrases and missing fix/outcome pairs. Change one retrieval or extraction

@@ -323,10 +323,18 @@ it added is visible as an observation rather than dropped — at the cost that
 `notification` is where unrecognised things accumulate, so it is the kind to
 look at when a harness seems to be reporting less than it should.
 
-**Only `session-start` and `session-end` are boundaries.** Consolidation asks
-whether a session carried anything else before writing a page, and a session
-that opened and closed with nothing between them leaves none: a wiki full of
-empty session stubs makes every later search worse.
+**Session and compaction markers are boundaries.** Consolidation asks whether
+a session carried anything besides `session-start`, `pre-compact`,
+`post-compact`, and `session-end` before writing a page. A lifecycle-only
+session leaves none: a wiki full of empty session stubs makes every later
+search worse.
+
+`pre-compact` has one additional effect after its observation is durable: the
+server refreshes the open session's deterministic wiki page in the background.
+It does not close the session, record final-summary provenance, or leave a
+handoff. Another compaction and the eventual `session-end` replace the same
+page; a delayed checkpoint sees the closed session and cannot overwrite its
+final summary.
 
 ### Consolidation
 
