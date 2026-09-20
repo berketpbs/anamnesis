@@ -52,6 +52,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI as a test, so a change that makes recall chatty fails there.
 
 ### Fixed
+- **Reading a shared query hit preserves its scope.** `memory_read_page` now
+  accepts the `global` flag returned by `memory_query`. When both the project
+  and shared wiki hold the same path, the caller can read the page it found
+  instead of silently receiving the project's different page. Explicit scope
+  reads never fall back; callers omitting the flag retain project-first lookup.
+
 - **Recall answers where the harness can hear it, under the event it
   answers.** 1.2.1 said the prompt hook asks `/recall` under whatever each
   harness calls a prompt, and prints the answer where the harness injects it.
