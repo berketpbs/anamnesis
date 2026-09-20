@@ -31,6 +31,7 @@ const HANDOFF_TIMEOUT_MS = 2000;
 
 export const Anamnesis = async ({ directory, worktree }) => {
   const cwd = worktree ?? directory ?? process.cwd();
+  const server = process.env.ANAMNESIS_RUN_SERVER?.trim() || SERVER;
 
   // Sessions this plugin has already opened, and already handed a note to.
   // OpenCode has no "session started" hook a plugin reliably receives, so the
@@ -47,7 +48,7 @@ export const Anamnesis = async ({ directory, worktree }) => {
   const send = async (payload) => {
     try {
       const child = Bun.spawn(
-        [BINARY, "hook", "--agent", "opencode", "--server", SERVER],
+        [BINARY, "hook", "--agent", "opencode", "--server", server],
         { stdin: "pipe", stdout: "ignore", stderr: "ignore" },
       );
       child.stdin.write(JSON.stringify(payload));
@@ -75,7 +76,7 @@ export const Anamnesis = async ({ directory, worktree }) => {
   const claim = async (sessionID) => {
     try {
       const url =
-        `${SERVER}/handoff?agent=opencode` +
+        `${server}/handoff?agent=opencode` +
         `&session_id=${encodeURIComponent(sessionID)}` +
         `&cwd=${encodeURIComponent(cwd)}`;
       const headers = {};

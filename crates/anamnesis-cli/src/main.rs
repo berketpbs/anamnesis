@@ -295,6 +295,14 @@ fn run() -> anyhow::Result<()> {
             token,
             probe,
         } => {
+            // Managed launches choose the destination for this whole session.
+            // clap normally lets an explicit --server in installed hooks win
+            // over ANAMNESIS_SERVER, which sent events to the old destination
+            // even after `run --server` had checked a different one.
+            let server = std::env::var(run::SERVER_OVERRIDE_ENV)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(server);
             if probe {
                 cmd_probe(&agent, &server, token.as_deref())?;
             } else {

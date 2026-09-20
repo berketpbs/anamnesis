@@ -208,9 +208,21 @@ pub fn made_up_payload(agent: &str) -> anyhow::Result<String> {
 /// and probe a path nobody uses.
 fn event_name_for(agent: &str) -> &'static str {
     match agent {
-        "codex" => "user_prompt",
-        "gemini-cli" => "UserPrompt",
+        "gemini-cli" => "BeforeAgent",
+        "cursor" => "beforeSubmitPrompt",
         _ => "UserPromptSubmit",
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn generated_probes_are_prompts_for_every_supported_harness() {
+    for agent in ["claude-code", "codex", "gemini-cli", "cursor", "opencode"] {
+        assert_eq!(
+            anamnesis_hooks::classify_event(event_name_for(agent)),
+            anamnesis_core::observation::EventKind::UserPrompt,
+            "{agent}'s probe must exercise the prompt capture path"
+        );
     }
 }
 

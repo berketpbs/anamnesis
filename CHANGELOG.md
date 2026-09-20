@@ -58,6 +58,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of silently receiving the project's different page. Explicit scope
   reads never fall back; callers omitting the flag retain project-first lookup.
 
+- **Managed launches verify capture before starting.** `run` and `continue`
+  now send a non-writing hook probe with the selected token; a healthy HTTP
+  listener alone no longer admits a session whose events would be refused.
+  Refused launches exit unsuccessfully, while `--anyway` remains available.
+  The selected endpoint also overrides stale `--server` arguments in native
+  hooks and the OpenCode plugin. Generated probes now use the actual prompt
+  event names for Codex, Gemini and Cursor.
+
 - **Recall answers where the harness can hear it, under the event it
   answers.** 1.2.1 said the prompt hook asks `/recall` under whatever each
   harness calls a prompt, and prints the answer where the harness injects it.
