@@ -392,6 +392,50 @@ pub fn finalize(
     .map(Some)
 }
 
+/// Refresh an open session's page without ending it or leaving a handoff.
+///
+/// `PreCompact` is the moment an agent is about to throw working context away.
+/// The observations are already durable in the raw spool, but without this
+/// page they remain inconvenient to recover until `SessionEnd` arrives (or the
+/// stale-session reaper eventually does). Repeated checkpoints rewrite the
+/// session's one deterministic path; the final summary rewrites it once more.
+///
+/// The open-state check happens while the caller holds the wiki lock. This is
+/// what orders a checkpoint against a simultaneous finalization: checkpoint
+/// first means the final page replaces it, while finalization first means this
+/// call sees a closed session and leaves that final page alone.
+pub fn checkpoint(
+    store: &Store,
+    wiki: &Wiki,
+    scope: &ResolvedScope,
+    session_id: SessionId,
+    embedder: Option<&dyn Embed>,
+    now: Timestamp,
+) -> Result<Option<String>, WebError> {
+    let Some(session) = store.load_session(session_id)? else {
+        return Ok(None);
+    };
+    if !session.is_open() {
+        return Ok(None);
+    }
+    let observations = store.observations(session_id)?;
+    let Some(digest) = consolidate(&session, &observations) else {
+        return Ok(None);
+    };
+
+    write_session_page(
+        store,
+        wiki,
+        scope,
+        &session,
+        &digest,
+        embedder,
+        now,
+        &format!("checkpoint: {}", digest.title),
+    )
+    .map(Some)
+}
+
 /// Close a session, then ask a model what it was about.
 ///
 /// Two steps, and the order is the whole point. [`finalize`] runs first and

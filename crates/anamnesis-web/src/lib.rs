@@ -47,8 +47,9 @@ pub use auth::{Auth, Identity};
 use shutdown::{Stop, finish_in_flight, stopped};
 
 pub use pipeline::{
-    Consolidation, Ingested, ProbeReport, Provenance, Recompiled, claim_handoff, finalize,
-    finalize_and_enrich, ingest, probe, read_preferences, recompile, record, session_page_path,
+    Consolidation, Ingested, ProbeReport, Provenance, Recompiled, checkpoint, claim_handoff,
+    finalize, finalize_and_enrich, ingest, probe, read_preferences, recompile, record,
+    session_page_path,
 };
 
 /// Errors surfaced over HTTP.
@@ -755,6 +756,42 @@ impl AgentQuery {
     }
 }
 
+/// Write the recoverable mid-session page after the hook has already received
+/// its response. Git, embedding and page rendering must not spend the hook's
+/// one-second budget; the recorded observation is the durable trigger.
+fn schedule_checkpoint(
+    state: &AppState,
+    checkout: PathBuf,
+    session_id: anamnesis_core::ids::SessionId,
+    now: Timestamp,
+) {
+    let background = state.clone();
+    state.tasks.spawn(async move {
+        let outcome = off_runtime(move || {
+            let scope = anamnesis_core::scope::resolve_scope(&checkout)?;
+            let held = background.wiki.lock();
+            pipeline::checkpoint(
+                &background.store,
+                &held,
+                &scope,
+                session_id,
+                background
+                    .embedder
+                    .as_ref()
+                    .map(|embedder| embedder.as_ref() as &dyn anamnesis_core::embedding::Embed),
+                now,
+            )
+        })
+        .await;
+
+        match outcome {
+            Ok(Some(page)) => tracing::info!(%page, %session_id, "session checkpoint written"),
+            Ok(None) => {}
+            Err(error) => tracing::error!(%error, %session_id, "session checkpoint failed"),
+        }
+    });
+}
+
 /// Receive one lifecycle event.
 ///
 /// Returns 202 rather than 200: the event has been accepted and made durable,
@@ -817,6 +854,11 @@ async fn receive_hook(
         if let Some(page) = &outcome.page {
             tracing::info!(%page, "session consolidated");
         }
+        if hook.kind == EventKind::PreCompact
+            && let Some(checkout) = hook.cwd.clone()
+        {
+            schedule_checkpoint(&state, checkout, outcome.session_id, now);
+        }
         return Ok((StatusCode::ACCEPTED, "accepted\n").into_response());
     };
 
@@ -841,6 +883,12 @@ async fn receive_hook(
         )
     })
     .await?;
+
+    if hook.kind == EventKind::PreCompact
+        && let Some(checkout) = hook.cwd.clone()
+    {
+        schedule_checkpoint(&state, checkout, session_id, now);
+    }
 
     if hook.kind == EventKind::SessionEnd {
         let background = state.clone();
@@ -1270,6 +1318,120 @@ mod tests {
                 .iter()
                 .any(|o| o.body.as_str().contains("retrieval side")),
             "what it said after the summary has to be kept"
+        );
+    }
+
+    #[test]
+    fn compaction_checkpoints_replace_one_open_page_and_finalization_replaces_them() {
+        let harness = harness();
+        let scope = resolve_scope(&harness.cwd).expect("scope");
+        run(&harness, "SessionStart", json!({"source": "startup"}));
+        let first = run(
+            &harness,
+            "UserPromptSubmit",
+            json!({"prompt": "preserve the first decision"}),
+        );
+        run(
+            &harness,
+            "PreCompact",
+            json!({"trigger": "auto", "compact_metadata": {}}),
+        );
+
+        let first_page = checkpoint(
+            &harness.state.store,
+            &harness.state.wiki.lock(),
+            &scope,
+            first.session_id,
+            None,
+            now(),
+        )
+        .expect("checkpoint")
+        .expect("page");
+        let path = anamnesis_core::page::PagePath::parse(&first_page).expect("path");
+        let session = harness
+            .state
+            .store
+            .load_session(first.session_id)
+            .expect("load")
+            .expect("session");
+        assert!(session.is_open(), "a checkpoint must not end the session");
+        assert!(session.ended_at.is_none());
+        assert_eq!(
+            harness
+                .state
+                .store
+                .page_count(scope.project_id)
+                .expect("count"),
+            1
+        );
+        assert!(
+            harness
+                .state
+                .store
+                .peek_handoff(scope.project_id, &anamnesis_core::handoff::Slot::shared(),)
+                .expect("peek")
+                .is_none(),
+            "a mid-session checkpoint is not a note to the next agent"
+        );
+        let checkpointed = harness
+            .state
+            .wiki
+            .lock()
+            .read_page(&scope.scope, &path)
+            .expect("page");
+        assert!(checkpointed.body.contains("preserve the first decision"));
+        assert!(!checkpointed.body.contains("- Ended:"));
+
+        run(
+            &harness,
+            "UserPromptSubmit",
+            json!({"prompt": "also preserve the second decision"}),
+        );
+        let second_page = checkpoint(
+            &harness.state.store,
+            &harness.state.wiki.lock(),
+            &scope,
+            first.session_id,
+            None,
+            now(),
+        )
+        .expect("checkpoint")
+        .expect("page");
+        assert_eq!(second_page, first_page, "checkpoints have one stable path");
+        assert_eq!(
+            harness
+                .state
+                .store
+                .page_count(scope.project_id)
+                .expect("count"),
+            1,
+            "a second checkpoint must replace rather than duplicate"
+        );
+
+        let end = run(&harness, "SessionEnd", json!({"reason": "clear"}));
+        assert_eq!(end.page.as_deref(), Some(first_page.as_str()));
+        let final_page = harness
+            .state
+            .wiki
+            .lock()
+            .read_page(&scope.scope, &path)
+            .expect("final page");
+        assert!(final_page.body.contains("preserve the first decision"));
+        assert!(final_page.body.contains("preserve the second decision"));
+        assert!(final_page.body.contains("- Ended:"));
+
+        assert!(
+            checkpoint(
+                &harness.state.store,
+                &harness.state.wiki.lock(),
+                &scope,
+                first.session_id,
+                None,
+                now(),
+            )
+            .expect("late checkpoint")
+            .is_none(),
+            "a delayed checkpoint must not overwrite a final page"
         );
     }
 
@@ -1812,6 +1974,38 @@ mod tests {
             state.store.page_count(project(&harness)).expect("count"),
             1,
             "the page a stopping server owed this session"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_precompact_request_returns_then_leaves_an_open_checkpoint() {
+        let harness = harness();
+        let state = harness.state.clone();
+
+        send(&state, hook_request(&harness, "SessionStart", None)).await;
+        send(&state, hook_request(&harness, "UserPromptSubmit", None)).await;
+        let response = send(&state, hook_request(&harness, "PreCompact", None)).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert!(
+            finish_in_flight(&state.tasks, std::time::Duration::from_secs(10)).await,
+            "the checkpoint had time to finish"
+        );
+
+        assert_eq!(state.store.page_count(project(&harness)).expect("count"), 1);
+        let sessions = state
+            .store
+            .recent_sessions(project(&harness), 10)
+            .expect("sessions");
+        let session = sessions.first().expect("session");
+        assert_eq!(session.state, "open");
+        assert!(session.ended_at.is_none());
+        assert_eq!(session.summary_source, None);
+        assert!(
+            state
+                .store
+                .peek_handoff(project(&harness), &anamnesis_core::handoff::Slot::shared(),)
+                .expect("peek")
+                .is_none()
         );
     }
 
