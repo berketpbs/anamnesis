@@ -28,6 +28,10 @@ use crate::hooks;
 use crate::opencode;
 use crate::project::open_project;
 
+/// The endpoint selected by a managed launch. Unlike the ordinary default,
+/// this must override an installer's older `hook --server` argument.
+pub const SERVER_OVERRIDE_ENV: &str = "ANAMNESIS_RUN_SERVER";
+
 /// What a harness is called on the command line.
 ///
 /// A guess that is wrong is visible immediately — the program is not found,
@@ -159,6 +163,7 @@ pub struct Launch {
 pub fn launch(program: &str, args: &[String], server: &str, token: Option<&str>) -> Launch {
     let mut env = BTreeMap::new();
     env.insert("ANAMNESIS_SERVER".to_owned(), server.to_owned());
+    env.insert(SERVER_OVERRIDE_ENV.to_owned(), server.to_owned());
     if let Some(token) = token.filter(|token| !token.is_empty()) {
         env.insert(anamnesis_web::auth::TOKEN_ENV.to_owned(), token.to_owned());
     }
@@ -246,13 +251,28 @@ fn start(
             println!("    {fix}");
             println!();
             println!("  Or `--anyway` to start without a memory of it.");
-            return Ok(());
+            anyhow::bail!("{agent} was not started: {reason}");
         }
         Decision::GoAnyway(notice) => {
             println!("⚠  {notice}.");
             println!();
         }
-        Decision::Go => {}
+        Decision::Go => {
+            // /health is deliberately unauthenticated. It cannot prove that
+            // this token or this project's marker will be accepted by /hook.
+            crate::capture::probe(
+                agent,
+                server,
+                token,
+                crate::capture::made_up_payload(agent)?,
+            )
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "not starting {agent}: capture preflight failed: {error}. \
+                 Check the server, token and project marker; use --anyway to skip this check"
+                )
+            })?;
+        }
     }
 
     let launch = launch(&program, args, server, token);

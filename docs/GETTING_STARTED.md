@@ -812,11 +812,22 @@ it:
   Or `--anyway` to start without a memory of it.
 ```
 
+Before launching, `run` also probes `/hook` with the selected token and project
+marker, without recording an event or consuming a handoff. A listener answering
+`/health` is not enough: it may refuse capture. Failed preflight exits nonzero;
+`--anyway` explicitly skips the refusal. This checks the receiving side; the
+harness still has to load and trust its hooks, and actual capture should be
+confirmed with `status` after a real prompt.
+
 `--program` names the executable when a harness is called something else on
 this machine — the launcher tries `claude`, `codex`, `cursor-agent`, `gemini`
 and `opencode`. The server address is passed to the harness in its environment,
 so the hooks inherit it: a project wired to one server can be run against
 another without touching a settings file.
+The managed child receives `ANAMNESIS_RUN_SERVER` as an override even when an
+installed hook still contains an older `--server` argument. Both launcher and
+hook binary need this behavior; reinstall the OpenCode plugin after upgrading
+so its handoff request uses the override as well.
 
 ## Common Commands
 

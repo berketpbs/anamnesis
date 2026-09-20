@@ -45,7 +45,15 @@ impl Drop for Server {
 
 /// Start a server on a free port and return its address, read from the banner.
 fn serve(data: &Path) -> (Server, String) {
-    let mut child = anamnesis(data)
+    serve_with_token(data, None)
+}
+
+fn serve_with_token(data: &Path, token: Option<&str>) -> (Server, String) {
+    let mut command = anamnesis(data);
+    if let Some(token) = token {
+        command.env("ANAMNESIS_TOKEN", token);
+    }
+    let mut child = command
         .args(["serve", "--port", "0", "--no-watch", "--no-ui"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -266,6 +274,114 @@ fn codex_closing_reports_reach_the_wiki_and_the_next_claude_session() {
     assert!(
         handed.contains(conclusion),
         "Codex's decision must reach Claude: {handed}"
+    );
+}
+
+#[test]
+fn a_managed_launch_probes_capture_and_its_hook_uses_the_selected_server() {
+    let data = tempfile::tempdir().unwrap();
+    let repo = project("managed-capture");
+    let token = "capture-test-token";
+    let (_server, server) = serve_with_token(data.path(), Some(token));
+    let installed = anamnesis(data.path())
+        .current_dir(repo.path())
+        .args([
+            "install-hooks",
+            "--agent",
+            "codex",
+            "--write",
+            "--server",
+            "http://127.0.0.1:1",
+        ])
+        .output()
+        .unwrap();
+    assert!(installed.status.success());
+
+    // /health succeeds without this token. The old launcher ran the program
+    // anyway; use an absent program so an attempted spawn is observable.
+    let refused = anamnesis(data.path())
+        .current_dir(repo.path())
+        .args([
+            "run",
+            "codex",
+            "--server",
+            &server,
+            "--program",
+            "anamnesis-no-such-test-program",
+        ])
+        .output()
+        .unwrap();
+    let refusal = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success());
+    assert!(refusal.contains("capture preflight failed"), "{refusal}");
+    assert!(
+        !refusal.contains("could not find"),
+        "the child must not start: {refusal}"
+    );
+
+    // Act as a harness that invokes its installed hook. The old baked-in
+    // endpoint is unreachable; only the managed override can deliver it.
+    let mut child = anamnesis(data.path())
+        .current_dir(repo.path())
+        .args([
+            "run",
+            "codex",
+            "--server",
+            &server,
+            "--token",
+            token,
+            "--program",
+            env!("CARGO_BIN_EXE_anamnesis"),
+            "--",
+            "--data-dir",
+        ])
+        .arg(data.path())
+        .args(["hook", "--agent", "codex", "--server", "http://127.0.0.1:1"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            event(
+                "managed-writer",
+                "UserPromptSubmit",
+                repo.path(),
+                json!({"prompt": "Retain the managed endpoint decision."}),
+            )
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("user-prompt"),
+        "the probe must classify a real prompt"
+    );
+    let store = anamnesis_store::Store::open(data.path().join("db/anamnesis.db")).unwrap();
+    let scope = anamnesis_core::scope::resolve_scope(repo.path()).unwrap();
+    let sessions = store.recent_sessions(scope.project_id, 10).unwrap();
+    assert_eq!(sessions.len(), 1, "the probe must not create a session");
+    let observations = store.observations(sessions[0].id).unwrap();
+    assert_eq!(
+        observations.len(),
+        1,
+        "the hook must reach the selected server once"
+    );
+    assert!(
+        observations[0]
+            .body
+            .as_str()
+            .contains("managed endpoint decision")
     );
 }
 
