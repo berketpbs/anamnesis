@@ -52,6 +52,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI as a test, so a change that makes recall chatty fails there.
 
 ### Fixed
+- **Compaction lifecycle events no longer create empty session summaries.**
+  `PreCompact` and `PostCompact` are boundaries like session start and end;
+  an otherwise empty session containing one now closes without a generated
+  page or handoff instead of treating the compaction marker as substantive
+  work.
+
 - **Reading a shared query hit preserves its scope.** `memory_read_page` now
   accepts the `global` flag returned by `memory_query`. When both the project
   and shared wiki hold the same path, the caller can read the page it found
