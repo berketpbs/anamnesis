@@ -242,14 +242,28 @@ pub fn hook_command(binary: &str, agent: &str, server: &str) -> String {
 /// anamnesis — a wrapper script, a line that starts the server first — is
 /// theirs, and this is the predicate deciding what may be overwritten.
 fn is_ours(command: &str) -> bool {
-    let mut words = command.split_whitespace();
-    let Some(binary) = words.next() else {
-        return false;
+    let command = command.trim_start();
+    // Our installer quotes executable paths, which may contain spaces. Read
+    // only that first argument; do not try to interpret arbitrary shell code.
+    let (binary, rest) = if let Some(quoted) = command.strip_prefix('"') {
+        let Some(end) = quoted.find('"') else {
+            return false;
+        };
+        let rest = &quoted[end + 1..];
+        if !rest.starts_with(char::is_whitespace) {
+            return false;
+        }
+        (&quoted[..end], rest)
+    } else {
+        let Some(end) = command.find(char::is_whitespace) else {
+            return false;
+        };
+        (&command[..end], &command[end..])
     };
-    if words.next() != Some("hook") {
+    if rest.split_whitespace().next() != Some("hook") {
         return false;
     }
-    let binary = binary.trim_matches('"').replace('\\', "/");
+    let binary = binary.replace('\\', "/");
     let name = binary.rsplit('/').next().unwrap_or(binary.as_str());
     name.eq_ignore_ascii_case("anamnesis") || name.eq_ignore_ascii_case("anamnesis.exe")
 }
@@ -881,6 +895,42 @@ mod tests {
         assert!(outcome.changed());
         let commands = commands_in(&settings["hooks"]["SessionStart"]);
         assert_eq!(commands, vec![wanted]);
+    }
+
+    #[test]
+    fn upgrading_and_removing_quoted_paths_keeps_other_hooks() {
+        let stale = hook_command(
+            r"C:\Users\Ada Lovelace\anamnesis.exe",
+            "codex",
+            "http://old:1",
+        );
+        let theirs = "./scripts/record-session.sh";
+        let mut settings = serde_json::json!({
+            "hooks": { "SessionStart": [{ "hooks": [
+                { "type": "command", "command": stale },
+                { "type": "command", "command": theirs }
+            ] }] }
+        });
+        let wanted = hook_command(
+            r"C:\Users\Ada Lovelace\anamnesis.exe",
+            "codex",
+            "http://new:2",
+        );
+        let incoming = hook_config(&CODEX, &wanted);
+        let result = merge(&mut settings, &incoming);
+        assert!(result.replaced.contains(&"SessionStart".to_owned()));
+        assert_eq!(
+            commands_in(&settings["hooks"]["SessionStart"]),
+            vec![wanted, theirs.to_owned()]
+        );
+        assert!(!merge(&mut settings, &incoming).changed());
+        remove_ours(&mut settings);
+        assert_eq!(
+            commands_in(&settings["hooks"]["SessionStart"]),
+            vec![theirs.to_owned()]
+        );
+        assert!(!is_ours(r#""C:/path/anamnesis.exe"suffix hook"#));
+        assert!(!is_ours(r#""C:/path/anamnesis.exe hook"#));
     }
 
     /// The other half of that: a hook someone else wrote is not ours to
