@@ -148,6 +148,18 @@ pub fn cmd_status(
             queue.set_aside_len()
         )
     );
+    // The line above is an aggregate, and an aggregate is exactly what hid the
+    // failure this line exists for: two harnesses wired in one project, every
+    // event recent, every event from the one that still works, and the other
+    // silent for two days while `Capture:` read "just now". Which agent the
+    // last event came from is the question, so it is the one asked here.
+    if let Some(line) = describe_agents(
+        &wired_agents(&scope.root),
+        &store.last_capture_by_agent(scope.project_id)?,
+        now,
+    ) {
+        println!("  Agents:    {line}");
+    }
     // Where a project keeps a slot per operator, the handoff reported has to
     // be the one *this* machine would be handed. Reporting the shared slot
     // would tell an operator with a note waiting that nothing is waiting.
@@ -576,6 +588,55 @@ fn describe_unrecognized(tables: &[String]) -> Option<String> {
     ))
 }
 
+/// The harnesses this project has wired to anamnesis, in a stable order.
+fn wired_agents(root: &std::path::Path) -> Vec<&'static str> {
+    crate::hooks::HARNESSES
+        .iter()
+        .filter(|harness| crate::hooks::wired(harness, root))
+        .map(|harness| harness.agent)
+        .collect()
+}
+
+/// One line naming each wired harness and when it last recorded anything.
+///
+/// Only the wired ones. An agent that captured here once and is no longer
+/// configured is history rather than a symptom, and the project total above
+/// already counts it; what this line is for is the harness that is configured
+/// now and sending nothing, which every other line in this report reads as a
+/// quiet afternoon.
+///
+/// Nothing is printed when no harness is wired: `Capture:` already says to run
+/// `install-hooks`, and saying it twice in different words is how a report
+/// stops being read.
+fn describe_agents(
+    wired: &[&str],
+    captured: &[(String, Timestamp)],
+    now: Timestamp,
+) -> Option<String> {
+    if wired.is_empty() {
+        return None;
+    }
+    let line = wired
+        .iter()
+        .map(|agent| {
+            match captured
+                .iter()
+                .find(|(captured, _)| captured == agent)
+                .map(|(_, at)| *at)
+            {
+                Some(at) => format!("{agent} {}", describe_age(at, now)),
+                // Said in full rather than as "never": the two halves are the
+                // whole finding. It is wired, so something should have
+                // arrived, and nothing has — which is not the same sentence as
+                // an agent nobody has opened yet.
+                None => format!("{agent} wired, never captured"),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    Some(line)
+}
+
 /// One line for when capture last reached the index.
 ///
 /// A reachable server proves nothing on its own: it records only what a
@@ -806,6 +867,47 @@ mod tests {
             0,
         );
         assert_eq!(line, "last event 3m ago");
+    }
+
+    /// The finding this line was written for: two harnesses wired, one of them
+    /// recording and the other silent since it was installed. `Capture:` reads
+    /// "just now" in exactly this state, which is why it cannot be the only
+    /// line.
+    #[test]
+    fn a_wired_agent_that_never_captured_is_named() {
+        let now = at("2026-08-25T12:00:00Z");
+        let captured = vec![("claude-code".to_owned(), at("2026-08-25T11:59:00Z"))];
+        let line = describe_agents(&["claude-code", "codex"], &captured, now).expect("a line");
+        assert_eq!(line, "claude-code 1m ago · codex wired, never captured");
+    }
+
+    #[test]
+    fn a_wired_agent_that_captured_reports_its_own_age() {
+        let now = at("2026-08-25T12:00:00Z");
+        let captured = vec![
+            ("claude-code".to_owned(), at("2026-08-25T11:57:00Z")),
+            ("codex".to_owned(), at("2026-08-23T12:00:00Z")),
+        ];
+        let line = describe_agents(&["claude-code", "codex"], &captured, now).expect("a line");
+        assert_eq!(line, "claude-code 3m ago · codex 2d ago");
+    }
+
+    /// An agent with history here that is no longer wired is not a symptom, and
+    /// the project total above already counts it.
+    #[test]
+    fn an_unwired_agent_with_history_is_left_out() {
+        let now = at("2026-08-25T12:00:00Z");
+        let captured = vec![
+            ("claude-code".to_owned(), at("2026-08-25T11:59:00Z")),
+            ("cursor".to_owned(), at("2026-08-20T12:00:00Z")),
+        ];
+        let line = describe_agents(&["claude-code"], &captured, now).expect("a line");
+        assert_eq!(line, "claude-code 1m ago");
+    }
+
+    #[test]
+    fn no_wired_agent_prints_no_line() {
+        assert!(describe_agents(&[], &[], at("2026-08-25T12:00:00Z")).is_none());
     }
 
     #[test]

@@ -1291,6 +1291,37 @@ impl Store {
         )?;
         Ok(found.as_deref().map(parse_time))
     }
+
+    /// When each agent last captured anything in this project.
+    ///
+    /// [`Store::last_observation_at`] answers for the project as a whole, and a
+    /// project with two harnesses wired hides the failure of one behind the
+    /// other: every event is recent, every event belongs to the agent that
+    /// still works, and the other side has been silent for days. Asked per
+    /// agent, a harness that is configured and recording nothing is a fact of
+    /// its own rather than a quiet afternoon.
+    ///
+    /// Agents that never recorded anything are absent rather than zero: this
+    /// reads what capture produced, and the caller is the one that knows which
+    /// harnesses are wired and should have produced something.
+    pub fn last_capture_by_agent(&self, project_id: ProjectId) -> Result<Vec<(String, Timestamp)>> {
+        let conn = self.connection();
+        let mut stmt = conn.prepare(
+            "SELECT s.agent, MAX(o.at) FROM observations o
+             JOIN sessions s ON s.id = o.session_id
+             WHERE s.project_id = ?1
+             GROUP BY s.agent
+             ORDER BY s.agent",
+        )?;
+        let rows = stmt.query_map(params![project_id.to_string()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let rows = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows
+            .into_iter()
+            .map(|(agent, at)| (agent, parse_time(&at)))
+            .collect())
+    }
 }
 
 /// Recompute supersession for a set of page paths.
@@ -3448,6 +3479,67 @@ mod tests {
         assert_eq!(
             store.last_observation_at(project).expect("query"),
             Some(newest)
+        );
+    }
+
+    /// The aggregate above reads "just now" while one of two wired harnesses
+    /// has been silent for days, so the per-agent answer has to keep the two
+    /// apart rather than report the newest event twice.
+    #[test]
+    fn the_last_event_is_reported_for_each_agent_separately() {
+        let (_dir, store, project, workspace) = fixture();
+        let busy: Timestamp = "2026-08-19T12:00:00Z".parse().expect("time");
+        let quiet: Timestamp = "2026-08-17T09:00:00Z".parse().expect("time");
+
+        for (agent, at) in [
+            (AgentKind::ClaudeCode, busy),
+            (
+                AgentKind::ClaudeCode,
+                "2026-08-19T10:00:00Z".parse().expect("time"),
+            ),
+            (AgentKind::Codex, quiet),
+        ] {
+            let session = new_session(
+                SessionId::derive(project, &format!("{agent}-{at}")),
+                project,
+                workspace,
+                agent,
+                "/repo".into(),
+                now(),
+                None,
+            );
+            store.ensure_session(&session).expect("session");
+            store
+                .insert_observation(&new_observation(
+                    session.id,
+                    EventKind::UserPrompt,
+                    None,
+                    BoundedBody::truncating("what happened", 1024),
+                    at,
+                ))
+                .expect("observation");
+        }
+
+        assert_eq!(
+            store.last_capture_by_agent(project).expect("query"),
+            vec![
+                (AgentKind::ClaudeCode.to_string(), busy),
+                (AgentKind::Codex.to_string(), quiet),
+            ]
+        );
+    }
+
+    /// An agent that never recorded anything is absent rather than zero: the
+    /// caller knows which harnesses are wired, and this only reports what
+    /// capture produced.
+    #[test]
+    fn an_agent_that_captured_nothing_is_not_listed() {
+        let (_dir, store, project, _workspace) = fixture();
+        assert!(
+            store
+                .last_capture_by_agent(project)
+                .expect("query")
+                .is_empty()
         );
     }
 
