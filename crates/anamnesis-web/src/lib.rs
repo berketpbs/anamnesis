@@ -1382,14 +1382,29 @@ mod tests {
         assert!(checkpointed.body.contains("preserve the first decision"));
         assert!(!checkpointed.body.contains("- Ended:"));
 
-        run(
-            &harness,
-            "UserPromptSubmit",
-            json!({"prompt": "also preserve the second decision"}),
-        );
+        // Reopen both durable halves as a restarted server would. The next
+        // event and finalization must continue from the checkpointed session,
+        // rather than creating a second page or losing its first half.
+        let restarted_store = Store::open(harness._data.path().join("index.db")).expect("store");
+        restarted_store.migrate().expect("migrate");
+        let restarted_wiki = Wiki::open(harness._data.path().join("wiki")).expect("wiki");
+        ingest(
+            &restarted_store,
+            &restarted_wiki,
+            None,
+            &hook(
+                &harness,
+                "UserPromptSubmit",
+                json!({"prompt": "also preserve the second decision"}),
+            ),
+            None,
+            now(),
+            None,
+        )
+        .expect("record after restart");
         let second_page = checkpoint(
-            &harness.state.store,
-            &harness.state.wiki.lock(),
+            &restarted_store,
+            &restarted_wiki,
             &scope,
             first.session_id,
             None,
@@ -1408,7 +1423,16 @@ mod tests {
             "a second checkpoint must replace rather than duplicate"
         );
 
-        let end = run(&harness, "SessionEnd", json!({"reason": "clear"}));
+        let end = ingest(
+            &restarted_store,
+            &restarted_wiki,
+            None,
+            &hook(&harness, "SessionEnd", json!({"reason": "clear"})),
+            None,
+            now(),
+            None,
+        )
+        .expect("end after restart");
         assert_eq!(end.page.as_deref(), Some(first_page.as_str()));
         let final_page = harness
             .state
@@ -1422,8 +1446,8 @@ mod tests {
 
         assert!(
             checkpoint(
-                &harness.state.store,
-                &harness.state.wiki.lock(),
+                &restarted_store,
+                &restarted_wiki,
                 &scope,
                 first.session_id,
                 None,
