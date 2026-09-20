@@ -475,6 +475,30 @@ pub fn default_settings_path(harness: &Harness, root: &Path) -> PathBuf {
         .fold(root.to_path_buf(), |path, component| path.join(component))
 }
 
+/// Whether this harness's project configuration calls anamnesis.
+///
+/// The same predicate that decides what `install-hooks` may overwrite, asked
+/// of a file nobody is about to write: a harness is wired when its own
+/// project-local settings hold a hook that runs our `hook` subcommand. A file
+/// that is missing, unreadable or somebody else's answers false, because the
+/// caller uses this to say what *should* have been recording — and claiming a
+/// harness is wired when it is not would put the mistake back where this came
+/// from.
+pub fn wired(harness: &Harness, root: &Path) -> bool {
+    let Ok(settings) = read_settings(&default_settings_path(harness, root)) else {
+        return false;
+    };
+    settings
+        .get("hooks")
+        .and_then(Value::as_object)
+        .is_some_and(|hooks| {
+            hooks
+                .values()
+                .flat_map(commands_in)
+                .any(|command| is_ours(&command))
+        })
+}
+
 /// Read a settings file, or start an empty one.
 ///
 /// A file that exists but does not parse is an error rather than something to
@@ -528,6 +552,43 @@ mod tests {
             &CLAUDE_CODE,
             "anamnesis hook --agent claude-code --server http://localhost:8080",
         )
+    }
+
+    /// What `status` reads to decide a harness *should* have been recording.
+    #[test]
+    fn a_harness_is_wired_once_its_own_settings_call_us() {
+        let root = tempfile::tempdir().expect("dir");
+        assert!(!wired(&CLAUDE_CODE, root.path()));
+
+        let mut settings = Value::Object(Map::new());
+        merge(&mut settings, &config());
+        let path = default_settings_path(&CLAUDE_CODE, root.path());
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+        write_settings(&path, &settings).expect("write");
+
+        assert!(wired(&CLAUDE_CODE, root.path()));
+        // One harness's file says nothing about another's.
+        assert!(!wired(&CODEX, root.path()));
+    }
+
+    /// A settings file whose hooks are all somebody else's is not ours, and
+    /// reporting it as wired would put back the false "configured" this whole
+    /// line exists to remove.
+    #[test]
+    fn someone_elses_hooks_do_not_count_as_wired() {
+        let root = tempfile::tempdir().expect("dir");
+        let settings = serde_json::json!({
+            "hooks": {
+                "PostToolUse": [{
+                    "hooks": [{ "type": "command", "command": "./scripts/fmt.sh" }]
+                }]
+            }
+        });
+        let path = default_settings_path(&CLAUDE_CODE, root.path());
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+        write_settings(&path, &settings).expect("write");
+
+        assert!(!wired(&CLAUDE_CODE, root.path()));
     }
 
     #[test]

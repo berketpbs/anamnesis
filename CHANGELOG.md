@@ -58,6 +58,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI as a test, so a change that makes recall chatty fails there.
 
 ### Fixed
+- **`status` names the agent behind the last event, not just its age.** A
+  project with two harnesses wired read `Capture: last event just now` while
+  one of them had recorded nothing at all: every event belonged to the agent
+  that still worked, and the aggregate hid the other. Status now lists each
+  harness wired in the project with its own last capture, and says
+  `wired, never captured` for one that has never sent an event — the state a
+  hook that is written, trusted and failing leaves behind. Agents that are no
+  longer wired stay out of the line; the project total already counts them.
+
 - **Compaction lifecycle events no longer create empty session summaries.**
   `PreCompact` and `PostCompact` are boundaries like session start and end;
   an otherwise empty session containing one now closes without a generated
