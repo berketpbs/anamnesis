@@ -71,9 +71,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   settings file.** Every hook judgement read the file and none read the index,
   so a harness wired for all eight moments whose hooks could not start was
   reported as `reports every moment anamnesis records` while it recorded
-  nothing. Measured on Codex under its Windows sandbox, which could not reach
-  the binary the hook command named: eight hooks written, eight hooks trusted,
-  eight hooks failing, zero observations, and a clean bill of health. A wired
+  nothing. Measured on Codex on Windows: eight hooks written, eight hooks
+  trusted, every one reported as failed by the client, zero observations, and
+  a clean bill of health. A wired
   harness that has never recorded anything is now a finding of its own —
   broken when another harness in the project is recording, since the events
   are arriving and this is the side that is silent, and thin when nothing has
