@@ -78,13 +78,16 @@ pub const CLAUDE_CODE: Harness = Harness {
     note: "Hooks are read when a session starts.",
 };
 
-/// Codex CLI: a file of its own, and the same five names.
+/// Codex CLI: a file of its own, with the closing reports as well as tool events.
 ///
 /// The payloads match Claude Code's field for field — `session_id`, `cwd`,
 /// `hook_event_name`, `tool_name`, `tool_input` — so nothing downstream had to
 /// learn a second shape. What a `SessionStart` hook prints on stdout becomes
 /// developer context, which is how the handoff arrives, exactly as it does in
 /// Claude Code.
+/// `Stop` and `SubagentStop` also carry `last_assistant_message`, as documented
+/// at <https://developers.openai.com/codex/hooks>. Without them, decisions
+/// explained only in the final answer never reach consolidation.
 pub const CODEX: Harness = Harness {
     agent: "codex",
     settings: &[".codex", "hooks.json"],
@@ -93,11 +96,13 @@ pub const CODEX: Harness = Harness {
         "UserPromptSubmit",
         "PreToolUse",
         "PostToolUse",
+        "Stop",
+        "SubagentStop",
         "PreCompact",
         "SessionEnd",
     ],
     schema_version: None,
-    note: "Hooks are on unless `[features] hooks = false` says otherwise.",
+    note: "Open `/hooks` in Codex to review and trust new or changed hooks, then start a fresh session. A written hook is not proof of capture; check `anamnesis status` after using it.",
 };
 
 /// Gemini CLI: the same five moments under four different names.

@@ -724,6 +724,15 @@ anamnesis install-hooks --agent cursor --write       # .cursor/hooks.json
 anamnesis install-hooks --agent opencode --write     # .opencode/plugins/anamnesis.js
 ```
 
+For Codex, review new or changed hooks in `/hooks`, then open a fresh session.
+Codex trusts each hook definition separately; writing `.codex/hooks.json`
+does not make it run. The installer includes `Stop` and `SubagentStop` so the
+agent's final explanation and subagent reports reach memory, as well as its
+tool calls. After a real prompt, check that `anamnesis status` shows a recent
+capture event. MCP access and a successful `hook --probe` establish other
+parts of the connection, not that Codex has actually emitted an event. See
+[Codex's hook contract](https://developers.openai.com/codex/hooks).
+
 All five capture the same five moments and one server captures all of them,
 though each spells the events its own way, Cursor names its fields its own way,
 and Gemini CLI and Cursor both want their answers as JSON. Hooks are read when a session starts, so the session you run this from

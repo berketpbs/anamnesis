@@ -798,7 +798,7 @@ fn keep(queue: Option<&spool::Queue>, agent: &str, event: &str, payload: &str) -
 fn announce(agent: &str, starting: bool, text: &str) {
     if starting {
         print!("{}", handoff_reply(agent, "SessionStart", text));
-    } else if agent == "gemini-cli" {
+    } else if matches!(agent, "gemini-cli" | "codex") {
         print!("{}", handoff_reply(agent, "", ""));
     }
 }
@@ -873,6 +873,12 @@ fn handoff_notice(reason: &str) -> String {
 /// spliced into a prompt.
 fn handoff_reply(agent: &str, event: &str, handoff: &str) -> String {
     let handoff = handoff.trim();
+
+    // Codex's closing-report hooks expect JSON, not plain text. Non-context
+    // replies go through the empty event name, including capture failures.
+    if agent == "codex" && event.is_empty() {
+        return "{}\n".to_owned();
+    }
 
     if agent == "gemini-cli" {
         let reply = if handoff.is_empty() {
