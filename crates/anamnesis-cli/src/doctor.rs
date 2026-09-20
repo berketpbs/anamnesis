@@ -13,7 +13,7 @@
 //! The judgements are a pure function over gathered facts, so each one can be
 //! tested against a situation rather than against a machine.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use anamnesis_core::datadir::DataDir;
@@ -86,6 +86,21 @@ pub struct Symptoms {
     pub wired: BTreeMap<String, Vec<EventKind>>,
     /// Harnesses whose settings file exists but wires nothing to anamnesis.
     pub unwired: Vec<String>,
+    /// Harnesses that have actually recorded something in this project.
+    ///
+    /// [`Symptoms::wired`] is read from settings files and says what *should*
+    /// arrive; this is read from the index and says what did. They come apart
+    /// in practice, and the gap is invisible to every other check here: a
+    /// sandboxed harness that cannot reach the binary its settings file names
+    /// runs every hook and fails every one, leaving a file that reads as
+    /// perfectly wired and an index with nothing in it. Judged from the file
+    /// alone that is a healthy setup having a quiet week.
+    ///
+    /// Membership only, not recency. Whether a harness that did record has
+    /// since gone silent is a question about ages, which `status` answers per
+    /// agent; this is the coarser question of whether its hooks have ever run
+    /// at all.
+    pub captured: BTreeSet<String>,
     /// Sessions examined, newest first: how many observations each holds.
     pub sessions: Vec<SessionFacts>,
     /// What the server's model answered the last time it did not answer with
@@ -376,6 +391,24 @@ fn which_of(part: usize, whole: usize) -> (String, &'static str) {
     (who, verb)
 }
 
+/// The other harnesses that have recorded here, named for a verdict.
+///
+/// `None` when there are none, which is the case that means the opposite
+/// thing: an empty index is a project nobody has opened, not a harness that
+/// is failing.
+fn witnesses(agent: &str, captured: &BTreeSet<String>) -> Option<String> {
+    let others: Vec<&str> = captured
+        .iter()
+        .map(String::as_str)
+        .filter(|other| *other != agent)
+        .collect();
+    match others.as_slice() {
+        [] => None,
+        [one] => Some((*one).to_owned()),
+        [rest @ .., last] => Some(format!("{} and {last}", rest.join(", "))),
+    }
+}
+
 /// Whether the harnesses are wired for every moment anamnesis records.
 fn judge_hooks(symptoms: &Symptoms) -> Vec<Finding> {
     let mut findings = Vec::new();
@@ -390,6 +423,50 @@ fn judge_hooks(symptoms: &Symptoms) -> Vec<Finding> {
     }
 
     for (agent, wired) in &symptoms.wired {
+        // Asked before anything about *which* moments are wired, because the
+        // answer decides whether that question means anything. A harness whose
+        // hooks never start has a settings file naming all eight events and an
+        // index holding none of them, and every judgement below reads only the
+        // file — so the worst-configured setup in this module and a perfect one
+        // that cannot run produce the same line. Measured on 2026-09-21: Codex
+        // wired to a binary outside its sandbox ran every hook, failed every
+        // hook, recorded nothing, and was reported here as reporting every
+        // moment anamnesis records.
+        if !symptoms.captured.contains(agent) {
+            // Nothing anywhere has recorded is a project nobody has used yet,
+            // which is not evidence against this harness. One that records
+            // while this one stays empty is: the events are arriving, from
+            // something else, and this is the side that is silent.
+            let (severity, because) = match witnesses(agent, &symptoms.captured) {
+                Some(others) => (
+                    Severity::Broken,
+                    format!(", while {others} has recorded here"),
+                ),
+                None => (Severity::Thin, String::new()),
+            };
+            findings.push(Finding {
+                severity,
+                subject: "hooks",
+                verdict: format!(
+                    "{agent} is wired for every moment but has never recorded one{because}"
+                ),
+                // Not `install-hooks`: the hooks are installed, which is the
+                // whole difficulty. What is unknown is why they do not run,
+                // and the command that says so is the hook itself, run the way
+                // the harness runs it.
+                remedy: Some(format!(
+                    "run the hook command in `{}` by hand from the project root to see why",
+                    hooks::harness(agent)
+                        .map(|h| h.settings.join("/"))
+                        .unwrap_or_else(|| "its settings file".to_owned()),
+                )),
+            });
+            // The per-event judgements below are all about the shape of what
+            // arrives, and nothing arrives. Printing them here would bury the
+            // one finding that matters under three that cannot be acted on.
+            continue;
+        }
+
         // The pre-tool moment is what makes a failed call visible on a harness
         // that reports no outcome, which is every harness measured so far. A
         // setup wired before that existed looks entirely healthy and quietly
@@ -740,6 +817,11 @@ pub fn cmd_doctor(server: &str, data_dir: Option<PathBuf>) -> anyhow::Result<()>
         }
         symptoms.sessions.push(facts);
     }
+    symptoms.captured = store
+        .last_capture_by_agent(scope.project_id)?
+        .into_iter()
+        .map(|(agent, _)| agent)
+        .collect();
     symptoms.embed_failures = store.embed_failures(scope.project_id)?;
     symptoms.sections_compared = Tuning::default().vector_sections;
     symptoms.stored_secrets =
@@ -903,9 +985,16 @@ mod tests {
         }
     }
 
+    /// A harness wired for `moments` whose hooks do reach the index.
+    ///
+    /// Capture is part of the fixture rather than left out of it because
+    /// every judgement about *which* moments are wired presumes the wiring
+    /// runs at all; a fixture without it tests those judgements against a
+    /// setup where they no longer apply.
     fn wired(agent: &str, moments: &[EventKind]) -> Symptoms {
         let mut symptoms = Symptoms::default();
         symptoms.wired.insert(agent.to_owned(), moments.to_vec());
+        symptoms.captured.insert(agent.to_owned());
         symptoms
     }
 
@@ -917,6 +1006,80 @@ mod tests {
         EventKind::AssistantMessage,
         EventKind::SessionEnd,
     ];
+
+    /// The finding this module was missing: settings that name every moment,
+    /// and an index that holds none of them. Codex on Windows, 2026-09-21 —
+    /// its sandbox could not reach the binary the hook command named, so every
+    /// hook ran and every hook failed, and the report called it healthy.
+    #[test]
+    fn a_wired_harness_that_never_recorded_is_not_called_healthy() {
+        let mut symptoms = wired("claude-code", &EVERY_MOMENT);
+        symptoms
+            .wired
+            .insert("codex".to_owned(), EVERY_MOMENT.to_vec());
+
+        let hooks: Vec<Finding> = diagnose(&symptoms)
+            .into_iter()
+            .filter(|f| f.subject == "hooks")
+            .collect();
+
+        let codex = hooks
+            .iter()
+            .find(|f| f.verdict.starts_with("codex"))
+            .expect("a finding about codex");
+        assert_eq!(codex.severity, Severity::Broken, "{codex:?}");
+        assert!(codex.verdict.contains("never recorded one"), "{codex:?}");
+        // The harness that does work is named, because it is the evidence:
+        // the events are arriving, and codex is not the one sending them.
+        assert!(codex.verdict.contains("claude-code"), "{codex:?}");
+        assert!(
+            !hooks
+                .iter()
+                .any(|f| f.verdict.starts_with("codex") && f.severity == Severity::Fine),
+            "a silent harness was also reported as fine: {hooks:?}"
+        );
+    }
+
+    /// The opposite case, which must not be reported the same way. A project
+    /// nobody has opened has an empty index for a reason that says nothing
+    /// about any harness in it, and calling that broken would make the check
+    /// fire on every fresh `install-hooks`.
+    #[test]
+    fn a_fresh_project_with_nothing_recorded_anywhere_is_only_thin() {
+        let mut symptoms = Symptoms::default();
+        symptoms
+            .wired
+            .insert("codex".to_owned(), EVERY_MOMENT.to_vec());
+
+        let finding = diagnose(&symptoms)
+            .into_iter()
+            .find(|f| f.subject == "hooks")
+            .expect("a finding about hooks");
+        assert_eq!(finding.severity, Severity::Thin, "{finding:?}");
+        // Nothing to name, so nothing is named: no other harness is implied
+        // to be working.
+        assert!(!finding.verdict.contains("while"), "{finding:?}");
+    }
+
+    /// Nothing arriving is one finding, not four. The per-event judgements
+    /// all describe the shape of what does arrive, and are noise when the
+    /// answer is that none of it does.
+    #[test]
+    fn a_silent_harness_is_not_also_faulted_for_the_moments_it_lacks() {
+        let mut symptoms = Symptoms::default();
+        symptoms
+            .wired
+            .insert("codex".to_owned(), vec![EventKind::SessionStart]);
+        symptoms.captured.insert("claude-code".to_owned());
+
+        let hooks: Vec<String> = diagnose(&symptoms)
+            .into_iter()
+            .filter(|f| f.subject == "hooks")
+            .map(|f| f.verdict)
+            .collect();
+        assert_eq!(hooks.len(), 1, "{hooks:?}");
+        assert!(hooks[0].contains("never recorded one"), "{hooks:?}");
+    }
 
     /// A string continued across source lines keeps the indentation of the
     /// next line unless the continuation is written exactly right, and a

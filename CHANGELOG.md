@@ -67,6 +67,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hook that is written, trusted and failing leaves behind. Agents that are no
   longer wired stay out of the line; the project total already counts them.
 
+- **`doctor` no longer calls a harness healthy on the strength of its
+  settings file.** Every hook judgement read the file and none read the index,
+  so a harness wired for all eight moments whose hooks could not start was
+  reported as `reports every moment anamnesis records` while it recorded
+  nothing. Measured on Codex under its Windows sandbox, which could not reach
+  the binary the hook command named: eight hooks written, eight hooks trusted,
+  eight hooks failing, zero observations, and a clean bill of health. A wired
+  harness that has never recorded anything is now a finding of its own —
+  broken when another harness in the project is recording, since the events
+  are arriving and this is the side that is silent, and thin when nothing has
+  recorded anywhere, which is a project nobody has opened rather than evidence
+  against a harness. The per-moment judgements are suppressed for it, because
+  they describe the shape of what arrives and nothing does.
+
 - **Compaction lifecycle events no longer create empty session summaries.**
   `PreCompact` and `PostCompact` are boundaries like session start and end;
   an otherwise empty session containing one now closes without a generated
