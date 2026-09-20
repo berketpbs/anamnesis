@@ -21,6 +21,12 @@ conversation. The server held 101 sessions and 102 pages. These are a private
 installation's dated observations, not a published corpus or a reproducible
 benchmark. Installed binary `6db72f9` was older than the audited source.
 
+On the later recheck, capture was recent and the session count had reached 102,
+but those new events belonged to Claude Code, not this Codex conversation.
+Aggregate freshness can therefore hide an inactive harness. Validate the agent
+and session behind the event, not just the timestamp. The pre-upgrade backup
+restored successfully into a separate directory (881 entries, schema 18).
+
 A fresh Codex process listed the installed hooks as enabled and trusted, and a
 non-writing probe succeeded. Neither proves that the already-running client
 executes those hooks. The cause of that live capture gap remains unconfirmed.

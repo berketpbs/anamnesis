@@ -263,9 +263,9 @@ Reached:
 
 Not yet demonstrated:
 
-- ? Fresh Claude ? Codex ? Claude continuity in this installation after the
+- ⬜ Fresh Claude → Codex → Claude continuity in this installation after the
   current repairs, including actual hook execution and preservation of decisions
-- ? Improved task outcomes across repeated paired agent runs
+- ⬜ Improved task outcomes across repeated paired agent runs
 
 - ⬜ Team shares knowledge without duplication — everything it needs exists
   now (tokens, per-operator handoffs, an audit log, a JSON API, a guide for
