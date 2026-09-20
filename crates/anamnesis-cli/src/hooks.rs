@@ -35,8 +35,26 @@ pub struct Harness {
     /// theirs, and overwriting it would be this command deciding which schema
     /// their other hooks are written against.
     pub schema_version: Option<u64>,
+    /// Seconds a named event's hook is given, where the harness's own default
+    /// is too short to deliver an observation.
+    ///
+    /// Empty for every harness that gives each hook the same generous budget.
+    /// Written per event rather than per file because the events that need it
+    /// are the closing ones, and raising the limit everywhere would let a
+    /// stalled hook hold up an ordinary tool call.
+    pub timeouts: &'static [(&'static str, u64)],
     /// What to tell someone about this file after writing it.
     pub note: &'static str,
+}
+
+impl Harness {
+    /// The timeout this harness needs on one event, if any.
+    fn timeout(&self, event: &str) -> Option<u64> {
+        self.timeouts
+            .iter()
+            .find(|(name, _)| *name == event)
+            .map(|(_, seconds)| *seconds)
+    }
 }
 
 /// Claude Code: hooks live beside the rest of its settings.
@@ -75,6 +93,7 @@ pub const CLAUDE_CODE: Harness = Harness {
         "SessionEnd",
     ],
     schema_version: None,
+    timeouts: &[],
     note: "Hooks are read when a session starts.",
 };
 
@@ -102,6 +121,15 @@ pub const CODEX: Harness = Harness {
         "SessionEnd",
     ],
     schema_version: None,
+    // `SessionEnd` is the one event Codex does not give the usual 600 seconds:
+    // it defaults to 1 and allows at most 3. A second is not reliably enough to
+    // post an observation and read the reply, so the closing hook was killed
+    // before it delivered — every Codex session in this project's memory was
+    // left `open`, with no `session-end` observation behind it, while the
+    // settings file went on looking complete. Measured 2026-09-21: 12 of 12
+    // Codex sessions open, 0 of them ended. Documented at
+    // <https://learn.chatgpt.com/docs/hooks>.
+    timeouts: &[("SessionEnd", 3)],
     note: "Open `/hooks` in Codex to review and trust new or changed hooks, then start a fresh session. A written hook is not proof of capture; check `anamnesis status` after using it.",
 };
 
@@ -131,6 +159,7 @@ pub const GEMINI_CLI: Harness = Harness {
         "SessionEnd",
     ],
     schema_version: None,
+    timeouts: &[],
     note: "Stdout must be one JSON object; the hook prints one.",
 };
 
@@ -153,6 +182,7 @@ pub const CURSOR: Harness = Harness {
         "sessionEnd",
     ],
     schema_version: Some(1),
+    timeouts: &[],
     note: "Cursor reads hooks.json at startup.",
 };
 
@@ -193,11 +223,15 @@ pub fn hook_config(harness: &Harness, command: &str) -> Value {
         .events
         .iter()
         .map(|event| {
+            let mut hook = serde_json::json!({ "type": "command", "command": command });
+            if let Some(seconds) = harness.timeout(event)
+                && let Some(hook) = hook.as_object_mut()
+            {
+                hook.insert("timeout".to_owned(), Value::from(seconds));
+            }
             (
                 (*event).to_owned(),
-                serde_json::json!([{
-                    "hooks": [{ "type": "command", "command": command }]
-                }]),
+                serde_json::json!([{ "hooks": [hook] }]),
             )
         })
         .collect();
@@ -316,7 +350,17 @@ pub fn merge(settings: &mut Value, incoming: &Value) -> Outcome {
 
         let already = commands_in(existing);
         if wanted.iter().any(|command| already.contains(command)) {
-            outcome.present.push(event.clone());
+            // Idempotent on the command, but not blind to what surrounds it: a
+            // file wired before this harness's closing timeout was known holds
+            // the right command under a budget that kills it, and calling that
+            // "already present" would never repair it.
+            let repaired =
+                wanted_timeout(matchers).is_some_and(|seconds| apply_timeout(existing, seconds));
+            if repaired {
+                outcome.replaced.push(event.clone());
+            } else {
+                outcome.present.push(event.clone());
+            }
             continue;
         }
 
@@ -370,6 +414,58 @@ fn rewrite_ours(matchers: &mut Value, wanted: &str) -> bool {
         }
     }
     rewrote
+}
+
+/// The timeout this configuration asks for on our own hook, if any.
+fn wanted_timeout(matchers: &Value) -> Option<u64> {
+    matchers
+        .as_array()?
+        .iter()
+        .filter_map(|matcher| matcher.get("hooks")?.as_array())
+        .flatten()
+        .find(|hook| {
+            hook.get("command")
+                .and_then(Value::as_str)
+                .is_some_and(is_ours)
+        })?
+        .get("timeout")?
+        .as_u64()
+}
+
+/// Give our hook the timeout it needs, reporting whether anything changed.
+///
+/// Separate from [`rewrite_ours`] because the command can be right while the
+/// budget around it is not: a file wired before this harness's closing timeout
+/// was known carries the correct command under a default too short to deliver,
+/// and an install that called that "already present" would leave it that way
+/// forever. A timeout already at or above what we ask for is someone's own
+/// choice and is left alone.
+fn apply_timeout(matchers: &mut Value, seconds: u64) -> bool {
+    let Some(matchers) = matchers.as_array_mut() else {
+        return false;
+    };
+    let mut changed = false;
+    for hook in matchers
+        .iter_mut()
+        .filter_map(|matcher| matcher.get_mut("hooks")?.as_array_mut())
+        .flatten()
+    {
+        let ours = hook
+            .get("command")
+            .and_then(Value::as_str)
+            .is_some_and(is_ours);
+        if !ours {
+            continue;
+        }
+        if hook.get("timeout").and_then(Value::as_u64) >= Some(seconds) {
+            continue;
+        }
+        if let Some(hook) = hook.as_object_mut() {
+            hook.insert("timeout".to_owned(), Value::from(seconds));
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// Take anamnesis back out of a settings file, and nothing else with it.
@@ -669,6 +765,59 @@ mod tests {
             command,
             "\"/usr/bin/anamnesis\" hook --agent claude-code --server http://127.0.0.1:8080"
         );
+    }
+
+    /// Codex gives `SessionEnd` one second by default and allows three. A
+    /// closing hook that posts an observation does not reliably finish in one,
+    /// so the budget has to be written or the session is never closed.
+    #[test]
+    fn codexs_closing_hook_is_given_the_time_it_needs() {
+        let config = hook_config(&CODEX, "\"anamnesis\" hook --agent codex --server s");
+        assert_eq!(config["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"], 3);
+        // Only the event that needs it: a generous budget everywhere would let
+        // a stalled hook hold up an ordinary tool call.
+        assert_eq!(
+            config["hooks"]["PreToolUse"][0]["hooks"][0].get("timeout"),
+            None
+        );
+        assert_eq!(
+            hook_config(&CLAUDE_CODE, "x")["hooks"]["SessionEnd"][0]["hooks"][0].get("timeout"),
+            None
+        );
+    }
+
+    /// The upgrade that matters most: a file wired before the timeout was
+    /// known holds the right command under a budget that kills it. Installing
+    /// again must repair it rather than call it already present.
+    #[test]
+    fn a_closing_hook_wired_without_its_timeout_is_repaired() {
+        let command = "\"anamnesis\" hook --agent codex --server s";
+        let mut settings = serde_json::json!({
+            "hooks": { "SessionEnd": [{ "hooks": [{ "type": "command", "command": command }] }] }
+        });
+        let outcome = merge(&mut settings, &hook_config(&CODEX, command));
+        assert!(outcome.replaced.contains(&"SessionEnd".to_owned()));
+        assert!(!outcome.present.contains(&"SessionEnd".to_owned()));
+        assert_eq!(settings["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"], 3);
+
+        // And having repaired it, saying so twice would be a lie.
+        let outcome = merge(&mut settings, &hook_config(&CODEX, command));
+        assert!(outcome.present.contains(&"SessionEnd".to_owned()));
+        assert!(outcome.replaced.is_empty());
+    }
+
+    /// A budget someone chose themselves is theirs, even where we ask for one.
+    #[test]
+    fn a_longer_timeout_already_in_the_file_is_left_alone() {
+        let command = "\"anamnesis\" hook --agent codex --server s";
+        let mut settings = serde_json::json!({
+            "hooks": { "SessionEnd": [{ "hooks": [
+                { "type": "command", "command": command, "timeout": 3 }
+            ] }] }
+        });
+        let outcome = merge(&mut settings, &hook_config(&CODEX, command));
+        assert!(outcome.present.contains(&"SessionEnd".to_owned()));
+        assert_eq!(settings["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"], 3);
     }
 
     #[test]
