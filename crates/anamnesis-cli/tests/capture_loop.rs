@@ -177,6 +177,99 @@ fn project(name: &str) -> tempfile::TempDir {
 }
 
 #[test]
+fn codex_closing_reports_reach_the_wiki_and_the_next_claude_session() {
+    let data = tempfile::tempdir().unwrap();
+    let repo = project("codex-closing-reports");
+    let (_server, server) = serve(data.path());
+    let installed = anamnesis(data.path())
+        .current_dir(repo.path())
+        .args([
+            "install-hooks",
+            "--agent",
+            "codex",
+            "--write",
+            "--server",
+            &server,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let settings: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo.path().join(".codex/hooks.json")).unwrap(),
+    )
+    .unwrap();
+    for name in ["Stop", "SubagentStop"] {
+        assert!(
+            settings["hooks"][name].is_array(),
+            "{name} is not installed"
+        );
+    }
+    hook(
+        data.path(),
+        "codex",
+        &server,
+        &event("writer", "SessionStart", repo.path(), json!({})),
+    );
+    let conclusion = "Keep SQLite: the index can be rebuilt from markdown.";
+    let report = "The parser investigation found an empty currency field.";
+    for (name, extra) in [
+        (
+            "Stop",
+            json!({"last_assistant_message": conclusion, "stop_hook_active": false}),
+        ),
+        (
+            "SubagentStop",
+            json!({"last_assistant_message": report, "agent_id": "investigator", "agent_type": "explorer"}),
+        ),
+    ] {
+        let reply = hook(
+            data.path(),
+            "codex",
+            &server,
+            &event("writer", name, repo.path(), extra),
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&reply).unwrap(),
+            json!({}),
+            "closing capture must not request another turn"
+        );
+    }
+    hook(
+        data.path(),
+        "codex",
+        &server,
+        &event("writer", "SessionEnd", repo.path(), json!({})),
+    );
+    assert!(wait_for_closed(data.path(), repo.path(), 1).contains("codex"));
+    let pages = data
+        .path()
+        .join("wiki/default/codex-closing-reports/sessions");
+    let page = std::fs::read_dir(pages)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let body = std::fs::read_to_string(page).unwrap();
+    assert!(body.contains(conclusion), "{body}");
+    assert!(body.contains(report), "{body}");
+    let handed = hook(
+        data.path(),
+        "claude-code",
+        &server,
+        &event("reader", "SessionStart", repo.path(), json!({})),
+    );
+    assert!(
+        handed.contains(conclusion),
+        "Codex's decision must reach Claude: {handed}"
+    );
+}
+
+#[test]
 fn claude_code_records_a_session_and_the_next_one_is_handed_its_note() {
     let data = tempfile::tempdir().expect("data dir");
     let repo = project("capture-loop");

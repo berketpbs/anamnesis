@@ -103,6 +103,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lives in `anamnesis-core` and both paths use it. The hook does not ask, and
   the server does not answer when an older hook does.
 
+- **Codex records its closing explanations.** Hook installation now includes
+  `Stop` and `SubagentStop`, whose `last_assistant_message` fields already fit
+  the capture parser. Decisions present only in the final answer and subagent
+  reports now reach the transcript and summary. Non-context replies are JSON
+  objects, including on capture failure. Installation explains Codex's hook
+  trust review and the need to verify capture in a fresh session.
+
 ### Security
 - **A password typed on a command line was stored whole.** Redaction knew
   provider keys by their prefix and any other value by the `=` or `:` in front
