@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import math
 import os
 import platform
 import re
@@ -1190,6 +1191,49 @@ def report_lines(scenario: dict, runs: list[dict]) -> list[str]:
             f"{ratio(sum(shown), len(shown))} | {ratio(sum(missed), len(missed))} |"
         )
 
+    # The columns above pool arms across runs. The pairs are what can be
+    # tested: one prompt, one agent model, one repository state, with and
+    # without memory.
+    lines += [
+        "",
+        "## Memory against control, pair by pair",
+        "",
+        "Each probe in each run is a pair: the same prompt and model, once with memory and once "
+        "without. Only a pair whose arms disagree says anything about memory. A pair is left out "
+        "when the memory arm's result is excluded above, or when either arm failed the planting "
+        "session's own task — an arm that could not do it when told cannot show that it forgot. "
+        "Grouped by the model that wrote the memory arm's pages, since those are different "
+        "experiments.",
+        "",
+        "| Pages by | Pairs | Left out | Memory only | Control only | Both | Neither | p |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    probes = [session for session in scenario["session"] if session["kind"] == "probe"]
+    groups: dict[str, list] = {}
+    reasons: Counter = Counter()
+    for run in runs:
+        for session in probes:
+            outcome, left_out = pair_verdict(run, session, valid)
+            if left_out == "an arm did not run":
+                continue
+            groups.setdefault(run_writer(run) or "not recorded", []).append(outcome)
+            if left_out:
+                reasons[f"{session['id']}: {left_out}"] += 1
+    for writer, outcomes in sorted(groups.items()) + [("all", [o for g in groups.values() for o in g])]:
+        tally = Counter(outcomes)
+        lines.append(
+            f"| {writer} | {len(outcomes)} | {tally['']} | {tally['memory']} | {tally['control']} | "
+            f"{tally['both']} | {tally['neither']} | {sign_test(tally['memory'], tally['control']):.2f} |"
+        )
+    lines += [
+        "",
+        "p is the chance of a split at least this lopsided between memory-only and control-only "
+        "pairs if memory made no difference. Even with every disagreement in memory's favour it "
+        "takes six of them before p falls below 0.05; a difference short of that is not yet one.",
+    ]
+    if reasons:
+        lines.append("Left out: " + ", ".join(f"{reason} ×{count}" for reason, count in sorted(reasons.items())) + ".")
+
     # The same runs, asked where the knowledge stopped. Read off disk rather
     # than out of results.json, so a run from before this existed is read too,
     # and the patterns in scenario.toml can be corrected and read again.
@@ -1312,6 +1356,43 @@ def mean(values: list, places: int = 1):
 
 def ratio(part: int, whole: int) -> str:
     return f"{part}/{whole}" if whole else "-"
+
+
+def sign_test(memory_only: int, control_only: int) -> float:
+    """Two-sided exact sign test: the chance of a split between the pairs
+    where the arms disagreed at least this lopsided, if memory made no
+    difference and either arm was as likely to be the one that passed."""
+    disagreed = memory_only + control_only
+    if disagreed == 0:
+        return 1.0
+    tail = sum(math.comb(disagreed, k) for k in range(min(memory_only, control_only) + 1))
+    return min(1.0, 2 * tail / 2**disagreed)
+
+
+def pair_verdict(run: dict, session: dict, valid) -> tuple[str, str | None]:
+    """One probe of one run, both arms: which arm passed, or why the pair says
+    nothing about memory.
+
+    A pair is left out when the memory arm's result is excluded for its own
+    reasons, or when either arm failed the planting session's own task. The
+    second is the first run's S09: its control arm, told outright that the
+    rates file is generated, still did not regenerate it, so the probe that
+    needs the same move could not show that it had forgotten anything.
+    """
+    records = {r["arm"]: r for r in run["sessions"] if r["session"] == session["id"]}
+    memory, control = records.get("memory"), records.get("control")
+    if memory is None or control is None:
+        return "", "an arm did not run"
+    if not valid(run, memory):
+        return "", "memory arm excluded"
+    needs = session.get("needs")
+    if needs:
+        for arm in ("memory", "control"):
+            planted = next((r for r in run["sessions"] if r["arm"] == arm and r["session"] == needs), None)
+            if planted is None or not planted["check"]["passed"]:
+                return "", f"{arm} failed {needs}'s own task"
+    m, c = memory["check"]["passed"], control["check"]["passed"]
+    return ("memory" if m and not c else "control" if c and not m else "both" if m else "neither"), None
 
 
 # ---------------------------------------------------------------------------
@@ -1631,6 +1712,34 @@ def cmd_selftest(_: argparse.Namespace) -> int:
         print(f"FAIL session_pages: {found}, expected the session's page and the note beside it")
         return 1
     print("ok   memory_tools_saw and session_pages find what the agent was brought and what a session left")
+
+    # Six disagreements all one way is the fewest that clear 0.05; five do not.
+    for split, expected in (((6, 0), 0.03125), ((5, 0), 0.0625), ((0, 6), 0.03125), ((1, 0), 1.0), ((3, 3), 1.0), ((0, 0), 1.0)):
+        if abs((got := sign_test(*split)) - expected) > 1e-9:
+            print(f"FAIL sign_test{split}: {got}, expected {expected}")
+            return 1
+
+    # The first run's S09: the control arm failed S03's own task, so its
+    # failure at S09 is not forgetting, and the pair is left out.
+    def record(session: str, arm: str, passed: bool) -> dict:
+        return {"session": session, "arm": arm, "check": {"passed": passed}}
+
+    probe = {"id": "S09", "needs": "S03"}
+    everything = lambda run, record: True  # noqa: E731
+    pairs = [
+        ([("S03", True, False), ("S09", True, False)], everything, ("", "control failed S03's own task")),
+        ([("S03", True, True), ("S09", True, False)], everything, ("memory", None)),
+        ([("S03", True, True), ("S09", False, True)], everything, ("control", None)),
+        ([("S03", True, True), ("S09", False, False)], everything, ("neither", None)),
+        ([("S03", True, True), ("S09", True, False)], lambda run, record: False, ("", "memory arm excluded")),
+        ([("S03", True, True)], everything, ("", "an arm did not run")),
+    ]
+    for sessions, valid, expected in pairs:
+        run = {"sessions": [r for sid, m, c in sessions for r in (record(sid, "memory", m), record(sid, "control", c))]}
+        if (got := pair_verdict(run, probe, valid)) != expected:
+            print(f"FAIL pair_verdict({sessions}): {got}, expected {expected}")
+            return 1
+    print("ok   sign_test and pair_verdict: a pair counts only when both arms could do the planting task")
 
     here = Path("C:/Users/x/AppData/Local/anamnesis-longrun/runs/r/.probe")
     elsewhere = Path(
