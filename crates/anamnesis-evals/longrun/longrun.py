@@ -604,11 +604,23 @@ def isolation_check(claude: str, model: str, scratch: Path) -> dict:
     Claude Code has a memory of its own, and a control arm that quietly had
     one would measure nothing. The answer is a model's and not proof, but a
     YES is enough to stop.
+
+    `isolated` is None when nothing answered. A session that cannot reach the
+    model still ends with a result, and its text is the reason: on 2026-09-19
+    it was "You've hit your weekly limit", read as not-NO and reported as a
+    control arm with memory of its own.
     """
     scratch.mkdir(parents=True, exist_ok=True)
     summary = run_claude(claude, scratch, ISOLATION_PROMPT, model, 2, None, scratch / "isolation.jsonl")
-    answer = summary["answer"].strip().upper()
-    return {"answer": summary["answer"].strip(), "isolated": answer.startswith("NO"), "cost_usd": summary["cost_usd"]}
+    return {"answer": summary["answer"].strip(), "isolated": isolation_verdict(summary), "cost_usd": summary["cost_usd"]}
+
+
+def isolation_verdict(summary: dict) -> bool | None:
+    """Whether the isolation answer was NO, or None when the model gave none."""
+    answer = (summary.get("answer") or "").strip()
+    if summary.get("is_error") or not answer:
+        return None
+    return answer.upper().startswith("NO")
 
 
 # ---------------------------------------------------------------------------
@@ -675,9 +687,46 @@ def redirected(run_dir: Path) -> str | None:
         probe.unlink(missing_ok=True)
 
 
+# How `key check` names each model it asks — the configured one, then each
+# fallback — and how it marks the answer that follows.
+CHECKED_MODEL = re.compile(r"^\s*(?:model|fallback)\s+(\S+)")
+CHECK_MARKS = ("✅", "❌", "⚠")
+
+
+def model_states(output: str) -> list[dict]:
+    """Each model `key check` asked, in chain order, and what it answered.
+
+    `said` is the first clause of the answer: the rest is the provider's own
+    text, which on a spent quota runs to four sentences and two URLs, and is
+    in key-check.txt for whoever needs it.
+    """
+    states = []
+    current = None
+    for line in output.splitlines():
+        if match := CHECKED_MODEL.match(line):
+            current = match.group(1)
+            continue
+        stripped = line.strip()
+        if current and stripped.startswith(CHECK_MARKS):
+            said = stripped.lstrip("".join(CHECK_MARKS) + "️").strip()
+            # "Answered" is the one state a page can be written in. A key that
+            # was accepted by a model whose quota is spent carries the same
+            # mark, and writes nothing.
+            states.append({"model": current, "answered": said.startswith("answered"), "said": said.split(": ")[0]})
+            current = None
+    return states
+
+
 def model_check_verdict(returncode: int, output: str) -> tuple[bool, str]:
-    """Read `anamnesis key check`: whether the memory arm's model can be shown
-    to work, and one line saying why not.
+    """Read `anamnesis key check`: whether the memory arm can write pages, and
+    one line saying which model will or why none can.
+
+    A run needs one model in the chain that answers, not all of them: the
+    server asks the configured model first and a fallback only when it fails.
+    Stopping on any failure lost the night of 2026-09-20, when the configured
+    model answered and only its fallback was overloaded. A model that answers
+    here can still refuse the work, which is what the stop at the first counted
+    planting page is for.
 
     A binary from before the command answers with clap's usage error, which is
     not a verdict about the key, and is named as what it is.
@@ -686,6 +735,12 @@ def model_check_verdict(returncode: int, output: str) -> tuple[bool, str]:
         return True, "every model answered"
     if "unrecognized subcommand" in output or "unexpected argument" in output:
         return False, "this anamnesis has no `key check`; use a newer build or pass --skip-model-check"
+    if states := model_states(output):
+        answered = [state["model"] for state in states if state["answered"]]
+        down = "; ".join(f"{state['model']}: {state['said']}" for state in states if not state["answered"])
+        if answered:
+            return True, f"{', '.join(answered)} answered (not {down})"
+        return False, f"no model can write pages — {down}"
     # Without its mark: the reason is printed, and on a Windows console in a
     # legacy code page (cp1254 on the machine this runs on) printing "❌"
     # raised UnicodeEncodeError — at the one moment the run had to say why it
@@ -724,7 +779,7 @@ def model_check(binary: Path, settings: Path, scratch: Path) -> dict:
         returncode, output = -1, f"key check did not finish: {error}"
     (scratch / "key-check.txt").write_text(output, encoding="utf-8")
     ok, reason = model_check_verdict(returncode, output)
-    return {"ok": ok, "reason": reason, "returncode": returncode}
+    return {"ok": ok, "reason": reason, "returncode": returncode, "models": model_states(output)}
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -793,6 +848,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         results["isolation"] = isolation
         write_json(results_path, results)
         print(f"  isolation: {isolation['answer']!r}")
+        if isolation["isolated"] is None:
+            print(
+                "  the agent did not answer, so no session would either; stopping. This is the agent's "
+                "account or service, not the control arm's setup",
+                file=sys.stderr,
+            )
+            return 6
         if not isolation["isolated"]:
             print("  the control setup reports memory of its own; stopping", file=sys.stderr)
             return 2
@@ -1035,7 +1097,7 @@ def report_lines(scenario: dict, runs: list[dict]) -> list[str]:
         f"Memory-arm pages: {dict(pages)}. A probe whose planting session's page was counted, "
         "or that ran without the MCP server connected, is excluded from the memory column above.",
     ]
-    wrote_with = {run["consolidation"] for run in runs if run.get("consolidation")}
+    wrote_with = {writer for run in runs if (writer := run_writer(run))}
     if len(wrote_with) > 1:
         lines.append(
             f"**The memory arm did not write its pages with one model: {sorted(wrote_with)}.** "
@@ -1058,12 +1120,32 @@ def report_lines(scenario: dict, runs: list[dict]) -> list[str]:
     for run in runs:
         isolation = run.get("isolation", {}).get("answer", "not checked")
         stopped = f", stopped: {run['stopped']}" if run.get("stopped") else ""
-        wrote_with = f", pages by {run['consolidation']}" if run.get("consolidation") else ""
+        wrote_with = f", pages by {writer}" if (writer := run_writer(run)) else ""
         lines.append(
             f"- {run['run']}: {'complete' if run.get('complete') else 'incomplete'}, "
             f"isolation {isolation!r}, {run['anamnesis']}{wrote_with}{stopped}"
         )
     return lines
+
+
+def run_writer(run: dict) -> str | None:
+    """The model a run's pages were written by, as far as the run can say.
+
+    The settings name the configured model, and the server falls back to the
+    next in the chain when that one fails. A run whose model check found the
+    configured model unable to answer had its pages written by the first
+    fallback that could, and pooling it under the configured model's name
+    would hide a second experiment inside the first.
+    """
+    configured = run.get("consolidation")
+    models = (run.get("model_check") or {}).get("models") or []
+    answered = [state["model"] for state in models if state.get("answered")]
+    if not configured or not answered or answered[0] == models[0]["model"]:
+        return configured
+    # The provider is everything before the first colon: a model's own name
+    # can carry more, as `ollama:qwen2.5:7b-instruct` does.
+    provider, colon, _ = configured.partition(":")
+    return f"{provider}:{answered[0]}" if colon else answered[0]
 
 
 def mean(values: list, places: int = 1):
@@ -1148,18 +1230,51 @@ def cmd_selftest(_: argparse.Namespace) -> int:
             return 1
     print("ok   a run stops when a planting session's page was written by counting")
 
-    # What `key check` printed on this machine on 2026-09-15, and the two
-    # other things it can come back as.
+    # What `key check` printed on this machine on 2026-09-15, 09-20 and 09-21,
+    # and the two other things it can come back as. The nightly run stopped
+    # on 09-20 although the configured model answered, and on 09-21 it named
+    # the fallback's 503 as the reason when the configured model's quota was
+    # spent.
+    header = "🔑 Checking the model key\n\n"
+    configured = "  model    gemini-3.5-flash (https://generativelanguage.googleapis.com/v1beta/openai)\n"
+    fallback = "  fallback gemini-3.6-flash (https://generativelanguage.googleapis.com/v1beta/openai)\n"
+    stored = "  key      GEMINI_API_KEY, from the credential store\n"
+    overloaded = (
+        "  ⚠️  the service did not answer (503): This model is currently experiencing high demand. "
+        "Spikes in demand are usually temporary. Please try again later. — this says nothing about "
+        "the key; try again\n\n"
+    )
     refused = (
-        "🔑 Checking the model key\n\n"
-        "  model    gemini-3.5-flash (https://generativelanguage.googleapis.com/v1beta/openai)\n"
-        "  key      ANAMNESIS_LLM_API_KEY, from the credential store\n"
+        header + configured + "  key      ANAMNESIS_LLM_API_KEY, from the credential store\n"
         "  ❌ the key was refused (400): Please pass a valid API key\n\n"
         "Error: 1 of 1 model(s) could not be shown to work\n"
     )
+    fallback_down = (
+        header + configured + stored + "  ✅ answered, as gemini-3.5-flash: the key works\n\n"
+        + fallback + stored + overloaded + "Error: 1 of 2 model(s) could not be shown to work\n"
+    )
+    quota_spent = (
+        header + configured + stored + "  ✅ the key was accepted, and today's quota for this model is "
+        "spent: You exceeded your current quota, please check your plan and billing details. * Quota "
+        "exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, "
+        "limit: 20, model: gemini-3.5-flash Please retry in 26.809445647s.\n\n"
+        + fallback + stored + overloaded + "Error: 1 of 2 model(s) could not be shown to work\n"
+    )
     cases = [
         ((0, "  ✅ answered, as gemini-3.5-flash: the key works\n"), (True, "every model answered")),
-        ((1, refused), (False, "the key was refused (400): Please pass a valid API key")),
+        ((1, refused), (False, "no model can write pages — gemini-3.5-flash: the key was refused (400)")),
+        (
+            (1, fallback_down),
+            (True, "gemini-3.5-flash answered (not gemini-3.6-flash: the service did not answer (503))"),
+        ),
+        (
+            (1, quota_spent),
+            (
+                False,
+                "no model can write pages — gemini-3.5-flash: the key was accepted, and today's quota "
+                "for this model is spent; gemini-3.6-flash: the service did not answer (503)",
+            ),
+        ),
         (
             (1, "  ⚠️  the service did not answer (503): overloaded — this says nothing about the key; try again\n"),
             (False, "the service did not answer (503): overloaded — this says nothing about the key; try again"),
@@ -1174,7 +1289,50 @@ def cmd_selftest(_: argparse.Namespace) -> int:
         if got != expected:
             print(f"FAIL model_check_verdict({returncode}): {got!r}, expected {expected!r}")
             return 1
-    print("ok   model_check_verdict stops a run on a refused key and on a binary without key check")
+    print("ok   model_check_verdict runs on any model in the chain that answers, and says why none can")
+
+    # The pages come from the first model in the chain that answers, which is
+    # not the configured one when its quota is spent.
+    quota_states = model_states(quota_spent)
+    spent = [dict(quota_states[0]), {"model": "gemini-3.6-flash", "answered": True, "said": "answered, as gemini-3.6-flash"}]
+    writers = [
+        ({"consolidation": "google:gemini-3.5-flash", "model_check": {"models": model_states(fallback_down)}}, "google:gemini-3.5-flash"),
+        ({"consolidation": "google:gemini-3.5-flash", "model_check": {"models": spent}}, "google:gemini-3.6-flash"),
+        ({"consolidation": "ollama:qwen2.5:7b-instruct", "model_check": {"models": []}}, "ollama:qwen2.5:7b-instruct"),
+        ({"consolidation": "google:gemini-3.5-flash"}, "google:gemini-3.5-flash"),
+        ({}, None),
+    ]
+    for run, expected in writers:
+        if (got := run_writer(run)) != expected:
+            print(f"FAIL run_writer({run!r}): {got!r}, expected {expected!r}")
+            return 1
+    print("ok   run_writer names the fallback that wrote a run's pages when the configured model could not")
+
+    # The result the isolation question got on 2026-09-19, cut to its fields:
+    # the account had hit its weekly limit, and the run reported a control
+    # arm with memory of its own.
+    limited = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "api_error_status": 429,
+            "terminal_reason": "api_error",
+            "num_turns": 1,
+            "result": "You've hit your weekly limit · resets 6am (Europe/Istanbul)",
+        }
+    )
+    answers = [
+        (json.dumps({"type": "result", "is_error": False, "result": "NO"}), True),
+        (json.dumps({"type": "result", "is_error": False, "result": "YES. There is a MEMORY.md."}), False),
+        (limited, None),
+        ("", None),
+    ]
+    for stream, expected in answers:
+        if (got := isolation_verdict(summarize_stream(stream))) is not expected:
+            print(f"FAIL isolation_verdict({stream[:60]!r}): {got!r}, expected {expected!r}")
+            return 1
+    print("ok   isolation_verdict tells an agent that could not answer from one that answered YES")
 
     # A recall block as Claude Code recorded it in the run of 2026-09-18, cut
     # to two pages: one a planting session wrote, one an agent wrote over MCP,

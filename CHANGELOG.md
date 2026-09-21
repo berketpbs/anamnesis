@@ -73,6 +73,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI as a test, so a change that makes recall chatty fails there.
 
 ### Fixed
+- **The long-run eval runs when a model can write its pages, and says why
+  when none can.** Three nights in a row it measured nothing. On 2026-09-20
+  it stopped because the fallback model was overloaded while the configured
+  one answered — one model in the chain is enough, since the server only asks
+  a fallback when the first fails. On 2026-09-21 it named that fallback's 503
+  as the reason when the configured model's daily quota was spent; it now
+  names each model and what it said. On 2026-09-19 the agent's weekly usage
+  limit was read as a control arm reporting memory of its own; an agent that
+  cannot answer now stops the run with exit 6 and its own reason. When only a
+  fallback answers, `report` names the run by the fallback that wrote its
+  pages.
 - **Codex sessions are closed instead of being left open forever.** Codex
   gives `SessionEnd` one second by default where every other event gets 600,
   and allows at most three. A closing hook that posts an observation does not
