@@ -71,6 +71,7 @@ keyring = { workspace = true, features = ["windows-native"] }
 keyring = { workspace = true, features = ["apple-native"] }
 
 [dev-dependencies]
+rusqlite.workspace = true
 tempfile.workspace = true
 
 [lints]
