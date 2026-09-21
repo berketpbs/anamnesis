@@ -48,6 +48,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   control arm that could not regenerate the rates file even when told to.
   Over the fifteen pairs so far the arms disagreed once.
 
+- **The long-run eval can run its probes in Codex.** `--probe-agent codex`
+  keeps the planting sessions in Claude Code and runs the probes in `codex
+  exec`, in both arms, so what one harness learnt has to be used by another
+  through the hooks and tools `anamnesis setup` wires. Codex runs a project's
+  hooks only once a person approves them, and the approval is tied to the
+  hook command, so these runs work in one fixed place on their own port;
+  `longrun.py codex-trust` builds it for that one approval, and a run whose
+  first Codex probe never reaches the server stops with exit 7 instead of
+  measuring a memory arm with no memory. Codex does not report what its
+  prompt hook printed, so the harness asks `/recall` itself with the probe's
+  prompt; `report --probe-agent codex` reads these runs apart from the rest.
+
 - **`anamnesis setup` wires every installed agent by default.** A bare setup
   used to wire Claude Code even when Codex was installed beside it, so the
   memory held a waiting handoff that the next agent never received. Setup now
