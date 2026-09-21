@@ -585,3 +585,441 @@ fn a_hook_whose_stdout_is_closed_still_exits_zero() {
     let status = child.wait().expect("the hook finishes");
     assert!(status.success(), "a hook exits 0 even unread: {status:?}");
 }
+
+// ---------------------------------------------------------------------------
+// One project, four harnesses. Every other test here stays inside one harness,
+// and every bug the cross-harness run of 2026-09-18 found was in a hand-over
+// between two of them: a Cursor session that claimed its handoff under a name
+// no session had (#274), recall printed where Cursor cannot read it and
+// answered to Gemini under the wrong event (#275), and a notification the
+// harness submitted asked about as though somebody had typed it (#272). The
+// first of those printed the right handoff to the right harness; only the
+// index said who it had been given to.
+//
+// The payloads are each harness's documented shape, not recordings: Codex's
+// fields are Claude Code's with a `model`, Gemini CLI names its own events,
+// and Cursor sends `conversation_id` and `workspace_roots` where the others
+// send `session_id` and `cwd`, with a `session_id` of its own on the start
+// and the end that matches nothing else.
+
+/// Run a query against the index, once the server that holds it has stopped.
+fn index_rows<T>(data: &Path, sql: &str, row: fn(&rusqlite::Row<'_>) -> T) -> Vec<T> {
+    let store = anamnesis_store::Store::open(data.join("db").join("anamnesis.db"))
+        .expect("the index opens");
+    let conn = store.connection();
+    let mut statement = conn.prepare(sql).expect("the query prepares");
+    statement
+        .query_map([], |r| Ok(row(r)))
+        .expect("the query runs")
+        .map(|r| r.expect("a row"))
+        .collect()
+}
+
+/// The page under `wiki/<workspace>/<project>/` whose text contains `needle`,
+/// as recall names it.
+fn page_saying(data: &Path, project: &str, needle: &str) -> String {
+    let sessions = data.join("wiki/default").join(project).join("sessions");
+    std::fs::read_dir(&sessions)
+        .expect("session pages")
+        .map(|entry| entry.expect("an entry").path())
+        .find(|path| std::fs::read_to_string(path).is_ok_and(|text| text.contains(needle)))
+        .map(|path| {
+            format!(
+                "sessions/{}",
+                path.file_name().expect("a name").to_string_lossy()
+            )
+        })
+        .unwrap_or_else(|| panic!("no page in {project} says {needle:?}"))
+}
+
+fn cursor(conversation: &str, name: &str, repo: &Path, extra: Value) -> Value {
+    let mut payload = json!({
+        "conversation_id": conversation,
+        "generation_id": format!("{conversation}-generation"),
+        "hook_event_name": name,
+        "workspace_roots": [repo.to_string_lossy()],
+    });
+    if let (Some(base), Some(extra)) = (payload.as_object_mut(), extra.as_object()) {
+        for (key, value) in extra {
+            base.insert(key.clone(), value.clone());
+        }
+    }
+    payload
+}
+
+/// What a Gemini CLI reply carries, and the event it says it answers.
+fn gemini_context(printed: &str) -> Option<(String, String)> {
+    let reply: Value = serde_json::from_str(printed.trim()).ok()?;
+    let output = &reply["hookSpecificOutput"];
+    Some((
+        output["hookEventName"].as_str()?.to_owned(),
+        output["additionalContext"].as_str()?.to_owned(),
+    ))
+}
+
+/// A decision made in Claude Code reaches each harness in turn, in the shape
+/// that harness reads, and comes back to Claude Code four sessions later.
+///
+/// Two routes carry it, and the test holds both apart. A handoff carries one
+/// session to the next and no further. What the first session decided comes
+/// back after that only through recall, and only by a name its page carries.
+///
+/// Each harness asks by a different one of those names, because asking is
+/// recorded: once a second page carries a name, a project this small counts it
+/// as common vocabulary and it names nothing. A name on one page always does.
+///
+/// Every broken hop is collected before anything fails, so a regression that
+/// breaks two harnesses says so in one run.
+#[test]
+fn a_decision_travels_from_claude_through_codex_gemini_and_cursor_and_back() {
+    let data = tempfile::tempdir().expect("data dir");
+    let repo = project("handover-across-agents");
+    let (server_process, server) = serve(data.path());
+    let d = data.path();
+    let r = repo.path();
+    let importer = r.join("ledger").join("importer.py");
+    let edit = json!({
+        "tool_name": "Edit",
+        "tool_input": {"file_path": importer.to_string_lossy()},
+        "tool_response": {"success": true},
+    });
+    let decision = "Every log line goes through redact_amounts before LEDGER_LOG_SINK, and a \
+                    failed row is reported by mask_failed_row: the logs are shipped to a third \
+                    party.";
+    let gemini_asks = "Does redact_amounts cover the importer's failure path too?";
+    let cursor_asks = "Where does LEDGER_LOG_SINK send the importer's lines?";
+    let claude_asks = "What does mask_failed_row keep out of the log?";
+    let mut broken: Vec<String> = Vec::new();
+
+    // Claude Code decides.
+    let s1 = "11111111-1111-4111-8111-111111111111";
+    let claude = |session: &str, name: &str, extra: Value| {
+        hook(d, "claude-code", &server, &event(session, name, r, extra))
+    };
+    claude(s1, "SessionStart", json!({"source": "startup"}));
+    claude(
+        s1,
+        "UserPromptSubmit",
+        json!({"prompt": "Add logging to the importer. Amounts must never appear in a log line."}),
+    );
+    claude(s1, "PostToolUse", edit.clone());
+    claude(s1, "Stop", json!({"last_assistant_message": decision}));
+    claude(s1, "SessionEnd", json!({"reason": "exit"}));
+    wait_for_closed(d, r, 1);
+    let planted = page_saying(d, "handover-across-agents", "shipped to a third party");
+
+    // Codex is handed it as plain text, which is what Codex injects.
+    let s2 = "22222222-2222-4222-8222-222222222222";
+    let codex = |name: &str, extra: Value| {
+        let mut payload = event(s2, name, r, extra);
+        payload["model"] = json!("gpt-5");
+        hook(d, "codex", &server, &payload)
+    };
+    let handed = codex("SessionStart", json!({"source": "startup"}));
+    if !handed.contains("shipped to a third party") || handed.trim_start().starts_with('{') {
+        broken.push(format!(
+            "Codex was not handed Claude's decision as text: {handed:?}"
+        ));
+    }
+    codex(
+        "UserPromptSubmit",
+        json!({"prompt": "Log a warning whenever the importer skips a malformed row."}),
+    );
+    codex("PostToolUse", edit.clone());
+    codex(
+        "Stop",
+        json!({
+            "last_assistant_message": "Skipped rows now log a warning naming the line number, never the amount.",
+            "stop_hook_active": false,
+        }),
+    );
+    codex("SessionEnd", json!({}));
+    wait_for_closed(d, r, 2);
+
+    // Gemini CLI is handed Codex's session inside one JSON object, and its
+    // prompt is answered under the event it asked on.
+    let s3 = "33333333-3333-4333-8333-333333333333";
+    let gemini =
+        |name: &str, extra: Value| hook(d, "gemini-cli", &server, &event(s3, name, r, extra));
+    let handed = gemini("SessionStart", json!({"source": "startup"}));
+    match gemini_context(&handed) {
+        Some((event, context))
+            if event == "SessionStart" && context.contains("never the amount") => {}
+        _ => broken.push(format!("Gemini was not handed Codex's session: {handed:?}")),
+    }
+    let recalled = gemini("BeforeAgent", json!({"prompt": gemini_asks}));
+    match gemini_context(&recalled) {
+        Some((event, context)) if event == "BeforeAgent" && context.contains(&planted) => {}
+        _ => broken.push(format!(
+            "Gemini's prompt was not answered with {planted} under BeforeAgent: {recalled:?}"
+        )),
+    }
+    gemini("AfterTool", edit.clone());
+    gemini("SessionEnd", json!({"reason": "exit"}));
+    wait_for_closed(d, r, 3);
+
+    // Cursor is handed Gemini's session under its own conversation, and told
+    // nothing at the prompt, which has no field to hear it in — although the
+    // server has an answer for that prompt, or the silence would prove nothing.
+    let c4 = "44444444-4444-4444-8444-444444444444";
+    let own_start = json!({"session_id": "cursor-start-and-end-only"});
+    let handed = hook(
+        d,
+        "cursor",
+        &server,
+        &cursor(c4, "sessionStart", r, own_start.clone()),
+    );
+    let context =
+        serde_json::from_str::<Value>(handed.trim()).unwrap_or_default()["additional_context"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+    if !context.contains(gemini_asks) {
+        broken.push(format!(
+            "Cursor was not handed Gemini's session: {handed:?}"
+        ));
+    }
+    let cwd = r.to_string_lossy();
+    let answer = reqwest::blocking::Client::new()
+        .get(format!("{server}/recall"))
+        .query(&[
+            ("agent", "cursor"),
+            ("session_id", c4),
+            ("cwd", cwd.as_ref()),
+            ("q", cursor_asks),
+        ])
+        .send()
+        .and_then(|response| response.text())
+        .unwrap_or_default();
+    if !answer.contains(&planted) {
+        broken.push(format!(
+            "the server had no answer for Cursor's prompt, so its silence proves nothing: {answer:?}"
+        ));
+    }
+    let printed = hook(
+        d,
+        "cursor",
+        &server,
+        &cursor(
+            c4,
+            "beforeSubmitPrompt",
+            r,
+            json!({"prompt": cursor_asks, "attachments": []}),
+        ),
+    );
+    if !printed.trim().is_empty() {
+        broken.push(format!(
+            "Cursor's prompt hook printed what it cannot read: {printed:?}"
+        ));
+    }
+    hook(
+        d,
+        "cursor",
+        &server,
+        &cursor(
+            c4,
+            "postToolUse",
+            r,
+            json!({
+                "cwd": r.to_string_lossy(),
+                "tool_name": "edit_file",
+                "tool_input": {"file_path": importer.to_string_lossy()},
+                "tool_output": "{\"success\": true}",
+            }),
+        ),
+    );
+    hook(
+        d,
+        "cursor",
+        &server,
+        &cursor(c4, "sessionEnd", r, own_start),
+    );
+    wait_for_closed(d, r, 4);
+
+    // Claude Code is handed Cursor's session, and the decision four sessions
+    // back comes to it only when asked by name — never for a notification.
+    let s5 = "55555555-5555-4555-8555-555555555555";
+    let handed = claude(s5, "SessionStart", json!({"source": "startup"}));
+    if !handed.contains("(cursor,") || !handed.contains(cursor_asks) {
+        broken.push(format!(
+            "Claude was not handed Cursor's session: {handed:?}"
+        ));
+    }
+    if handed.contains("shipped to a third party") {
+        broken.push(format!(
+            "a handoff carried more than one session: {handed:?}"
+        ));
+    }
+    let notified = claude(
+        s5,
+        "UserPromptSubmit",
+        json!({"prompt": format!(
+            "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n\
+             <summary>{claude_asks}</summary>\n</task-notification>"
+        )}),
+    );
+    if !notified.is_empty() {
+        broken.push(format!("a harness notification was answered: {notified:?}"));
+    }
+    let recalled = claude(s5, "UserPromptSubmit", json!({"prompt": claude_asks}));
+    if !recalled.contains(&planted) {
+        broken.push(format!(
+            "Claude's question did not recall {planted}: {recalled:?}"
+        ));
+    }
+
+    // Each handoff went to the session that asked for it: a session of that
+    // agent, holding that harness's events — not one derived from a name the
+    // harness never sent, which prints the same note and records nothing.
+    drop(server_process);
+    let claims = index_rows(
+        d,
+        "SELECT s.agent, (SELECT COUNT(*) FROM observations o WHERE o.session_id = s.id)
+         FROM handoffs h LEFT JOIN sessions s ON s.id = h.to_session
+         WHERE h.state = 'accepted' ORDER BY h.accepted_at",
+        |row| {
+            (
+                row.get::<_, Option<String>>(0).ok().flatten(),
+                row.get::<_, i64>(1).unwrap_or(0),
+            )
+        },
+    );
+    let agents: Vec<Option<&str>> = claims.iter().map(|(agent, _)| agent.as_deref()).collect();
+    if agents
+        != [
+            Some("codex"),
+            Some("gemini-cli"),
+            Some("cursor"),
+            Some("claude-code"),
+        ]
+        || claims.iter().any(|(_, observations)| *observations == 0)
+    {
+        broken.push(format!("handoffs were claimed by {claims:?}"));
+    }
+    let subjects = index_rows(
+        d,
+        "SELECT subject FROM audit_log WHERE action = 'handoff.claimed' ORDER BY at",
+        |row| row.get::<_, String>(0).unwrap_or_default(),
+    );
+    if subjects != [s2, s3, c4, s5] {
+        broken.push(format!("the audit log names the claimants {subjects:?}"));
+    }
+    let sessions = index_rows(
+        d,
+        "SELECT agent, COUNT(*) FROM sessions GROUP BY agent ORDER BY agent",
+        |row| {
+            (
+                row.get::<_, String>(0).unwrap_or_default(),
+                row.get::<_, i64>(1).unwrap_or(0),
+            )
+        },
+    );
+    let expected = [
+        ("claude-code", 2),
+        ("codex", 1),
+        ("cursor", 1),
+        ("gemini-cli", 1),
+    ];
+    if sessions.iter().map(|(a, n)| (a.as_str(), *n)).ne(expected) {
+        broken.push(format!("sessions recorded per agent: {sessions:?}"));
+    }
+
+    assert!(broken.is_empty(), "\n{}", broken.join("\n"));
+}
+
+/// Two projects on one server: each is handed its own last session and
+/// recalled from its own pages, with the other's page one query away.
+///
+/// The positive half is what makes the negative one worth anything — the
+/// question that finds nothing at home finds the neighbour's page in the
+/// neighbour.
+#[test]
+fn a_neighbouring_project_is_never_handed_or_recalled() {
+    let data = tempfile::tempdir().expect("data dir");
+    let home = project("handover-home");
+    let neighbour = project("handover-neighbour");
+    let (_server, server) = serve(data.path());
+    let d = data.path();
+    let asked = "Which host does deploy_staging_ledger push to?";
+
+    let finish = |repo: &Path, session: &str, said: &str| {
+        let claude = |name: &str, extra: Value| {
+            hook(
+                d,
+                "claude-code",
+                &server,
+                &event(session, name, repo, extra),
+            )
+        };
+        claude("SessionStart", json!({"source": "startup"}));
+        claude(
+            "UserPromptSubmit",
+            json!({"prompt": "Write down how staging is deployed."}),
+        );
+        claude(
+            "PostToolUse",
+            json!({
+                "tool_name": "Edit",
+                "tool_input": {"file_path": repo.join("DEPLOY.md").to_string_lossy()},
+                "tool_response": {"success": true},
+            }),
+        );
+        claude("Stop", json!({"last_assistant_message": said}));
+        claude("SessionEnd", json!({"reason": "exit"}));
+        wait_for_closed(d, repo, 1);
+    };
+    finish(
+        neighbour.path(),
+        "neighbour-one",
+        "deploy_staging_ledger pushes to ledger-stg-02 with ENV=staging.",
+    );
+    finish(
+        home.path(),
+        "home-one",
+        "Staging is deployed by hand from the release branch.",
+    );
+    let theirs = page_saying(d, "handover-neighbour", "ledger-stg-02");
+
+    let start = |repo: &Path, session: &str| {
+        hook(
+            d,
+            "claude-code",
+            &server,
+            &event(session, "SessionStart", repo, json!({"source": "startup"})),
+        )
+    };
+    let ask = |repo: &Path, session: &str| {
+        hook(
+            d,
+            "claude-code",
+            &server,
+            &event(session, "UserPromptSubmit", repo, json!({"prompt": asked})),
+        )
+    };
+
+    let handed = start(home.path(), "home-two");
+    assert!(
+        handed.contains("by hand"),
+        "home is handed its own session: {handed:?}"
+    );
+    assert!(
+        !handed.contains("ledger-stg-02"),
+        "home was handed the neighbour's: {handed:?}"
+    );
+    let recalled = ask(home.path(), "home-two");
+    assert!(
+        !recalled.contains(&theirs),
+        "home recalled the neighbour's page: {recalled:?}"
+    );
+
+    let handed = start(neighbour.path(), "neighbour-two");
+    assert!(
+        handed.contains("ledger-stg-02"),
+        "the neighbour keeps its own handoff: {handed:?}"
+    );
+    let recalled = ask(neighbour.path(), "neighbour-two");
+    assert!(
+        recalled.contains(&theirs),
+        "the same question finds the page where it lives: {recalled:?}"
+    );
+}
