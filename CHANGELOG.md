@@ -38,6 +38,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs are followed too, and recall is read from Claude Code's transcript for
   the run that did not record it.
 
+- **The long-run eval says whether memory made a difference, pair by pair.**
+  Its pass columns pooled each arm across runs, so "memory 2/5, control 1/5"
+  read as a difference whether or not it was one. Each probe in each run is
+  now a pair, and an exact sign test over the pairs where the arms disagreed
+  says whether the split is more than chance, grouped by the model that wrote
+  the pages. A pair is left out when either arm failed the planting session's
+  own task: the first run's S09, which counted as a win for memory, was a
+  control arm that could not regenerate the rates file even when told to.
+  Over the fifteen pairs so far the arms disagreed once.
+
 - **`anamnesis setup` wires every installed agent by default.** A bare setup
   used to wire Claude Code even when Codex was installed beside it, so the
   memory held a waiting handoff that the next agent never received. Setup now
