@@ -184,7 +184,7 @@ pub fn cmd_install_hooks(
     };
 
     let binary = crate::binary::stable_command();
-    let config = hooks::hook_config(&harness, &hooks::hook_command(&binary, agent, server));
+    let config = hooks::hook_config(&harness, &harness.command(&binary, server));
 
     // Resolved once, and before the dry run, so that what is printed is the
     // file `--write` would touch. It named `.\.claude\settings.local.json`

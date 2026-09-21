@@ -195,6 +195,100 @@ fn project(name: &str) -> tempfile::TempDir {
     repo
 }
 
+/// Codex on Windows hands a hook's command to PowerShell. Run the command
+/// `install-hooks` writes for it the way Codex runs it, and the session has to
+/// reach the server. A quoted path followed by arguments is a syntax error in
+/// PowerShell, and until this was known every Codex hook written on Windows
+/// exited 1 before starting — `hook: SessionStart Failed` in Codex, nothing at
+/// the server, and `/hooks` listing each one as approved.
+#[cfg(windows)]
+#[test]
+fn the_codex_hook_command_runs_in_powershell() {
+    let data = tempfile::tempdir().expect("data dir");
+    let repo = project("codex-in-powershell");
+    let (_server, server) = serve(data.path());
+    let installed = anamnesis(data.path())
+        .current_dir(repo.path())
+        .args([
+            "install-hooks",
+            "--agent",
+            "codex",
+            "--write",
+            "--server",
+            &server,
+        ])
+        .output()
+        .expect("install-hooks runs");
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let settings: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo.path().join(".codex/hooks.json")).expect("hooks.json"),
+    )
+    .expect("hooks.json parses");
+    let command = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        .as_str()
+        .expect("a command")
+        .to_owned();
+
+    let mut shell = Command::new("powershell.exe");
+    for (name, _) in std::env::vars() {
+        if name.starts_with("ANAMNESIS_") {
+            shell.env_remove(name);
+        }
+    }
+    let mut child = shell
+        .args(["-NoProfile", "-NonInteractive", "-Command", &command])
+        .env("ANAMNESIS_DATA_DIR", data.path())
+        .current_dir(repo.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("powershell starts");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(
+            event(
+                "codex-in-powershell",
+                "SessionStart",
+                repo.path(),
+                json!({"source": "startup"}),
+            )
+            .to_string()
+            .as_bytes(),
+        )
+        .expect("write the payload");
+    let output = child.wait_with_output().expect("powershell finishes");
+    assert!(
+        output.status.success(),
+        "PowerShell could not run {command}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let listed = loop {
+        let listed = anamnesis(data.path())
+            .arg("sessions")
+            .current_dir(repo.path())
+            .output()
+            .expect("sessions runs");
+        let text = String::from_utf8_lossy(&listed.stdout).into_owned();
+        if text.contains("codex") || Instant::now() > deadline {
+            break text;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert!(
+        listed.contains("codex"),
+        "the hook reached no session: {listed}"
+    );
+}
+
 #[test]
 fn codex_closing_reports_reach_the_wiki_and_the_next_claude_session() {
     let data = tempfile::tempdir().unwrap();

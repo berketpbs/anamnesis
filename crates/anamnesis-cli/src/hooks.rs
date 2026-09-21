@@ -43,6 +43,14 @@ pub struct Harness {
     /// are the closing ones, and raising the limit everywhere would let a
     /// stalled hook hold up an ordinary tool call.
     pub timeouts: &'static [(&'static str, u64)],
+    /// Whether this harness hands a hook's command to PowerShell on Windows.
+    ///
+    /// PowerShell reads a quoted path followed by arguments as a string and
+    /// then a stray token, and fails before anything runs — so the command has
+    /// to call the path with `&`. Every other shell a harness uses would reject
+    /// the `&` instead, which is why this is per harness and not a platform
+    /// rule.
+    pub powershell_on_windows: bool,
     /// What to tell someone about this file after writing it.
     pub note: &'static str,
 }
@@ -54,6 +62,23 @@ impl Harness {
             .iter()
             .find(|(name, _)| *name == event)
             .map(|(_, seconds)| *seconds)
+    }
+
+    /// The command this harness's hooks run, on the platform this is built
+    /// for.
+    pub fn command(&self, binary: &str, server: &str) -> String {
+        self.command_on(binary, server, cfg!(windows))
+    }
+
+    /// [`Harness::command`], with the platform named, so both spellings are
+    /// tested wherever the tests run.
+    fn command_on(&self, binary: &str, server: &str, windows: bool) -> String {
+        let command = hook_command(binary, self.agent, server);
+        if windows && self.powershell_on_windows {
+            format!("& {command}")
+        } else {
+            command
+        }
     }
 }
 
@@ -94,6 +119,7 @@ pub const CLAUDE_CODE: Harness = Harness {
     ],
     schema_version: None,
     timeouts: &[],
+    powershell_on_windows: false,
     note: "Hooks are read when a session starts.",
 };
 
@@ -130,6 +156,13 @@ pub const CODEX: Harness = Harness {
     // Codex sessions open, 0 of them ended. Documented at
     // <https://learn.chatgpt.com/docs/hooks>.
     timeouts: &[("SessionEnd", 3)],
+    // On Windows Codex hands the command to PowerShell, the shell it runs its
+    // own commands in, and a quoted path followed by arguments is a syntax
+    // error there. Every hook this command wrote for Codex on Windows exited 1
+    // before starting — `hook: SessionStart Failed`, no request at the server,
+    // while `/hooks` listed each one as approved. Measured 2026-09-21: the
+    // quoted form exits 1 under `powershell -Command` and the `&` form runs.
+    powershell_on_windows: true,
     note: "Open `/hooks` in Codex to review and trust new or changed hooks, then start a fresh session. A written hook is not proof of capture; check `anamnesis status` after using it.",
 };
 
@@ -160,6 +193,7 @@ pub const GEMINI_CLI: Harness = Harness {
     ],
     schema_version: None,
     timeouts: &[],
+    powershell_on_windows: false,
     note: "Stdout must be one JSON object; the hook prints one.",
 };
 
@@ -183,6 +217,7 @@ pub const CURSOR: Harness = Harness {
     ],
     schema_version: Some(1),
     timeouts: &[],
+    powershell_on_windows: false,
     note: "Cursor reads hooks.json at startup.",
 };
 
@@ -277,6 +312,14 @@ pub fn hook_command(binary: &str, agent: &str, server: &str) -> String {
 /// theirs, and this is the predicate deciding what may be overwritten.
 fn is_ours(command: &str) -> bool {
     let command = command.trim_start();
+    // PowerShell's call operator, which the command carries for a harness
+    // that runs hooks in PowerShell. It is ours only when it is followed by a
+    // space and then our own command, so it is read off and the rest judged.
+    let command = match command.strip_prefix('&') {
+        Some(rest) if rest.starts_with(char::is_whitespace) => rest.trim_start(),
+        Some(_) => return false,
+        None => command,
+    };
     // Our installer quotes executable paths, which may contain spaces. Read
     // only that first argument; do not try to interpret arbitrary shell code.
     let (binary, rest) = if let Some(quoted) = command.strip_prefix('"') {
@@ -1141,6 +1184,60 @@ mod tests {
         );
         assert!(!is_ours(r#""C:/path/anamnesis.exe"suffix hook"#));
         assert!(!is_ours(r#""C:/path/anamnesis.exe hook"#));
+    }
+
+    /// Codex on Windows runs a hook's command in PowerShell, where a quoted
+    /// path and then arguments is a syntax error: every hook written for it
+    /// exited 1 before anything ran. Only that harness on that platform gets
+    /// the call operator; anywhere else the `&` would be the error.
+    #[test]
+    fn codex_on_windows_calls_the_path_the_way_powershell_can_run_it() {
+        let binary = r"C:\Users\Ada Lovelace\anamnesis.exe";
+        assert_eq!(
+            CODEX.command_on(binary, "http://s", true),
+            "& \"C:/Users/Ada Lovelace/anamnesis.exe\" hook --agent codex --server http://s"
+        );
+        assert_eq!(
+            CODEX.command_on(binary, "http://s", false),
+            hook_command(binary, "codex", "http://s")
+        );
+        for harness in [CLAUDE_CODE, GEMINI_CLI, CURSOR] {
+            assert!(
+                !harness
+                    .command_on(binary, "http://s", true)
+                    .starts_with('&'),
+                "{} does not run hooks in PowerShell",
+                harness.agent
+            );
+        }
+    }
+
+    /// A file wired before that was known carries the quoted command Codex
+    /// could not run, and installing again has to repair it rather than add a
+    /// second hook beside it — the one approval a person gives covers the
+    /// command they were shown.
+    #[test]
+    fn a_codex_hook_powershell_could_not_run_is_replaced() {
+        let binary = r"C:\Users\Ada Lovelace\anamnesis.exe";
+        let stale = hook_command(binary, "codex", "http://127.0.0.1:8080");
+        let mut settings = hook_config(&CODEX, &stale);
+        let wanted = CODEX.command_on(binary, "http://127.0.0.1:8080", true);
+
+        let outcome = merge(&mut settings, &hook_config(&CODEX, &wanted));
+
+        assert_eq!(outcome.replaced.len(), CODEX.events.len(), "{outcome:?}");
+        assert!(outcome.added.is_empty(), "{outcome:?}");
+        for event in CODEX.events {
+            assert_eq!(
+                commands_in(&settings["hooks"][*event]),
+                vec![wanted.clone()]
+            );
+        }
+        assert!(!merge(&mut settings, &hook_config(&CODEX, &wanted)).changed());
+        remove_ours(&mut settings);
+        assert!(commands_in(&settings["hooks"]["SessionStart"]).is_empty());
+        assert!(!is_ours(r#"&"C:/path/anamnesis.exe" hook"#));
+        assert!(!is_ours(r#"& "C:/path/other.exe" hook"#));
     }
 
     /// The other half of that: a hook someone else wrote is not ours to

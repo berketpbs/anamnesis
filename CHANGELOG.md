@@ -95,6 +95,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI as a test, so a change that makes recall chatty fails there.
 
 ### Fixed
+- **Codex's hooks run on Windows.** Codex hands a hook's command to
+  PowerShell there, and the command `setup` and `install-hooks` wrote — a
+  quoted path, then arguments — is a syntax error in PowerShell: `Unexpected
+  token 'hook' in expression or statement`. Every Codex hook written on
+  Windows exited 1 before anything ran. Codex printed `hook: SessionStart
+  Failed`, the server heard nothing, and `/hooks` listed each one as
+  approved, so the only sign was a memory that never grew. The command for
+  Codex on Windows now calls the path with PowerShell's `&`, and installing
+  again replaces the old one. Codex asks for the changed hooks to be approved
+  again under `/hooks`. A test runs the written command in PowerShell the way
+  Codex does and expects the session at the server.
 - **The long-run eval runs when a model can write its pages, and says why
   when none can.** Three nights in a row it measured nothing. On 2026-09-20
   it stopped because the fallback model was overloaded while the configured

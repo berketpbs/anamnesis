@@ -490,7 +490,7 @@ fn hooks_step(agent: &str, root: &Path, binary: &str, server: &str) -> Step {
 
     let path = hooks::default_settings_path(&harness, root);
     let shown = shown(&path, root);
-    let config = hooks::hook_config(&harness, &hooks::hook_command(binary, agent, server));
+    let config = hooks::hook_config(&harness, &harness.command(binary, server));
     step(match hooks::read_settings(&path) {
         Err(error) => State::Blocked(format!(
             "{agent}: {shown} could not be read ({error}); fix it or run `install-hooks` to print the lines"
