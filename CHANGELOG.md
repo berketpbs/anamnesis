@@ -107,6 +107,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI as a test, so a change that makes recall chatty fails there.
 
 ### Fixed
+- **Codex can use the memory tools with nobody there to approve them.**
+  `codex exec` refused every anamnesis tool with "MCP tool call requires
+  approval, but approval policy is never": none of them said whether it
+  changes anything, and a harness running unattended has nobody to ask. In
+  the long-run eval an agent left without its memory tools went and grepped
+  the wiki's files instead. Each tool now carries MCP's hints.
+  `memory_query`, `memory_read_page` and `workstream_status` are read-only,
+  and codex-cli 0.155.1 runs them without asking; the three that write say
+  so, so a harness that asks before writes still asks.
 - **A model is asked about each session once.** A session is closed on its
   counted page before the model is asked, and that puts it in the queue the
   retry pass reads for as long as the model takes to answer. A pass that ran

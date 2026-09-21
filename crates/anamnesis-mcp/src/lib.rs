@@ -461,6 +461,14 @@ impl AnamnesisMcp {
     }
 }
 
+// Every tool says whether it changes memory, because harnesses decide by it
+// whether to ask first. A harness running unattended cannot ask anyone: on
+// 2026-09-22 `codex exec` refused `memory_query` outright — "MCP tool call
+// requires approval, but approval policy is never" — and the agent, left
+// without its memory tools, went and grepped the wiki's files instead. With
+// these hints codex-cli 0.155.1 runs the three read-only tools unasked under
+// its default settings; the other three are marked as the writes they are, so
+// a harness that asks before writes still asks.
 #[tool_router(router = tool_router)]
 impl AnamnesisMcp {
     /// Search the project's memory wiki.
@@ -474,7 +482,8 @@ impl AnamnesisMcp {
     /// finds relevant is never surfaced no matter its standing.
     #[tool(
         name = "memory_query",
-        description = "Search the project's memory wiki for pages relevant to a query."
+        description = "Search the project's memory wiki for pages relevant to a query.",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     pub async fn memory_query(
         &self,
@@ -492,7 +501,13 @@ impl AnamnesisMcp {
     /// change, because page identifiers are derived from `(project, path)`.
     #[tool(
         name = "memory_write_page",
-        description = "Write or update a page in the project's memory wiki."
+        description = "Write or update a page in the project's memory wiki.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     pub async fn memory_write_page(
         &self,
@@ -516,7 +531,8 @@ impl AnamnesisMcp {
     /// Omitting `global` preserves the legacy project-first lookup.
     #[tool(
         name = "memory_read_page",
-        description = "Read one page of the memory wiki in full. Copy both path and global from the memory_query hit to select the same page."
+        description = "Read one page of the memory wiki in full. Copy both path and global from the memory_query hit to select the same page.",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     pub async fn memory_read_page(
         &self,
@@ -534,7 +550,13 @@ impl AnamnesisMcp {
     /// `null` afterward.
     #[tool(
         name = "memory_handoff_accept",
-        description = "Claim the pending handoff left by the previous session, if any."
+        description = "Claim the pending handoff left by the previous session, if any.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     pub async fn memory_handoff_accept(
         &self,
@@ -555,7 +577,13 @@ impl AnamnesisMcp {
     /// than starting a second one.
     #[tool(
         name = "workstream_start",
-        description = "Start or resume a named workstream: a persistent thread of work spanning many sessions and harnesses."
+        description = "Start or resume a named workstream: a persistent thread of work spanning many sessions and harnesses.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     pub async fn workstream_start(
         &self,
@@ -573,7 +601,8 @@ impl AnamnesisMcp {
     /// a raw log of what actually happened, in order.
     #[tool(
         name = "workstream_status",
-        description = "Show a workstream's status and its event ledger (sessions and handoffs)."
+        description = "Show a workstream's status and its event ledger (sessions and handoffs).",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     pub async fn workstream_status(
         &self,
