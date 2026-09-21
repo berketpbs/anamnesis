@@ -1623,9 +1623,15 @@ def report_lines(scenario: dict, runs: list[dict]) -> list[str]:
         "",
         "## Effort per session",
         "",
-        "| Session | Kind | Arm | Turns (mean) | Cost USD (mean) | Refused (mean) | Task passed |",
-        "|---|---|---|---|---|---|---|",
+        "| Session | Kind | Arm | Turns (mean) | Cost USD (mean) | Actions (mean) | Refused (mean) | Task passed |",
+        "|---|---|---|---|---|---|---|---|",
     ]
+
+    def known(records: list[dict], field: str) -> list:
+        # Over the sessions that report it: Claude Code reports turns and cost,
+        # Codex actions, and a session reporting none is not one that took none.
+        return [r["agent"].get(field) for r in records if r["agent"].get(field) is not None]
+
     for session in scenario["session"]:
         for arm in ("memory", "control"):
             records = [record for _, record in by.get((session["id"], arm), [])]
@@ -1633,19 +1639,27 @@ def report_lines(scenario: dict, runs: list[dict]) -> list[str]:
                 continue
             lines.append(
                 f"| {session['id']} | {session['kind']} | {arm} | "
-                f"{mean([r['agent']['turns'] or 0 for r in records])} | "
-                f"{mean([r['agent']['cost_usd'] or 0 for r in records], 4)} | "
+                f"{mean(known(records, 'turns'))} | "
+                f"{mean(known(records, 'cost_usd'), 4)} | "
+                f"{mean(known(records, 'actions'))} | "
                 f"{mean([r['agent']['permission_denials'] or 0 for r in records])} | "
                 f"{sum(r['check']['passed'] for r in records)}/{len(records)} |"
             )
 
-    pages = Counter((record["page"] or {}).get("source", "none") for run in runs for record in run["sessions"] if record["arm"] == "memory")
+    # A Codex probe waits for no page, so it has none to count.
+    pages = Counter(
+        (record["page"] or {}).get("source", "none")
+        for run in runs
+        for record in run["sessions"]
+        if record["arm"] == "memory" and record.get("agent_kind") != "codex"
+    )
     lines += [
         "",
         "## Validity",
         "",
         f"Memory-arm pages: {dict(pages)}. A probe whose planting session's page was counted, "
-        "or that ran without the MCP server connected, is excluded from the memory column above.",
+        "or that ran without the MCP server connected — for a probe in Codex, without its hooks "
+        "reaching the server — is excluded from the memory column above.",
     ]
     wrote_with = {writer for run in runs if (writer := run_writer(run))}
     if len(wrote_with) > 1:
