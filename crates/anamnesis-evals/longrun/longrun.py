@@ -139,6 +139,14 @@ def load_scenario(path: Path = SCENARIO) -> dict:
                 problems.append(f"{session['id']} {field} {session[field]!r}, which is not a session")
         if session["kind"] not in ("plant", "distractor", "probe"):
             problems.append(f"{session['id']} has kind {session['kind']!r}")
+        if "knowledge" in session and session["kind"] != "plant":
+            problems.append(f"{session['id']} names knowledge but plants nothing")
+        for fact in session.get("knowledge", []):
+            for pattern in fact:
+                try:
+                    re.compile(pattern)
+                except re.error as error:
+                    problems.append(f"{session['id']} knowledge {pattern!r}: {error}")
         session["prompt"] = " ".join(session["prompt"].split())
     if problems:
         raise SystemExit("scenario.toml: " + "; ".join(problems))
@@ -562,6 +570,17 @@ def plant_offered(run: dict, record: dict, needs: str | None) -> bool | None:
     return any(page.get("session") == planted_session for page in offered["pages"])
 
 
+def with_recall(run: dict, record: dict) -> dict:
+    """`record`, with what recall showed it read now if the run did not record
+    it — the first run with recall on predates recording it — and Claude
+    Code's transcript of the session is still there to read."""
+    claude_session = (record.get("agent") or {}).get("claude_session")
+    if record.get("recall") is not None or record["arm"] != "memory" or not run.get("_dir") or not claude_session:
+        return record
+    data = Path(run["_dir"]) / "memory" / "data"
+    return {**record, "recall": recall_offered(data, f"ledger-{run['run'].lower()}", claude_session)}
+
+
 def recall_note(run: dict, record: dict, needs: str | None) -> str:
     """The console's few words on what recall offered one memory-arm session."""
     offered = record.get("recall")
@@ -572,6 +591,103 @@ def recall_note(run: dict, record: dict, needs: str | None) -> str:
     if plant is not None:
         note += f" ({'with' if plant else 'without'} {needs}'s)"
     return note
+
+
+def session_pages(wiki: Path, session: str | None) -> list[tuple[str, str]]:
+    """Every page whose frontmatter says `session` wrote it, with its text.
+
+    A session leaves more than its own page: consolidation writes the rules
+    and gotchas it found beside it, and on 2026-09-18 the rule a planting
+    session was told went into a gotcha while its session page said only what
+    was built. A page an agent wrote over MCP names no session and is not
+    counted here, even when it holds the same rule.
+    """
+    if not session or not wiki.is_dir():
+        return []
+    pages = []
+    for page in sorted(wiki.rglob("*.md")):
+        path = page.relative_to(wiki).as_posix()
+        if page_session(wiki, path) == session:
+            pages.append((path, page.read_text(encoding="utf-8", errors="replace")))
+    return pages
+
+
+def knowledge_kept(pages: list[tuple[str, str]], knowledge: list[list[str]]) -> bool | None:
+    """Whether the pages carry every fact a probe needs, None when the scenario
+    names none. A fact is kept when any one of its patterns matches a line of
+    any page, case aside."""
+    if not knowledge:
+        return None
+    return all(
+        any(re.search(pattern, text, re.IGNORECASE) for pattern in fact for _, text in pages)
+        for fact in knowledge
+    )
+
+
+def memory_tools_saw(stream: str, paths: set[str]) -> dict:
+    """Whether a session's own memory calls brought back any of `paths`, and
+    whether it opened one in full.
+
+    Separate from recall, which the prompt hook shows the agent unasked: this
+    is what the agent went looking for. Counted from `stream-json`, where both
+    the calls and what they returned are recorded.
+    """
+    ids: set[str] = set()
+    returned = opened = False
+    for line in stream.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = event.get("message") if isinstance(event, dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use" and str(block.get("name", "")).startswith("mcp__anamnesis__"):
+                ids.add(block.get("id"))
+                if block["name"].endswith("memory_read_page") and (block.get("input") or {}).get("path") in paths:
+                    opened = True
+            elif block.get("type") == "tool_result" and block.get("tool_use_id") in ids:
+                text = json.dumps(block.get("content"), ensure_ascii=False)
+                returned = returned or any(path in text for path in paths)
+    return {"returned": returned, "opened": opened}
+
+
+def knowledge_path(run: dict, record: dict, needs: str | None, knowledge: list[list[str]]) -> dict | None:
+    """How far a probe's planted knowledge got in one memory-arm run.
+
+    Four questions a pass rate folds into one: did the planting session's pages
+    keep the knowledge, was one of them put in front of the agent — by recall
+    or by a memory call it made — did the agent open one in full, and did the
+    probe pass. On 2026-09-18 the run with a local model tied the control arm,
+    and the reason was the first of these: its pages kept one fact in five.
+
+    None for a run without its directory on disk. Each answer is None where it
+    cannot be said.
+    """
+    run_dir = run.get("_dir")
+    planted = next((r for r in run["sessions"] if r["arm"] == "memory" and r["session"] == needs), None)
+    if not run_dir or not needs or planted is None:
+        return None
+    run_dir = Path(run_dir)
+    wiki = run_dir / "memory" / "data" / "wiki" / "longrun" / f"ledger-{run['run'].lower()}"
+    pages = session_pages(wiki, (planted.get("page") or {}).get("session"))
+    paths = {path for path, _ in pages}
+    transcript = run_dir / "memory" / "sessions" / f"{record['session']}.jsonl"
+    tools = (
+        memory_tools_saw(transcript.read_text(encoding="utf-8", errors="replace"), paths)
+        if transcript.exists() and paths
+        else {"returned": None, "opened": None}
+    )
+    offered = plant_offered(run, with_recall(run, record), needs)
+    shown = True if offered or tools["returned"] else (False if offered is False and tools["returned"] is False else None)
+    return {
+        "kept": knowledge_kept(pages, knowledge) if pages else (False if knowledge else None),
+        "shown": shown,
+        "opened": tools["opened"],
+        "passed": record["check"]["passed"],
+    }
 
 
 def nothing_left_to_measure(session: dict, arm: str, record: dict) -> str | None:
@@ -977,7 +1093,11 @@ def cmd_report(args: argparse.Namespace) -> int:
     scenario = load_scenario()
     runs = []
     for path in sorted((Path(args.root) / "runs").glob("*/results.json")):
-        runs.append(json.loads(path.read_text(encoding="utf-8")))
+        run = json.loads(path.read_text(encoding="utf-8"))
+        # Where the run's pages and transcripts are, for what `report` reads
+        # off disk rather than out of results.json.
+        run["_dir"] = str(path.parent)
+        runs.append(run)
     if not runs:
         print(f"no runs under {Path(args.root) / 'runs'}")
         return 1
@@ -1047,8 +1167,9 @@ def report_lines(scenario: dict, runs: list[dict]) -> list[str]:
         "## What recall offered",
         "",
         "Whether the prompt hook's recall block showed a probe a page its planting session "
-        "wrote, and how the probe did either way. Over the memory column's runs; a run from "
-        "before recall was recorded, or a session whose transcript was not found, is left out.",
+        "wrote, and how the probe did either way. Over the memory column's runs. A run that did "
+        "not record it is read from Claude Code's transcript, and one from before recall existed "
+        "reads as not offered, since nothing was; a session whose transcript is gone is left out.",
         "",
         "| Probe | Plant offered | Passed when offered | Passed when not |",
         "|---|---|---|---|",
@@ -1060,13 +1181,50 @@ def report_lines(scenario: dict, runs: list[dict]) -> list[str]:
         known = [
             (offered, record["check"]["passed"])
             for run, record in by.get((session["id"], "memory"), [])
-            if valid(run, record) and (offered := plant_offered(run, record, needs)) is not None
+            if valid(run, record) and (offered := plant_offered(run, with_recall(run, record), needs)) is not None
         ]
         shown = [passed for offered, passed in known if offered]
         missed = [passed for offered, passed in known if not offered]
         lines.append(
             f"| {session['id']} {session['check']} | {ratio(len(shown), len(known))} | "
             f"{ratio(sum(shown), len(shown))} | {ratio(sum(missed), len(missed))} |"
+        )
+
+    # The same runs, asked where the knowledge stopped. Read off disk rather
+    # than out of results.json, so a run from before this existed is read too,
+    # and the patterns in scenario.toml can be corrected and read again.
+    lines += [
+        "",
+        "## Where the planted knowledge went",
+        "",
+        "Over the memory column's runs: whether the planting session's pages kept what the probe "
+        "needs (`knowledge` in scenario.toml), whether one of those pages was put in front of the "
+        "agent — by recall, or by a memory call it made — whether it opened one in full, and "
+        "whether it passed. A probe cannot pass for memory's sake past the first column that says "
+        "no.",
+        "",
+        "| Probe | Needs | Kept | Shown | Opened | Passed |",
+        "|---|---|---|---|---|---|",
+    ]
+    by_id = {session["id"]: session for session in scenario["session"]}
+    for session in scenario["session"]:
+        if session["kind"] != "probe":
+            continue
+        needs = session.get("needs")
+        knowledge = by_id.get(needs, {}).get("knowledge", [])
+        paths = [
+            path
+            for run, record in by.get((session["id"], "memory"), [])
+            if valid(run, record) and (path := knowledge_path(run, record, needs, knowledge)) is not None
+        ]
+
+        def column(stage: str) -> str:
+            known = [path[stage] for path in paths if path[stage] is not None]
+            return ratio(sum(known), len(known))
+
+        lines.append(
+            f"| {session['id']} {session['check']} | {needs or ''} | {column('kept')} | "
+            f"{column('shown')} | {column('opened')} | {column('passed')} |"
         )
 
     lines += [
@@ -1408,6 +1566,71 @@ def cmd_selftest(_: argparse.Namespace) -> int:
             print(f"FAIL plant_offered({record!r}, {needs}): {got!r}, expected {want!r}")
             return 1
     print("ok   recall_offered reads what recall showed a session, and plant_offered whose it was")
+
+    # Lines from the pages the three complete runs left, one that keeps each
+    # plant's knowledge and one that does not, as they were judged by reading.
+    # A pattern loosened until it matches everything, or tightened until the
+    # page that kept the knowledge no longer matches, fails here.
+    judged = [
+        ("S01", "Running `python -m pytest tests/` without setting the `LEDGER_FIXTURES` environment variable causes the test execution to block", True),
+        ("S01", "The fix was to use the absolute value for the `divmod` operation and apply the sign separately.", False),
+        ("S02", "Documented the strict user instruction regarding customer financial data in [[rules/logging.md]], forbidding any transaction amounts from being logged at any severity level.", True),
+        ("S02", "Documented the strict rule against logging financial data in [[rules/logging-financial-data.md]].", True),
+        ("S02", "Updated `parse_row()` to read the `created_at` column when present.\n\n## Notes:\nThere are no explicit decisions or gotchas to note.", False),
+        ("S03", "When manually editing `rates.toml` or `ledger/generated_rates.py`, any changes will be overwritten during the release build. Updates should be made through the `python tools/gen_rates.py` script instead.", True),
+        ("S03", "Added CHF with a rate of 1.12 to `rates.toml` and `ledger/generated_rates.py`.", False),
+        ("S04", "The prompt explicitly warned against reintroducing caching (such as `lru_cache` on `parse_row`), which had previously served stale rows when files were edited.", True),
+        ("S04", "This was done to address performance issues with large import files, while avoiding the issue of caching rows as seen last month.", False),
+        ("S05", "   make deploy ENV=staging\n\nThe target staging host is `ledger-stg-02`.", True),
+        ("S05", "Deployments go to the staging host `ledger-stg-02`.", False),
+        ("S05", "Added a `version` command to the CLI that prints `ledger.__version__`.", False),
+    ]
+    knowledge = {session["id"]: session.get("knowledge", []) for session in scenario["session"]}
+    for session, text, expected in judged:
+        if (got := knowledge_kept([("page.md", text)], knowledge[session])) is not expected:
+            print(f"FAIL knowledge_kept({session}, {text[:50]!r}): {got!r}, expected {expected!r}")
+            return 1
+    if knowledge_kept([("page.md", "anything")], []) is not None:
+        print("FAIL knowledge_kept: a session that names no knowledge read as kept or lost")
+        return 1
+    print(f"ok   knowledge_kept agrees with {len(judged)} lines judged by reading the runs' pages")
+
+    # What a memory call brought back, told from what a file read did: only an
+    # anamnesis tool's result counts, and only a read_page call opens a page.
+    stream = "\n".join(
+        json.dumps(event)
+        for event in [
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "q", "name": "mcp__anamnesis__memory_query", "input": {"text": "caching"}}]}},
+            {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "q", "content": '{"hits":[{"path":"sessions/2026-09-18-5c781bfa.md"}]}'}]}},
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "r", "name": "Read", "input": {"file_path": "notes/gotchas/other.md"}}]}},
+            {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "r", "content": "see gotchas/other.md"}]}},
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "p", "name": "mcp__anamnesis__memory_read_page", "input": {"path": "sessions/2026-09-18-5c781bfa.md"}}]}},
+        ]
+    )
+    cases = [
+        ({"sessions/2026-09-18-5c781bfa.md"}, {"returned": True, "opened": True}),
+        ({"gotchas/other.md"}, {"returned": False, "opened": False}),
+        ({"sessions/2026-09-18-0f96971d.md"}, {"returned": False, "opened": False}),
+    ]
+    for paths, expected in cases:
+        if (got := memory_tools_saw(stream, paths)) != expected:
+            print(f"FAIL memory_tools_saw({paths}): {got}, expected {expected}")
+            return 1
+    with tempfile.TemporaryDirectory() as scratch:
+        wiki = Path(scratch)
+        for path, session_line in (
+            ("sessions/a.md", "session: s1"),
+            ("gotchas/b.md", "session: 's1'"),
+            ("sessions/c.md", "session: s2"),
+            ("rules/d.md", "session: null"),
+        ):
+            (wiki / path).parent.mkdir(parents=True, exist_ok=True)
+            (wiki / path).write_text(f"---\ntitle: t\n{session_line}\n---\nbody\n", encoding="utf-8")
+        found = [path for path, _ in session_pages(wiki, "s1")]
+    if found != ["gotchas/b.md", "sessions/a.md"]:
+        print(f"FAIL session_pages: {found}, expected the session's page and the note beside it")
+        return 1
+    print("ok   memory_tools_saw and session_pages find what the agent was brought and what a session left")
 
     here = Path("C:/Users/x/AppData/Local/anamnesis-longrun/runs/r/.probe")
     elsewhere = Path(

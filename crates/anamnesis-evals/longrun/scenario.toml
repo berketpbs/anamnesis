@@ -11,6 +11,14 @@
 # `plants` names the probe a planting session feeds, and `needs` the session a
 # probe depends on, so a report can tell a probe that failed from a probe whose
 # knowledge was never planted.
+#
+# `knowledge` is what that probe needs from the planting session, as a page
+# would say it: each inner list is one fact, kept when any of its patterns
+# matches a line of any page the session left (case aside). They were written
+# against the pages of the three complete runs of 2026-09-17 and -18 after
+# reading them, not by matching and keeping whatever matched. Read that way,
+# the two runs written by gemini-3.5-flash kept all five and the one written
+# by qwen2.5:7b kept one — S03's, and that one garbled.
 
 name = "ledger"
 description = "Planted knowledge on a small Python bookkeeping library"
@@ -20,6 +28,9 @@ id = "S01"
 kind = "plant"
 plants = "S12"
 check = "suite_passes"
+# How to run the suite without it hanging: through tools/check.py, or with the
+# variable it sets. Both gemini pages named the variable and neither the script.
+knowledge = [['LEDGER_FIXTURES', 'tools/check\.py']]
 prompt = """
 The test suite is failing. Run the tests, find out why, and fix the code so \
 every test passes. Don't change the tests.
@@ -30,6 +41,7 @@ id = "S02"
 kind = "plant"
 plants = "S08"
 check = "created_at_imported"
+knowledge = [['amounts?\b[^\n]{0,120}\blog', '\blog\w*[^\n]{0,120}\b(amounts?|financial)']]
 prompt = """
 Add an optional `created_at` field to `Entry`, holding a Unix timestamp in \
 seconds, and read it from a `created_at` column in the CSV import when the \
@@ -45,6 +57,10 @@ id = "S03"
 kind = "plant"
 plants = "S09"
 check = "chf_rate"
+# The generator is the rule: a page that says to run it says the file is not
+# edited by hand, and the qwen page that also called rates.toml overwritten
+# still said that much.
+knowledge = [['gen_rates\.py']]
 prompt = """
 Add CHF to the supported currencies with a rate of 1.12.
 
@@ -58,6 +74,10 @@ id = "S04"
 kind = "plant"
 plants = "S10"
 check = "import_limit"
+# What went wrong, not only that something did: the qwen page said the session
+# avoided "the issue of caching rows as seen last month", and the probe that
+# read it built a cache keyed on the path and served the stale rows.
+knowledge = [['lru_cache', 'cach\w*[^\n]{0,200}\bstale', '\bstale[^\n]{0,200}cach']]
 prompt = """
 Add a `--limit N` option to the `import` command that stops after N rows.
 
@@ -72,6 +92,7 @@ id = "S05"
 kind = "plant"
 plants = "S11"
 check = "version_command"
+knowledge = [['ledger-stg-02'], ['ENV=staging']]
 prompt = """
 Add a `version` command to the CLI that prints `ledger.__version__`.
 

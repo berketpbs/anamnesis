@@ -26,6 +26,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `report` splits every probe by whether it was shown its plant. A transcript
   that cannot be found is recorded as unknown, not as nothing offered.
 
+- **The long-run eval follows each probe's knowledge from end to end.**
+  Being shown the page was one question of four. `report` now also asks
+  whether the planting session's pages kept what the probe needs, whether one
+  was put in front of the agent by recall or by a memory call it made, and
+  whether the agent opened one in full. What a page has to say is `knowledge`
+  in `scenario.toml`, written after reading the first three runs' pages and
+  held by the selftest to lines judged by hand. Over those runs it says the
+  writer was the bottleneck: gemini-3.5-flash's pages kept five facts of five
+  twice, qwen2.5:7b's kept one. It is read off disk at report time, so older
+  runs are followed too, and recall is read from Claude Code's transcript for
+  the run that did not record it.
+
 - **`anamnesis setup` wires every installed agent by default.** A bare setup
   used to wire Claude Code even when Codex was installed beside it, so the
   memory held a waiting handoff that the next agent never received. Setup now
