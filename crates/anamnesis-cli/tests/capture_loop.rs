@@ -77,7 +77,18 @@ fn serve_with_token(data: &Path, token: Option<&str>) -> (Server, String) {
 
 /// Run one hook the way a harness does, and return what it printed.
 fn hook(data: &Path, agent: &str, server: &str, payload: &Value) -> String {
-    let mut child = anamnesis(data)
+    hook_in(None, data, agent, server, payload)
+}
+
+/// [`hook`], started in `dir` — where a harness that runs a project's hooks
+/// from its root starts them, and where the command looks for a project when
+/// the payload names no directory it reads.
+fn hook_in(dir: Option<&Path>, data: &Path, agent: &str, server: &str, payload: &Value) -> String {
+    let mut command = anamnesis(data);
+    if let Some(dir) = dir {
+        command.current_dir(dir);
+    }
+    let mut child = command
         .args(["hook", "--agent", agent, "--server", server])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -647,6 +658,24 @@ fn cursor(conversation: &str, name: &str, repo: &Path, extra: Value) -> Value {
     payload
 }
 
+/// What the server would recall for `asked`, asked directly rather than
+/// through a hook — to tell a hook that stayed quiet from a server with
+/// nothing to say.
+fn recall(server: &str, agent: &str, session: &str, cwd: &Path, asked: &str) -> String {
+    let cwd = cwd.to_string_lossy();
+    reqwest::blocking::Client::new()
+        .get(format!("{server}/recall"))
+        .query(&[
+            ("agent", agent),
+            ("session_id", session),
+            ("cwd", cwd.as_ref()),
+            ("q", asked),
+        ])
+        .send()
+        .and_then(|response| response.text())
+        .unwrap_or_default()
+}
+
 /// What a Gemini CLI reply carries, and the event it says it answers.
 fn gemini_context(printed: &str) -> Option<(String, String)> {
     let reply: Value = serde_json::from_str(printed.trim()).ok()?;
@@ -763,12 +792,12 @@ fn a_decision_travels_from_claude_through_codex_gemini_and_cursor_and_back() {
     // server has an answer for that prompt, or the silence would prove nothing.
     let c4 = "44444444-4444-4444-8444-444444444444";
     let own_start = json!({"session_id": "cursor-start-and-end-only"});
-    let handed = hook(
-        d,
-        "cursor",
-        &server,
-        &cursor(c4, "sessionStart", r, own_start.clone()),
-    );
+    // Cursor runs a project's hooks from the project root, as its
+    // documentation says; started anywhere else, a regression that reads the
+    // wrong fields loses the note outright instead of doing what it did in
+    // use — delivering it, and recording it as claimed by nobody.
+    let cursor_hook = |payload: Value| hook_in(Some(r), d, "cursor", &server, &payload);
+    let handed = cursor_hook(cursor(c4, "sessionStart", r, own_start.clone()));
     let context =
         serde_json::from_str::<Value>(handed.trim()).unwrap_or_default()["additional_context"]
             .as_str()
@@ -779,61 +808,35 @@ fn a_decision_travels_from_claude_through_codex_gemini_and_cursor_and_back() {
             "Cursor was not handed Gemini's session: {handed:?}"
         ));
     }
-    let cwd = r.to_string_lossy();
-    let answer = reqwest::blocking::Client::new()
-        .get(format!("{server}/recall"))
-        .query(&[
-            ("agent", "cursor"),
-            ("session_id", c4),
-            ("cwd", cwd.as_ref()),
-            ("q", cursor_asks),
-        ])
-        .send()
-        .and_then(|response| response.text())
-        .unwrap_or_default();
+    let answer = recall(&server, "cursor", c4, r, cursor_asks);
     if !answer.contains(&planted) {
         broken.push(format!(
             "the server had no answer for Cursor's prompt, so its silence proves nothing: {answer:?}"
         ));
     }
-    let printed = hook(
-        d,
-        "cursor",
-        &server,
-        &cursor(
-            c4,
-            "beforeSubmitPrompt",
-            r,
-            json!({"prompt": cursor_asks, "attachments": []}),
-        ),
-    );
+    let printed = cursor_hook(cursor(
+        c4,
+        "beforeSubmitPrompt",
+        r,
+        json!({"prompt": cursor_asks, "attachments": []}),
+    ));
     if !printed.trim().is_empty() {
         broken.push(format!(
             "Cursor's prompt hook printed what it cannot read: {printed:?}"
         ));
     }
-    hook(
-        d,
-        "cursor",
-        &server,
-        &cursor(
-            c4,
-            "postToolUse",
-            r,
-            json!({
-                "cwd": r.to_string_lossy(),
-                "tool_name": "edit_file",
-                "tool_input": {"file_path": importer.to_string_lossy()},
-                "tool_output": "{\"success\": true}",
-            }),
-        ),
-    );
-    hook(
-        d,
-        "cursor",
-        &server,
-        &cursor(c4, "sessionEnd", r, own_start),
-    );
+    cursor_hook(cursor(
+        c4,
+        "postToolUse",
+        r,
+        json!({
+            "cwd": r.to_string_lossy(),
+            "tool_name": "edit_file",
+            "tool_input": {"file_path": importer.to_string_lossy()},
+            "tool_output": "{\"success\": true}",
+        }),
+    ));
+    cursor_hook(cursor(c4, "sessionEnd", r, own_start));
     wait_for_closed(d, r, 4);
 
     // Claude Code is handed Cursor's session, and the decision four sessions
@@ -850,14 +853,20 @@ fn a_decision_travels_from_claude_through_codex_gemini_and_cursor_and_back() {
             "a handoff carried more than one session: {handed:?}"
         ));
     }
-    let notified = claude(
-        s5,
-        "UserPromptSubmit",
-        json!({"prompt": format!(
-            "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n\
-             <summary>{claude_asks}</summary>\n</task-notification>"
-        )}),
-    );
+    // A notification the harness submitted is not a question, whatever it
+    // says. This one says what would be answered if somebody had typed it,
+    // which is the only case where not asking matters: wrapped in tags the
+    // project has never written, most notifications fall short of the naming
+    // gate without any filter. The server refuses one too, for hooks older
+    // than the one that stopped sending it.
+    let notification = format!("<task-notification>\n{claude_asks}\n</task-notification>");
+    let answer = recall(&server, "claude-code", s5, r, &notification);
+    if !answer.is_empty() {
+        broken.push(format!(
+            "the server answered a harness notification: {answer:?}"
+        ));
+    }
+    let notified = claude(s5, "UserPromptSubmit", json!({"prompt": notification}));
     if !notified.is_empty() {
         broken.push(format!("a harness notification was answered: {notified:?}"));
     }
@@ -968,15 +977,17 @@ fn a_neighbouring_project_is_never_handed_or_recalled() {
         claude("SessionEnd", json!({"reason": "exit"}));
         wait_for_closed(d, repo, 1);
     };
-    finish(
-        neighbour.path(),
-        "neighbour-one",
-        "deploy_staging_ledger pushes to ledger-stg-02 with ENV=staging.",
-    );
+    // The neighbour finishes last, so its handoff is the newest one waiting
+    // anywhere: a claim that forgot which project asked would take it.
     finish(
         home.path(),
         "home-one",
         "Staging is deployed by hand from the release branch.",
+    );
+    finish(
+        neighbour.path(),
+        "neighbour-one",
+        "deploy_staging_ledger pushes to ledger-stg-02 with ENV=staging.",
     );
     let theirs = page_saying(d, "handover-neighbour", "ledger-stg-02");
 
