@@ -95,6 +95,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI as a test, so a change that makes recall chatty fails there.
 
 ### Fixed
+- **A model is asked about each session once.** A session is closed on its
+  counted page before the model is asked, and that puts it in the queue the
+  retry pass reads for as long as the model takes to answer. A pass that ran
+  in that window asked about the same session again: on 2026-09-22 the
+  long-run eval's server asked Gemini twice about one session, three seconds
+  apart, on a free tier of twenty requests a day, and wrote its page twice.
+  The slower the model, the more sessions the window caught. The server now
+  holds a session while a model is being asked about it, and a pass checks,
+  when it reaches a session, that nothing answered for it since the pass read
+  its list.
 - **Codex's hooks run on Windows.** Codex hands a hook's command to
   PowerShell there, and the command `setup` and `install-hooks` wrote — a
   quoted path, then arguments — is a syntax error in PowerShell: `Unexpected

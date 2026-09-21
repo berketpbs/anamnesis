@@ -19,7 +19,7 @@
 //! `counted` is a session worth asking about again, and [`run_enricher`] is the
 //! thing that asks.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -55,6 +55,48 @@ pub enum Enriched {
     Counted,
     /// There was nothing to ask about — no session, or nothing in it.
     Nothing,
+    /// A model is being asked about this session right now, or has answered
+    /// for it since it was queued. Not asked again.
+    AlreadyAsked,
+}
+
+/// The sessions a model is being asked about right now.
+///
+/// [`crate::pipeline::finalize`] closes a session on its counted page before
+/// the model is asked, which is what makes a crash cost only the enrichment —
+/// and also what puts the session in the queue [`sweep_paced`] reads, for as
+/// long as that model call takes. A pass that ran in the window asked about it
+/// too: on 2026-09-22 the long-run eval's server asked Gemini twice about one
+/// session, three seconds apart, on a free tier of twenty requests a day. The
+/// window is as long as the model is slow, so a local one would have been
+/// asked twice about most sessions.
+///
+/// Held in memory, because the only asker it has to keep out is another task
+/// of the same server; a restart forgets it, and nothing is asking by then.
+#[derive(Debug, Clone, Default)]
+pub struct Asking(Arc<Mutex<HashSet<SessionId>>>);
+
+impl Asking {
+    /// Hold `session` until the returned claim is dropped, unless somebody
+    /// already holds it.
+    fn claim(&self, session: SessionId) -> Option<Claim> {
+        self.0.lock().insert(session).then(|| Claim {
+            asking: self.clone(),
+            session,
+        })
+    }
+}
+
+/// One session held by [`Asking`], released however the asking ends.
+struct Claim {
+    asking: Asking,
+    session: SessionId,
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        self.asking.0.lock().remove(&self.session);
+    }
 }
 
 /// Ask a model to rewrite one closed session's page.
@@ -78,6 +120,12 @@ pub async fn enrich(
     now: Timestamp,
     llm: &LlmSettings,
 ) -> Result<Enriched, WebError> {
+    // One question about a session at a time, held until this one is answered
+    // or given up on. See [`Asking`].
+    let Some(_claim) = llm.asking.claim(session_id) else {
+        return Ok(Enriched::AlreadyAsked);
+    };
+
     // Same three phases as the path this was split out of, and the same reason:
     // only the model call belongs on the runtime, and it holds neither the wiki
     // nor a transaction while it waits.
@@ -86,12 +134,18 @@ pub async fn enrich(
         let wiki = wiki.clone();
         let scope = scope.clone();
         crate::off_runtime(move || -> Result<_, WebError> {
+            // Under the claim, so nothing can answer for it between this and
+            // the model call. A pass reads its list before it gets here, and
+            // the claim of whoever answered meanwhile is gone by now.
+            if !store.awaits_enrichment(session_id)? {
+                return Ok(Err(Enriched::AlreadyAsked));
+            }
             let Some(session) = store.load_session(session_id)? else {
-                return Ok(None);
+                return Ok(Err(Enriched::Nothing));
             };
             let observations = store.observations(session_id)?;
             if observations.is_empty() {
-                return Ok(None);
+                return Ok(Err(Enriched::Nothing));
             }
             // Both come from the wiki, so both are read under one hold of it.
             // The session's own page is left out of the list: it exists by now
@@ -109,12 +163,13 @@ pub async fn enrich(
                     .collect::<Vec<_>>();
                 (read_preferences(&wiki, &scope), pages)
             };
-            Ok(Some((session, observations, preferences, pages)))
+            Ok(Ok((session, observations, preferences, pages)))
         })
         .await?
     };
-    let Some((session, observations, preferences, pages)) = loaded else {
-        return Ok(Enriched::Nothing);
+    let (session, observations, preferences, pages) = match loaded {
+        Ok(loaded) => loaded,
+        Err(outcome) => return Ok(outcome),
     };
 
     let compiled = consolidate_attributed(
@@ -365,6 +420,9 @@ pub async fn sweep_paced(state: &AppState, now: Timestamp, pacing: &mut Pacing) 
                 asked += 1;
             }
             Ok(Enriched::Nothing) => pacing.missed(session.id, now),
+            // Neither a question nor a miss: somebody else asked, and either
+            // has the page or leaves the session in the queue for a later pass.
+            Ok(Enriched::AlreadyAsked) => {}
             Err(error) => {
                 tracing::error!(%error, session = %session.id, "could not ask again about a session");
                 pacing.missed(session.id, now);

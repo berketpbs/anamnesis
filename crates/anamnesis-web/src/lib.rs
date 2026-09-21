@@ -114,6 +114,9 @@ pub struct LlmSettings {
     /// Filled only when `provider` reports into it, which
     /// [`LlmSettings::watched`] arranges.
     pub last_failure: answering::LastFailure,
+    /// The sessions `provider` is being asked about right now, shared by every
+    /// clone, so that no two paths ask it about one session at once.
+    pub asking: enrich::Asking,
 }
 
 impl LlmSettings {
@@ -129,6 +132,7 @@ impl LlmSettings {
             max_input_tokens,
             max_output_tokens,
             last_failure,
+            asking: enrich::Asking::default(),
         }
     }
 }
@@ -2733,6 +2737,129 @@ mod tests {
             enriched, counted,
             "and the rewrite is the same page, still its"
         );
+    }
+
+    /// A provider whose first answer waits until the test lets it go, and
+    /// which counts every time it is asked.
+    #[derive(Default)]
+    struct Held {
+        asked: std::sync::atomic::AtomicUsize,
+        started: tokio::sync::Notify,
+        go: tokio::sync::Notify,
+    }
+
+    impl Held {
+        fn asked(&self) -> usize {
+            self.asked.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for Held {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+
+        fn model(&self) -> &str {
+            "fake-1"
+        }
+
+        async fn complete(
+            &self,
+            _: &anamnesis_llm::Completion,
+        ) -> Result<anamnesis_llm::CompletionOutput, anamnesis_llm::LlmError> {
+            if self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                self.started.notify_one();
+                self.go.notified().await;
+            }
+            Ok(anamnesis_llm::CompletionOutput {
+                json: json!({"title": "t", "body": "b", "handoff": "h"}),
+                model: "fake-1".to_owned(),
+                input_tokens: 0,
+                output_tokens: 0,
+                instead_of: None,
+            })
+        }
+    }
+
+    /// A session is closed on its counted page before the model is asked, and
+    /// that puts it in the retry queue for as long as the model takes. A pass
+    /// in that window used to ask about it again — twice the requests on a
+    /// free tier that allows twenty a day.
+    #[tokio::test]
+    async fn a_session_being_summarised_is_not_asked_about_again() {
+        let harness = harness();
+        let (scope, session_id) = recorded(&harness);
+        let provider = Arc::new(Held::default());
+        let state = harness
+            .state
+            .clone()
+            .with_llm(Some(settings(provider.clone())));
+
+        let closing = {
+            let (store, wiki) = (state.store.clone(), state.wiki.clone());
+            let llm = state.llm.clone().expect("a model");
+            tokio::spawn(async move {
+                finalize_and_enrich(&store, &wiki, &scope, session_id, None, now(), &llm).await
+            })
+        };
+        provider.started.notified().await;
+        assert!(
+            state.store.awaits_enrichment(session_id).expect("read"),
+            "closed and counted while the model is asked: the window this is about"
+        );
+
+        assert_eq!(enrich::sweep_awaiting(&state, now()).await, 0);
+        assert_eq!(provider.asked(), 1, "the pass left it to the ask in flight");
+
+        provider.go.notify_one();
+        closing
+            .await
+            .expect("joined")
+            .expect("finalized")
+            .expect("a page");
+        assert!(!state.store.awaits_enrichment(session_id).expect("read"));
+        assert_eq!(provider.asked(), 1);
+    }
+
+    /// Nor once a model has answered for it. A pass works through a list it
+    /// read before it started, so a session answered since is still on it.
+    #[tokio::test]
+    async fn a_session_a_model_has_answered_is_not_asked_about_again() {
+        let harness = harness();
+        let (scope, session_id) = recorded(&harness);
+        let provider = Arc::new(Held::default());
+        provider.go.notify_one();
+        let llm = settings(provider.clone());
+
+        finalize_and_enrich(
+            &harness.state.store,
+            &harness.state.wiki,
+            &scope,
+            session_id,
+            None,
+            now(),
+            &llm,
+        )
+        .await
+        .expect("finalized")
+        .expect("a page");
+        assert_eq!(provider.asked(), 1);
+
+        // What a pass that listed the session before that answer does next.
+        let again = enrich::enrich(
+            &harness.state.store,
+            &harness.state.wiki,
+            &scope,
+            session_id,
+            None,
+            now(),
+            &llm,
+        )
+        .await
+        .expect("enrich");
+        assert_eq!(again, enrich::Enriched::AlreadyAsked);
+        assert_eq!(provider.asked(), 1, "one answer is the page");
     }
 
     /// The reply that leaves something behind, end to end: the model names a
