@@ -60,6 +60,51 @@ One more case answered at rank five rather than near the top — a Turkish
 symptom against an English page — which is the same gap without the total
 failure.
 
+## Attribution: it is synonymy, not language
+
+The six misses looked like a language problem. Paired probes — the same page
+asked twice, changing one thing — say otherwise:
+
+| probe | what changed | rank |
+|---|---|---|
+| `esinlenilen dis projelerin isimleri` | control, the page's own words | 1 |
+| `projelerin isimleri PR commit` | control | 1 |
+| `projenin ismi PR commit` | Turkish suffix only (`proje+nin` / `proje+lerin`) | **4** |
+| `gizli kelime parola` | synonym only, TR → TR, no suffix change | **—** |
+| `is the local model good enough to write session pages` | synonym only, EN → EN | **—** |
+
+Turkish agglutination costs ranks and does not kill: rank 1 → 4. A synonym
+kills outright, and it kills **inside one language** as readily as across two.
+Cross-language misses are the extreme of the same failure, not a separate one.
+
+## What closing it would be worth
+
+Four pages were copied into a throwaway data dir and given one line of
+alternate phrasings each — the other words a person uses for that subject.
+Nothing was written to real memory and no code changed.
+
+| | before | after |
+|---|---|---|
+| Hit@1 | 0.611 | 0.694 |
+| MRR | 0.714 | 0.820 |
+| Recall | 0.833 | **0.972** |
+| misses | 6 | **1** |
+
+On the diagnostic pairs alone, all ten went to rank 1 — including the
+morphology case, which moved 4 → 1. The remaining suite miss is the one page
+that was not given aliases.
+
+**This probe proves the mechanism, not the product.** The aliases were written
+while looking at the questions, which is the same circularity this file warns
+against in the other direction: a page told in advance what it will be asked
+is not evidence that a writer who has only seen the page would choose those
+words. What it does establish is that a purely lexical retriever reaches the
+right page once the page carries the vocabulary — no model at query time.
+
+The honest next measurement is to generate the alternate phrasings from the
+page alone, with the questions withheld, and re-run this suite. Until that
+runs, the numbers above are an upper bound.
+
 ## What it does not measure
 
 Ranking, not the prompt-time gate. A page at rank one still has to clear
