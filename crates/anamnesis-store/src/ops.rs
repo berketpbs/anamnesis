@@ -380,6 +380,24 @@ impl Store {
             .map_err(Into::into)
     }
 
+    /// Whether one session is still in [`Self::sessions_awaiting_enrichment`].
+    ///
+    /// The same test, asked of one session at the moment it matters: a pass
+    /// works through a list it read earlier, and a session a model answered
+    /// for since is still on it.
+    pub fn awaits_enrichment(&self, id: SessionId) -> Result<bool> {
+        let conn = self.connection();
+        let found = conn
+            .query_row(
+                "SELECT 1 FROM sessions
+                 WHERE id = ?1 AND state = 'closed' AND summary_source = 'counted'",
+                params![id.to_string()],
+                |_| Ok(()),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
     /// Load one session, with the workspace reached through its project.
     pub fn load_session(&self, id: SessionId) -> Result<Option<Session>> {
         let conn = self.connection();
