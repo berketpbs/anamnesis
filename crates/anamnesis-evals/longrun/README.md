@@ -81,11 +81,21 @@ scenario; `--settings-env none` runs the memory arm without a model.
 
 Before anything else a run asks the memory arm's model, with the
 `settings.env` its server will read and the key in the credential store,
-through `anamnesis key check`, and stops if any model cannot be shown to work:
-under a refused key every page is counted, every probe is excluded, and the
-run measures nothing for two hours. What the check said is in
+through `anamnesis key check`, and stops with exit 3 unless some model in the
+chain answers: under a refused key or a spent quota every page is counted,
+every probe is excluded, and the run measures nothing for two hours. One is
+enough, because the server asks the configured model first and a fallback
+only when it fails — the run of 2026-09-20 stopped because a fallback was
+overloaded while the configured model answered, and measured nothing for no
+reason. When only a fallback answers, the pages are that fallback's, and
+`report` names the run by it. What each model said is in
 `runs/<run>/model-check/key-check.txt` and `results.json`.
 `--skip-model-check` starts anyway.
+
+Then the agent is asked, in the control arm's setup, whether it has memory of
+its own; a YES stops the run with exit 2. An agent that cannot answer at all —
+out of usage, or the service down — stops it with exit 6, since no session
+would run either. On 2026-09-19 a weekly limit was read as a YES.
 
 That check is one small question, and a model out of quota can still answer
 it. So the run asks the same question of the work: when a **planting**
