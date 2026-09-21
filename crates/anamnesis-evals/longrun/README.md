@@ -106,6 +106,55 @@ hour — on 2026-09-17 a repeat started against a spent quota wrote its first
 page by counting, and the eleven sessions after it would have cost two hours
 and $1.59 to measure nothing. `--keep-going` runs the whole scenario anyway.
 
+## Probes in Codex
+
+`--probe-agent codex` runs the five probes in Codex (`codex exec`, the
+cheapest model it lists by default, `--codex-model` to change it), in both
+arms, while every planting session stays in Claude Code. What was learnt in
+one harness then has to be used in the other, through the same hooks and
+memory tools a person would wire with `anamnesis setup`.
+
+Codex runs a project's hooks only after a person has approved them, and skips
+unapproved ones without a word. The approval holds as long as the hook
+command stays the same, and that command names the binary's path and the
+server's port. So a run with Codex works in one fixed place — the binary, both
+checkouts and the memory arm's data under `<root>/codex/`, the server on port
+18081 — and moves them into the run's directory when it ends. Approve it once:
+
+```bash
+python longrun.py codex-trust --anamnesis /path/to/anamnesis --settings-env <the runs' settings.env>
+# then, in a terminal: cd into the checkout it names, run `codex`, trust the
+# folder, approve every hook under /hooks, and quit
+```
+
+A run checks that the approval still holds: if the memory arm's first Codex
+probe reaches the server with no session, its hooks did not run, and the run
+stops with exit 7 rather than measure a memory arm with no memory. That
+happens whenever a newer anamnesis writes different hooks; `codex-trust`
+again fixes it.
+
+Three things differ from a Claude Code probe, and none of them favours an arm:
+
+- Codex's events do not carry what its prompt hook printed, so the harness
+  asks `/recall` itself with the probe's prompt just before the session
+  starts — the same question to the same endpoint, and recall records
+  nothing.
+- Codex reports no turns and no cost, so its effort is counted as actions:
+  commands, file changes and tool calls.
+- Codex's Windows sandbox runs commands as a separate account by default, and
+  that account cannot see a Python installed for this user, so no probe could
+  run the fixture's tests. The runs pass `windows.sandbox="unelevated"` on
+  each call, which sandboxes this account's own token instead; the person's
+  sandbox setting is not touched.
+
+`codex exec` does write one thing to the person's `~/.codex/config.toml`:
+every directory it runs in is recorded as trusted. So the isolation question
+is asked under `<root>/codex/isolation` too, and the runs add three entries —
+that one and the two checkouts — once, not one per run.
+
+`report --probe-agent codex` reads these runs, and only these: a probe run in
+another harness is another experiment.
+
 ## The model the memory arm writes with
 
 A repeat is twelve consolidation requests plus whatever the enrich pass asks

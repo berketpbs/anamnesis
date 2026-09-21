@@ -34,12 +34,14 @@ import os
 import platform
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 import tomllib
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from collections import Counter
@@ -111,6 +113,27 @@ ALLOWED_TOOLS = [
 # than refusing it in the moment: asked, an agent started this way answers
 # that it has no PowerShell tool, and reaches for the shell both arms share.
 DISALLOWED_TOOLS = ["PowerShell"]
+
+# Codex, for the probes when a run is started with `--probe-agent codex`: the
+# planting sessions stay Claude Code's, and the knowledge has to cross from
+# one harness to the other. The cheapest model Codex lists, 2026-09-21.
+DEFAULT_CODEX_MODEL = "gpt-5.6-luna"
+
+# Codex runs a project's hooks only after a person approves them, and the
+# approval is a hash over the hook command — which names the binary's path and
+# the server's port. So a run with Codex puts its binary, both checkouts and
+# the memory arm's data at one fixed place under the root, on a port of its
+# own, and moves them into the run's directory when it ends. Approved once,
+# the next run writes the same hooks and needs nothing.
+CODEX_PORT = 18081
+
+# Codex's Windows sandbox runs commands as a separate account by default, and
+# that account cannot see a Python installed for this user: on 2026-09-21 both
+# `python` and `py` were "not recognized" inside it, so no probe could run the
+# fixture's tests. The unelevated sandbox restricts this account's own token
+# instead and finds it. Passed on each call, so the person's sandbox setting is
+# left as it is.
+CODEX_OVERRIDES = ['windows.sandbox="unelevated"'] if os.name == "nt" else []
 
 ISOLATION_PROMPT = (
     "Answer with one word, YES or NO. Do your instructions or your tools give you "
@@ -351,6 +374,141 @@ def summarize_stream(stream: str) -> dict:
         "memory_calls": sum(count for name, count in tools.items() if name.startswith("mcp__anamnesis__")),
         "answer": (result.get("result") or "")[-600:],
     }
+
+
+def codex_args(codex: str, model: str, repo: Path) -> list[str]:
+    """One non-interactive Codex session in `repo`, reading its prompt from
+    stdin and writing its events as JSONL. The project's own config — its MCP
+    registration — loads because the person trusted the directory.
+
+    `--skip-git-repo-check` because Codex refuses to start in a directory that
+    is neither trusted nor a repository, which the isolation question's is. It
+    skips that check and nothing else; the sandbox stays.
+    """
+    args = [codex, "exec", "--json", "--skip-git-repo-check", "-m", model, "-s", "workspace-write", "-C", str(repo)]
+    for override in CODEX_OVERRIDES:
+        args += ["-c", override]
+    return args + ["-"]
+
+
+def summarize_codex(stream: str) -> dict:
+    """What one `codex exec --json` transcript says the session did, under the
+    names `summarize_stream` gives a Claude Code session.
+
+    Codex reports neither turns nor cost, so both are None, and `actions`
+    counts what it did instead: every command, file change and tool call.
+    """
+    tools: Counter = Counter()
+    thread = answer = None
+    errors = 0
+    input_tokens = output_tokens = 0
+    for line in stream.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        kind = event.get("type")
+        item = event.get("item") or {}
+        if kind == "thread.started":
+            thread = event.get("thread_id")
+        elif kind == "item.completed":
+            name = item.get("type", "?")
+            if name == "mcp_tool_call":
+                name = f"mcp__{item.get('server', '?')}__{item.get('tool', '?')}"
+            if name == "agent_message":
+                answer = item.get("text") or answer
+            elif name != "reasoning":
+                tools[name] += 1
+        elif kind == "turn.completed":
+            usage = event.get("usage") or {}
+            input_tokens += usage.get("input_tokens") or 0
+            output_tokens += usage.get("output_tokens") or 0
+        elif kind in ("turn.failed", "error"):
+            errors += 1
+    return {
+        "codex_thread": thread,
+        "claude_session": None,
+        "mcp_servers": {},
+        "turns": None,
+        "cost_usd": None,
+        "is_error": errors > 0,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "permission_denials": 0,
+        "denials_by_tool": {},
+        "tools": dict(tools),
+        "actions": sum(tools.values()),
+        "tool_errors": 0,
+        "memory_calls": sum(count for name, count in tools.items() if name.startswith("mcp__anamnesis__")),
+        "answer": (answer or "")[-600:],
+    }
+
+
+def run_codex(codex: str, repo: Path, prompt: str, model: str, log: Path) -> dict:
+    started = time.time()
+    env = dict(os.environ)
+    env.pop("ANAMNESIS_DATA_DIR", None)
+    try:
+        proc = subprocess.run(
+            codex_args(codex, model, repo),
+            cwd=repo,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=SESSION_TIMEOUT,
+        )
+        stdout, stderr, code = proc.stdout, proc.stderr, proc.returncode
+    except subprocess.TimeoutExpired as expired:
+        stdout = expired.stdout.decode("utf-8", "replace") if isinstance(expired.stdout, bytes) else (expired.stdout or "")
+        stderr, code = "timed out", None
+    log.write_text(stdout, encoding="utf-8")
+    log.with_suffix(".stderr.txt").write_text(stderr, encoding="utf-8")
+    summary = summarize_codex(stdout)
+    summary["exit_code"] = code
+    summary["wall_s"] = round(time.time() - started, 1)
+    # Where Codex says why it did not start, when it did not.
+    summary["stderr"] = stderr.strip()[-300:]
+    return summary
+
+
+def codex_sessions(data: Path) -> int:
+    """How many Codex sessions the memory arm's server has recorded — which
+    goes up by one when a Codex session's hooks ran, and by none when Codex
+    skipped hooks nobody approved, which it does without a word."""
+    db = data / "db" / "anamnesis.db"
+    if not db.exists():
+        return 0
+    connection = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
+    try:
+        return connection.execute("SELECT COUNT(*) FROM sessions WHERE agent = 'codex'").fetchone()[0]
+    finally:
+        connection.close()
+
+
+def recall_asked(port: int, repo: Path, wiki: Path, prompt: str) -> dict | None:
+    """What recall shows for `prompt`, asked of the server by the harness at
+    the moment the probe's own hook would ask it.
+
+    Claude Code keeps the block its prompt hook printed in a transcript;
+    Codex's events do not carry it. Asked the same endpoint with the same
+    question before the session starts, the answer is the one the hook gets:
+    recall records nothing, and the probe's own prompt is not a page yet.
+    """
+    query = urllib.parse.urlencode(
+        {"agent": "codex", "session_id": "longrun-asked", "cwd": str(repo), "q": prompt[:1000]}
+    )
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/recall?{query}", timeout=30) as response:
+            block = response.read().decode("utf-8", "replace")
+    except (urllib.error.URLError, OSError):
+        return None
+    if RECALL_OPENER not in block:
+        return {"blocks": 0, "pages": [], "via": "asked"}
+    pages = [{"path": path, "session": page_session(wiki, path)} for path in RECALL_PAGE.findall(block)]
+    return {"blocks": 1, "pages": pages, "via": "asked"}
 
 
 def run_claude(claude: str, repo: Path, prompt: str, model: str, max_turns: int, mcp_config: Path | None, log: Path) -> dict:
@@ -639,8 +797,9 @@ def memory_tools_saw(stream: str, paths: set[str]) -> dict:
     whether it opened one in full.
 
     Separate from recall, which the prompt hook shows the agent unasked: this
-    is what the agent went looking for. Counted from `stream-json`, where both
-    the calls and what they returned are recorded.
+    is what the agent went looking for. Counted from Claude Code's
+    `stream-json` or Codex's `--json`, both of which record the calls and what
+    they returned.
     """
     ids: set[str] = set()
     returned = opened = False
@@ -648,6 +807,19 @@ def memory_tools_saw(stream: str, paths: set[str]) -> dict:
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
+            continue
+        item = event.get("item") if isinstance(event, dict) else None
+        if isinstance(item, dict) and item.get("type") == "mcp_tool_call" and item.get("server") == "anamnesis":
+            arguments = item.get("arguments")
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    arguments = {}
+            if str(item.get("tool", "")).endswith("memory_read_page") and (arguments or {}).get("path") in paths:
+                opened = True
+            text = json.dumps(item.get("result"), ensure_ascii=False)
+            returned = returned or any(path in text for path in paths)
             continue
         message = event.get("message") if isinstance(event, dict) else None
         content = message.get("content") if isinstance(message, dict) else None
@@ -926,17 +1098,28 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 4
     arms = [arm for arm in ("memory", "control") if arm in args.arms.split(",")]
     only = set(args.only.split(",")) if args.only else None
+    with_codex = args.probe_agent == "codex"
+    port = args.port or (CODEX_PORT if with_codex else DEFAULT_PORT)
+    if with_codex:
+        args.codex = shutil.which(args.codex) or args.codex
+    # Where the checkouts, the memory arm's data and the binary live while the
+    # run is going: the run's own directory, or with Codex the fixed place its
+    # approved hooks name — moved into the run's directory when it ends.
+    work = codex_workplace(Path(args.root)) if with_codex else run_dir
 
     # A copy, so that an upgrade of the binary it came from during a two-hour
     # run changes nothing about this one.
-    binary = run_dir / "bin" / source_binary.name
-    binary.parent.mkdir()
+    binary = work / "bin" / source_binary.name
+    binary.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_binary, binary)
 
     results = {
         "run": run_id,
         "scenario": scenario["name"],
         "model": args.model,
+        "probe_agent": args.probe_agent,
+        "codex_model": args.codex_model if with_codex else None,
+        "codex": version_of([args.codex, "--version"]) if with_codex else None,
         "claude": version_of([claude, "--version"]),
         "anamnesis": version_of([str(binary), "--version"]),
         "python": sys.version.split()[0],
@@ -984,6 +1167,31 @@ def cmd_run(args: argparse.Namespace) -> int:
         if not isolation["isolated"]:
             print("  the control setup reports memory of its own; stopping", file=sys.stderr)
             return 2
+        if with_codex:
+            # Asked in an empty directory with no project config, so what
+            # answers is Codex as the control arm meets it. A fixed one, like
+            # the checkouts: `codex exec` records every directory it runs in
+            # as trusted in the person's ~/.codex/config.toml, and one per run
+            # would add an entry to it every night.
+            scratch = codex_workplace(Path(args.root)) / "isolation"
+            if scratch.exists():
+                shutil.rmtree(scratch, onerror=make_writable)
+            scratch.mkdir(parents=True)
+            transcript = run_dir / "isolation-codex"
+            transcript.mkdir()
+            summary = run_codex(args.codex, scratch, ISOLATION_PROMPT, args.codex_model, transcript / "isolation.jsonl")
+            results["isolation_codex"] = {"answer": summary["answer"].strip(), "isolated": isolation_verdict(summary)}
+            write_json(results_path, results)
+            print(f"  isolation (codex): {results['isolation_codex']['answer']!r}")
+            if results["isolation_codex"]["isolated"] is None:
+                print(
+                    f"  Codex did not answer, so no probe would either; stopping. It said: {summary['stderr']!r}",
+                    file=sys.stderr,
+                )
+                return 6
+            if not results["isolation_codex"]["isolated"]:
+                print("  Codex reports memory of its own; stopping", file=sys.stderr)
+                return 2
 
     repos: dict[str, Path] = {}
     server = None
@@ -991,34 +1199,24 @@ def cmd_run(args: argparse.Namespace) -> int:
     project = f"ledger-{run_id.lower()}"
     try:
         for arm in arms:
-            arm_dir = run_dir / arm
-            (arm_dir / "sessions").mkdir(parents=True)
-            repos[arm] = arm_dir / "repo"
+            (run_dir / arm / "sessions").mkdir(parents=True)
+            repos[arm] = work / arm / "repo"
+            if repos[arm].exists():
+                shutil.rmtree(repos[arm], onerror=make_writable)
             prepare_repo(repos[arm], project if arm == "memory" else None)
 
         if "memory" in arms:
-            data = run_dir / "memory" / "data"
-            data.mkdir()
+            data = work / "memory" / "data"
+            if data.exists():
+                shutil.rmtree(data, onerror=make_writable)
+            data.mkdir(parents=True)
             if args.settings_env != "none" and settings.exists():
                 shutil.copy2(settings, data / "settings.env")
                 results["settings_env"] = str(settings)
                 results["consolidation"] = consolidation_model(settings)
-            server = Server(binary, data, args.port, run_dir / "memory" / "server.log")
+            server = Server(binary, data, port, run_dir / "memory" / "server.log")
             server.start()
-            wired = subprocess.run(
-                # The agent named, not detected: a bare setup wires every
-                # harness installed on the machine it runs on, so the memory
-                # arm's checkout — which the agent lists and reads — would
-                # depend on that machine. On 2026-09-21 it carried a Codex
-                # wiring nobody asked for, committed into S01's diff.
-                [str(binary), "setup", "--write", "--no-service", "--no-seed", "--port", str(args.port), "--agent", "claude-code"],
-                cwd=repos["memory"],
-                env=server.env(),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
+            wired = wire(binary, repos["memory"], server.env(), port, with_codex)
             (run_dir / "memory" / "setup.txt").write_text(wired.stdout + wired.stderr, encoding="utf-8")
             if wired.returncode != 0 or not (repos["memory"] / ".mcp.json").exists():
                 raise SystemExit(f"setup did not wire the memory arm; see {run_dir / 'memory' / 'setup.txt'}")
@@ -1037,23 +1235,38 @@ def cmd_run(args: argparse.Namespace) -> int:
             if only and session["id"] not in only:
                 continue
             for arm in arms:
-                record = run_one(args, claude, scenario, session, arm, repos[arm], run_dir, project)
+                record = run_one(args, claude, scenario, session, arm, repos[arm], run_dir, project, work, port)
                 results["sessions"].append(record)
                 write_json(results_path, results)
                 verdict = "pass" if record["check"]["passed"] else "FAIL"
-                source = (
-                    f", page {record['page']['source']}{recall_note(results, record, session.get('needs'))}"
-                    if arm == "memory"
-                    else ""
+                # A Codex probe waits for no page, so it has none to name;
+                # whether its hooks ran is what says it had memory at all.
+                wired = (
+                    f", hooks {'ran' if record['hooks_ran'] else 'did not run'}"
+                    if record["agent_kind"] == "codex"
+                    else f", page {(record['page'] or {}).get('source', 'none')}"
                 )
+                source = f"{wired}{recall_note(results, record, session.get('needs'))}" if arm == "memory" else ""
                 refused = record["agent"]["permission_denials"] or 0
+                effort = (
+                    f"{record['agent']['actions']} actions"
+                    if record["agent_kind"] == "codex"
+                    else f"turns {record['agent']['turns']}, ${record['agent']['cost_usd'] or 0:.3f}"
+                )
                 print(
-                    f"  {session['id']} {arm:<7} {verdict}  turns {record['agent']['turns']}, "
-                    f"${record['agent']['cost_usd'] or 0:.3f}, memory calls {record['agent']['memory_calls']}"
+                    f"  {session['id']} {arm:<7} {verdict}  {record['agent_kind']}, {effort}, "
+                    f"memory calls {record['agent']['memory_calls']}"
                     f"{f', {refused} refused' if refused else ''}{source}"
                 )
                 if not args.keep_going and (reason := nothing_left_to_measure(session, arm, record)):
                     stopped = reason
+                    break
+                if record["hooks_ran"] is False:
+                    stopped = (
+                        f"{session['id']} ran Codex in the memory arm and its hooks never reached the server. "
+                        f"Codex skips hooks nobody approved: run `python longrun.py codex-trust` and approve "
+                        f"them in {repos['memory']}"
+                    )
                     break
             if stopped:
                 break
@@ -1065,7 +1278,17 @@ def cmd_run(args: argparse.Namespace) -> int:
             results["stopped"] = stopped
         results["finished"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
         write_json(results_path, results)
+        if work != run_dir:
+            # Into the run's own directory, where `report` reads every run,
+            # leaving the fixed place empty for the next one to rebuild.
+            for arm in repos:
+                for part in ("repo", "data"):
+                    if (work / arm / part).exists():
+                        shutil.move(str(work / arm / part), str(run_dir / arm / part))
     print(f"results: {results_path}")
+    if stopped and "hooks never reached" in stopped:
+        print(f"  stopping: {stopped}.", file=sys.stderr)
+        return 7
     if stopped:
         print(
             f"  stopping: {stopped}. The memory arm's model is not writing pages; see "
@@ -1076,21 +1299,124 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
-def run_one(args, claude: str, scenario: dict, session: dict, arm: str, repo: Path, run_dir: Path, project: str) -> dict:
-    data = run_dir / "memory" / "data"
+def codex_workplace(root: Path) -> Path:
+    """The fixed place a run with Codex works in, so the hooks it writes are
+    the ones a person approved."""
+    return root / "codex"
+
+
+def make_writable(function, path, _) -> None:
+    """Remove a read-only file git left behind, which `rmtree` cannot on
+    Windows without being told to."""
+    os.chmod(path, 0o700)
+    function(path)
+
+
+def wire(binary: Path, repo: Path, env: dict, port: int, with_codex: bool) -> subprocess.CompletedProcess:
+    """`anamnesis setup` in the memory arm's checkout, for the agents the run
+    uses and no others.
+
+    The agents are named, not detected: a bare setup wires every harness
+    installed on the machine it runs on, so the checkout — which the agent
+    lists and reads — would depend on that machine. On 2026-09-21 it carried a
+    Codex wiring nobody asked for, committed into S01's diff.
+    """
+    agents = ["--agent", "claude-code"] + (["--agent", "codex"] if with_codex else [])
+    return subprocess.run(
+        [str(binary), "setup", "--write", "--no-service", "--no-seed", "--port", str(port), *agents],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+
+def cmd_codex_trust(args: argparse.Namespace) -> int:
+    """Build the memory arm's checkout where a run with Codex builds it, wired
+    the way that run wires it, and say how to approve its hooks.
+
+    Codex runs a project's hooks only once a person has approved them, and
+    skips unapproved ones without a word. The approval holds while the hook
+    command is the same, so the checkout, the binary and the port are fixed;
+    a run rebuilds them identically, and one approval serves every run until
+    `anamnesis setup` writes something different.
+    """
+    source_binary = Path(args.anamnesis).resolve()
+    work = codex_workplace(Path(args.root))
+    binary = work / "bin" / source_binary.name
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_binary, binary)
+    repo, data = work / "memory" / "repo", work / "memory" / "data"
+    for place in (repo, data):
+        if place.exists():
+            shutil.rmtree(place, onerror=make_writable)
+    prepare_repo(repo, "codex-trust")
+    data.mkdir(parents=True)
+    # The settings the runs will use, so the MCP registration written here is
+    # the one they write too, down to the embedder it names.
+    settings = Path(args.settings_env) if args.settings_env else live_data_dir() / "settings.env"
+    if settings.exists():
+        shutil.copy2(settings, data / "settings.env")
+    server = Server(binary, data, CODEX_PORT, work / "trust-server.log")
+    server.start()
+    try:
+        wired = wire(binary, repo, server.env(), CODEX_PORT, True)
+    finally:
+        server.stop()
+    if wired.returncode != 0 or not (repo / ".codex" / "hooks.json").exists():
+        print(wired.stdout + wired.stderr, file=sys.stderr)
+        return 1
+    print(
+        f"Wired {repo}\n\n"
+        "Now, once, by hand:\n"
+        f"  1. cd {repo}\n"
+        "  2. run `codex`, and answer yes when it asks whether to trust this folder\n"
+        "  3. type /hooks and approve every hook it lists\n"
+        "  4. quit Codex\n\n"
+        "A run with `--probe-agent codex` then writes the same hooks here and they run. If a later "
+        "anamnesis writes different ones, the run stops at the first probe (exit 7) and says to do "
+        "this again."
+    )
+    return 0
+
+
+def session_agent(args, session: dict) -> str:
+    """Which harness runs `session`: Codex for a probe when the run asked for
+    it, Claude Code for everything else."""
+    return "codex" if getattr(args, "probe_agent", "claude") == "codex" and session["kind"] == "probe" else "claude"
+
+
+def run_one(args, claude: str, scenario: dict, session: dict, arm: str, repo: Path, run_dir: Path, project: str, work: Path, port: int) -> dict:
+    data = work / "memory" / "data"
     server_log = run_dir / "memory" / "server.log"
     log_from = log_size(server_log)
-    mcp_config = repo / ".mcp.json" if arm == "memory" else None
     log = run_dir / arm / "sessions" / f"{session['id']}.jsonl"
-    agent = run_claude(claude, repo, session["prompt"], args.model, args.max_turns, mcp_config, log)
-    page = wait_for_page(data, project, agent["claude_session"], server_log, log_from) if arm == "memory" else None
-    recall = recall_offered(data, project, agent["claude_session"]) if arm == "memory" else None
+    kind = session_agent(args, session)
+    hooks_ran = None
+    if kind == "codex":
+        # A probe's page is not what anything reads, so there is no page to
+        # wait for; what matters is whether its hooks ran at all.
+        wiki = data / "wiki" / "longrun" / project
+        recall = recall_asked(port, repo, wiki, session["prompt"]) if arm == "memory" else None
+        before = codex_sessions(data) if arm == "memory" else 0
+        agent = run_codex(args.codex, repo, session["prompt"], args.codex_model, log)
+        hooks_ran = codex_sessions(data) > before if arm == "memory" else None
+        page = None
+    else:
+        mcp_config = repo / ".mcp.json" if arm == "memory" else None
+        agent = run_claude(claude, repo, session["prompt"], args.model, args.max_turns, mcp_config, log)
+        page = wait_for_page(data, project, agent["claude_session"], server_log, log_from) if arm == "memory" else None
+        recall = recall_offered(data, project, agent["claude_session"]) if arm == "memory" else None
     diff = commit_session(repo, session["id"])
     verdict = checks.CHECKS[session["check"]](repo)
     return {
         "session": session["id"],
         "kind": session["kind"],
         "arm": arm,
+        "agent_kind": kind,
+        "hooks_ran": hooks_ran,
         "check_name": session["check"],
         "check": verdict.as_dict(),
         "agent": agent,
@@ -1112,9 +1438,12 @@ def cmd_report(args: argparse.Namespace) -> int:
         # Where the run's pages and transcripts are, for what `report` reads
         # off disk rather than out of results.json.
         run["_dir"] = str(path.parent)
-        runs.append(run)
+        # A run whose probes ran in another harness is another experiment,
+        # and pooled with these it would read as more of the same.
+        if run.get("probe_agent", "claude") == args.probe_agent:
+            runs.append(run)
     if not runs:
-        print(f"no runs under {Path(args.root) / 'runs'}")
+        print(f"no runs with {args.probe_agent} probes under {Path(args.root) / 'runs'}")
         return 1
 
     lines = report_lines(scenario, runs)
@@ -1138,7 +1467,12 @@ def report_lines(scenario: dict, runs: list[dict]) -> list[str]:
             return True
         needs = next(s for s in scenario["session"] if s["id"] == record["session"]).get("needs")
         earlier = [r for r in run["sessions"] if r["arm"] == "memory" and r["session"] < record["session"]]
-        if record["agent"]["mcp_servers"].get("anamnesis") != "connected":
+        # Codex reports no MCP status; what says its memory arm was wired is
+        # the server hearing from its hooks.
+        if record.get("agent_kind") == "codex":
+            if not record.get("hooks_ran"):
+                return False
+        elif record["agent"]["mcp_servers"].get("anamnesis") != "connected":
             return False
         if needs:
             planted = [r for r in earlier if r["session"] == needs]
@@ -1791,6 +2125,93 @@ def cmd_selftest(_: argparse.Namespace) -> int:
         print(f"FAIL prepare_repo: a session's commit held {committed}, expected only the agent's file")
         return 1
     print("ok   prepare_repo keeps every harness's wiring out of the commits a session is judged from")
+
+    # A Codex session as `codex exec --json` recorded it on 2026-09-21, inside
+    # the sandbox that could not find Python: one message, one file written,
+    # two commands, the answer, and the usage.
+    events = [
+        {"type": "thread.started", "thread_id": "01a0c529-a11a-7e20-a85b-166a359e07ed"},
+        {"type": "turn.started"},
+        {"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": "I'll create `hello.txt`."}},
+        {"type": "item.started", "item": {"id": "item_1", "type": "file_change", "status": "in_progress"}},
+        {"type": "item.completed", "item": {"id": "item_1", "type": "file_change", "status": "completed"}},
+        {"type": "item.completed", "item": {"id": "item_2", "type": "command_execution", "command": "python -c 1", "exit_code": 1}},
+        {"type": "item.completed", "item": {"id": "item_3", "type": "command_execution", "command": "py -c 1", "exit_code": 1}},
+        {"type": "item.completed", "item": {"id": "item_4", "type": "agent_message", "text": "Done. Python wasn't available."}},
+        {"type": "turn.completed", "usage": {"input_tokens": 37855, "cached_input_tokens": 32000, "output_tokens": 452}},
+    ]
+    # And three items no probe has produced yet, shaped as `codex exec --json`
+    # documents them: reasoning, which is not an action, and two memory calls,
+    # which are — one that found the page, one that opened it.
+    page = "rules/logging-constraints.md"
+    events[-1:-1] = [
+        {"type": "item.completed", "item": {"id": "item_5", "type": "reasoning", "text": "**Checking the rules**"}},
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_6",
+                "type": "mcp_tool_call",
+                "server": "anamnesis",
+                "tool": "memory_query",
+                "arguments": {"text": "logging amounts"},
+                "result": {"content": [{"type": "text", "text": json.dumps({"hits": [{"path": page}]})}]},
+                "status": "completed",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_7",
+                "type": "mcp_tool_call",
+                "server": "anamnesis",
+                "tool": "memory_read_page",
+                "arguments": json.dumps({"path": page}),
+                "result": {"content": [{"type": "text", "text": "Never log amounts."}]},
+                "status": "completed",
+            },
+        },
+    ]
+    stream = "\n".join(json.dumps(event) for event in events) + "\nnot json\n"
+    summary = summarize_codex(stream)
+    expected = {
+        "codex_thread": "01a0c529-a11a-7e20-a85b-166a359e07ed",
+        "actions": 5,
+        "tools": {
+            "file_change": 1,
+            "command_execution": 2,
+            "mcp__anamnesis__memory_query": 1,
+            "mcp__anamnesis__memory_read_page": 1,
+        },
+        "input_tokens": 37855,
+        "output_tokens": 452,
+        "memory_calls": 2,
+        "answer": "Done. Python wasn't available.",
+        "is_error": False,
+        "turns": None,
+        "cost_usd": None,
+    }
+    if wrong := {key: summary[key] for key, value in expected.items() if summary[key] != value}:
+        print(f"FAIL summarize_codex: {wrong}")
+        return 1
+    if (saw := memory_tools_saw(stream, {page})) != {"returned": True, "opened": True}:
+        print(f"FAIL memory_tools_saw: a Codex session that found {page} and opened it read as {saw}")
+        return 1
+    if (saw := memory_tools_saw(stream, {"rules/other.md"})) != {"returned": False, "opened": False}:
+        print(f"FAIL memory_tools_saw: a page the calls never named read as {saw}")
+        return 1
+    if session_agent(argparse.Namespace(probe_agent="codex"), {"kind": "plant"}) != "claude" or session_agent(
+        argparse.Namespace(probe_agent="codex"), {"kind": "probe"}
+    ) != "codex" or session_agent(argparse.Namespace(probe_agent="claude"), {"kind": "probe"}) != "claude":
+        print("FAIL session_agent: only a probe runs in Codex, and only when the run asked for it")
+        return 1
+    args = codex_args("codex", DEFAULT_CODEX_MODEL, Path("repo"))
+    if args[:3] != ["codex", "exec", "--json"] or args[-1] != "-" or "workspace-write" not in args:
+        print(f"FAIL codex_args: {args}")
+        return 1
+    print(
+        "ok   summarize_codex and memory_tools_saw read a Codex session and its memory calls, "
+        "and only probes run in Codex, sandboxed, from stdin"
+    )
     return checks.selftest()
 
 
@@ -1806,7 +2227,19 @@ def main() -> int:
     run.add_argument("--claude", default="claude")
     run.add_argument("--model", default=DEFAULT_MODEL)
     run.add_argument("--root", default=str(default_root()))
-    run.add_argument("--port", type=int, default=DEFAULT_PORT)
+    run.add_argument(
+        "--port",
+        type=int,
+        help=f"the memory arm's server; {DEFAULT_PORT}, or {CODEX_PORT} with Codex, whose approved hooks name it",
+    )
+    run.add_argument(
+        "--probe-agent",
+        choices=("claude", "codex"),
+        default="claude",
+        help="the harness the probes run in; planting sessions always run in Claude Code",
+    )
+    run.add_argument("--codex", default="codex")
+    run.add_argument("--codex-model", default=DEFAULT_CODEX_MODEL)
     run.add_argument("--max-turns", type=int, default=MAX_TURNS)
     run.add_argument("--arms", default="memory,control")
     run.add_argument("--only", help="comma-separated session ids, for trying the harness out")
@@ -1827,9 +2260,20 @@ def main() -> int:
     )
     run.set_defaults(func=cmd_run)
 
+    trust = commands.add_parser(
+        "codex-trust", help="build the checkout a run with Codex uses, for a person to approve its hooks once"
+    )
+    trust.add_argument("--anamnesis", required=True, help="the anamnesis binary the runs will use")
+    trust.add_argument("--root", default=str(default_root()))
+    trust.add_argument("--settings-env", help="the settings.env the runs will use; this machine's by default")
+    trust.set_defaults(func=cmd_codex_trust)
+
     report = commands.add_parser("report", help="every run so far")
     report.add_argument("--root", default=str(default_root()))
     report.add_argument("--markdown", help="also write the report here")
+    report.add_argument(
+        "--probe-agent", choices=("claude", "codex"), default="claude", help="the runs whose probes ran in this harness"
+    )
     report.set_defaults(func=cmd_report)
 
     args = parser.parse_args()
