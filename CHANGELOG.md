@@ -58,6 +58,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI as a test, so a change that makes recall chatty fails there.
 
 ### Fixed
+- **Codex sessions are closed instead of being left open forever.** Codex
+  gives `SessionEnd` one second by default where every other event gets 600,
+  and allows at most three. A closing hook that posts an observation does not
+  reliably finish in one, so it was killed before it delivered: measured on
+  2026-09-21, 12 of 12 Codex sessions in this project's memory were still
+  `open` with no `session-end` behind any of them, while `hooks.json` went on
+  looking complete. `install-hooks` now writes `"timeout": 3` on that event,
+  and installing again repairs a file that was wired without it rather than
+  reporting it as already present. A timeout already at least as long is left
+  alone.
+
 - **`status` names the agent behind the last event, not just its age.** A
   project with two harnesses wired read `Capture: last event just now` while
   one of them had recorded nothing at all: every event belonged to the agent
