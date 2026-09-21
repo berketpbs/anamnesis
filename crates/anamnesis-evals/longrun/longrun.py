@@ -188,6 +188,15 @@ def git(repo: Path, *args: str) -> str:
     return result.stdout
 
 
+# Where `anamnesis setup` writes each harness's wiring, and the marker it pins
+# the project with. Kept out of the commits each session is judged from: they
+# are the harness's, not the agent's work, and the control arm has none.
+WIRING_IGNORED = "".join(
+    f"{path}\n"
+    for path in (".claude/", ".codex/", ".gemini/", ".cursor/", ".mcp.json", ".anamnesis.toml", "__pycache__/")
+)
+
+
 def prepare_repo(repo: Path, project: str | None) -> None:
     shutil.copytree(FIXTURE, repo, ignore=shutil.ignore_patterns("__pycache__"))
     git(repo, "init", "-q")
@@ -202,7 +211,7 @@ def prepare_repo(repo: Path, project: str | None) -> None:
     # work, and stays out of the commits a session is judged from.
     exclude = repo / ".git" / "info" / "exclude"
     exclude.parent.mkdir(parents=True, exist_ok=True)
-    exclude.write_text(".claude/\n.mcp.json\n.anamnesis.toml\n__pycache__/\n", encoding="utf-8")
+    exclude.write_text(WIRING_IGNORED, encoding="utf-8")
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "-m", "fixture")
 
@@ -997,7 +1006,12 @@ def cmd_run(args: argparse.Namespace) -> int:
             server = Server(binary, data, args.port, run_dir / "memory" / "server.log")
             server.start()
             wired = subprocess.run(
-                [str(binary), "setup", "--write", "--no-service", "--no-seed", "--port", str(args.port)],
+                # The agent named, not detected: a bare setup wires every
+                # harness installed on the machine it runs on, so the memory
+                # arm's checkout — which the agent lists and reads — would
+                # depend on that machine. On 2026-09-21 it carried a Codex
+                # wiring nobody asked for, committed into S01's diff.
+                [str(binary), "setup", "--write", "--no-service", "--no-seed", "--port", str(args.port), "--agent", "claude-code"],
                 cwd=repos["memory"],
                 env=server.env(),
                 capture_output=True,
@@ -1760,6 +1774,23 @@ def cmd_selftest(_: argparse.Namespace) -> int:
         print(f"FAIL redirection_reason: a redirected path was not reported: {reason!r}")
         return 1
     print("ok   redirection_reason catches a Store Python writing the run somewhere else")
+
+    # What setup writes for any harness stays out of a session's commit, and
+    # the agent's own work goes in. On 2026-09-21 a Codex wiring nobody asked
+    # for was committed into S01's diff in the memory arm only.
+    with tempfile.TemporaryDirectory() as scratch:
+        repo = Path(scratch) / "repo"
+        prepare_repo(repo, "ledger")
+        for wiring in (".claude/settings.local.json", ".codex/hooks.json", ".gemini/settings.json", ".cursor/hooks.json", ".mcp.json"):
+            (repo / wiring).parent.mkdir(parents=True, exist_ok=True)
+            (repo / wiring).write_text("{}", encoding="utf-8")
+        (repo / "ledger" / "added.py").write_text("x = 1\n", encoding="utf-8")
+        commit_session(repo, "S01")
+        committed = git(repo, "show", "--name-only", "--format=", "HEAD").split()
+    if committed != ["ledger/added.py"]:
+        print(f"FAIL prepare_repo: a session's commit held {committed}, expected only the agent's file")
+        return 1
+    print("ok   prepare_repo keeps every harness's wiring out of the commits a session is judged from")
     return checks.selftest()
 
 
