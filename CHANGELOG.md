@@ -45,7 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gave a block 8 times, where the cosine gate gives one 184 times. Asked of a
   project they were not about, 213 prompts got none. It cannot see a
   paraphrase, so a server with an embedder keeps the cosine gate. `[recall]
-  by_name = false` turns it off, and `min_coverage` sets the share
+  by_name = false` turns it off, and `min_coverage` sets the share, 0.5 by
+  default.
 - **Retrieval can be scored against this project's own memory, not only
   against fixtures.** The four built-in suites carry 10 to 22 invented pages
   each; they say whether the ranker works, and cannot say whether real memory
@@ -54,12 +55,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own and is asked of a snapshot through `--pages-from`. Over 112 pages and 36
   questions it scored Hit@1 0.611, MRR 0.714, Recall 0.833 — a name, a flag or
   a config key is found first almost every time, while `paraphrase` scored
-  0.000 at rank one. Five of the six misses are a question in one language
-  against a page in the other, which the English-only fixtures could not have
-  shown at any score. Numbers and misses in
-  `docs/measurements/2026-09-21-live-memory-retrieval.md`. It needs a real data
-  directory, so it runs by hand rather than in CI.
-
+  0.000 at rank one. The misses read as a language problem — five of six ask
+  in one language of a page in the other — but paired probes say synonymy: a
+  different word for the same thing misses inside one language as surely as
+  across two, while a Turkish suffix only costs ranks. Numbers, misses and the
+  probes in `docs/measurements/2026-09-21-live-memory-retrieval.md`. It needs a
+  real data directory, so it runs by hand rather than in CI.
 - **`anamnesis eval --gate` measures whether recall keeps quiet, with no
   labels.** Recall at prompt time has to say nothing when the project has
   nothing to say, and that half is usually judged by reading prompts and

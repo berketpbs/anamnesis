@@ -46,12 +46,13 @@ categories = ["keyword", "natural", "paraphrase", "symptom", "temporal"]
 #   symptom       8   0.625   0.775   0.831   1.000
 #   temporal      1   1.000   1.000   1.000   1.000
 #
-# The finding the fixture suites cannot produce, because their corpora are
-# written in one language: **five of the six misses are a question in one
-# language against a page in the other.** This memory is written in Turkish and
-# English, sometimes within one page, and no retrieval stream crosses between
-# them. `paraphrase` scoring 0.000 at rank one is the same fact stated by
-# category.
+# Five of the six misses ask in one language of a page in the other, and read
+# first as a language problem. Paired probes — one page asked twice, one thing
+# changed — say it is **synonymy**: another word for the same thing misses
+# inside one language as surely as across two, while a Turkish suffix only
+# costs ranks. Cross-language is the extreme of that failure, not a separate
+# one. `paraphrase` scoring 0.000 at rank one is the same fact stated by
+# category. The probes are in docs/measurements/2026-09-21-live-memory-retrieval.md.
 #
 # Measured, then rounded down — a floor, not a target. A change that pushes
 # these up should raise them; one that pushes them down has to say so in the
