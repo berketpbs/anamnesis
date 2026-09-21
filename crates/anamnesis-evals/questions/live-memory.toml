@@ -1,0 +1,316 @@
+# Questions asked of this project's own memory.
+#
+# The four built-in suites carry their own small corpora — 10 to 22 invented
+# pages, written so that a specific retrieval failure has somewhere to happen.
+# They answer "does the ranker work". They cannot answer "does *our* memory
+# answer *our* questions", because the corpus they score is not the one anybody
+# uses.
+#
+# This file carries no pages. It is asked of a snapshot of real memory:
+#
+#     anamnesis eval --suite crates/anamnesis-evals/questions/live-memory.toml \
+#                    --pages-from <data dir or backup> --scope default/anamnesis
+#
+# Every question here is one somebody could plausibly type at this project, and
+# every `relevant` page is one that actually answers it — checked by reading
+# the page, not by running retrieval and writing down what came back. A suite
+# built from what retrieval already finds measures nothing.
+#
+# Two rules kept while writing it:
+#
+#   - Questions are phrased the way the asker would phrase them, not the way
+#     the page is written. Where those differ the case is a `paraphrase`, and
+#     several of them are expected to fail. A suite that only asks what the
+#     corpus already says is a suite that cannot go down.
+#   - Turkish and English questions both appear, because this memory is written
+#     in both and people ask in both. Cross-language cases are marked in their
+#     notes: a Turkish page reached by an English question has no route through
+#     a lexical stream, and that is a finding rather than a bug to hide.
+
+name = "live-memory"
+description = "This project's real pages, asked the questions its own people ask"
+
+# Same as the built-in suites: what `memory_query` returns when not told
+# otherwise.
+limit = 5
+
+categories = ["keyword", "natural", "paraphrase", "symptom", "temporal"]
+
+# What the first run said, 2026-09-21, over 112 pages and 36 questions:
+#
+#   Hit@1 0.611   MRR 0.714   NDCG@5 0.745   Recall 0.833
+#
+#   keyword      13   0.846   0.923   0.943   1.000
+#   natural       9   0.556   0.667   0.696   0.778
+#   paraphrase    5   0.000   0.100   0.126   0.200
+#   symptom       8   0.625   0.775   0.831   1.000
+#   temporal      1   1.000   1.000   1.000   1.000
+#
+# The finding the fixture suites cannot produce, because their corpora are
+# written in one language: **five of the six misses are a question in one
+# language against a page in the other.** This memory is written in Turkish and
+# English, sometimes within one page, and no retrieval stream crosses between
+# them. `paraphrase` scoring 0.000 at rank one is the same fact stated by
+# category.
+#
+# Measured, then rounded down — a floor, not a target. A change that pushes
+# these up should raise them; one that pushes them down has to say so in the
+# diff.
+[thresholds]
+min_hit1 = 0.61
+min_mrr = 0.71
+min_ndcg = 0.74
+min_recall = 0.83
+
+# ---------------------------------------------------------------------------
+# The continuity marker. The page a whole evening was spent on, and the one
+# case set where the lexical limit was already measured by hand on 2026-09-21.
+# ---------------------------------------------------------------------------
+
+[[case]]
+query = "KIRLANGIC-47"
+category = "keyword"
+relevant = ["decisions/codex-sureklilik-testi-dogrulama-isareti.md"]
+note = "The marker itself, declared as an entity. If this ever misses, name lookup is broken outright."
+
+[[case]]
+query = "Codex süreklilik testi doğrulama işareti neydi"
+category = "natural"
+relevant = ["decisions/codex-sureklilik-testi-dogrulama-isareti.md"]
+note = "Asked in the page's own words, with diacritics the ASCII page does not carry. Folding is the only thing between the two."
+
+[[case]]
+query = "hafizanin aktarildigini kanitlamak icin sectigimiz gizli kelime neydi"
+category = "paraphrase"
+relevant = ["decisions/codex-sureklilik-testi-dogrulama-isareti.md"]
+note = "Measured as a miss on 2026-09-21. The page says dogrulama isareti; the question says gizli kelime. Kept because the fix has to show up here."
+
+[[case]]
+query = "what code word did we agree on to prove memory carried across agents"
+category = "paraphrase"
+relevant = ["decisions/codex-sureklilik-testi-dogrulama-isareti.md"]
+note = "Cross-language against a Turkish page. Expected to miss through every lexical route; it is here to measure the gap, not to be passed."
+
+# ---------------------------------------------------------------------------
+# Models: which one writes summaries, and why a ping does not answer that.
+# ---------------------------------------------------------------------------
+
+[[case]]
+query = "anamnesis-qwen"
+category = "keyword"
+relevant = ["decisions/the-local-model-is-a-fallback-not-a-peer.md"]
+note = "Declared as an entity on a page whose title never names it."
+
+[[case]]
+query = "is the local model good enough to write session pages"
+category = "natural"
+relevant = ["decisions/the-local-model-is-a-fallback-not-a-peer.md"]
+note = "The decision is exactly this question. The page answers it with a paired measurement of the same session through both backends."
+
+[[case]]
+query = "model bir kelimelik prompta cevap veriyor ama gercek isi yapmiyor"
+category = "symptom"
+relevant = ["gotchas/a-model-that-answers-a-ping-can-still-refuse-the-work.md"]
+note = "Turkish question, English page. The shape a person hits it in — the check passed, the work did not."
+
+[[case]]
+query = "gemini-3.8-flash"
+category = "keyword"
+relevant = ["gotchas/a-model-that-answers-a-ping-can-still-refuse-the-work.md"]
+note = "A version string, declared as an entity. The narrowest possible lookup."
+
+[[case]]
+query = "yeni API anahtari koydum ama hala 400 doniyor"
+category = "symptom"
+relevant = ["gotchas/a-new-key-changes-nothing-while-the-old-generic-one-is-stored.md"]
+note = "Three days were lost to this exact symptom. The page is in English and the symptom is asked in Turkish."
+
+[[case]]
+query = "ANAMNESIS_LLM_API_KEY"
+category = "keyword"
+relevant = [
+  "gotchas/a-new-key-changes-nothing-while-the-old-generic-one-is-stored.md",
+  "decisions/anamnesis-llm-api-key-artik-varsayilan-olarak-anthropic-saglayicisini-s.md",
+]
+note = "Two pages genuinely answer this: the gotcha about the stale key shadowing a new one, and the decision that changed what a bare key defaults to. Either first is correct."
+
+[[case]]
+query = "how many retries should a background summary get"
+category = "natural"
+relevant = ["decisions/differentiate-llm-retry-budgets-between-interactive-and-background-tasks.md"]
+note = "The page splits interactive from background budgets and gives numbers for both."
+
+# ---------------------------------------------------------------------------
+# Recall at prompt time: the cluster with the most near-duplicate pages, which
+# is where ranking under competition actually gets tested on real memory.
+# ---------------------------------------------------------------------------
+
+[[case]]
+query = "min_words"
+category = "keyword"
+relevant = ["decisions/prompt-zamanı-hatırlatıcı-tetiklenmesi-için-en-az-üç-kelime-sınırı-geti.md"]
+note = "A config key named in the body of one page and in no title."
+
+[[case]]
+query = "kosinüs benzerliği eşiği neden 0.55 seçildi"
+category = "natural"
+relevant = [
+  "decisions/otomatik-hatırlatıcı-için-kosinüs-benzerliği-eşik-değeri-0-55-olarak-be.md",
+  "gotchas/kosinüs-benzerliği-eşiği-küçük-külliyatlarda-medyan-farkıyla-belirlenem.md",
+]
+note = "The decision and the measurement behind it. Both answer; the decision is the better first."
+
+[[case]]
+query = "kısa promptlar neden alakasız hatırlatma getiriyor"
+category = "natural"
+relevant = [
+  "gotchas/kısa-ve-jenerik-promptlar-kosinüs-benzerliği-eşiğini-aşarak-ilgisiz-rec.md",
+  "gotchas/kısa-ve-bağlamsız-kontrol-promptları-yüksek-kosinüs-benzerliğiyle-yanlı.md",
+]
+note = "Two pages say nearly the same thing in nearly the same words. The honest answer is either; this is the crowding case real memory already contains."
+
+[[case]]
+query = "gömücü yokken hatırlatma ne yapıyor"
+category = "paraphrase"
+relevant = ["decisions/gomucu-olmadiginda-basarisiz-olmak-yerine-isim-tabanli-recall-calistiri.md"]
+note = "The page is written without diacritics (gomucu); the question carries them. Same word, different bytes."
+
+[[case]]
+query = "inverse document frequency"
+category = "keyword"
+relevant = ["decisions/gomucu-olmadiginda-basarisiz-olmak-yerine-isim-tabanli-recall-calistiri.md"]
+note = "Spelled out in the body, where the name-based fallback is described. Nothing else in memory uses the phrase."
+
+[[case]]
+query = "recall lexical olduğu için parafrazı göremiyor"
+category = "natural"
+relevant = ["measurements/recall-is-lexical-paraphrase-probe-2026-09-21.md"]
+note = "The finding stated in the asker's words. The page is the measurement that established it."
+
+[[case]]
+query = "2026-09-21 recall ölçümünde kaç prompt ıskalandı"
+category = "temporal"
+relevant = ["measurements/recall-is-lexical-paraphrase-probe-2026-09-21.md"]
+note = "Anchored to the date in the page's own path and first line. Five of eight missed."
+
+[[case]]
+query = "uzun sayfalar için bölümleme mi özet vektörü mü"
+category = "natural"
+relevant = [
+  "decisions/uzun-sayfalar-için-karmaşık-bölümleme-yerine-frontmatter-özet-vektörü-k.md",
+  "gotchas/section-vectors-reach-deep-answers-but-favour-long-pages.md",
+]
+note = "The decision chose the summary vector; the gotcha is the measurement that argued against sections. Both are answers."
+
+[[case]]
+query = "128 tokens"
+category = "keyword"
+relevant = ["gotchas/the-local-minilm-tokenizer-silently-truncates-at-128-tokens.md"]
+note = "A number that appears in exactly one page, and in its title."
+
+# ---------------------------------------------------------------------------
+# Capture and harnesses.
+# ---------------------------------------------------------------------------
+
+[[case]]
+query = "başarısız araç çağrısı neden kayda geçmiyor"
+category = "paraphrase"
+relevant = ["gotchas/a-failed-tool-call-never-reaches-the-hook.md"]
+note = "Turkish question, English page, and the page says never reaches the hook rather than not recorded."
+
+[[case]]
+query = "conversation_id"
+category = "keyword"
+relevant = ["gotchas/cursor-kancalarında-session-id-yerine-conversation-id-kullanılır.md"]
+note = "A field name. The page exists because Cursor sends it where everything else sends session_id."
+
+[[case]]
+query = "cursor handoff boş oturuma yazılıyor"
+category = "symptom"
+relevant = ["gotchas/cursor-kancalarında-session-id-yerine-conversation-id-kullanılır.md"]
+note = "The page says hayalet (ghost) sessions; the question says boş (empty). Near-miss vocabulary on purpose."
+
+[[case]]
+query = "codex hangi olayları kaydediyor hangilerini kaydetmiyor"
+category = "natural"
+relevant = ["gotchas/codex-hooks-fire-but-fail-stale-trust.md"]
+note = "The page is the table answering exactly this, rewritten 2026-09-21 after the earlier revisions were refuted."
+
+[[case]]
+query = "ajanlar memory_query aracını kendiliğinden çağırmıyor"
+category = "symptom"
+relevant = ["gotchas/mcp-araçları-yerine-sadece-sessionstart-handoff-hafıza-akışını-sağlıyor.md"]
+note = "Measured over 12 longrun sessions: 0 calls in 11 of them."
+
+# ---------------------------------------------------------------------------
+# Build, release and the tools around them.
+# ---------------------------------------------------------------------------
+
+[[case]]
+query = "core.autocrlf"
+category = "keyword"
+relevant = ["gotchas/a-checkout-decided-what-a-database-could-open.md"]
+note = "Named once, in the body. The title says nothing a keyword search could reach."
+
+[[case]]
+query = "migration checksum matches on one machine and not another"
+category = "symptom"
+relevant = ["gotchas/a-checkout-decided-what-a-database-could-open.md"]
+note = "The symptom as it presented. The page explains it as line endings changing the hashed bytes."
+
+[[case]]
+query = "prova üç kez geçti ama gerçek sürüm patladı"
+category = "paraphrase"
+relevant = ["gotchas/a-rehearsal-cannot-run-the-step-that-only-runs-for-real.md"]
+note = "Turkish paraphrase of an English page whose words are rehearsal and publish. Expected to be hard."
+
+[[case]]
+query = "release.yml"
+category = "keyword"
+relevant = ["gotchas/a-rehearsal-cannot-run-the-step-that-only-runs-for-real.md"]
+note = "Declared as an entity, which is the only stream that reaches it cheaply."
+
+[[case]]
+query = "gh pr merge --auto"
+category = "keyword"
+relevant = ["gotchas/gh-pr-merge-auto-komutu-ci-kontrollerini-beklemeden-anında-merge-ediy.md"]
+note = "A command typed verbatim, including flags. Tokenisation of the flag is what this case watches."
+
+[[case]]
+query = "PR CI beklemeden merge oldu"
+category = "symptom"
+relevant = ["gotchas/gh-pr-merge-auto-komutu-ci-kontrollerini-beklemeden-anında-merge-ediy.md"]
+note = "The same page reached by what happened rather than by what was typed."
+
+[[case]]
+query = "exit code 56"
+category = "keyword"
+relevant = ["gotchas/macos-uzerinde-curl-504-hatasini-exit-code-56-ile-doner-ve-retry-bunu-y.md"]
+note = "A number plus two common words. Nothing else in memory carries it."
+
+[[case]]
+query = "iki süreç aynı anda commit atınca biri diğerini eziyor"
+category = "symptom"
+relevant = ["gotchas/eşzamanlı-git-işlemleri-bayat-indeks-yüzünden-veri-kaybına-yol-açabilir.md"]
+note = "The page's own framing is a stale index; the question is what the user sees."
+
+[[case]]
+query = "Microsoft Store Python"
+category = "keyword"
+relevant = [
+  "gotchas/microsoft-store-python-localappdata-yazmalarını-sanallaştırır.md",
+  "gotchas/microsoft-store-python-sürümü-localappdata-dizinini-sessizce-sanallaştı.md",
+]
+note = "Two pages on the same fact, written weeks apart and never merged. Real memory duplicates itself, and a suite drawn from it should say so."
+
+[[case]]
+query = "karşılaştırdığımız projenin adını PR'a yazabilir miyiz"
+category = "natural"
+relevant = ["decisions/esinlenilen-dis-projelerin-isimleri-pr-ve-commitlerde-gizli-tutulmalidir.md"]
+note = "A rule that has to be found before it is broken, which makes retrieving it the whole point."
+
+[[case]]
+query = "cmd /c ile forward slash yol çalışmıyor gibi görünüyor"
+category = "symptom"
+relevant = ["gotchas/msys-mangles-slash-c-and-fakes-a-cmd-failure.md"]
+note = "The false result itself, phrased as the belief it produces. Written 2026-09-21 after it cost a wrong root cause."
