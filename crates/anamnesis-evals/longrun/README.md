@@ -143,6 +143,25 @@ is about what the page said or what the agent did with it — the first run with
 recall, on 2026-09-18, showed four of five probes their plant, and two of
 those four still failed.
 
+Being shown the page is not the whole path, so `report` also follows each
+probe's knowledge from end to end: whether the planting session's pages kept
+it — every page that session left, since the rule it was told often goes into
+a gotcha beside its session page — whether one of them was put in front of
+the agent, by recall or by a memory call it made itself, whether it opened
+one in full, and whether it passed. What a page has to say is `knowledge` in
+`scenario.toml`, one list of patterns per fact, written after reading the
+pages of the first three runs; the selftest holds the patterns to lines from
+those pages judged by hand, one that kept each fact and one that did not.
+Read that way, those runs say the local model was the bottleneck, not recall:
+the two runs gemini-3.5-flash wrote kept all five facts, the one qwen2.5:7b
+wrote kept one, and the probe that opened a qwen page in full read "avoiding
+the issue of caching rows as seen last month" and built the cache anyway.
+
+All of it is read off disk when `report` runs, so older runs are followed
+too, and a pattern corrected later applies to every run at once. Recall is
+read from Claude Code's transcript for a run that did not record it, while
+Claude Code still keeps that transcript.
+
 The agent and the scenario are both fixed, so a difference between arms is
 memory's; the number of repeats is what says whether the difference is more
 than one model's variance.
