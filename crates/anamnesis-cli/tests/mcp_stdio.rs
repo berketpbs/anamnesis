@@ -238,3 +238,69 @@ fn a_harness_can_list_write_find_and_read_over_stdio() {
         "and it still answers"
     );
 }
+
+/// Each tool tells the harness whether it changes memory, in the listing the
+/// harness reads before deciding whether to ask. A harness with nobody to ask
+/// refuses a tool that says nothing: `codex exec` refused `memory_query` on
+/// 2026-09-22 and its agent grepped the wiki's files instead.
+#[test]
+fn every_tool_says_whether_it_changes_memory() {
+    let data = tempfile::tempdir().expect("data dir");
+    let repo = tempfile::tempdir().expect("repo dir");
+    std::fs::write(
+        repo.path().join(".anamnesis.toml"),
+        "[scope]\nworkspace = \"default\"\nproject = \"stdio-hints\"\n",
+    )
+    .expect("marker");
+
+    let mut server = Server::start(data.path(), repo.path());
+    server.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": { "name": "anamnesis-stdio-test", "version": "0" },
+        },
+    }));
+    server.answer(1);
+    server.send(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+    server.send(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
+    let listed = server.answer(2);
+    let tools = listed["result"]["tools"].as_array().expect("a tool list");
+
+    let reads = ["memory_query", "memory_read_page", "workstream_status"];
+    let writes = [
+        "memory_write_page",
+        "memory_handoff_accept",
+        "workstream_start",
+    ];
+    for tool in tools {
+        let name = tool["name"].as_str().expect("a name");
+        let hints = &tool["annotations"];
+        let expected = if reads.contains(&name) {
+            true
+        } else if writes.contains(&name) {
+            false
+        } else {
+            panic!("{name} is listed and neither a read nor a write here: add it to one");
+        };
+        assert_eq!(
+            hints["readOnlyHint"],
+            json!(expected),
+            "{name} should say readOnlyHint = {expected}: {tool}"
+        );
+        if !expected {
+            // A write that replaces or claims, never one that loses anything:
+            // pages keep their history in git, a handoff is consumed once.
+            assert_eq!(hints["destructiveHint"], json!(false), "{name}: {tool}");
+        }
+        assert_eq!(
+            hints["openWorldHint"],
+            json!(false),
+            "{name} reaches nothing outside this memory: {tool}"
+        );
+    }
+    assert_eq!(tools.len(), reads.len() + writes.len(), "{listed}");
+}
