@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **What the person tells the agent to keep gets a note of its own.** The
+  consolidation prompt now names that case: a rule, how the project is
+  deployed, or a value no file holds. It is the clearest reason for a durable
+  page, and most of all when the session was about something else, because
+  nobody looks for the deploy command in a page about a `version` command.
+  That is where it was lost in the long-run eval on 2026-09-22: recall could
+  not find it there, 0.508 against a 0.55 gate. Replaying that run's own
+  consolidation requests twice each against `gemini-3.5-flash-lite`, what the
+  person said got its own note in 5 tries of 6 instead of 2, and the two
+  sessions that plant nothing still wrote none. Every such note sat above the
+  gate for the probe that needed it. The method and the table are in
+  `docs/measurements/2026-09-22-notes-for-what-the-person-said.md`.
 - **Open sessions are checkpointed before context compaction.** A
   `PreCompact` event now refreshes the session's deterministic wiki page in the
   background without closing the session, creating a handoff, or waiting on a
