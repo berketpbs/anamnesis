@@ -157,6 +157,14 @@ second telling of the session page, not a description of the change, and not \
 advice that would be true of any project. If nothing clears that bar, write \
 none: a memory whose durable pages are mostly filler is one nobody reads far \
 enough into to find the two that were real.
+- The clearest case for a note is something the person told the agent about \
+the project for later: a rule to keep to, how or where it is deployed, a name \
+or value no file in the repository holds. It clears the bar even when the \
+session's own work was about something else, and then most of all, because a \
+later session looking for it will not think to look in a page about that other \
+work. Give it a note of its own, in the person's words — a decision for a \
+rule, a procedure for a way of doing something — and still mention it on the \
+session page.
 - A note's title is the claim it makes, so that a listing of them argues with \
 somebody scanning it: `A moved crate breaks the Docker build`, not `Docker \
 notes`. Do not label it with its own kind — it is already filed under one — \
