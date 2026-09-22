@@ -111,8 +111,28 @@ pub struct Tuning {
     /// body a second time. Zero silences it, and the stream is not even run.
     pub abstracts: f64,
     /// Exponent applied to [`authority_multiplier`]. `1.0` leaves it as it is,
-    /// `0.0` switches it off, and anything between softens it.
+    /// `0.0` switches it off, and anything between softens it. Standing says
+    /// which place a page counts from ([`fuse_standing`]), so this is how far
+    /// up its own ranking a distilled page may move, not what its score is
+    /// multiplied by.
     pub authority_exponent: f64,
+    /// How far down a session page that records almost nothing counts from.
+    ///
+    /// Asking memory a question leaves a session page that says the question,
+    /// so the echoes of a question multiply while the answer stays one page.
+    /// On 2026-09-22, in this project's own memory, `KIRLANGIC-47` — a marker
+    /// one decision defines — was in six pages, five of them sessions where
+    /// somebody had asked what it was, and the decision had fallen behind
+    /// them. A record of a question is not an answer to it.
+    pub thin_record_divisor: f64,
+    /// How short a session page has to be to count as one of those records.
+    ///
+    /// In characters of body, an absolute number rather than a share of the
+    /// corpus, for the reason the recall gate is absolute: a baseline needs a
+    /// corpus to be a baseline. The pages it is drawn between are real — the
+    /// question-only sessions in this memory run 550 to 1000 characters, and
+    /// the session pages that answer something run past 1600.
+    pub thin_record_chars: usize,
     /// How much of an entity's name the query has to say for it to match.
     ///
     /// `1.0` requires every token of the name — what the entity stream has
@@ -210,12 +230,28 @@ impl Default for Tuning {
             // below removing vectors altogether under both. The sets are in
             // `docs/measurements/`; `docs/DIRECTION.md` has the table.
             abstracts: 0.0,
-            // A quarter, so the full 2.34x multiplier becomes about 1.24x.
-            // Authority is a preference between comparably relevant pages,
-            // and applied whole it was larger than the entire spread of the
-            // relevance it adjusted — a canonical page in an authoritative
-            // namespace outranked whatever any stream put first.
-            authority_exponent: 0.25,
+            // Three quarters, in rank space: an ordinary decision counts from
+            // 1.36 places higher, a pinned canonical one from 1.89. It was a
+            // quarter while standing multiplied the score, where it decided
+            // nothing at all — the largest multiplier the wiki could give a
+            // page was 1.24x and the gap between the first two places is
+            // 1.33x. Measured over this project's 140 pages and the 36
+            // questions in `questions/live-memory.toml`: MRR 0.706 → 0.766
+            // and hit@1 0.611 → 0.722 with the divisor below, every fixture
+            // suite at or above its floor, and `adversarial` — the suite no
+            // knob is tuned against — unchanged at 0.969. Alone, without the
+            // divisor, three quarters takes `adversarial` to 0.938, because
+            // the trap it was written around is a session page.
+            authority_exponent: 0.75,
+            // Twice, and a page of 1500 characters or fewer. Measured on the
+            // same 36 questions: with authority alone the real corpus reached
+            // 0.736 and the untuned suite fell; with both it reaches 0.766 and
+            // nothing falls. Demoting every session page instead scored 0.749
+            // and took `long`, five of whose sixteen answers are sessions,
+            // from 0.562 to 0.528: it is the thin record that is not an
+            // answer, not the session page.
+            thin_record_divisor: 2.0,
+            thin_record_chars: 1500,
             // Thirty, unchanged — and the one knob whose measurement came
             // back empty. At the tuning above, ten, thirty and a hundred and
             // twenty score identically on both corpora. Depth only mattered
@@ -264,14 +300,33 @@ impl Tuning {
         coverage.clamp(0.0, 1.0).powf(self.vector_coverage)
     }
 
-    /// The authority multiplier this tuning applies.
+    /// What a page's standing in the wiki is worth, as a factor on the place
+    /// it counts from.
     ///
     /// Kept here rather than at the call site because the exponent only means
     /// anything against the multiplier it modifies, and separating them is how
-    /// one of them silently stops being applied.
-    pub fn authority(&self, pinned: bool, canonical: bool, authoritative_namespace: bool) -> f64 {
-        authority_multiplier(pinned, canonical, authoritative_namespace)
-            .powf(self.authority_exponent)
+    /// one of them silently stops being applied. `thin_record` says the page
+    /// is a session that recorded almost nothing — see [`Tuning::thin_record`].
+    pub fn standing(
+        &self,
+        pinned: bool,
+        canonical: bool,
+        authoritative_namespace: bool,
+        thin_record: bool,
+    ) -> f64 {
+        let standing = authority_multiplier(pinned, canonical, authoritative_namespace)
+            .powf(self.authority_exponent);
+        if thin_record {
+            standing / self.thin_record_divisor
+        } else {
+            standing
+        }
+    }
+
+    /// Whether a page is a session that recorded almost nothing: in the
+    /// `sessions` namespace and shorter than [`Tuning::thin_record_chars`].
+    pub fn thin_record(&self, sessions_namespace: bool, body_chars: usize) -> bool {
+        sessions_namespace && body_chars <= self.thin_record_chars
     }
 }
 
@@ -338,6 +393,28 @@ pub fn fuse_weighted(streams: &[(&[PageId], f64)], k: f64) -> Vec<(PageId, f64)>
 /// vector stream, where a page embedded from part of itself counts for part —
 /// see [`Tuning::vector_coverage`].
 pub fn fuse_scaled(streams: &[(&[PageId], f64, &[f64])], k: f64) -> Vec<(PageId, f64)> {
+    fuse_standing(streams, k, &HashMap::new())
+}
+
+/// [`fuse_scaled`], with each page's standing deciding the place it counts
+/// from.
+///
+/// A page with standing `s` contributes what the page at `rank / s` would:
+/// standing moves a page up the list by a factor, rather than multiplying a
+/// score it cannot move. That difference is the whole point. At `k = 2` the
+/// gap between the first two places is 1.33x and between the fifth and sixth
+/// 1.14x, while the largest multiplier the wiki can give a page — pinned,
+/// canonical, in an authoritative namespace — is 1.24x at the exponent that
+/// ships, and an ordinary decision's is 1.11x. Multiplied into the score it
+/// could not cross the top of its own ranking: on 2026-09-22, against this
+/// project's own memory, the decision holding an answer sat third behind two
+/// session pages that recorded only somebody asking the question, and
+/// switching authority off changed no order at all.
+pub fn fuse_standing(
+    streams: &[(&[PageId], f64, &[f64])],
+    k: f64,
+    standing: &HashMap<PageId, f64>,
+) -> Vec<(PageId, f64)> {
     let mut scores: HashMap<PageId, f64> = HashMap::new();
     for (stream, weight, scales) in streams {
         if *weight == 0.0 {
@@ -345,7 +422,13 @@ pub fn fuse_scaled(streams: &[(&[PageId], f64, &[f64])], k: f64) -> Vec<(PageId,
         }
         for (rank, id) in stream.iter().enumerate() {
             let scale = scales.get(rank).copied().unwrap_or(1.0);
-            *scores.entry(*id).or_insert(0.0) += weight * scale / (k + rank as f64 + 1.0);
+            let standing = standing
+                .get(id)
+                .copied()
+                .unwrap_or(1.0)
+                .max(f64::MIN_POSITIVE);
+            let place = (rank as f64 + 1.0) / standing;
+            *scores.entry(*id).or_insert(0.0) += weight * scale / (k + place);
         }
     }
     sorted(scores)
@@ -367,12 +450,12 @@ fn sorted(scores: HashMap<PageId, f64>) -> Vec<(PageId, f64)> {
     fused
 }
 
-/// How much a page's fused score should be scaled for its standing in the
-/// wiki, applied *after* fusion produces relevance candidates.
+/// What a page's standing in the wiki is worth, as a factor on the place it
+/// counts from in every stream that found it ([`fuse_standing`]).
 ///
-/// This is a multiplier, not an independent retriever: a page that no stream
-/// found relevant stays absent no matter how authoritative it is. Only pages
-/// already in the fused set get pushed up or down within it.
+/// Not an independent retriever: a page no stream found stays absent however
+/// authoritative it is. Only pages some stream already returned move within
+/// the ranking.
 pub fn authority_multiplier(pinned: bool, canonical: bool, authoritative_namespace: bool) -> f64 {
     let mut multiplier = 1.0;
     if authoritative_namespace {
@@ -486,7 +569,9 @@ mod tests {
         assert_eq!(tuning.entity, 1.0);
         assert_eq!(tuning.links, 0.25);
         assert_eq!(tuning.vectors, 1.0);
-        assert_eq!(tuning.authority_exponent, 0.25);
+        assert_eq!(tuning.authority_exponent, 0.75);
+        assert_eq!(tuning.thin_record_divisor, 2.0);
+        assert_eq!(tuning.thin_record_chars, 1500);
     }
 
     /// Why lowering `k` was safe for the scope fusion, which no suite covers:
@@ -626,19 +711,42 @@ mod tests {
         };
         let full = authority_multiplier(true, true, true);
 
-        assert!((with(1.0).authority(true, true, true) - full).abs() < 1e-9);
-        assert!((with(0.0).authority(true, true, true) - 1.0).abs() < 1e-9);
+        assert!((with(1.0).standing(true, true, true, false) - full).abs() < 1e-9);
+        assert!((with(0.0).standing(true, true, true, false) - 1.0).abs() < 1e-9);
 
-        let half = with(0.5).authority(true, true, true);
+        let half = with(0.5).standing(true, true, true, false);
         assert!(half > 1.0 && half < full, "{half} should sit between");
+    }
 
-        // What ships: kept, and cut to about a quarter of its former reach.
-        let shipped = Tuning::default().authority(true, true, true);
+    /// Standing has to be worth more than the gap between two places, or it
+    /// decides nothing: that is what it was worth while it multiplied scores.
+    #[test]
+    fn what_ships_can_move_a_page_at_the_top_of_its_own_ranking() {
+        let tuning = Tuning::default();
+        let first_two_places = (tuning.rrf_k + 2.0) / (tuning.rrf_k + 1.0);
+
+        let decision = tuning.standing(false, false, true, false);
         assert!(
-            shipped > 1.0,
-            "authority should still prefer a canonical page"
+            decision > first_two_places,
+            "an ordinary decision ({decision}) cannot pass the page above it ({first_two_places})"
         );
-        assert!(shipped < 1.3, "but not by more than relevance can overcome");
+
+        // And a session page that recorded almost nothing goes the other way,
+        // by more than that same gap.
+        let thin = tuning.standing(false, false, false, true);
+        assert!(
+            thin < 1.0 / first_two_places,
+            "a thin session record ({thin}) should fall below the page under it"
+        );
+    }
+
+    #[test]
+    fn a_thin_record_is_a_short_session_page_and_nothing_else() {
+        let tuning = Tuning::default();
+
+        assert!(tuning.thin_record(true, 800));
+        assert!(!tuning.thin_record(true, tuning.thin_record_chars + 1));
+        assert!(!tuning.thin_record(false, 10), "only session pages");
     }
 
     #[test]

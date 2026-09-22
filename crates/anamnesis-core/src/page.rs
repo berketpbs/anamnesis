@@ -17,6 +17,9 @@ pub const MAX_ENTITY_LEN: usize = 64;
 /// Wiki namespaces whose pages outrank ordinary ones during retrieval.
 pub const AUTHORITY_NAMESPACES: [&str; 4] = ["_rules", "decisions", "procedures", "gotchas"];
 
+/// The namespace holding one page per session: the record, not the distillate.
+pub const SESSIONS_NAMESPACE: &str = "sessions";
+
 /// A validated, project-relative page path such as `decisions/0001-storage.md`.
 ///
 /// Paths become filesystem locations under the wiki root, so validation here is
@@ -157,6 +160,12 @@ impl PagePath {
     pub fn is_authoritative(&self) -> bool {
         self.namespace()
             .is_some_and(|ns| AUTHORITY_NAMESPACES.contains(&ns))
+    }
+
+    /// Whether this page is the record of one session rather than something
+    /// distilled from it.
+    pub fn is_session_record(&self) -> bool {
+        self.namespace() == Some(SESSIONS_NAMESPACE)
     }
 }
 

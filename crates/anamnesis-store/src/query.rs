@@ -19,7 +19,7 @@ use std::collections::HashMap;
 
 use anamnesis_core::ids::{PageId, ProjectId};
 use anamnesis_core::page::{Entity, PagePath, PageStatus, Tier};
-use anamnesis_core::retrieval::{RRF_K, Tuning, fuse_and_rank, fuse_scaled, tokenize};
+use anamnesis_core::retrieval::{RRF_K, Tuning, fuse_and_rank, fuse_standing, tokenize};
 use jiff::Timestamp;
 use rusqlite::types::Value;
 use rusqlite::{OptionalExtension, params, params_from_iter};
@@ -77,8 +77,12 @@ pub struct PageHit {
     pub pinned: bool,
     /// Declared authoritative on its subject.
     pub canonical: bool,
-    /// Fused relevance score, after the authority multiplier.
+    /// Fused relevance score, with standing in the places it was fused from.
     pub score: f64,
+    /// What the page's standing was worth: the factor on the place each
+    /// stream's rank counted from. `1.0` means it was weighed and left alone;
+    /// below one is a session page that recorded almost nothing.
+    pub standing: f64,
     /// Leading slice of the body, for a caller deciding whether to read more.
     pub snippet: String,
 }
@@ -133,6 +137,20 @@ struct PageRow {
     status: PageStatus,
     pinned: bool,
     canonical: bool,
+}
+
+/// What a page's standing is worth, from the row the streams returned.
+///
+/// One place, because standing now decides where a page counts from in every
+/// stream, and a second copy of this rule is how one of them silently starts
+/// ranking by something else.
+fn standing_of(tuning: &Tuning, row: &PageRow) -> f64 {
+    tuning.standing(
+        row.pinned,
+        row.canonical,
+        row.path.is_authoritative(),
+        tuning.thin_record(row.path.is_session_record(), row.body.chars().count()),
+    )
 }
 
 impl Store {
@@ -214,29 +232,47 @@ impl Store {
         };
 
         let weights = tuning.weights();
-        let fused = fuse_scaled(
-            &[
-                (fts.as_slice(), weights[0], &[][..]),
-                (entity.as_slice(), weights[1], &[][..]),
-                (links.as_slice(), weights[2], &[][..]),
-                (vectors.as_slice(), weights[3], vector_scales.as_slice()),
-                (abstracts.as_slice(), weights[4], &[][..]),
-            ],
-            tuning.rrf_k,
-        );
+        let streams = [
+            (fts.as_slice(), weights[0], &[][..]),
+            (entity.as_slice(), weights[1], &[][..]),
+            (links.as_slice(), weights[2], &[][..]),
+            (vectors.as_slice(), weights[3], vector_scales.as_slice()),
+            (abstracts.as_slice(), weights[4], &[][..]),
+        ];
+
+        // The rows are read before fusing rather than after, because standing
+        // now decides the place a page counts from instead of scaling the
+        // score fusion produced. It is the same single query over the same
+        // ids: every page any weighted stream returned.
+        let mut ids: Vec<PageId> = Vec::new();
+        for (stream, weight, _) in &streams {
+            if *weight == 0.0 {
+                continue;
+            }
+            for id in *stream {
+                if !ids.contains(id) {
+                    ids.push(*id);
+                }
+            }
+        }
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = self.load_page_rows(&ids)?;
+        let standings: HashMap<PageId, f64> = rows
+            .iter()
+            .map(|(id, row)| (*id, standing_of(tuning, row)))
+            .collect();
+
+        let fused = fuse_standing(&streams, tuning.rrf_k, &standings);
         if fused.is_empty() {
             return Ok(Vec::new());
         }
-
-        let ids: Vec<PageId> = fused.iter().map(|(id, _)| *id).collect();
-        let rows = self.load_page_rows(&ids)?;
 
         let mut hits: Vec<PageHit> = fused
             .into_iter()
             .filter_map(|(id, score)| {
                 let row = rows.get(&id)?;
-                let adjusted = score
-                    * tuning.authority(row.pinned, row.canonical, row.path.is_authoritative());
                 Some(PageHit {
                     page_id: id,
                     project_id: row.project_id,
@@ -246,7 +282,8 @@ impl Store {
                     status: row.status,
                     pinned: row.pinned,
                     canonical: row.canonical,
-                    score: adjusted,
+                    score,
+                    standing: standings.get(&id).copied().unwrap_or(1.0),
                     snippet: snippet_of(&row.body),
                 })
             })
@@ -331,7 +368,7 @@ impl Store {
         let best = {
             let conn = self.connection();
             let mut statement = conn.prepare(
-                "SELECT pe.page_id, pe.vector, p.path, p.pinned, p.canonical
+                "SELECT pe.page_id, pe.vector, p.path, p.pinned, p.canonical, length(p.body)
                  FROM page_embeddings pe
                  JOIN pages p ON p.id = pe.page_id
                  WHERE pe.model = ?1 AND p.project_id = ?2
@@ -344,6 +381,7 @@ impl Store {
                     row.get::<_, String>(2)?,
                     row.get::<_, bool>(3)?,
                     row.get::<_, bool>(4)?,
+                    row.get::<_, i64>(5)?,
                 ))
             })?;
 
@@ -352,10 +390,15 @@ impl Store {
             let query_norm = norm(query_vector);
             let mut best: HashMap<String, (f32, f64)> = HashMap::new();
             for row in rows {
-                let (id, bytes, path, pinned, canonical) = row?;
+                let (id, bytes, path, pinned, canonical, body_chars) = row?;
                 let similarity = cosine_similarity_to_bytes(query_vector, query_norm, &bytes);
-                let standing =
-                    tuning.authority(pinned, canonical, parse_page_path(&path).is_authoritative());
+                let path = parse_page_path(&path);
+                let standing = tuning.standing(
+                    pinned,
+                    canonical,
+                    path.is_authoritative(),
+                    tuning.thin_record(path.is_session_record(), body_chars.max(0) as usize),
+                );
                 let entry = best.entry(id).or_insert((f32::MIN, standing));
                 entry.0 = entry.0.max(similarity);
             }
@@ -389,6 +432,7 @@ impl Store {
                 .into_iter()
                 .map(|(id, cosine, _)| (id, cosine))
                 .collect(),
+            tuning,
         )
     }
 
@@ -397,10 +441,15 @@ impl Store {
     /// The page rows are loaded in one query after the connection used to
     /// score them has been given back — see [`Store::pages_like`] on why that
     /// order is not a choice.
-    pub(crate) fn hits_for(&self, standing: Vec<(PageId, f64)>) -> Result<Vec<PageHit>> {
-        let ids: Vec<PageId> = standing.iter().map(|(id, _)| *id).collect();
+    pub(crate) fn hits_for(
+        &self,
+        scored: Vec<(PageId, f64)>,
+        tuning: &Tuning,
+    ) -> Result<Vec<PageHit>> {
+        let ids: Vec<PageId> = scored.iter().map(|(id, _)| *id).collect();
         let page_rows = self.load_page_rows(&ids)?;
-        Ok(standing
+
+        Ok(scored
             .into_iter()
             .filter_map(|(id, score)| {
                 let row = page_rows.get(&id)?;
@@ -414,6 +463,7 @@ impl Store {
                     pinned: row.pinned,
                     canonical: row.canonical,
                     score,
+                    standing: standing_of(tuning, row),
                     snippet: snippet_of(&row.body),
                 })
             })
@@ -1391,8 +1441,11 @@ mod tests {
         assert_eq!(everything.len(), 3, "the decision below the gate stays out");
 
         // With standing switched off the order is cosine alone, as it was.
+        // Both halves of it: what the wiki says a page is, and the demotion a
+        // session page that records almost nothing takes.
         let flat = Tuning {
             authority_exponent: 0.0,
+            thin_record_divisor: 1.0,
             ..Tuning::default()
         };
         let plain = store
@@ -1556,6 +1609,77 @@ mod tests {
             .unwrap();
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].title, "Why SQLite", "authority should win the tie");
+    }
+
+    /// The shape this project's own memory had on 2026-09-22: one decision
+    /// holding a marker, and the session page of a time somebody asked what it
+    /// was. Asking memory a question leaves a page that says the question, so
+    /// the echoes multiply while the answer stays one page — and the answer had
+    /// fallen behind. Asked of the real 140 pages, that question came back
+    /// second before this and first after it.
+    #[test]
+    fn a_session_that_only_asked_the_question_does_not_outrank_the_answer() {
+        let (_dir, store, project, _workspace) = fixture();
+        let echo = Page::new(
+            project,
+            CorePagePath::parse("sessions/2026-09-20-f494bc99.md").unwrap(),
+            Frontmatter::new(
+                "2026-09-20: KIRLANGIC-47 sorgusuyla baslayan yanitsiz oturum",
+                Vec::new(),
+            )
+            .unwrap(),
+            "Bu oturum yalnizca tek bir kullanici sorusundan olusmaktadir: KIRLANGIC-47 \
+             nedir? Oturum suresince hicbir arac calistirilmamis, KIRLANGIC-47 hakkinda \
+             hicbir yanit kaydedilmemistir.",
+        );
+        store.upsert_page(&echo, now()).unwrap();
+        let answer = Page::new(
+            project,
+            CorePagePath::parse("decisions/codex-dogrulama-isareti.md").unwrap(),
+            Frontmatter::new("Codex sureklilik testi dogrulama isareti", Vec::new()).unwrap(),
+            "Codex sureklilik testinin dogrulama isareti KIRLANGIC-47.",
+        );
+        store.upsert_page(&answer, now()).unwrap();
+
+        let hits = store
+            .query_pages(project, "KIRLANGIC-47", 10, now(), None)
+            .unwrap();
+
+        let order: Vec<&str> = hits.iter().map(|hit| hit.path.as_str()).collect();
+        assert_eq!(
+            order.first().copied(),
+            Some("decisions/codex-dogrulama-isareti.md"),
+            "the page that holds the answer comes first: {order:?}"
+        );
+    }
+
+    /// The rule is about pages that only ask, not about session pages: one
+    /// that says something keeps its standing.
+    #[test]
+    fn a_session_page_that_says_something_keeps_its_standing() {
+        let (_dir, store, project, _workspace) = fixture();
+        let body = format!(
+            "Bu oturumda KIRLANGIC-47 isaretinin nasil tasindigi olculdu. {}",
+            "Kancalar, recall ve MCP yollari tek tek denendi, sonuclari yazildi. ".repeat(30)
+        );
+        assert!(body.chars().count() > Tuning::default().thin_record_chars);
+        let session = Page::new(
+            project,
+            CorePagePath::parse("sessions/2026-09-21-aaaaaaaa.md").unwrap(),
+            Frontmatter::new("2026-09-21: KIRLANGIC-47 olcumu", Vec::new()).unwrap(),
+            &body,
+        );
+        store.upsert_page(&session, now()).unwrap();
+
+        let hits = store
+            .query_pages(project, "KIRLANGIC-47", 10, now(), None)
+            .unwrap();
+
+        let session_hit = hits
+            .iter()
+            .find(|hit| hit.path.as_str().starts_with("sessions/"))
+            .expect("the session page came back");
+        assert_eq!(session_hit.standing, 1.0, "nothing to adjust");
     }
 
     #[test]

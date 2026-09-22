@@ -138,10 +138,13 @@ impl SweepReport {
 ///   relative, so scaling every other stream against a fixed `fts = 1.0`
 ///   already covers "trust full text more", and sweeping it too would only
 ///   produce duplicate rows.
-/// - `authority_exponent` decides how much a canonical page in an
-///   authoritative namespace is allowed to outrank a relevant one. At 1.0 the
-///   multiplier reaches 2.34x, which is larger than the entire spread it
-///   adjusts.
+/// - `authority_exponent` decides how far up its own ranking a canonical page
+///   in an authoritative namespace may move: standing says which place a page
+///   counts from, so 2.34x means "as if it stood 2.34 places higher", not
+///   "2.34 times the score". The grid reaches 2.0 because the values it used
+///   to span cannot move a page at the top at all — at `k = 2` the gap between
+///   the first two places is 1.33x, and the largest multiplier the wiki can
+///   give a page is 1.24x.
 ///
 /// - `entity_coverage` decides how much of a name the query has to say. One
 ///   requires all of it, which is what the stream was written to do and had
@@ -167,7 +170,7 @@ pub fn default_grid() -> Vec<Tuning> {
     for rrf_k in [1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0] {
         for entity in [0.5, 1.0, 1.5] {
             for links in [0.0, 0.25, 0.5, 1.0] {
-                for authority_exponent in [0.0, 0.25, 0.5, 1.0] {
+                for authority_exponent in [0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0] {
                     for candidates in [10, 30, 120] {
                         for entity_coverage in [0.5, 1.0] {
                             for vectors in [0.0, 0.5, 1.0] {
@@ -190,6 +193,11 @@ pub fn default_grid() -> Vec<Tuning> {
                                     // with no abstracts, which is all but one.
                                     abstracts: Tuning::default().abstracts,
                                     authority_exponent,
+                                    // Not a dimension of the grid: what it
+                                    // separates is a shape of page, measured
+                                    // against the corpus the shape is in.
+                                    thin_record_divisor: Tuning::default().thin_record_divisor,
+                                    thin_record_chars: Tuning::default().thin_record_chars,
                                     entity_coverage,
                                     candidates,
                                 });
