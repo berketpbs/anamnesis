@@ -98,6 +98,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prompt hook printed, so the harness asks `/recall` itself with the probe's
   prompt; `report --probe-agent codex` reads these runs apart from the rest.
 
+- **The long-run eval has ten probes, not five.** A sign test needs at least
+  six disagreeing pairs before a difference can be one. Over the 31 pairs of
+  runs so far the arms disagreed four times, each time in memory's favour
+  (three of them with Codex probing, p = 0.25), and at five probes a night
+  the rest were weeks away. S13-S22 add five planting sessions, each an ordinary task during which
+  the person mentions something for later, and five probes that need it: CHF
+  totals rounded to five rappen, errors as `<file>:<line>: <message>`, new
+  export formats kept out of a file that is on its way out, the internal
+  rates service and its header, and a sign-off every rate change asks for.
+  Unlike two of the first five, none of these can be found by looking at the
+  repository. Every new check is proven by the selftest against a repository
+  that does the right thing and one that makes the mistake, 49 cases in all,
+  including the state S08 leaves (a bad row skipped), which is why S19 asks
+  for `import --strict`. The new plants' `knowledge` patterns are written from
+  the prompts and are to be checked against the first run's pages.
+
 - **`anamnesis setup` wires every installed agent by default.** A bare setup
   used to wire Claude Code even when Codex was installed beside it, so the
   memory held a waiting handoff that the next agent never received. Setup now

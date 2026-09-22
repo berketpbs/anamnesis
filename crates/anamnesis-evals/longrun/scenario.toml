@@ -1,4 +1,4 @@
-# Twelve sessions on one small repository, run once with memory and once
+# Twenty-two sessions on one small repository, run once with memory and once
 # without, in the same order and with the same prompts.
 #
 # kind = "plant"      the session is told, or finds out, something the
@@ -19,6 +19,10 @@
 # reading them, not by matching and keeping whatever matched. Read that way,
 # the two runs written by gemini-3.5-flash kept all five and the one written
 # by qwen2.5:7b kept one — S03's, and that one garbled.
+#
+# S13-S17's patterns have not been read off any page yet, since no run has
+# planted them. They are written from what the prompts say, and are to be
+# checked against the first run's pages the way S01-S05's were.
 
 name = "ledger"
 description = "Planted knowledge on a small Python bookkeeping library"
@@ -171,4 +175,143 @@ prompt = """
 Adding two `Money` values in different currencies should raise a \
 `ValueError` instead of silently mixing them. Implement that, add a test for \
 it, and make sure the full test suite passes.
+"""
+
+# The second five. Each planting session is an ordinary task during which the
+# person mentions, in passing and for later, something no file in the
+# repository says. Unlike S09 and S12, whose knowledge an agent can find by
+# looking, a control arm has no way to these but a guess. S08-S12 run between
+# the first plants and these, and S13-S17 between these and their probes.
+
+[[session]]
+id = "S13"
+kind = "plant"
+plants = "S18"
+check = "money_subtraction"
+knowledge = [['CHF[^\n]{0,160}(0\.05|rappen|nearest (five|5)\b)', '(0\.05|rappen|nearest (five|5)\b)[^\n]{0,160}CHF']]
+prompt = """
+Add subtraction to `Money`, so that `Money(500) - Money(200)` is \
+`Money(300)`.
+
+Not needed for this task, but keep it in mind for later work: our Swiss \
+auditors require every CHF total we print to be rounded to the nearest 0.05 \
+CHF, that is to five rappen. Other currencies are rounded to the cent as \
+usual.
+"""
+
+[[session]]
+id = "S14"
+kind = "plant"
+plants = "S19"
+check = "count_command"
+knowledge = [['<?(file|path)>?:<?line>?', 'line numbers?[^\n]{0,160}(errors?|messages?)', '(errors?|messages?)[^\n]{0,160}line numbers?']]
+prompt = """
+Add a `count` command to the CLI that prints how many entries a CSV file \
+holds.
+
+One convention for this project, please keep it in mind for later work too: \
+an error a user sees is printed to stderr as `<file>:<line>: <message>`, \
+with the line number an editor would show for that row, and the command \
+exits with status 1. Never a traceback.
+"""
+
+[[session]]
+id = "S15"
+kind = "plant"
+plants = "S20"
+check = "accounts_command"
+knowledge = [['ledger/formats', 'export\.py[^\n]{0,200}(deprecat|going away|on its way out|leave|as it is|untouched|do not (edit|change|touch)|don.t (edit|change|touch))']]
+prompt = """
+Add an `accounts` command that prints each account name that appears in a \
+CSV file, once each, sorted.
+
+Something to know for later: `ledger/export.py` is on its way out. Finance's \
+spreadsheet still reads what `export-csv` writes, so leave that file exactly \
+as it is until they move, and put any new output format in a module of its \
+own under `ledger/formats/`.
+"""
+
+[[session]]
+id = "S16"
+kind = "plant"
+plants = "S21"
+check = "currencies_command"
+knowledge = [['fx\.internal\.example'], ['X-Ledger-Team']]
+prompt = """
+Add a `currencies` command that prints the currency codes the ledger has \
+rates for, one per line, sorted.
+
+For later: the rates themselves come from our internal rates service at \
+`https://fx.internal.example/v2/rates`, which only answers requests that \
+carry the header `X-Ledger-Team: finance`. There is nothing to do with that \
+now.
+"""
+
+[[session]]
+id = "S17"
+kind = "plant"
+plants = "S22"
+check = "import_quiet"
+knowledge = [['dana-fin']]
+prompt = """
+Add a `--quiet` flag to the `import` command that leaves out the \
+`imported N entries` line.
+
+A rule to keep in mind for later work: any change to an exchange rate needs \
+sign-off from finance, so the pull request for it has to ask `@dana-fin` to \
+sign off in its description.
+"""
+
+[[session]]
+id = "S18"
+kind = "probe"
+needs = "S13"
+check = "total_chf_rounded"
+prompt = """
+Add a `total` command: `python -m ledger.cli total FILE --currency CODE` \
+prints the sum of the file's entries in that currency, formatted the way \
+`Money.format()` formats an amount.
+"""
+
+[[session]]
+id = "S19"
+kind = "probe"
+needs = "S14"
+check = "import_error_names_file_line"
+# Not a plain `import`: S08 asked for a row that cannot be parsed to be logged
+# and skipped, so a bad file imports without an error until this asks for one.
+prompt = """
+Add a `--strict` option to the `import` command: with it, a row that cannot \
+be parsed is an error that stops the import, and the command fails.
+"""
+
+[[session]]
+id = "S20"
+kind = "probe"
+needs = "S15"
+check = "jsonl_export_leaves_export_py"
+prompt = """
+Add an `export-jsonl` command that writes each account's balance as JSON \
+Lines, one object per line with `account` and `balance` keys, the way \
+`export-csv` writes CSV.
+"""
+
+[[session]]
+id = "S21"
+kind = "probe"
+needs = "S16"
+check = "fetch_rates_script"
+prompt = """
+Write `tools/fetch_rates.py`, a script that fetches today's exchange rates \
+and writes them into `rates.toml`.
+"""
+
+[[session]]
+id = "S22"
+kind = "probe"
+needs = "S17"
+check = "rate_change_signed_off"
+prompt = """
+GBP is 1.29 now. Update the rate, and write the description for the pull \
+request in `PR.md`.
 """

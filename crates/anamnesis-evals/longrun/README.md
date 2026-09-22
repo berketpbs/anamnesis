@@ -6,7 +6,7 @@ something, do the right thing because memory kept it?
 
 ## What runs
 
-`scenario.toml` is twelve sessions on `fixture/`, a small Python bookkeeping
+`scenario.toml` is twenty-two sessions on `fixture/`, a small Python bookkeeping
 library. Every session is a headless `claude -p` and runs twice, once in each
 arm, on two copies of the fixture:
 
@@ -23,9 +23,15 @@ The sessions come in three kinds:
 
 | Kind | Sessions | What it does |
 |---|---|---|
-| plant | S01-S05 | the session finds out or is told something the repository does not say |
+| plant | S01-S05, S13-S17 | the session finds out or is told something the repository does not say |
 | distractor | S06-S07 | unrelated work, so the plant is not simply the last page |
-| probe | S08-S12 | a task that needs a plant; its check is the measurement |
+| probe | S08-S12, S18-S22 | a task that needs a plant; its check is the measurement |
+
+The first five probes are also what stands between the second five plants
+and the first. In the second five, each planting session is an ordinary task
+during which the person mentions, in passing and for later, something no file
+says. S09 and S12 can be passed by looking at the repository; none of S18-S22
+can, so a control arm that passes one has guessed.
 
 | Probe | Needs | Passes only if |
 |---|---|---|
@@ -34,6 +40,14 @@ The sessions come in three kinds:
 | S10 repeated imports | S04: caching import results served stale rows | a file edited to the same size with its mtime restored imports as edited |
 | S11 DEPLOY.md | S05: the staging host and command | the file names `ledger-stg-02` and `ENV=staging` |
 | S12 mixed currencies | S01: tests run through `tools/check.py` | the suite passes and mixing currencies raises; also compared by turns and cost |
+| S18 `total` | S13: CHF totals round to 0.05 | CHF totals round to five rappen and USD totals to the cent |
+| S19 `import --strict` | S14: errors read `<file>:<line>: <message>` | a bad row exits non-zero with `bad.csv:3:` and no traceback |
+| S20 `export-jsonl` | S15: `export.py` stays as it is, formats go under `ledger/formats/` | the command works and `export.py` is unchanged |
+| S21 `tools/fetch_rates.py` | S16: the internal rates service and its header | the script names `fx.internal.example/v2/rates` and `X-Ledger-Team: finance` |
+| S22 GBP rate | S17: rate changes ask `@dana-fin` to sign off | GBP is 1.29 and `PR.md` names the rate and `@dana-fin` |
+
+S19 asks for `--strict` rather than a better plain `import` because S08 has a
+bad row logged and skipped: by then a plain import of a bad file succeeds.
 
 Every check runs the fixture's code or reads its files; none asks a model.
 `python checks.py` runs each probe against a repository that does the right
@@ -108,7 +122,7 @@ and $1.59 to measure nothing. `--keep-going` runs the whole scenario anyway.
 
 ## Probes in Codex
 
-`--probe-agent codex` runs the five probes in Codex (`codex exec`, the
+`--probe-agent codex` runs the probes in Codex (`codex exec`, the
 cheapest model it lists by default, `--codex-model` to change it), in both
 arms, while every planting session stays in Claude Code. What was learnt in
 one harness then has to be used in the other, through the same hooks and
@@ -157,10 +171,10 @@ another harness is another experiment.
 
 ## The model the memory arm writes with
 
-A repeat is twelve consolidation requests plus whatever the enrich pass asks
-again, against a Google free tier of 20 per day per model that is shared with
-any server already running on the same key. The first complete run spent it by
-S10. `settings.local.env.example` points the arm at a local Ollama model
+A repeat is twenty-two consolidation requests plus whatever the enrich pass
+asks again, against a Google free tier of 20 per day per model that is shared
+with any server already running on the same key: more than a whole day's
+quota. The first complete run, of twelve sessions, spent it by S10. `settings.local.env.example` points the arm at a local Ollama model
 instead: no key, no quota, and measured here on 2026-09-17 a session's page
 came back written by the model. A small local model writes thinner pages than
 the hosted one, so the arm is weaker than a real install and a difference it
@@ -168,10 +182,10 @@ still shows is a floor — which is worth more than a nightly repeat that
 measures nothing. Point a run at it with `--settings-env`, and leave it off to
 measure the setup this machine actually runs.
 
-One repeat takes one to two hours with Haiku 4.5 and costs a few dollars of
-agent usage. It also asks the consolidation model about twelve sessions, which
-on a free Gemini tier is most of a day's quota, so repeats are meant to run
-one a night.
+A repeat of the first twelve sessions took 17 to 29 minutes in the three
+complete runs of 2026-09-21 and -22; twenty-two have not been timed yet. It costs a few dollars of agent usage, and on a free Gemini tier
+it asks the consolidation model for more than a day's quota, so repeats are
+meant to run one a night, on a paid key or the local model.
 
 ## Reading the result
 
