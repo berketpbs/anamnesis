@@ -732,21 +732,95 @@ def recall_offered(data: Path, project: str, claude_session: str | None) -> dict
     return {"blocks": len(blocks), "pages": pages}
 
 
+def pages_written(stream: str) -> list[str]:
+    """The pages a session wrote itself with `memory_write_page`, in the order
+    it wrote them, from Claude Code's `stream-json` or Codex's `--json`.
+
+    A page written over MCP names no session in its frontmatter, so nothing on
+    disk ties it to the session that wrote it; the transcript does. On
+    2026-09-22 S17's agent wrote the sign-off rule as a decision of its own,
+    recall put that page first in front of S22, S22 passed, and the report
+    said the plant had never been shown.
+    """
+    written: list[str] = []
+    for line in stream.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        item = event.get("item")
+        if (
+            event.get("type") == "item.completed"
+            and isinstance(item, dict)
+            and item.get("type") == "mcp_tool_call"
+            and item.get("server") == "anamnesis"
+            and str(item.get("tool", "")).endswith("memory_write_page")
+        ):
+            arguments = item.get("arguments")
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    arguments = {}
+            path = (arguments or {}).get("path") if isinstance(arguments, dict) else None
+            if path and path not in written:
+                written.append(path)
+            continue
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        for block in content if isinstance(content, list) else []:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "tool_use"
+                and str(block.get("name", "")).startswith("mcp__anamnesis__")
+                and block["name"].endswith("memory_write_page")
+            ):
+                path = (block.get("input") or {}).get("path")
+                if path and path not in written:
+                    written.append(path)
+    return written
+
+
+def planted_pages(run: dict, needs: str | None) -> tuple[str | None, set[str]]:
+    """The planting session's id, and the pages its agent wrote over MCP.
+
+    Read from its record where the run kept them, and otherwise from its
+    transcript, so a run from before `wrote` was recorded is read the same way.
+    """
+    planted = next((r for r in run["sessions"] if r["arm"] == "memory" and r["session"] == needs), None)
+    if planted is None:
+        return None, set()
+    session = (planted.get("page") or {}).get("session")
+    written = planted.get("wrote")
+    if written is None and run.get("_dir"):
+        transcript = Path(run["_dir"]) / "memory" / "sessions" / f"{needs}.jsonl"
+        if transcript.exists():
+            written = pages_written(transcript.read_text(encoding="utf-8", errors="replace"))
+    return session, set(written or [])
+
+
 def plant_offered(run: dict, record: dict, needs: str | None) -> bool | None:
-    """Whether recall showed a probe a page its planting session wrote.
+    """Whether recall showed a probe a page its planting session wrote: its
+    own page, a note consolidation wrote beside it, or a page its agent wrote
+    over MCP.
 
     None when that cannot be said: the session plants nothing it needs, no
     recall was recorded (a run from before this was, or a transcript that
-    could not be found), or the planting session's own id was never learnt.
+    could not be found), or nothing is known of what the planting session
+    wrote.
     """
     offered = record.get("recall")
     if not needs or offered is None:
         return None
-    planted = next((r for r in run["sessions"] if r["arm"] == "memory" and r["session"] == needs), None)
-    planted_session = ((planted or {}).get("page") or {}).get("session")
-    if not planted_session:
+    planted_session, written = planted_pages(run, needs)
+    if not planted_session and not written:
         return None
-    return any(page.get("session") == planted_session for page in offered["pages"])
+    return any(
+        (planted_session and page.get("session") == planted_session) or page.get("path") in written
+        for page in offered["pages"]
+    )
 
 
 def with_recall(run: dict, record: dict) -> dict:
@@ -779,7 +853,8 @@ def session_pages(wiki: Path, session: str | None) -> list[tuple[str, str]]:
     and gotchas it found beside it, and on 2026-09-18 the rule a planting
     session was told went into a gotcha while its session page said only what
     was built. A page an agent wrote over MCP names no session and is not
-    counted here, even when it holds the same rule.
+    counted here, even when it holds the same rule; `knowledge_path` adds
+    those from the session's transcript (`pages_written`).
     """
     if not session or not wiki.is_dir():
         return []
@@ -905,7 +980,11 @@ def knowledge_path(run: dict, record: dict, needs: str | None, knowledge: list[l
         return None
     run_dir = Path(run_dir)
     wiki = run_dir / "memory" / "data" / "wiki" / "longrun" / f"ledger-{run['run'].lower()}"
-    pages = session_pages(wiki, (planted.get("page") or {}).get("session"))
+    planted_session, written = planted_pages(run, needs)
+    pages = session_pages(wiki, planted_session)
+    for path in sorted(written - {path for path, _ in pages}):
+        if (wiki / path).is_file():
+            pages.append((path, (wiki / path).read_text(encoding="utf-8", errors="replace")))
     paths = {path for path, _ in pages}
     transcript = run_dir / "memory" / "sessions" / f"{record['session']}.jsonl"
     stream = transcript.read_text(encoding="utf-8", errors="replace") if transcript.exists() else None
@@ -1465,10 +1544,12 @@ def run_one(args, claude: str, scenario: dict, session: dict, arm: str, repo: Pa
         recall = recall_offered(data, project, agent["claude_session"]) if arm == "memory" else None
     diff = commit_session(repo, session["id"])
     verdict = checks.CHECKS[session["check"]](repo)
-    files_read = memory_files_read(log.read_text(encoding="utf-8", errors="replace")) if log.exists() else None
+    stream = log.read_text(encoding="utf-8", errors="replace") if log.exists() else None
+    files_read = memory_files_read(stream) if stream is not None else None
     return {
         "session": session["id"],
         "memory_files_read": files_read,
+        "wrote": pages_written(stream) if arm == "memory" and stream is not None else None,
         "kind": session["kind"],
         "arm": arm,
         "agent_kind": kind,
@@ -2066,7 +2147,22 @@ def cmd_selftest(_: argparse.Namespace) -> int:
         if got is not want:
             print(f"FAIL plant_offered({record!r}, {needs}): {got!r}, expected {want!r}")
             return 1
-    print("ok   recall_offered reads what recall showed a session, and plant_offered whose it was")
+    # S22 on 2026-09-22: recall put first the rule S17's agent had written
+    # over MCP, a page that names no session, and that is the plant shown.
+    rule = {"path": "decisions/exchange-rate-changes-require-finance-signoff.md", "session": None}
+    other = {"path": "procedures/regenerate-generated-rates.md", "session": "s03"}
+    wrote = {"sessions": [{"session": "S17", "arm": "memory", "page": {"session": "s17"}, "wrote": [rule["path"]]}]}
+    no_page = {"sessions": [{"session": "S17", "arm": "memory", "page": None, "wrote": [rule["path"]]}]}
+    cases = [
+        (wrote, {"recall": {"blocks": 1, "pages": [rule, other]}}, True),
+        (wrote, {"recall": {"blocks": 1, "pages": [other]}}, False),
+        (no_page, {"recall": {"blocks": 1, "pages": [rule]}}, True),
+    ]
+    for planted_run, record, want in cases:
+        if (got := plant_offered(planted_run, record, "S17")) is not want:
+            print(f"FAIL plant_offered: a page S17 wrote over MCP, recall {record['recall']['pages']}: {got!r}, expected {want!r}")
+            return 1
+    print("ok   recall_offered reads what recall showed a session, and plant_offered whose it was, pages its agent wrote included")
 
     # Lines from the pages the three complete runs left, one that keeps each
     # plant's knowledge and one that does not, as they were judged by reading.
@@ -2150,7 +2246,22 @@ def cmd_selftest(_: argparse.Namespace) -> int:
     if found != ["gotchas/b.md", "sessions/a.md"]:
         print(f"FAIL session_pages: {found}, expected the session's page and the note beside it")
         return 1
-    print("ok   memory_tools_saw and session_pages find what the agent was brought and what a session left")
+    # What an agent wrote itself, in either harness; reading a page is not
+    # writing one.
+    stream = "\n".join(
+        json.dumps(event)
+        for event in [
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "w", "name": "mcp__anamnesis__memory_write_page", "input": {"path": "decisions/sign-off.md", "title": "t", "body": "b"}}]}},
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "r", "name": "mcp__anamnesis__memory_read_page", "input": {"path": "sessions/a.md"}}]}},
+            {"type": "item.completed", "item": {"type": "mcp_tool_call", "server": "anamnesis", "tool": "memory_write_page", "arguments": json.dumps({"path": "gotchas/rates.md"})}},
+            {"type": "item.completed", "item": {"type": "mcp_tool_call", "server": "anamnesis", "tool": "memory_read_page", "arguments": {"path": "rules/x.md"}}},
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "w2", "name": "mcp__anamnesis__memory_write_page", "input": {"path": "decisions/sign-off.md"}}]}},
+        ]
+    )
+    if (written := pages_written(stream)) != ["decisions/sign-off.md", "gotchas/rates.md"]:
+        print(f"FAIL pages_written: {written}, expected the two pages written, once each")
+        return 1
+    print("ok   memory_tools_saw, session_pages and pages_written find what the agent was brought, what a session left and what its agent wrote")
 
     # Six disagreements all one way is the fewest that clear 0.05; five do not.
     for split, expected in (((6, 0), 0.03125), ((5, 0), 0.0625), ((0, 6), 0.03125), ((1, 0), 1.0), ((3, 3), 1.0), ((0, 0), 1.0)):
