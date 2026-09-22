@@ -397,8 +397,15 @@ def summarize_codex(stream: str) -> dict:
 
     Codex reports neither turns nor cost, so both are None, and `actions`
     counts what it did instead: every command, file change and tool call.
+
+    A tool call Codex refused to run for want of an approval is counted where
+    a Claude Code session's permission denials are. `codex exec` has nobody to
+    ask, and on 2026-09-22 it refused every memory call of a whole run —
+    "MCP tool call requires approval, but approval policy is never" — while
+    the console said "memory calls 1".
     """
     tools: Counter = Counter()
+    refused: Counter = Counter()
     thread = answer = None
     errors = 0
     input_tokens = output_tokens = 0
@@ -415,6 +422,9 @@ def summarize_codex(stream: str) -> dict:
             name = item.get("type", "?")
             if name == "mcp_tool_call":
                 name = f"mcp__{item.get('server', '?')}__{item.get('tool', '?')}"
+                error = str((item.get("error") or {}).get("message", ""))
+                if item.get("status") == "failed" and "approval" in error:
+                    refused[name] += 1
             if name == "agent_message":
                 answer = item.get("text") or answer
             elif name != "reasoning":
@@ -434,8 +444,8 @@ def summarize_codex(stream: str) -> dict:
         "is_error": errors > 0,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
-        "permission_denials": 0,
-        "denials_by_tool": {},
+        "permission_denials": sum(refused.values()),
+        "denials_by_tool": dict(refused),
         "tools": dict(tools),
         "actions": sum(tools.values()),
         "tool_errors": 0,
@@ -836,6 +846,46 @@ def memory_tools_saw(stream: str, paths: set[str]) -> dict:
     return {"returned": returned, "opened": opened}
 
 
+# The memory arm's own files, reached around recall and the memory tools. On
+# 2026-09-22 a Codex probe whose memory call had been refused read the data
+# directory's path out of the checkout's MCP registration and grepped the wiki
+# with `rg ..\data\wiki`, and passed. That is a way to the knowledge the
+# product does not offer, so it is counted apart. Both kinds of run keep the
+# data at `.../memory/data`, beside the checkout the agent works in.
+MEMORY_FILES = re.compile(r"(memory[\\/]+data|\.\.[\\/]+data)\b", re.IGNORECASE)
+
+
+def tool_inputs(event: dict):
+    """What a session's own tool calls were given, in either harness's
+    transcript: Claude Code's `tool_use` inputs, Codex's commands and file
+    changes. Never what came back, which can quote a path the agent only
+    read about."""
+    if not isinstance(event, dict):
+        return
+    message = event.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    for block in content if isinstance(content, list) else []:
+        if isinstance(block, dict) and block.get("type") == "tool_use":
+            yield json.dumps(block.get("input"), ensure_ascii=False)
+    item = event.get("item")
+    if event.get("type") == "item.completed" and isinstance(item, dict):
+        if item.get("type") in ("command_execution", "file_change"):
+            yield json.dumps({key: item.get(key) for key in ("command", "changes")}, ensure_ascii=False)
+
+
+def memory_files_read(stream: str) -> int:
+    """How many of a session's tool calls went into the memory arm's data
+    directory on disk (`MEMORY_FILES`)."""
+    count = 0
+    for line in stream.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        count += sum(1 for text in tool_inputs(event) if MEMORY_FILES.search(text))
+    return count
+
+
 def knowledge_path(run: dict, record: dict, needs: str | None, knowledge: list[list[str]]) -> dict | None:
     """How far a probe's planted knowledge got in one memory-arm run.
 
@@ -857,9 +907,10 @@ def knowledge_path(run: dict, record: dict, needs: str | None, knowledge: list[l
     pages = session_pages(wiki, (planted.get("page") or {}).get("session"))
     paths = {path for path, _ in pages}
     transcript = run_dir / "memory" / "sessions" / f"{record['session']}.jsonl"
+    stream = transcript.read_text(encoding="utf-8", errors="replace") if transcript.exists() else None
     tools = (
-        memory_tools_saw(transcript.read_text(encoding="utf-8", errors="replace"), paths)
-        if transcript.exists() and paths
+        memory_tools_saw(stream, paths)
+        if stream is not None and paths
         else {"returned": None, "opened": None}
     )
     offered = plant_offered(run, with_recall(run, record), needs)
@@ -868,6 +919,7 @@ def knowledge_path(run: dict, record: dict, needs: str | None, knowledge: list[l
         "kept": knowledge_kept(pages, knowledge) if pages else (False if knowledge else None),
         "shown": shown,
         "opened": tools["opened"],
+        "read_files": memory_files_read(stream) > 0 if stream is not None else None,
         "passed": record["check"]["passed"],
     }
 
@@ -1257,6 +1309,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                     f"  {session['id']} {arm:<7} {verdict}  {record['agent_kind']}, {effort}, "
                     f"memory calls {record['agent']['memory_calls']}"
                     f"{f', {refused} refused' if refused else ''}{source}"
+                    f"{f', read the memory files {files} times' if (files := record['memory_files_read']) else ''}"
                 )
                 if not args.keep_going and (reason := nothing_left_to_measure(session, arm, record)):
                     stopped = reason
@@ -1411,8 +1464,10 @@ def run_one(args, claude: str, scenario: dict, session: dict, arm: str, repo: Pa
         recall = recall_offered(data, project, agent["claude_session"]) if arm == "memory" else None
     diff = commit_session(repo, session["id"])
     verdict = checks.CHECKS[session["check"]](repo)
+    files_read = memory_files_read(log.read_text(encoding="utf-8", errors="replace")) if log.exists() else None
     return {
         "session": session["id"],
+        "memory_files_read": files_read,
         "kind": session["kind"],
         "arm": arm,
         "agent_kind": kind,
@@ -1593,10 +1648,12 @@ def report_lines(scenario: dict, runs: list[dict]) -> list[str]:
         "needs (`knowledge` in scenario.toml), whether one of those pages was put in front of the "
         "agent — by recall, or by a memory call it made — whether it opened one in full, and "
         "whether it passed. A probe cannot pass for memory's sake past the first column that says "
-        "no.",
+        "no. `Read files` is apart from all of them: whether the agent went into the memory's own "
+        "files on disk, a way to the knowledge the product does not offer, so a pass that came "
+        "that way is not read as recall or the tools working.",
         "",
-        "| Probe | Needs | Kept | Shown | Opened | Passed |",
-        "|---|---|---|---|---|---|",
+        "| Probe | Needs | Kept | Shown | Opened | Read files | Passed |",
+        "|---|---|---|---|---|---|---|",
     ]
     by_id = {session["id"]: session for session in scenario["session"]}
     for session in scenario["session"]:
@@ -1616,7 +1673,7 @@ def report_lines(scenario: dict, runs: list[dict]) -> list[str]:
 
         lines.append(
             f"| {session['id']} {session['check']} | {needs or ''} | {column('kept')} | "
-            f"{column('shown')} | {column('opened')} | {column('passed')} |"
+            f"{column('shown')} | {column('opened')} | {column('read_files')} | {column('passed')} |"
         )
 
     lines += [
@@ -2154,9 +2211,11 @@ def cmd_selftest(_: argparse.Namespace) -> int:
         {"type": "item.completed", "item": {"id": "item_4", "type": "agent_message", "text": "Done. Python wasn't available."}},
         {"type": "turn.completed", "usage": {"input_tokens": 37855, "cached_input_tokens": 32000, "output_tokens": 452}},
     ]
-    # And three items no probe has produced yet, shaped as `codex exec --json`
-    # documents them: reasoning, which is not an action, and two memory calls,
-    # which are — one that found the page, one that opened it.
+    # And items from other sessions: reasoning, shaped as `codex exec --json`
+    # documents it and not an action; two memory calls that ran, one that
+    # found the page and one that opened it, shaped as the completed call of
+    # 2026-09-22 was; and, as the S11 probe of that morning recorded them, the
+    # memory call Codex refused and the command that went around it.
     page = "rules/logging-constraints.md"
     events[-1:-1] = [
         {"type": "item.completed", "item": {"id": "item_5", "type": "reasoning", "text": "**Checking the rules**"}},
@@ -2184,21 +2243,46 @@ def cmd_selftest(_: argparse.Namespace) -> int:
                 "status": "completed",
             },
         },
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_8",
+                "type": "mcp_tool_call",
+                "server": "anamnesis",
+                "tool": "memory_query",
+                "arguments": {"text": "staging deployment command host deploy host", "limit": 10},
+                "result": None,
+                "error": {"message": "MCP tool call requires approval, but approval policy is never"},
+                "status": "failed",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_9",
+                "type": "command_execution",
+                "command": r'"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe" -Command '
+                r'"rg -n -C 4 \"ledger-stg-02|staging|deploy\" ..\data\wiki -S"',
+                "exit_code": 0,
+            },
+        },
     ]
     stream = "\n".join(json.dumps(event) for event in events) + "\nnot json\n"
     summary = summarize_codex(stream)
     expected = {
         "codex_thread": "01a0c529-a11a-7e20-a85b-166a359e07ed",
-        "actions": 5,
+        "actions": 7,
         "tools": {
             "file_change": 1,
-            "command_execution": 2,
-            "mcp__anamnesis__memory_query": 1,
+            "command_execution": 3,
+            "mcp__anamnesis__memory_query": 2,
             "mcp__anamnesis__memory_read_page": 1,
         },
         "input_tokens": 37855,
         "output_tokens": 452,
-        "memory_calls": 2,
+        "memory_calls": 3,
+        "permission_denials": 1,
+        "denials_by_tool": {"mcp__anamnesis__memory_query": 1},
         "answer": "Done. Python wasn't available.",
         "is_error": False,
         "turns": None,
@@ -2213,6 +2297,24 @@ def cmd_selftest(_: argparse.Namespace) -> int:
     if (saw := memory_tools_saw(stream, {"rules/other.md"})) != {"returned": False, "opened": False}:
         print(f"FAIL memory_tools_saw: a page the calls never named read as {saw}")
         return 1
+    if (read := memory_files_read(stream)) != 1:
+        print(f"FAIL memory_files_read: the Codex session grepped ..\\data\\wiki once, read as {read}")
+        return 1
+    # And a Claude Code session: a Read of a page file counts, the test run in
+    # the checkout beside it does not, and neither does a result that only
+    # quotes the data directory.
+    run = r"C:\Users\x\AppData\Local\anamnesis-longrun\runs\20260922T000000Z"
+    claude = "\n".join(
+        json.dumps(event)
+        for event in [
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "a", "name": "Read", "input": {"file_path": run + r"\memory\data\wiki\longrun\p\rules\a.md"}}]}},
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b", "name": "Bash", "input": {"command": f'cd "{run}\\memory\\repo" && python -m pytest'}}]}},
+            {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "c", "content": run + r"\memory\data\settings.env"}]}},
+        ]
+    )
+    if (read := memory_files_read(claude)) != 1:
+        print(f"FAIL memory_files_read: one Read of a wiki page, read as {read}")
+        return 1
     if session_agent(argparse.Namespace(probe_agent="codex"), {"kind": "plant"}) != "claude" or session_agent(
         argparse.Namespace(probe_agent="codex"), {"kind": "probe"}
     ) != "codex" or session_agent(argparse.Namespace(probe_agent="claude"), {"kind": "probe"}) != "claude":
@@ -2223,8 +2325,9 @@ def cmd_selftest(_: argparse.Namespace) -> int:
         print(f"FAIL codex_args: {args}")
         return 1
     print(
-        "ok   summarize_codex and memory_tools_saw read a Codex session and its memory calls, "
-        "and only probes run in Codex, sandboxed, from stdin"
+        "ok   summarize_codex and memory_tools_saw read a Codex session and its memory calls, refused "
+        "ones apart; memory_files_read counts reads of the memory's own files in either harness; and "
+        "only probes run in Codex, sandboxed, from stdin"
     )
     return checks.selftest()
 
