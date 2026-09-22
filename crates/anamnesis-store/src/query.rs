@@ -296,6 +296,24 @@ impl Store {
     /// the sweep reads those counters to decide what to keep, and a block that
     /// renewed every page it mentioned would make the top of this ranking
     /// immortal without anyone having read a word of it.
+    ///
+    /// **The gate is on cosine alone; the order is not.** Of the pages that
+    /// pass, the ones shown are the best by cosine times `tuning`'s authority
+    /// multiplier — the standing `memory_query` already weighs, softened the
+    /// same way. The gate is left alone because it is the part that was
+    /// measured to separate a project's prompts from everybody else's, so what
+    /// passes it, and every false alarm, is exactly what it was. What changes
+    /// is which of them make the cut. On 2026-09-22 a long-run probe about
+    /// adding logging was shown three session pages about the importer, and
+    /// not the pinned rule that amounts never reach a log: 0.583 against the
+    /// third page's 0.584. It logged amounts. Asked the 36 labelled questions
+    /// of `live-memory.toml` through `/recall`, over a copy of this project's
+    /// own memory, the same 27 got a block either way; the answer was in it
+    /// for 15 instead of 14 and led it for 14 instead of 11, and no question
+    /// lost its answer. The price is visible in the same run: of the 76 pages
+    /// those blocks showed, 11 were session pages instead of 37.
+    ///
+    /// A hit's `score` stays its cosine, the number the gate read.
     pub fn pages_like(
         &self,
         project_id: ProjectId,
@@ -303,6 +321,7 @@ impl Store {
         query_vector: &[f32],
         limit: usize,
         min_similarity: f64,
+        tuning: &Tuning,
     ) -> Result<Vec<PageHit>> {
         // The connection is taken and given back inside this block, because
         // `load_page_rows` below takes it too and the lock behind it does not
@@ -312,24 +331,33 @@ impl Store {
         let best = {
             let conn = self.connection();
             let mut statement = conn.prepare(
-                "SELECT pe.page_id, pe.vector FROM page_embeddings pe
+                "SELECT pe.page_id, pe.vector, p.path, p.pinned, p.canonical
+                 FROM page_embeddings pe
                  JOIN pages p ON p.id = pe.page_id
                  WHERE pe.model = ?1 AND p.project_id = ?2
                    AND p.is_latest = 1 AND p.status != 'superseded'",
             )?;
             let rows = statement.query_map(params![model, project_id.to_string()], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, bool>(3)?,
+                    row.get::<_, bool>(4)?,
+                ))
             })?;
 
             // Best part per page, the way the vector stream reads a page that
-            // was embedded in sections.
+            // was embedded in sections, with the page's standing beside it.
             let query_norm = norm(query_vector);
-            let mut best: HashMap<String, f32> = HashMap::new();
+            let mut best: HashMap<String, (f32, f64)> = HashMap::new();
             for row in rows {
-                let (id, bytes) = row?;
+                let (id, bytes, path, pinned, canonical) = row?;
                 let similarity = cosine_similarity_to_bytes(query_vector, query_norm, &bytes);
-                let entry = best.entry(id).or_insert(f32::MIN);
-                *entry = entry.max(similarity);
+                let standing =
+                    tuning.authority(pinned, canonical, parse_page_path(&path).is_authoritative());
+                let entry = best.entry(id).or_insert((f32::MIN, standing));
+                entry.0 = entry.0.max(similarity);
             }
             best
         };
@@ -337,23 +365,31 @@ impl Store {
             return Ok(Vec::new());
         }
 
-        let mut standing: Vec<(PageId, f64)> = best
+        let mut passed: Vec<(PageId, f64, f64)> = best
             .into_iter()
-            .map(|(id, score)| (parse_id(id), f64::from(score)))
-            .filter(|(_, score)| *score >= min_similarity)
+            .map(|(id, (cosine, standing))| {
+                let cosine = f64::from(cosine);
+                (parse_id(id), cosine, cosine * standing)
+            })
+            .filter(|(_, cosine, _)| *cosine >= min_similarity)
             .collect();
         // Ties by id, so two runs over the same index agree on an order.
-        standing.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
+        passed.sort_by(|a, b| {
+            b.2.partial_cmp(&a.2)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.0.cmp(&b.0))
         });
-        standing.truncate(limit);
-        if standing.is_empty() {
+        passed.truncate(limit);
+        if passed.is_empty() {
             return Ok(Vec::new());
         }
 
-        self.hits_for(standing)
+        self.hits_for(
+            passed
+                .into_iter()
+                .map(|(id, cosine, _)| (id, cosine))
+                .collect(),
+        )
     }
 
     /// Scored pages as hits, in the order given, leaving out any that is gone.
@@ -1312,6 +1348,58 @@ mod tests {
             .set_page_entities(project_id, page.id, &entities)
             .expect("entities");
         page.id
+    }
+
+    /// A page whose cosine to `(1, 0)` is exactly `cosine`.
+    fn at(cosine: f32) -> Vec<f32> {
+        vec![cosine, (1.0 - cosine * cosine).sqrt()]
+    }
+
+    /// Recall's order weighs a page's standing and its gate does not. The case
+    /// is the one a long-run probe lost on 2026-09-22: a rule just below the
+    /// session pages, cut from a block of three.
+    #[test]
+    fn recall_shows_a_rule_over_sessions_it_barely_trails_and_gates_on_cosine_alone() {
+        let (_dir, store, project, _workspace) = fixture();
+        let model = "nomic-embed-text";
+        let page = |path: &str, cosine: f32| {
+            let id = write_page(&store, project, path, path, "body", Vec::new());
+            store.set_page_embedding(id, model, &at(cosine)).unwrap();
+            id
+        };
+        let closest = page("sessions/2026-09-21-importer.md", 0.60);
+        page("sessions/2026-09-21-created-at.md", 0.59);
+        let rule = page("gotchas/amounts-never-reach-a-log.md", 0.58);
+        // Weighted, this one would clear the gate (0.52 × 1.5^0.25 ≈ 0.575);
+        // by its cosine, which is what the gate reads, it does not.
+        page("decisions/an-unrelated-decision.md", 0.52);
+
+        let tuning = Tuning::default();
+        let shown = store
+            .pages_like(project, model, &[1.0, 0.0], 2, 0.55, &tuning)
+            .unwrap();
+        let ids: Vec<PageId> = shown.iter().map(|hit| hit.page_id).collect();
+        assert_eq!(ids, vec![rule, closest], "{shown:?}");
+        assert!(
+            (shown[0].score - 0.58).abs() < 1e-6,
+            "a hit's score is still the cosine the gate read: {shown:?}"
+        );
+
+        let everything = store
+            .pages_like(project, model, &[1.0, 0.0], 10, 0.55, &tuning)
+            .unwrap();
+        assert_eq!(everything.len(), 3, "the decision below the gate stays out");
+
+        // With standing switched off the order is cosine alone, as it was.
+        let flat = Tuning {
+            authority_exponent: 0.0,
+            ..Tuning::default()
+        };
+        let plain = store
+            .pages_like(project, model, &[1.0, 0.0], 2, 0.55, &flat)
+            .unwrap();
+        assert_eq!(plain[0].page_id, closest);
+        assert!(plain.iter().all(|hit| hit.page_id != rule));
     }
 
     /// How long the vector stream takes over a memory far larger than any this

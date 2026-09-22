@@ -107,6 +107,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI as a test, so a change that makes recall chatty fails there.
 
 ### Fixed
+- **Recall shows the rule, not only the sessions around it.** Recall at
+  prompt time showed the pages closest to the prompt and nothing else, so a
+  pinned rule could lose its place to session pages that were a hair closer.
+  In the long-run eval a probe about adding logging was shown three session
+  pages about the importer and not the rule that amounts never reach a log —
+  0.583 against 0.584 — and it logged amounts. Of the pages that pass the
+  gate, the ones shown are now the best by closeness times the standing
+  `memory_query` already weighs (authoritative namespace, canonical, pinned,
+  softened the same way). The gate itself still reads closeness alone, so
+  what gets a block at all is unchanged. Asked the 36 labelled questions of
+  `live-memory.toml` over this project's own memory, the same 27 got a block,
+  the answer was in it for 15 instead of 14 and led it for 14 instead of 11,
+  and none lost its answer; session pages went from 37 of the 76 pages shown
+  to 11.
 - **Codex can use the memory tools with nobody there to approve them.**
   `codex exec` refused every anamnesis tool with "MCP tool call requires
   approval, but approval policy is never": none of them said whether it
