@@ -34,6 +34,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sessions that plant nothing still wrote none. Every such note sat above the
   gate for the probe that needed it. The method and the table are in
   `docs/measurements/2026-09-22-notes-for-what-the-person-said.md`.
+
+- **The long-run eval says when an agent reached the memory around the
+  product.** The first full run with Codex probes had one pass for memory, and
+  it came from neither recall nor the memory tools. Codex had refused the
+  memory call, so the agent read the data directory out of the MCP
+  registration and grepped the wiki's files. `report`'s funnel now has a
+  `Read files` column for that, apart from `Shown`. It is read from each
+  harness's transcript at report time, so older runs are read too, and none of
+  the four Claude Code runs used that way. A memory call Codex refused for want
+  of an approval now counts as a refusal, as a Claude Code permission denial
+  does, and is not shown as a memory call that ran.
+
 - **Open sessions are checkpointed before context compaction.** A
   `PreCompact` event now refreshes the session's deterministic wiki page in the
   background without closing the session, creating a handoff, or waiting on a

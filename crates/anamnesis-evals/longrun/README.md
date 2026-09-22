@@ -206,6 +206,16 @@ the two runs gemini-3.5-flash wrote kept all five facts, the one qwen2.5:7b
 wrote kept one, and the probe that opened a qwen page in full read "avoiding
 the issue of caching rows as seen last month" and built the cache anyway.
 
+One more column stands apart from that path: whether the agent went into the
+memory's own files on disk. The first full run with Codex probes had one pass
+that came that way. Its memory call was refused, so the agent read the data
+directory's path out of the checkout's MCP registration and grepped the wiki
+with `rg ..\data\wiki`. That is a way to the knowledge the product does not
+offer, and counted with the others it reads as recall working. A memory call
+Codex refused for want of an approval is counted where Claude Code's
+permission denials are, so the console no longer says "memory calls 1" about
+a call that never ran.
+
 All of it is read off disk when `report` runs, so older runs are followed
 too, and a pattern corrected later applies to every run at once. Recall is
 read from Claude Code's transcript for a run that did not record it, while
