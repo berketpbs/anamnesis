@@ -146,13 +146,15 @@ pub struct QueryExplain {
     /// a zero contribution is a stream that found the page and was not given
     /// weight, which is how it ships.
     pub abstracts: StreamRank,
-    /// Sum of the contributions: the fused score before standing.
+    /// Sum of the contributions: what ordered this page within its own scope.
     pub fused: f64,
-    /// Multiplier for the page's standing — authoritative namespace, canonical,
-    /// pinned — applied after fusion. `1.0` means it was considered and left
-    /// alone. A page no stream found is never surfaced however high this is.
-    pub authority: f64,
-    /// `fused * authority`: what ordered this page within its own scope.
+    /// The factor the page's standing — authoritative namespace, canonical,
+    /// pinned, and a session page that recorded almost nothing — put on the
+    /// place each rank above counted from. `1.0` means it was weighed and left
+    /// alone, and a page no stream found is never surfaced however high it is.
+    pub standing: f64,
+    /// The same number as `fused`, kept under the name an earlier explain gave
+    /// it, when standing multiplied the score instead of moving the place.
     pub within_scope: f64,
 }
 
@@ -182,6 +184,10 @@ impl StreamWorking {
             &self.project
         };
         let weights = self.tuning.weights();
+        // Standing decides the place each rank counts from, so it belongs
+        // inside the contributions rather than beside them: an explanation
+        // whose numbers do not add up to the score is worse than none.
+        let standing = hit.standing;
         let rank_in = |stream: &[anamnesis_core::ids::PageId], weight: f64| {
             let rank = stream
                 .iter()
@@ -190,7 +196,7 @@ impl StreamWorking {
             StreamRank {
                 rank,
                 contribution: rank
-                    .map(|rank| weight / (self.tuning.rrf_k + rank as f64))
+                    .map(|rank| weight / (self.tuning.rrf_k + rank as f64 / standing))
                     .unwrap_or(0.0),
                 coverage: None,
             }
@@ -222,10 +228,6 @@ impl StreamWorking {
             + links.contribution
             + vectors.contribution
             + abstracts.contribution;
-        let authority =
-            self.tuning
-                .authority(hit.pinned, hit.canonical, hit.path.is_authoritative());
-
         QueryExplain {
             scope: if from_global { "global" } else { "project" }.to_owned(),
             fts,
@@ -234,8 +236,8 @@ impl StreamWorking {
             vectors,
             abstracts,
             fused,
-            authority,
-            within_scope: fused * authority,
+            standing,
+            within_scope: fused,
         }
     }
 }
@@ -2027,19 +2029,19 @@ mod tests {
             + working.vectors.contribution;
         assert!((working.fused - summed).abs() < 1e-12, "{working:?}");
         assert!(
-            (working.within_scope - working.fused * working.authority).abs() < 1e-12,
+            (working.within_scope - working.fused).abs() < 1e-12,
             "{working:?}"
         );
         // `notes/` is not an authoritative namespace and the page is neither
         // pinned nor canonical, so there is nothing for standing to adjust.
-        assert_eq!(working.authority, 1.0);
+        assert_eq!(working.standing, 1.0);
     }
 
-    /// Standing is a multiplier on relevance a stream already found, so an
+    /// Standing moves a page up a ranking a stream already put it in, so an
     /// authoritative page reports one above 1.0 — and the explain is where
     /// that claim becomes checkable instead of documented.
     #[test]
-    fn the_working_shows_standing_as_the_multiplier_it_is() {
+    fn the_working_shows_standing_as_the_factor_it_is() {
         let (_repo, _data, server) = harness();
         server
             .write_page(WritePageRequest {
@@ -2067,10 +2069,16 @@ mod tests {
         let working = found.hits[0].explain.as_ref().expect("explain");
 
         assert!(
-            working.authority > 1.0,
+            working.standing > 1.0,
             "an authoritative, canonical, pinned page: {working:?}"
         );
-        assert!(working.within_scope > working.fused);
+        // The rank it was found at, counted from the place standing gave it.
+        let rank = working.fts.rank.expect("full text found it") as f64;
+        let expected = 1.0 / (Tuning::default().rrf_k + rank / working.standing);
+        assert!(
+            (working.fts.contribution - expected).abs() < 1e-12,
+            "{working:?}"
+        );
     }
 
     /// Asking which stream *would have* found a page is not the same as being

@@ -33,7 +33,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anamnesis_core::ids::{PageId, ProjectId};
-use anamnesis_core::retrieval::tokenize;
+use anamnesis_core::retrieval::{Tuning, tokenize};
 use rusqlite::params;
 
 use crate::convert::parse_id;
@@ -308,7 +308,7 @@ impl Store {
         if standing.is_empty() {
             return Ok(Vec::new());
         }
-        self.hits_for(standing)
+        self.hits_for(standing, &Tuning::default())
     }
 }
 

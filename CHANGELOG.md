@@ -173,6 +173,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   currency" was read as every entry converted into it, and the probe
   measured that reading instead of the rounding rule.
 
+- **A page that only records a question stops outranking the answer, and
+  standing can finally move a page at all.** Asking memory something leaves a
+  session page that says the question, so the echoes of a question multiply
+  while the answer stays one page: on 2026-09-22 this project's own memory
+  answered `KIRLANGIC-47` with a session where somebody had asked what it
+  meant, and the decision that defines it came second. Standing was supposed
+  to settle that and could not — it multiplied the fused score, where the
+  largest factor the wiki can give a page was 1.24x against a 1.33x gap
+  between the first two places, and switching it off changed no order at all.
+  It now decides the place a page counts from in each stream, so an ordinary
+  decision counts from 1.36 places higher, and a session page shorter than
+  1500 characters counts from twice as low. Over 140 real pages and the 36
+  questions in `questions/live-memory.toml`: hit@1 0.611 → 0.722, MRR 0.706 →
+  0.766, NDCG 0.738 → 0.783, recall unchanged. None of the four fixture suites
+  moved, recall by name still gives 1 false alarm in 171, and `adversarial` —
+  the suite no knob is tuned against — is unchanged at 0.969. `memory_query
+  --explain` reports `standing` in place of `authority`, inside each stream's
+  contribution rather than beside it.
+
 - **Recall shows the rule, not only the sessions around it.** Recall at
   prompt time showed the pages closest to the prompt and nothing else, so a
   pinned rule could lose its place to session pages that were a hair closer.
