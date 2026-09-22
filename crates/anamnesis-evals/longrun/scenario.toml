@@ -267,10 +267,15 @@ id = "S18"
 kind = "probe"
 needs = "S13"
 check = "total_chf_rounded"
+# "The entries in that currency" read, on 2026-09-22, as every entry converted
+# into it: the memory arm printed 14.17 CHF for rows of CHF and USD, and the
+# probe measured how the prompt was read rather than what was remembered. So
+# it says which entries count.
 prompt = """
 Add a `total` command: `python -m ledger.cli total FILE --currency CODE` \
-prints the sum of the file's entries in that currency, formatted the way \
-`Money.format()` formats an amount.
+prints the sum of the file's entries whose currency is CODE, formatted the \
+way `Money.format()` formats an amount. Entries in other currencies are left \
+out, not converted.
 """
 
 [[session]]

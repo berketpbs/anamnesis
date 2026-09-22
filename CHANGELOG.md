@@ -161,6 +161,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI as a test, so a change that makes recall chatty fails there.
 
 ### Fixed
+- **The long-run eval counts a rule the planting agent wrote itself.** A page
+  written with `memory_write_page` names no session, so the report could not
+  tie it to the session that wrote it: on 2026-09-22 S17's agent wrote the
+  sign-off rule as a decision, recall put that page first in front of S22,
+  S22 passed, and the funnel said the plant was never shown. The pages a
+  session writes over MCP are now read from its transcript, in either
+  harness, and counted as that session's. Read again, the same runs say S22
+  was shown its plant and S08's knowledge was kept in four runs of four, not
+  three. S18's prompt also says which entries count now: "the entries in that
+  currency" was read as every entry converted into it, and the probe
+  measured that reading instead of the rounding rule.
+
 - **Recall shows the rule, not only the sessions around it.** Recall at
   prompt time showed the pages closest to the prompt and nothing else, so a
   pinned rule could lose its place to session pages that were a hair closer.
