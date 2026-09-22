@@ -15,7 +15,7 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use anamnesis_core::observation::{EventKind, Observation, RESULT_MARKER};
+use anamnesis_core::observation::{EventKind, Observation, RESULT_MARKER, is_harness_prompt};
 use anamnesis_core::page::{Entity, PagePath};
 use anamnesis_core::session::Session;
 use anamnesis_llm::{
@@ -58,6 +58,21 @@ const MAX_BODY_CHARS: usize = 600;
 /// `error[E0308]`, an exit code — while a command can legitimately be a
 /// paragraph of shell.
 const MAX_RESULT_CHARS: usize = 200;
+
+/// Completed actions retained as the session's deterministic resume point.
+///
+/// Four held the last verification and the follow-up inspection in the real
+/// 873-event session that motivated this checkpoint, without turning a
+/// handoff back into a transcript.
+const MAX_RESUME_ACTIONS: usize = 4;
+
+/// Bounded fields in the resume checkpoint. Keeping separate allowances means
+/// a long command can never crowd out the result tail that says whether it
+/// worked.
+const MAX_RESUME_REQUEST_BYTES: usize = 320;
+const MAX_RESUME_TOOL_BYTES: usize = 32;
+const MAX_RESUME_INPUT_BYTES: usize = 64;
+const MAX_RESUME_RESULT_BYTES: usize = 120;
 
 /// Share of the prompt the list of existing pages may take, as a divisor.
 ///
@@ -126,11 +141,16 @@ it: write what this session was about, the way somebody scanning a directory \
 listing would want it named.
 - Write in the language the person wrote their prompts in, in that language's own alphabet. A page written in Turkish with the Turkish letters stripped out — `Ozet` for `Özet`, `gorev` for `görev` — is a page in no language at all, and it is also unsearchable by anybody typing the word properly.
 - An `assistant-message` line is what the agent said when it finished a turn: its own account of what it had just done, written for a person. It is the most direct statement of intent and outcome in the transcript, and where it and the tool calls disagree, say what the tools show — an account written before a command failed is still what was believed at the time.
+- A `harness-notification` line arrived through the prompt hook but was written by the agent harness, not the person. It is evidence about background work, never the person's request. The `Resume evidence` section already separates the last real request from this chatter.
 - A `subagent-report` line is what a subagent handed back, labelled with the kind of agent that produced it. A subagent is a whole investigation inside one tool call, and its report is the only record of what it found: the calls it made are not in this transcript.
 - A tool line shows what was run and, after a `→`, the end of what came back. Read it: that is where a command says whether it worked. `(FAILED)` marks a call the harness reported as failed, and `(NO RESULT ...)` marks one the agent started that never came back, which on some harnesses is the only trace a failed call leaves. Do not describe a session as having gone well because nothing is marked; the header says when this harness reports no outcomes at all, and then nothing being marked means nothing.
 - The handoff is read by an agent that has no other context and a limited \
-budget for it. It is prose, not headings, and it says what to know and what \
-to do next — not what happened, except where that changes what to do.
+budget for it. Use the compact labels `Objective:`, `Verified:`, `Working \
+state:`, `Next action:`, `Blockers:`, and `User constraints:` when the \
+session provides those facts. Omit labels whose value is genuinely unknown. \
+Say what to know and what to do next — not a chronological retelling. Never \
+drop a concrete verdict or last action from `Resume evidence`; those facts are \
+there because another agent needs the exact resume point.
 - If the session genuinely did nothing of substance, say so plainly and \
 briefly rather than inflating it.
 - The entities are what a later search would type to find this page: the \
@@ -189,7 +209,7 @@ pub fn schema() -> Value {
             },
             "handoff": {
                 "type": "string",
-                "description": "Plain prose for the next session. Under 1500 characters.",
+                "description": "A compact operational brief for the next session, under 1500 characters. Use Objective, Verified, Working state, Next action, Blockers, and User constraints labels when known. Preserve exact verdicts and the last action from Resume evidence.",
             },
             "entities": {
                 "type": "array",
@@ -349,7 +369,7 @@ pub async fn consolidate_attributed(
     // microseconds, it decides whether this session is worth a page at all,
     // and holding it means the fallback below is a value rather than another
     // thing that can go wrong.
-    let fallback = consolidate(session, observations)?;
+    let fallback = with_resume_checkpoint(consolidate(session, observations)?, observations);
 
     let (user, omitted) =
         render_prompt_reporting(session, observations, surroundings, max_input_tokens);
@@ -400,6 +420,12 @@ pub async fn consolidate_attributed(
                     "session consolidated by model"
                 );
                 let digest = disclosing(digest, observations.len(), omitted);
+                // A model may accurately describe three hours of work and
+                // still omit the final test verdict and the inspection that
+                // followed it. Those are the two facts a replacement agent
+                // needs most, so keep a small recorded appendix outside the
+                // model's judgement. It is evidence, not an inferred plan.
+                let digest = with_resume_checkpoint(digest, observations);
                 let stood_in = output.instead_of.as_ref().map(|_| output.model.clone());
                 Some(Attributed {
                     digest: naming_the_stand_in(digest, &output),
@@ -594,6 +620,185 @@ fn garbled_letters(digest: &SessionDigest, shown: &str) -> usize {
     }
 }
 
+/// Facts kept outside the model's judgement because they define where work
+/// stopped, rather than what the whole session was about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResumeEvidence {
+    last_request: Option<String>,
+    actions: Vec<String>,
+}
+
+impl ResumeEvidence {
+    /// Read the latest real request and the last actions after it.
+    ///
+    /// An action is a completed call, or an attempt that never came back.
+    /// Claude Code fires no post-tool hook for a call that failed, so when the
+    /// last thing a session did was a test run that broke, the attempt is the
+    /// only trace of it — and leaving it out would name the successful call
+    /// before it as where work stopped.
+    fn from_observations(observations: &[Observation]) -> Option<Self> {
+        let last_request = observations
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, observation)| {
+                observation.kind == EventKind::UserPrompt
+                    && !is_harness_prompt(observation.body.as_str())
+                    && !observation.body.as_str().trim().is_empty()
+            });
+        let after = last_request.map_or(0, |(index, _)| index + 1);
+
+        let unfinished = crate::unfinished_attempts(observations);
+        let mut actions = VecDeque::new();
+        for (index, observation) in observations.iter().enumerate().skip(after) {
+            let unanswered =
+                observation.kind == EventKind::ToolAttempt && unfinished.contains(&index);
+            if observation.kind != EventKind::ToolUse && !unanswered {
+                continue;
+            }
+            let Some(action) = resume_action(observation) else {
+                continue;
+            };
+            if actions.len() == MAX_RESUME_ACTIONS {
+                actions.pop_front();
+            }
+            actions.push_back(action);
+        }
+
+        if actions.is_empty() {
+            return None;
+        }
+        Some(Self {
+            last_request: last_request.map(|(_, observation)| {
+                clip_bytes(
+                    &observation.body.as_str().trim().replace(['\n', '\r'], " "),
+                    MAX_RESUME_REQUEST_BYTES,
+                )
+            }),
+            actions: actions.into_iter().collect(),
+        })
+    }
+
+    fn render_markdown(&self) -> String {
+        let mut out = String::new();
+        if let Some(request) = &self.last_request {
+            out.push_str(&format!("- Last human request: {request}\n"));
+        }
+        for action in &self.actions {
+            out.push_str(&format!("- Action: {action}\n"));
+        }
+        out
+    }
+
+    fn render_handoff(&self) -> String {
+        let mut out = String::from("Recorded resume checkpoint:\n");
+        if let Some(request) = &self.last_request {
+            out.push_str(&format!("User constraint/request: {request}\n"));
+        }
+        for action in &self.actions {
+            out.push_str(&format!("Action: {action}\n"));
+        }
+        out.trim_end().to_owned()
+    }
+}
+
+/// Name one call by its useful input and the tail of its result, marked the
+/// way the transcript marks it when it failed or never came back.
+fn resume_action(observation: &Observation) -> Option<String> {
+    let reference = observation.tool.as_ref()?;
+    let mut tool = clip_bytes(reference.name.trim(), MAX_RESUME_TOOL_BYTES);
+    if reference.ok == Some(false) {
+        tool.push_str(" (FAILED)");
+    } else if observation.kind == EventKind::ToolAttempt {
+        tool.push_str(" (NO RESULT)");
+    }
+    let body = observation.body.as_str().trim();
+    if body.is_empty() {
+        return None;
+    }
+    let (input, result) = body
+        .split_once(RESULT_MARKER)
+        .map_or((body, None), |(input, result)| (input, Some(result)));
+    let input = resume_input(input);
+    let result = result
+        .map(str::trim)
+        .filter(|result| !result.is_empty())
+        .map(|result| tail_clip_bytes(&result.replace(['\n', '\r'], " "), MAX_RESUME_RESULT_BYTES));
+
+    let action = match (input.is_empty(), result) {
+        (false, Some(result)) => format!("{tool}: {input} -> {result}"),
+        (false, None) => format!("{tool}: {input}"),
+        (true, Some(result)) => format!("{tool}: {result}"),
+        (true, None) => return None,
+    };
+    Some(action)
+}
+
+/// Prefer a tool's human description, then the most recognisable argument.
+fn resume_input(input: &str) -> String {
+    let parsed = serde_json::from_str::<Value>(input).ok();
+    let value = parsed
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|object| {
+            ["description", "command", "file_path", "pattern"]
+                .iter()
+                .find_map(|key| {
+                    object
+                        .get(*key)
+                        .and_then(Value::as_str)
+                        .map(|value| (*key, value))
+                })
+        });
+    let (kind, value) = value.unwrap_or(("", input));
+    let value = value.trim().replace(['\n', '\r'], " ");
+    if kind == "file_path" {
+        tail_clip_bytes(&value, MAX_RESUME_INPUT_BYTES)
+    } else {
+        clip_bytes(&value, MAX_RESUME_INPUT_BYTES)
+    }
+}
+
+/// Keep the end of a result, where command-line tools put their verdict.
+fn tail_clip_bytes(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    let room = max.saturating_sub('…'.len_utf8());
+    let mut start = text.len().saturating_sub(room);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("…{}", text[start..].trim_start())
+}
+
+/// Repair both durable outputs with a bounded, recorded resume checkpoint.
+fn with_resume_checkpoint(
+    mut digest: SessionDigest,
+    observations: &[Observation],
+) -> SessionDigest {
+    let Some(evidence) = ResumeEvidence::from_observations(observations) else {
+        return digest;
+    };
+
+    digest.body = format!(
+        "{}\n\n## Recorded resume checkpoint\n\n{}",
+        digest.body.trim_end(),
+        evidence.render_markdown().trim_end()
+    );
+
+    let checkpoint = evidence.render_handoff();
+    let separator = "\n\n";
+    let prose_budget = HANDOFF_LIMIT.saturating_sub(checkpoint.len() + separator.len());
+    let prose = clip_bytes(digest.handoff.trim(), prose_budget);
+    digest.handoff = if prose.is_empty() {
+        clip_bytes(&checkpoint, HANDOFF_LIMIT)
+    } else {
+        format!("{prose}{separator}{checkpoint}")
+    };
+    digest
+}
+
 /// Render the material for one session, inside a token budget.
 pub fn render_prompt(
     session: &Session,
@@ -644,6 +849,16 @@ pub fn render_prompt_reporting(
              FAILED, and the absence of failures is not evidence that none occurred — do not \
              report the session as succeeding on that basis.\n",
         );
+    }
+
+    if let Some(evidence) = ResumeEvidence::from_observations(observations) {
+        out.push_str("\n# Resume evidence\n\n");
+        out.push_str(
+            "These are the recorded facts nearest the end of the person's latest request. \
+             Treat them as the resume point; do not replace exact verdicts with a generic \
+             statement that work was started.\n",
+        );
+        out.push_str(&evidence.render_markdown());
     }
 
     if let Some(text) = preferences.map(str::trim).filter(|t| !t.is_empty()) {
@@ -734,7 +949,14 @@ fn render_observation(observation: &Observation) -> String {
         .and_then(|t| t.split('.').next())
         .unwrap_or("--:--:--");
 
-    let mut line = format!("[{time}] {}", observation.kind.as_str());
+    let kind = if observation.kind == EventKind::UserPrompt
+        && is_harness_prompt(observation.body.as_str())
+    {
+        "harness-notification"
+    } else {
+        observation.kind.as_str()
+    };
+    let mut line = format!("[{time}] {kind}");
 
     if let Some(tool) = &observation.tool {
         line.push_str(&format!(" {}", tool.name));
@@ -1331,6 +1553,77 @@ mod tests {
         assert!(digest.handoff.contains("cargo test"));
     }
 
+    /// Regression for the 873-event Claude session whose model-written page
+    /// said only that expansion had started even though the final tool output
+    /// said `46/46` and the next call inspected hard-coded session ids.
+    #[tokio::test]
+    async fn a_vague_model_reply_is_repaired_with_the_recorded_resume_point() {
+        let observations = vec![
+            observation(
+                EventKind::UserPrompt,
+                "increase the test count; quality matters more than cost",
+                None,
+            ),
+            observation(
+                EventKind::UserPrompt,
+                "<task-notification> background run completed",
+                None,
+            ),
+            observation(
+                EventKind::ToolUse,
+                &format!(
+                    r#"{{"description":"Run the checks selftest"}}{RESULT_MARKER}46/46 cases behave as expected"#
+                ),
+                Some(ToolRef {
+                    name: "PowerShell".to_owned(),
+                    ok: None,
+                    call_id: None,
+                }),
+            ),
+            observation(
+                EventKind::ToolUse,
+                &format!(
+                    r#"{{"pattern":"twelve|S08|S12"}}{RESULT_MARKER}scenario.toml:163:id = "S12""#
+                ),
+                Some(ToolRef {
+                    name: "Grep".to_owned(),
+                    ok: None,
+                    call_id: None,
+                }),
+            ),
+        ];
+        let vague = json!({
+            "title": "Longrun expansion",
+            "body": "The scenario expansion was started.",
+            "handoff": "Continue expanding the scenario.",
+            "entities": ["longrun.py"],
+        });
+
+        let digest = consolidate_with_llm(
+            &Fake(Ok(vague)),
+            &session(),
+            &observations,
+            Surroundings::default(),
+            6_500,
+            2_000,
+        )
+        .await
+        .expect("a digest");
+
+        for output in [&digest.body, &digest.handoff] {
+            assert!(
+                output.contains("46/46 cases behave as expected"),
+                "{output}"
+            );
+            assert!(output.contains("S12"), "{output}");
+            assert!(
+                output.contains("quality matters more than cost"),
+                "{output}"
+            );
+            assert!(!output.contains("task-notification"), "{output}");
+        }
+    }
+
     #[tokio::test]
     async fn a_dead_provider_still_produces_a_page() {
         let digest = consolidate_with_llm(
@@ -1829,10 +2122,140 @@ mod tests {
             "NO RESULT",
             "subagent-report",
             "assistant-message",
+            "harness-notification",
             "nothing being marked means nothing",
         ] {
             assert!(SYSTEM.contains(rule), "the prompt no longer says {rule:?}");
         }
+    }
+
+    #[test]
+    fn resume_evidence_separates_the_person_from_harness_chatter() {
+        let observations = vec![
+            observation(EventKind::UserPrompt, "add ten probes", None),
+            observation(
+                EventKind::UserPrompt,
+                "<task-notification> monitor finished",
+                None,
+            ),
+            observation(
+                EventKind::ToolUse,
+                &format!(
+                    r#"{{"description":"Run the checks selftest"}}{RESULT_MARKER}46/46 cases behave as expected"#
+                ),
+                Some(ToolRef {
+                    name: "PowerShell".to_owned(),
+                    ok: None,
+                    call_id: None,
+                }),
+            ),
+        ];
+
+        let prompt = render_prompt(&session(), &observations, Surroundings::default(), 4_000);
+
+        assert!(prompt.contains("# Resume evidence"), "{prompt}");
+        assert!(
+            prompt.contains("Last human request: add ten probes"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("46/46 cases behave as expected"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("harness-notification: <task-notification>"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("Last human request: <task-notification>"));
+    }
+
+    /// Claude Code sends no completion for a call that failed. A session whose
+    /// last move was a test run that broke would otherwise hand over the
+    /// build before it as where work stopped.
+    #[test]
+    fn resume_evidence_names_the_last_call_even_when_it_never_came_back() {
+        let bash = |id: &str, ok: Option<bool>| {
+            Some(ToolRef {
+                name: "Bash".to_owned(),
+                ok,
+                call_id: Some(id.to_owned()),
+            })
+        };
+        let observations = vec![
+            observation(EventKind::UserPrompt, "run the suite", None),
+            observation(
+                EventKind::ToolAttempt,
+                r#"{"command":"cargo build"}"#,
+                bash("a", None),
+            ),
+            observation(
+                EventKind::ToolUse,
+                &format!(r#"{{"command":"cargo build"}}{RESULT_MARKER}Finished"#),
+                bash("a", None),
+            ),
+            observation(
+                EventKind::ToolUse,
+                &format!(r#"{{"command":"cargo fmt --check"}}{RESULT_MARKER}Diff in llm.rs"#),
+                bash("b", Some(false)),
+            ),
+            observation(
+                EventKind::ToolAttempt,
+                r#"{"command":"cargo test --workspace"}"#,
+                bash("c", None),
+            ),
+        ];
+
+        let evidence = ResumeEvidence::from_observations(&observations).expect("resume evidence");
+
+        assert_eq!(evidence.actions.len(), 3, "{:?}", evidence.actions);
+        assert!(
+            evidence.actions[1].starts_with("Bash (FAILED): cargo fmt --check"),
+            "{:?}",
+            evidence.actions
+        );
+        assert_eq!(
+            evidence.actions[2], "Bash (NO RESULT): cargo test --workspace",
+            "the call that never came back is the last action, and said to be one"
+        );
+        assert!(
+            !evidence
+                .actions
+                .iter()
+                .any(|a| a.contains("NO RESULT") && a.contains("cargo build")),
+            "an attempt that was answered is not told again: {:?}",
+            evidence.actions
+        );
+    }
+
+    #[test]
+    fn resume_evidence_keeps_the_filename_at_the_end_of_a_long_path() {
+        let observations = vec![observation(
+            EventKind::ToolUse,
+            &format!(
+                r#"{{"file_path":"C:\\Berke\\anamnesis-worktrees\\ten-probes\\crates\\anamnesis-evals\\src\\checks.py"}}{RESULT_MARKER}updated"#
+            ),
+            Some(ToolRef {
+                name: "Edit".to_owned(),
+                ok: Some(true),
+                call_id: None,
+            }),
+        )];
+
+        let evidence = ResumeEvidence::from_observations(&observations).expect("resume evidence");
+        let rendered = evidence.render_markdown();
+
+        assert!(rendered.contains("checks.py"), "{rendered}");
+        assert!(rendered.contains("updated"), "{rendered}");
+    }
+
+    #[test]
+    fn resume_tail_clipping_obeys_a_byte_budget_without_splitting_unicode() {
+        let verdict = format!("{}SONUÇ", "başarılı ".repeat(40));
+
+        let clipped = tail_clip_bytes(&verdict, 64);
+
+        assert!(clipped.len() <= 64, "{} bytes: {clipped}", clipped.len());
+        assert!(clipped.ends_with("SONUÇ"), "{clipped}");
     }
 
     /// A transcript that told every call twice would be half as long for the
@@ -1856,10 +2279,14 @@ mod tests {
 
         let prompt = render_prompt(&session(), &observations, Surroundings::default(), 4_000);
 
+        let transcript = prompt
+            .split_once("# Transcript")
+            .map(|(_, transcript)| transcript)
+            .expect("a transcript section");
         assert_eq!(
-            prompt.matches("cargo build").count(),
+            transcript.matches("cargo build").count(),
             1,
-            "the completed call is told once:\n{prompt}"
+            "the transcript tells the completed call once:\n{prompt}"
         );
         assert!(prompt.contains("rm -rf /tmp/x"), "{prompt}");
         assert!(prompt.contains("NO RESULT"), "{prompt}");

@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Session handoffs keep a recorded resume checkpoint outside the model's
+  judgement.** Consolidation now separates harness notifications from human
+  prompts, puts the latest real request and the last four actions in a
+  high-salience `Resume evidence` block for the model, and appends the same
+  bounded evidence to both the session page and handoff. A call that failed is
+  marked `(FAILED)`, and one that never came back — all Claude Code leaves of
+  a failed call — is kept as `(NO RESULT)`, so a broken final test run is not
+  handed over as the successful build before it. This closes the case
+  where Gemini saw all 873 events of a Claude Code session but reduced its
+  final `46/46 cases behave as expected` verdict and the hard-coded-session-id
+  scan that followed to "scenario expansion was started." Model handoffs are
+  also asked for explicit objective, verification, working-state, next-action,
+  blocker, and user-constraint fields when those facts are known.
+
 - **What the person tells the agent to keep gets a note of its own.** The
   consolidation prompt now names that case: a rule, how the project is
   deployed, or a value no file holds. It is the clearest reason for a durable
