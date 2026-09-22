@@ -1068,6 +1068,9 @@ async fn deliver_recall(
                     &vector,
                     config.pages,
                     config.min_similarity,
+                    // What `memory_query` weighs a page's standing with, so a
+                    // rule counts for the same whichever way it is reached.
+                    &anamnesis_core::retrieval::Tuning::default(),
                 )?,
                 Err(error) => {
                     tracing::warn!(%error, "recall embedding failed; answering this prompt by name");
