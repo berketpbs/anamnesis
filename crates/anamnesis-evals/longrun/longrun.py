@@ -20,8 +20,9 @@ judged by a check in checks.py that runs the code rather than asking a model.
     python longrun.py run --anamnesis PATH one repeat of the scenario, both arms
     python longrun.py report              every run so far, side by side
 
-A repeat takes one to two hours and asks the consolidation model about twelve
-sessions, which is why it is meant to run once a night rather than all at once.
+A repeat asks the consolidation model about twenty-two sessions, more than a
+free Gemini tier allows in a day, which is why it is meant to run once a night
+rather than all at once.
 """
 
 from __future__ import annotations
@@ -2085,15 +2086,34 @@ def cmd_selftest(_: argparse.Namespace) -> int:
         ("S05", "Deployments go to the staging host `ledger-stg-02`.", False),
         ("S05", "Added a `version` command to the CLI that prints `ledger.__version__`.", False),
     ]
+    # S13-S17 have not planted anything in a run yet, so these lines are
+    # written rather than read off a page: one that says the fact, and one
+    # that names only the task or loses the part the probe needs. Lines from
+    # the first run's pages are to replace them.
+    written = [
+        ("S13", "CHF totals are rounded to the nearest 0.05 CHF (five rappen), as the Swiss auditors require.", True),
+        ("S13", "Added `Money.__sub__`, so `Money(500) - Money(200)` is `Money(300)`.", False),
+        ("S14", "Errors a user sees go to stderr as `<file>:<line>: <message>` and exit with status 1, never a traceback.", True),
+        ("S14", "Added a `count` command that prints how many entries a CSV file holds.", False),
+        ("S15", "New output formats go in a module of their own under `ledger/formats/`.", True),
+        ("S15", "Added an `accounts` command that prints each account name once, sorted.", False),
+        ("S16", "Rates come from `https://fx.internal.example/v2/rates`, which needs the header `X-Ledger-Team: finance`.", True),
+        ("S16", "Rates come from `https://fx.internal.example/v2/rates`; nothing was done with it.", False),
+        ("S17", "A change to an exchange rate needs `@dana-fin` to sign off in the pull request's description.", True),
+        ("S17", "A change to an exchange rate needs sign-off from finance.", False),
+    ]
     knowledge = {session["id"]: session.get("knowledge", []) for session in scenario["session"]}
-    for session, text, expected in judged:
+    for session, text, expected in judged + written:
         if (got := knowledge_kept([("page.md", text)], knowledge[session])) is not expected:
             print(f"FAIL knowledge_kept({session}, {text[:50]!r}): {got!r}, expected {expected!r}")
             return 1
     if knowledge_kept([("page.md", "anything")], []) is not None:
         print("FAIL knowledge_kept: a session that names no knowledge read as kept or lost")
         return 1
-    print(f"ok   knowledge_kept agrees with {len(judged)} lines judged by reading the runs' pages")
+    print(
+        f"ok   knowledge_kept agrees with {len(judged)} lines judged by reading the runs' pages "
+        f"and {len(written)} written for the plants no run has made yet"
+    )
 
     # What a memory call brought back, told from what a file read did: only an
     # anamnesis tool's result counts, and only a read_page call opens a page.
