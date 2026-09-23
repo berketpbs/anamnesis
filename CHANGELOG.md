@@ -21,6 +21,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after each. S23 is also told a check word in passing, and `report` counts
   the runs that kept it in a note outside `sessions/`, the way a test word
   once became a decision of its own.
+- **A starting session is told what the project decided.** Beside the
+  handoff, a new session is now handed the project's standing decisions and
+  rules: `decisions/` and `_rules/` pages that are the head of their chain and
+  `active`, pinned and canonical first, then newest, a title and path each,
+  framed as evidence rather than instruction. The handoff carries only the
+  session before this one, and recall answers a prompt only with pages close
+  to it. So a decision taken in conversation sessions ago, recorded on a page
+  and in no file, reached a new agent only if its prompt happened to look like
+  that page. In the long-run eval it did not: the page was kept, recall gave the
+  probe's prompt nothing, and the probe built the thing the decision had ruled
+  out. `[recall] on_start` sets how many (default 5; 0 hands none).
 - **Closing a terminal no longer hands the next agent silence.** A session
   whose terminal is closed sends no end event, so until the reaper gave up on
   it twelve hours later there was no page and no note, and the agent opened

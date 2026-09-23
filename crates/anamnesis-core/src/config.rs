@@ -219,6 +219,19 @@ pub struct RecallConfig {
     /// script written without them is counted a word per character rather
     /// than as one. See [`words_in`].
     pub min_words: usize,
+    /// How many of the project's decisions a starting session is handed,
+    /// beside the handoff. 0 hands none.
+    ///
+    /// The handoff says what the session before this one did, and a prompt is
+    /// answered with the pages close to it; a decision taken three sessions
+    /// ago in conversation reaches neither. It was never in the last session,
+    /// and a prompt about the work it constrains need not look like the page
+    /// that records it — in the long-run eval a planted page scored 0.64 to
+    /// 0.73 against its probe, inside the band an unrelated page reaches. So
+    /// the decisions the project holds are named at the start, newest first,
+    /// a title each, whatever the work turns out to be. See
+    /// [`crate::brief::standing`].
+    pub on_start: usize,
 }
 
 impl Default for RecallConfig {
@@ -231,6 +244,7 @@ impl Default for RecallConfig {
             by_name: true,
             min_coverage: 0.5,
             min_words: 3,
+            on_start: 5,
         }
     }
 }
