@@ -99,7 +99,7 @@ pub enum Commands {
         path: Option<String>,
     },
 
-    /// Write or update a wiki page
+    /// Create a wiki page; existing paths are rejected
     WritePage {
         /// Page path (e.g., decisions/0001-database.md)
         #[arg(long)]
@@ -156,6 +156,65 @@ pub enum Commands {
         /// Every project in the workspace searches it, so this is where a
         /// policy goes — something true of all of them rather than of the one
         /// you happen to be standing in.
+        #[arg(long)]
+        global: bool,
+    },
+
+    /// Patch an existing wiki page without resetting omitted metadata
+    PatchPage {
+        /// Existing page path
+        #[arg(long)]
+        path: String,
+
+        /// Exact revision printed by show-page
+        #[arg(long)]
+        expected_revision: String,
+
+        /// Replacement title; omitted preserves it
+        #[arg(long)]
+        title: Option<String>,
+
+        /// Replacement body; omitted preserves it
+        #[arg(long)]
+        body: Option<String>,
+
+        /// Replacement pin state
+        #[arg(long)]
+        pinned: Option<bool>,
+
+        /// Replacement expiration date or timestamp
+        #[arg(long)]
+        expires_at: Option<String>,
+
+        /// Replacement temporal tier
+        #[arg(long)]
+        tier: Option<String>,
+
+        /// Replacement authored trust status
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Replacement canonical state
+        #[arg(long)]
+        canonical: Option<bool>,
+
+        /// Replacement entities, repeated or comma-separated
+        #[arg(long = "entity", value_delimiter = ',', num_args = 1..)]
+        entity: Option<Vec<String>>,
+
+        /// Replacement supersession target
+        #[arg(long)]
+        supersedes: Option<String>,
+
+        /// Replacement one-line abstract
+        #[arg(long = "abstract")]
+        page_abstract: Option<String>,
+
+        /// Remove one nullable field explicitly
+        #[arg(long = "clear-field", value_delimiter = ',')]
+        clear_fields: Vec<String>,
+
+        /// Patch the workspace's shared scope
         #[arg(long)]
         global: bool,
     },

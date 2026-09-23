@@ -48,8 +48,9 @@ Anamnesis is organized as a Rust workspace with modular crates:
   and OpenCode — the same five lifecycle events, each in the file, spelling,
   payload, and reply format that harness uses. OpenCode takes a plugin module
   rather than a command, and gets its handoff through the system prompt
-- MCP server: `memory_query`, `memory_write_page`, `memory_handoff_accept`,
-  `workstream_start`, `workstream_status`
+- MCP server: `memory_query`, `memory_read_page`, `memory_write_page`,
+  `memory_patch_page`, `memory_handoff_accept`, `workstream_start`,
+  `workstream_status`
 - Workstreams: parallel threads of work, each keeping its own handoff slot
 - `anamnesis bootstrap` seeds a new project's memory from its git history
 - `anamnesis sweep` forgets pages that have decayed — reports by default,

@@ -20,7 +20,7 @@ use anamnesis_core::session::{AgentKind, Session};
 use anamnesis_hooks::ParsedHook;
 use anamnesis_llm::Embedder;
 use anamnesis_store::{RawSpool, Store, SummarySource, new_handoff, new_observation, new_session};
-use anamnesis_wiki::Wiki;
+use anamnesis_wiki::{MergePage, PagePatch, Wiki};
 use jiff::Timestamp;
 use parking_lot::Mutex;
 
@@ -734,14 +734,26 @@ fn write_session_page(
     // wrote it would forget on the next `reindex`.
     frontmatter.session = Some(session.id);
 
-    let mut page = Page::new(
+    let page = Page::new(
         scope.project_id,
         path.clone(),
         frontmatter,
         attributed(&digest.body, session),
     );
-    let commit = wiki.write_page(&scope.scope, &page, message)?;
-    page.git_commit = Some(commit);
+    let merged = wiki.merge_page(
+        &scope.scope,
+        &MergePage {
+            create: page,
+            patch: PagePatch {
+                title: Some(digest.title.clone()),
+                body: Some(attributed(&digest.body, session)),
+                ..PagePatch::default()
+            },
+        },
+        message,
+    )?;
+    let mut page = merged.page;
+    page.git_commit = Some(merged.commit);
 
     // Everything a rebuild would put in the index, in one call. Leaving any of
     // it to `reindex` would mean the index the live path builds and the index a
@@ -816,7 +828,7 @@ fn try_write_notes(
     // first — and a summary of one session does not get to overwrite it.
     let mine = store.pages_from_session(session.id)?;
 
-    let mut pages = Vec::with_capacity(digest.notes.len());
+    let mut mutations = Vec::with_capacity(digest.notes.len());
     for note in &digest.notes {
         if wiki.exists(&scope.scope, &note.path) && !mine.contains(&note.path) {
             tracing::info!(
@@ -844,15 +856,36 @@ fn try_write_notes(
             .filter(|replaced| wiki.exists(&scope.scope, replaced))
             .cloned();
 
-        pages.push(Page::new(
+        let create = Page::new(
             scope.project_id,
             note.path.clone(),
             frontmatter,
             note.body.clone(),
-        ));
+        );
+        mutations.push(MergePage {
+            create,
+            patch: PagePatch {
+                title: Some(note.title.clone()),
+                body: Some(note.body.clone()),
+                // A model that deliberately names a predecessor owns that
+                // link. Omitting one on a later recompile preserves the
+                // existing chain rather than silently resurrecting its tail.
+                supersedes: note
+                    .supersedes
+                    .as_ref()
+                    .filter(|replaced| wiki.exists(&scope.scope, replaced))
+                    .cloned(),
+                ..PagePatch::default()
+            },
+        });
     }
 
-    let Some(commit) = wiki.write_pages(&scope.scope, &pages, &notes_message(digest, &pages))?
+    let creates = mutations
+        .iter()
+        .map(|mutation| mutation.create.clone())
+        .collect::<Vec<_>>();
+    let Some(merged) =
+        wiki.merge_pages(&scope.scope, &mutations, &notes_message(digest, &creates))?
     else {
         return Ok(Vec::new());
     };
@@ -860,9 +893,9 @@ fn try_write_notes(
     // Indexed here rather than left to `reindex`, for the reason
     // `write_session_page` gives: the index the live path builds and the index
     // a rebuild reproduces have to be the same index.
-    let mut written = Vec::with_capacity(pages.len());
-    for mut page in pages {
-        page.git_commit = Some(commit.clone());
+    let mut written = Vec::with_capacity(merged.pages.len());
+    for mut page in merged.pages {
+        page.git_commit = Some(merged.commit.clone());
         store.index_page(
             scope.project_id,
             &page,

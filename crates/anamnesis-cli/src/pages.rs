@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use anamnesis_wiki::Wiki;
+use anamnesis_wiki::{ClearField, PagePatch, Wiki};
 use jiff::Timestamp;
 
 use anamnesis_core::audit::Action;
@@ -129,6 +129,37 @@ pub struct PageOptions {
     pub global: bool,
 }
 
+/// Fields accepted by `patch-page`; every absent field is preserved.
+#[derive(Debug, Default)]
+pub struct PatchPageOptions {
+    /// Expected exact-content revision printed by `show-page`.
+    pub expected_revision: String,
+    /// Replacement title.
+    pub title: Option<String>,
+    /// Replacement body.
+    pub body: Option<String>,
+    /// Replacement pin state.
+    pub pinned: Option<bool>,
+    /// Replacement expiry.
+    pub expires_at: Option<String>,
+    /// Replacement tier.
+    pub tier: Option<String>,
+    /// Replacement authored status.
+    pub status: Option<String>,
+    /// Replacement canonical state.
+    pub canonical: Option<bool>,
+    /// Replacement entities.
+    pub entities: Option<Vec<String>>,
+    /// Replacement supersession target.
+    pub supersedes: Option<String>,
+    /// Replacement abstract.
+    pub page_abstract: Option<String>,
+    /// Nullable fields to remove deliberately.
+    pub clear_fields: Vec<String>,
+    /// Patch the workspace's shared scope.
+    pub global: bool,
+}
+
 /// Write one page by hand, as a person rather than as consolidation.
 pub fn cmd_write_page(
     path: &str,
@@ -195,7 +226,20 @@ pub fn cmd_write_page(
 
     let mut page =
         anamnesis_core::page::Page::new(scope.project_id, page_path.clone(), frontmatter, body);
-    let commit = wiki.write_page(&scope.scope, &page, &format!("cli: write {page_path}"))?;
+    let created = match wiki.create_page(&scope.scope, &page, &format!("cli: create {page_path}")) {
+        Ok(created) => created,
+        Err(anamnesis_wiki::WikiError::AlreadyExists(_)) => {
+            let current = wiki.read_versioned_page(&scope.scope, &page_path)?;
+            anyhow::bail!(
+                "page {page_path} already exists at revision {}\ncurrent frontmatter: {}\nread it with `anamnesis show-page {page_path}`, then use `anamnesis patch-page --expected-revision {}`",
+                current.revision,
+                serde_json::to_string(&current.parsed.frontmatter)?,
+                current.revision,
+            );
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let commit = created.commit;
     page.git_commit = Some(commit.clone());
     note(
         &store,
@@ -239,6 +283,139 @@ pub fn cmd_write_page(
     Ok(())
 }
 
+/// Patch one existing page while preserving every field the caller omitted.
+pub fn cmd_patch_page(
+    path: &str,
+    options: PatchPageOptions,
+    data_dir: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    let (project, data, store) = open_project(data_dir)?;
+    let scope = if options.global {
+        global_scope(&project, &data)
+    } else {
+        project
+    };
+    let wiki = Wiki::open(data.wiki())?;
+    let page_path = anamnesis_core::page::PagePath::parse(path)?;
+    let mut clear = std::collections::BTreeSet::new();
+    for name in &options.clear_fields {
+        clear.insert(match name.as_str() {
+            "supersedes" => ClearField::Supersedes,
+            "expires_at" => ClearField::ExpiresAt,
+            "entities" => ClearField::Entities,
+            "abstract" => ClearField::Abstract,
+            _ => anyhow::bail!(
+                "unknown --clear-field {name:?}; use supersedes, expires_at, entities, or abstract"
+            ),
+        });
+    }
+    let entities = options
+        .entities
+        .as_ref()
+        .map(|names| {
+            names
+                .iter()
+                .map(|name| anamnesis_core::page::Entity::parse(name))
+                .collect::<anamnesis_core::Result<Vec<_>>>()
+        })
+        .transpose()?;
+    let expires_at = options
+        .expires_at
+        .as_ref()
+        .map(|expires| {
+            let stamp = if expires.len() == 10 {
+                format!("{expires}T00:00:00Z")
+            } else {
+                expires.clone()
+            };
+            stamp.parse().map_err(|_| {
+                anyhow::anyhow!("--expires-at {expires:?} is not a date or RFC 3339 timestamp")
+            })
+        })
+        .transpose()?;
+    let patch = PagePatch {
+        title: options.title,
+        body: options.body,
+        tier: options
+            .tier
+            .as_deref()
+            .map(anamnesis_core::page::Tier::parse)
+            .transpose()?,
+        status: options
+            .status
+            .as_deref()
+            .map(anamnesis_core::page::PageStatus::parse)
+            .transpose()?,
+        pinned: options.pinned,
+        canonical: options.canonical,
+        supersedes: options
+            .supersedes
+            .as_deref()
+            .map(anamnesis_core::page::PagePath::parse)
+            .transpose()?,
+        entities,
+        expires_at,
+        page_abstract: options.page_abstract,
+        clear,
+        ..PagePatch::default()
+    };
+    let embedder = crate::serve::embedder_for(
+        &anamnesis_llm::EmbedConfig::from_vars(crate::settings::var),
+        &data.models(),
+        |said| eprintln!("anamnesis: {said}"),
+    )?;
+    let mut patched = wiki.patch_page(
+        &scope.scope,
+        scope.project_id,
+        &page_path,
+        &options.expected_revision,
+        &patch,
+        &format!("cli: patch {page_path}"),
+    )?;
+    patched.page.git_commit = Some(patched.commit.clone());
+    let now = Timestamp::now();
+    store.upsert_project(&scope, now)?;
+    store.index_page(
+        scope.project_id,
+        &patched.page,
+        &anamnesis_wiki::extract_links(&patched.page.body),
+        embedder
+            .as_deref()
+            .map(|embedder| embedder as &dyn anamnesis_core::embedding::Embed),
+        now,
+    )?;
+    note(
+        &store,
+        Some(scope.project_id),
+        Action::PageWritten,
+        page_path.to_string(),
+        Some(format!(
+            "patch commit {}",
+            &patched.commit[..patched.commit.len().min(8)]
+        )),
+    );
+
+    println!("Patched {page_path}");
+    println!("   revision {}", patched.revision);
+    println!("   changed: {}", patched.changed.join(", "));
+    println!("   preserved: {}", patched.preserved.join(", "));
+    if !patched.cleared.is_empty() {
+        println!("   cleared: {}", patched.cleared.join(", "));
+    }
+    if let Some(replacement) = store.superseded_by(scope.project_id, &page_path)? {
+        println!("   WARNING: this page remains retired; it was superseded by {replacement}");
+    }
+    if patched.cleared.iter().any(|field| field == "supersedes") {
+        if let Some(predecessor) = patched.previous_supersedes {
+            let is_latest = store
+                .page_is_latest(scope.project_id, &predecessor)?
+                .unwrap_or(true);
+            println!("   WARNING: clearing supersedes made {predecessor} is_latest={is_latest}");
+        }
+    }
+    Ok(())
+}
+
 /// The one-line summary of what a page was written as.
 fn describe_page(frontmatter: &anamnesis_core::page::Frontmatter) -> String {
     let mut parts = vec![frontmatter.tier.as_str().to_owned()];
@@ -278,12 +455,16 @@ pub fn cmd_show_page(path: &str, data_dir: Option<PathBuf>) -> anyhow::Result<()
         );
     }
 
-    let page = wiki.read_page(&scope.scope, &page_path)?;
-    let fm = &page.frontmatter;
+    let page = wiki.read_versioned_page(&scope.scope, &page_path)?;
+    let fm = &page.parsed.frontmatter;
 
     println!("📄 {}", fm.title);
     println!("   {page_path}");
     println!("   {} · {}", fm.tier.as_str(), fm.status.as_str());
+    println!("   revision {}", page.revision);
+    if let Some(source) = fm.session {
+        println!("   source session {source}");
+    }
     if fm.pinned {
         println!("   pinned");
     }
@@ -307,7 +488,7 @@ pub fn cmd_show_page(path: &str, data_dir: Option<PathBuf>) -> anyhow::Result<()
         println!("   entities: {}", names.join(", "));
     }
     println!();
-    println!("{}", page.body.trim_end());
+    println!("{}", page.parsed.body.trim_end());
     Ok(())
 }
 

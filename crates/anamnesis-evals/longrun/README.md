@@ -77,6 +77,12 @@ runs in which the session left it in a note outside `sessions/`: telling it on
 the session page is what happened, keeping it as a decision is the memory
 filling up with what nobody needs.
 
+S23 also names the affirmative title of the rejected `ledger.toml` option in
+`rejected_decisions`. `report` derives the current decision heads from the
+wiki's authored `supersedes` links and reports whether that rejected option
+survived as a current decision. The selftest removes the chosen page's
+supersedes link as a mutation and requires this probe to turn red.
+
 S19 asks for `--strict` rather than a better plain `import` because S08 has a
 bad row logged and skipped: by then a plain import of a bad file succeeds.
 

@@ -1,7 +1,7 @@
 //! MCP server implementation for anamnesis.
 //!
-//! Exposes six tools over the Model Context Protocol: `memory_query`,
-//! `memory_read_page`, `memory_write_page`, `memory_handoff_accept`,
+//! Exposes seven tools over the Model Context Protocol: `memory_query`,
+//! `memory_read_page`, `memory_write_page`, `memory_patch_page`, `memory_handoff_accept`,
 //! `workstream_start`, and `workstream_status`. All of them operate against
 //! one resolved scope — the project the server was started against — the same
 //! way `anamnesis serve` binds to one project's store and wiki rather than
@@ -19,6 +19,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -31,7 +32,7 @@ use anamnesis_core::session::AgentKind;
 use anamnesis_core::workstream::{Workstream, WorkstreamSlug};
 use anamnesis_llm::Embedder;
 use anamnesis_store::{Store, StreamBreakdown, new_session};
-use anamnesis_wiki::Wiki;
+use anamnesis_wiki::{ClearField, PagePatch, Wiki};
 use jiff::Timestamp;
 use parking_lot::Mutex;
 use rmcp::handler::server::wrapper::Parameters;
@@ -276,6 +277,78 @@ pub struct WritePageResponse {
     pub path: String,
     /// Git commit the write landed in.
     pub commit: String,
+    /// Opaque content revision to use for a later patch.
+    pub revision: String,
+}
+
+/// Request for [`AnamnesisMcp::memory_patch_page`].
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PatchPageRequest {
+    /// Existing project-relative path.
+    pub path: String,
+    /// Opaque revision returned by `memory_read_page`.
+    pub expected_revision: String,
+    /// Replacement title. Omit to preserve it.
+    pub title: Option<String>,
+    /// Replacement Markdown body. Omit to preserve it.
+    pub body: Option<String>,
+    /// Replacement temporal tier. Omit to preserve it.
+    pub tier: Option<String>,
+    /// Replacement authored trust status. Omit to preserve it.
+    pub status: Option<String>,
+    /// Replacement pin flag. Omit to preserve it.
+    pub pinned: Option<bool>,
+    /// Replacement canonical flag. Omit to preserve it.
+    pub canonical: Option<bool>,
+    /// Replacement entities. Omit to preserve them.
+    pub entities: Option<Vec<String>>,
+    /// Replacement expiry. Omit to preserve it.
+    pub expires_at: Option<String>,
+    /// Replacement supersession target. Omit to preserve it.
+    pub supersedes: Option<String>,
+    /// Replacement salience. Omit to preserve it.
+    pub salience: Option<f64>,
+    /// Replacement one-line abstract. Omit to preserve it.
+    #[serde(rename = "abstract")]
+    pub page_abstract: Option<String>,
+    /// Fields to remove explicitly: supersedes, expires_at, entities, abstract.
+    pub clear_fields: Option<Vec<String>>,
+    /// Select the workspace-shared scope instead of this project.
+    pub global: Option<bool>,
+}
+
+/// One supersession-chain consequence of a patch.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ChainEffect {
+    /// Page whose standing may have changed.
+    pub path: String,
+    /// Whether it is now the head of its chain.
+    pub is_latest: bool,
+}
+
+/// Response for [`AnamnesisMcp::memory_patch_page`].
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PatchPageResponse {
+    /// Patched path.
+    pub path: String,
+    /// Git commit containing the patch.
+    pub commit: String,
+    /// Opaque content revision after the patch.
+    pub revision: String,
+    /// Fields explicitly supplied.
+    pub changed: Vec<String>,
+    /// Existing fields kept because they were omitted.
+    pub preserved: Vec<String>,
+    /// Fields removed through `clear_fields`.
+    pub cleared: Vec<String>,
+    /// Whether this page is the head of its chain.
+    pub is_latest: bool,
+    /// Newer page replacing this one, when any.
+    pub superseded_by: Option<String>,
+    /// Predecessor standing changes caused by clearing or changing supersedes.
+    pub chain_effects: Vec<ChainEffect>,
+    /// Important consequences the caller should not mistake for an ordinary edit.
+    pub warnings: Vec<String>,
 }
 
 /// Request for [`AnamnesisMcp::memory_read_page`].
@@ -298,6 +371,8 @@ pub struct ReadPageResponse {
     pub title: String,
     /// The whole markdown body, untruncated. This is the point of the tool.
     pub body: String,
+    /// Opaque content revision required for a safe patch.
+    pub revision: String,
     /// Temporal tier: working, episodic, semantic, or procedural.
     pub tier: String,
     /// Trust status: active, historical, do-not-answer-from, or superseded.
@@ -307,6 +382,12 @@ pub struct ReadPageResponse {
     /// holding — and is the one status where the body is evidence about what
     /// was once believed rather than about what is true.
     pub status: String,
+    /// Effective trust state after applying the supersession chain.
+    pub effective_status: String,
+    /// Whether this page is the head of its supersession chain.
+    pub is_latest: bool,
+    /// Newer page replacing this one, when any.
+    pub superseded_by: Option<String>,
     /// Exempt from decay.
     pub pinned: bool,
     /// Declared authoritative on its subject.
@@ -319,6 +400,11 @@ pub struct ReadPageResponse {
     pub salience: f64,
     /// RFC 3339 instant after which the page should be forgotten, if set.
     pub expires_at: Option<String>,
+    /// Authored one-line abstract, when present.
+    #[serde(rename = "abstract")]
+    pub page_abstract: Option<String>,
+    /// Session that first created this page through consolidation, if any.
+    pub source_session: Option<String>,
     /// True when the page came from the workspace's shared `_global` scope
     /// rather than this project.
     pub global: bool,
@@ -469,7 +555,7 @@ impl AnamnesisMcp {
 // requires approval, but approval policy is never" — and the agent, left
 // without its memory tools, went and grepped the wiki's files instead. With
 // these hints codex-cli 0.155.1 runs the three read-only tools unasked under
-// its default settings; the other three are marked as the writes they are, so
+// its default settings; the other four are marked as the writes they are, so
 // a harness that asks before writes still asks.
 #[tool_router(router = tool_router)]
 impl AnamnesisMcp {
@@ -496,14 +582,15 @@ impl AnamnesisMcp {
             .map_err(|error| error.to_string())
     }
 
-    /// Write or update a wiki page.
+    /// Create a wiki page.
     ///
-    /// Writing the same path again replaces its content and adds a new git
-    /// commit; the page's identity (and therefore its decay history) does not
-    /// change, because page identifiers are derived from `(project, path)`.
+    /// An existing path is rejected: updating it requires first reading its
+    /// revision and then calling `memory_patch_page`, so omitted frontmatter
+    /// cannot silently reset metadata and concurrent editors cannot overwrite
+    /// one another.
     #[tool(
         name = "memory_write_page",
-        description = "Write or update a page in the project's memory wiki.",
+        description = "Create a new page in the project's memory wiki. Existing paths are rejected; use memory_patch_page to update one.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -516,6 +603,26 @@ impl AnamnesisMcp {
         params: Parameters<WritePageRequest>,
     ) -> Result<Json<WritePageResponse>, String> {
         self.write_page(params.0)
+            .map(Json)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Patch an existing wiki page without resetting omitted metadata.
+    #[tool(
+        name = "memory_patch_page",
+        description = "Patch an existing page after reading its revision. Omitted fields are preserved; nullable fields are removed only through clear_fields.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    pub async fn memory_patch_page(
+        &self,
+        params: Parameters<PatchPageRequest>,
+    ) -> Result<Json<PatchPageResponse>, String> {
+        self.patch_page(params.0)
             .map(Json)
             .map_err(|error| error.to_string())
     }
@@ -625,8 +732,9 @@ impl ServerHandler for AnamnesisMcp {
              snippets: when a hit looks like the answer, call memory_read_page with its path and global flag \
              to read the page in full rather than querying again with different words — a \
              snippet is enough to choose a page and not enough to act on one. Call \
-             memory_write_page to record durable knowledge — decisions, gotchas, procedures — \
-             worth keeping past this session; ordinary session summaries are written \
+             memory_write_page to create durable knowledge — decisions, gotchas, procedures — \
+             worth keeping past this session. To update an existing page, read its revision and \
+             call memory_patch_page; omitted fields are preserved there. Ordinary session summaries are written \
              automatically and do not need this tool. If this project has more than one \
              thread of work going at once, call workstream_start with a short slug before \
              memory_handoff_accept and name that slug there too — each workstream keeps its \
@@ -804,10 +912,28 @@ impl AnamnesisMcp {
             frontmatter,
             request.body.clone(),
         );
-        let commit = {
+        let written = {
             let wiki = self.wiki.lock();
-            wiki.write_page(&self.scope.scope, &page, &format!("mcp: write {path}"))?
+            match wiki.create_page(&self.scope.scope, &page, &format!("mcp: create {path}")) {
+                Ok(written) => written,
+                Err(anamnesis_wiki::WikiError::AlreadyExists(_)) => {
+                    let current = wiki.read_versioned_page(&self.scope.scope, &path)?;
+                    let current_frontmatter = serde_json::to_string(&current.parsed.frontmatter)
+                        .unwrap_or_else(|_| "<could not serialize frontmatter>".to_owned());
+                    let replacement = self
+                        .store
+                        .superseded_by(self.scope.project_id, &path)?
+                        .map(|newer| format!("; this page was superseded by {newer}"))
+                        .unwrap_or_default();
+                    return Err(McpError::Invalid(format!(
+                        "page {path} already exists at revision {}{replacement}; current frontmatter: {current_frontmatter}. Read it with memory_read_page, then use memory_patch_page with expected_revision",
+                        current.revision
+                    )));
+                }
+                Err(error) => return Err(error.into()),
+            }
         };
+        let commit = written.commit;
         page.git_commit = Some(commit.clone());
         self.note(
             anamnesis_core::audit::Action::PageWritten,
@@ -840,6 +966,168 @@ impl AnamnesisMcp {
         Ok(WritePageResponse {
             path: path.as_str().to_owned(),
             commit,
+            revision: written.revision,
+        })
+    }
+
+    fn patch_page(&self, request: PatchPageRequest) -> Result<PatchPageResponse, McpError> {
+        let path = PagePath::parse(&request.path)?;
+        let target = if request.global.unwrap_or(false) {
+            self.global_scope()
+        } else {
+            self.scope.clone()
+        };
+
+        let entities = request
+            .entities
+            .as_ref()
+            .map(|names| {
+                names
+                    .iter()
+                    .map(|name| Entity::parse(name))
+                    .collect::<anamnesis_core::Result<Vec<_>>>()
+            })
+            .transpose()?;
+        let expires_at = request
+            .expires_at
+            .as_ref()
+            .map(|value| {
+                value
+                    .parse()
+                    .map_err(|_| McpError::Invalid(format!("expires_at {value:?} is not RFC 3339")))
+            })
+            .transpose()?;
+        let mut clear = BTreeSet::new();
+        for name in request.clear_fields.unwrap_or_default() {
+            let field = match name.as_str() {
+                "supersedes" => ClearField::Supersedes,
+                "expires_at" => ClearField::ExpiresAt,
+                "entities" => ClearField::Entities,
+                "abstract" => ClearField::Abstract,
+                _ => {
+                    return Err(McpError::Invalid(format!(
+                        "clear_fields contains {name:?}; allowed fields are supersedes, expires_at, entities, abstract"
+                    )));
+                }
+            };
+            clear.insert(field);
+        }
+        let patch = PagePatch {
+            title: request.title,
+            body: request.body,
+            tier: request
+                .tier
+                .as_deref()
+                .map(|value| parse_tier(Some(value)))
+                .transpose()?,
+            status: request
+                .status
+                .as_deref()
+                .map(|value| parse_status(Some(value)))
+                .transpose()?,
+            pinned: request.pinned,
+            canonical: request.canonical,
+            entities,
+            expires_at,
+            supersedes: request
+                .supersedes
+                .as_deref()
+                .map(PagePath::parse)
+                .transpose()?,
+            salience: request.salience,
+            page_abstract: request.page_abstract,
+            clear,
+        };
+
+        let mut written = {
+            let wiki = self.wiki.lock();
+            wiki.patch_page(
+                &target.scope,
+                target.project_id,
+                &path,
+                &request.expected_revision,
+                &patch,
+                &format!("mcp: patch {path}"),
+            )?
+        };
+        written.page.git_commit = Some(written.commit.clone());
+        let now = Timestamp::now();
+        self.store.upsert_project(&target, now)?;
+        let links = anamnesis_wiki::extract_links(&written.page.body);
+        self.store.index_page(
+            target.project_id,
+            &written.page,
+            &links,
+            self.embedder
+                .as_deref()
+                .map(|embedder| embedder as &dyn anamnesis_core::embedding::Embed),
+            now,
+        )?;
+        self.note(
+            anamnesis_core::audit::Action::PageWritten,
+            path.to_string(),
+            Some(format!(
+                "patch commit {}",
+                &written.commit[..written.commit.len().min(8)]
+            )),
+            None,
+        );
+
+        let is_latest = self
+            .store
+            .page_is_latest(target.project_id, &path)?
+            .unwrap_or(true);
+        let superseded_by = self
+            .store
+            .superseded_by(target.project_id, &path)?
+            .map(|newer| newer.as_str().to_owned());
+        let mut affected = BTreeSet::new();
+        if let Some(previous) = &written.previous_supersedes {
+            affected.insert(previous.clone());
+        }
+        if let Some(current) = &written.page.frontmatter.supersedes {
+            affected.insert(current.clone());
+        }
+        let chain_effects = affected
+            .into_iter()
+            .map(|affected_path| {
+                Ok(ChainEffect {
+                    is_latest: self
+                        .store
+                        .page_is_latest(target.project_id, &affected_path)?
+                        .unwrap_or(true),
+                    path: affected_path.as_str().to_owned(),
+                })
+            })
+            .collect::<Result<Vec<_>, McpError>>()?;
+        let mut warnings = Vec::new();
+        if let Some(newer) = &superseded_by {
+            warnings.push(format!(
+                "this page remains retired; it was superseded by {newer}"
+            ));
+        }
+        if written.cleared.iter().any(|field| field == "supersedes") {
+            for effect in &chain_effects {
+                if effect.is_latest {
+                    warnings.push(format!(
+                        "clearing supersedes made {} a chain head again",
+                        effect.path
+                    ));
+                }
+            }
+        }
+
+        Ok(PatchPageResponse {
+            path: path.as_str().to_owned(),
+            commit: written.commit,
+            revision: written.revision,
+            changed: written.changed,
+            preserved: written.preserved,
+            cleared: written.cleared,
+            is_latest,
+            superseded_by,
+            chain_effects,
+            warnings,
         })
     }
 
@@ -850,10 +1138,10 @@ impl AnamnesisMcp {
         // shared policy while this project holds a different page at its path.
         // Keep project-first fallback only for callers of the original API.
         let global = self.global_scope();
-        let (parsed, scope_project_id, from_global) = match request.global {
+        let (versioned, scope_project_id, from_global) = match request.global {
             Some(from_global) => {
                 let scope = if from_global { &global } else { &self.scope };
-                let parsed = self.read_from_scope(&scope.scope, &path)?.ok_or_else(|| {
+                let versioned = self.read_from_scope(&scope.scope, &path)?.ok_or_else(|| {
                     McpError::Invalid(format!(
                         "no page at {path} in {}",
                         if from_global {
@@ -863,12 +1151,12 @@ impl AnamnesisMcp {
                         }
                     ))
                 })?;
-                (parsed, scope.project_id, from_global)
+                (versioned, scope.project_id, from_global)
             }
             None => match self.read_from_scope(&self.scope.scope, &path)? {
-                Some(parsed) => (parsed, self.scope.project_id, false),
+                Some(versioned) => (versioned, self.scope.project_id, false),
                 None => match self.read_from_scope(&global.scope, &path)? {
-                    Some(parsed) => (parsed, global.project_id, true),
+                    Some(versioned) => (versioned, global.project_id, true),
                     None => {
                         return Err(McpError::Invalid(format!(
                             "no page at {path} in this project or the workspace's shared scope"
@@ -888,13 +1176,32 @@ impl AnamnesisMcp {
             tracing::warn!(%error, %path, "page was read but its access was not recorded");
         }
 
+        let is_latest = self
+            .store
+            .page_is_latest(scope_project_id, &path)?
+            .unwrap_or(true);
+        let superseded_by = self
+            .store
+            .superseded_by(scope_project_id, &path)?
+            .map(|newer| newer.as_str().to_owned());
+        let revision = versioned.revision;
+        let parsed = versioned.parsed;
         let frontmatter = parsed.frontmatter;
+        let authored_status = frontmatter.status.as_str().to_owned();
         Ok(ReadPageResponse {
             path: path.as_str().to_owned(),
             title: frontmatter.title,
             body: parsed.body,
+            revision,
             tier: frontmatter.tier.as_str().to_owned(),
-            status: frontmatter.status.as_str().to_owned(),
+            status: authored_status.clone(),
+            effective_status: if is_latest {
+                authored_status
+            } else {
+                "superseded".to_owned()
+            },
+            is_latest,
+            superseded_by,
             pinned: frontmatter.pinned,
             canonical: frontmatter.canonical,
             entities: frontmatter
@@ -907,6 +1214,8 @@ impl AnamnesisMcp {
                 .map(|target| target.as_str().to_owned()),
             salience: frontmatter.salience,
             expires_at: frontmatter.expires_at.map(|at| at.to_string()),
+            page_abstract: frontmatter.page_abstract,
+            source_session: frontmatter.session.map(|id| id.to_string()),
             global: from_global,
         })
     }
@@ -922,9 +1231,9 @@ impl AnamnesisMcp {
         &self,
         scope: &anamnesis_core::scope::Scope,
         path: &PagePath,
-    ) -> Result<Option<anamnesis_wiki::ParsedPage>, McpError> {
+    ) -> Result<Option<anamnesis_wiki::VersionedPage>, McpError> {
         let wiki = self.wiki.lock();
-        match wiki.read_page(scope, path) {
+        match wiki.read_versioned_page(scope, path) {
             Ok(parsed) => Ok(Some(parsed)),
             Err(anamnesis_wiki::WikiError::Io { source, .. })
                 if source.kind() == std::io::ErrorKind::NotFound =>
@@ -1257,6 +1566,7 @@ mod tests {
             names,
             [
                 "memory_handoff_accept",
+                "memory_patch_page",
                 "memory_query",
                 "memory_read_page",
                 "memory_write_page",
@@ -1708,6 +2018,174 @@ mod tests {
         assert_eq!(page.entities, vec!["token cap".to_owned()]);
         assert_eq!(page.supersedes.as_deref(), Some("gotchas/older.md"));
         assert_eq!(page.salience, 2.5);
+    }
+
+    #[test]
+    fn patch_preserves_metadata_and_clear_fields_changes_the_chain_explicitly() {
+        let (_repo, _data, server) = harness();
+        write_page(
+            &server,
+            "decisions/old.md",
+            "Old decision",
+            "The earlier answer.",
+        );
+        let created = server
+            .write_page(WritePageRequest {
+                path: "decisions/current.md".to_owned(),
+                title: "Current decision".to_owned(),
+                body: "The current answer.".to_owned(),
+                tier: Some("semantic".to_owned()),
+                status: Some("active".to_owned()),
+                pinned: Some(true),
+                canonical: Some(true),
+                entities: Some(vec!["handoff".to_owned()]),
+                expires_at: None,
+                supersedes: Some("decisions/old.md".to_owned()),
+                salience: Some(2.0),
+            })
+            .expect("create replacement");
+
+        let patched = server
+            .patch_page(PatchPageRequest {
+                path: "decisions/current.md".to_owned(),
+                expected_revision: created.revision,
+                title: Some("Better current decision".to_owned()),
+                body: Some("The corrected answer.".to_owned()),
+                tier: None,
+                status: None,
+                pinned: None,
+                canonical: None,
+                entities: None,
+                expires_at: None,
+                supersedes: None,
+                salience: None,
+                page_abstract: None,
+                clear_fields: None,
+                global: None,
+            })
+            .expect("patch");
+        for field in ["tier", "pinned", "canonical", "entities", "supersedes"] {
+            assert!(
+                patched.preserved.iter().any(|kept| kept == field),
+                "{field}"
+            );
+        }
+        let current = server
+            .read_page(ReadPageRequest {
+                path: "decisions/current.md".to_owned(),
+                global: Some(false),
+            })
+            .unwrap();
+        assert_eq!(current.tier, "semantic");
+        assert!(current.pinned);
+        assert!(current.canonical);
+        assert_eq!(current.entities, vec!["handoff"]);
+        assert_eq!(current.supersedes.as_deref(), Some("decisions/old.md"));
+        let old = server
+            .read_page(ReadPageRequest {
+                path: "decisions/old.md".to_owned(),
+                global: Some(false),
+            })
+            .unwrap();
+        assert!(!old.is_latest);
+        assert_eq!(old.status, "active", "authored status remains visible");
+        assert_eq!(old.effective_status, "superseded");
+        assert_eq!(old.superseded_by.as_deref(), Some("decisions/current.md"));
+
+        let retired_patch = server
+            .patch_page(PatchPageRequest {
+                path: "decisions/old.md".to_owned(),
+                expected_revision: old.revision,
+                title: None,
+                body: Some("Clarified old context.".to_owned()),
+                tier: None,
+                status: None,
+                pinned: None,
+                canonical: None,
+                entities: None,
+                expires_at: None,
+                supersedes: None,
+                salience: None,
+                page_abstract: None,
+                clear_fields: None,
+                global: None,
+            })
+            .expect("patch retired page");
+        assert!(!retired_patch.is_latest);
+        assert_eq!(
+            retired_patch.superseded_by.as_deref(),
+            Some("decisions/current.md")
+        );
+        assert!(
+            retired_patch
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("remains retired"))
+        );
+
+        let cleared = server
+            .patch_page(PatchPageRequest {
+                path: "decisions/current.md".to_owned(),
+                expected_revision: patched.revision,
+                title: None,
+                body: None,
+                tier: None,
+                status: None,
+                pinned: None,
+                canonical: None,
+                entities: None,
+                expires_at: None,
+                supersedes: None,
+                salience: None,
+                page_abstract: None,
+                clear_fields: Some(vec!["supersedes".to_owned()]),
+                global: None,
+            })
+            .expect("clear supersedes");
+        assert_eq!(cleared.cleared, vec!["supersedes"]);
+        assert!(
+            cleared
+                .chain_effects
+                .iter()
+                .any(|effect| { effect.path == "decisions/old.md" && effect.is_latest })
+        );
+        assert!(cleared.warnings.iter().any(|warning| {
+            warning.contains("decisions/old.md") && warning.contains("chain head")
+        }));
+        assert!(
+            server
+                .read_page(ReadPageRequest {
+                    path: "decisions/old.md".to_owned(),
+                    global: Some(false),
+                })
+                .unwrap()
+                .is_latest
+        );
+    }
+
+    #[test]
+    fn write_refuses_an_existing_path_and_names_the_safe_update_contract() {
+        let (_repo, _data, server) = harness();
+        write_page(&server, "notes/existing.md", "Existing", "original");
+        let error = server
+            .write_page(WritePageRequest {
+                path: "notes/existing.md".to_owned(),
+                title: "Replacement".to_owned(),
+                body: "would overwrite".to_owned(),
+                tier: None,
+                status: None,
+                pinned: None,
+                canonical: None,
+                entities: None,
+                expires_at: None,
+                supersedes: None,
+                salience: None,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already exists at revision"), "{error}");
+        assert!(error.contains("current frontmatter"), "{error}");
+        assert!(error.contains("memory_patch_page"), "{error}");
     }
 
     /// A path out of a `memory_query` hit resolves whichever scope it came

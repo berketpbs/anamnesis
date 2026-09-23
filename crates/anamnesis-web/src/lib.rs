@@ -1009,7 +1009,14 @@ async fn deliver_handoff(
             Ok(found) => anamnesis_core::brief::standing(
                 &found
                     .into_iter()
-                    .map(|(path, title)| anamnesis_core::brief::Standing { path, title })
+                    .map(|decision| anamnesis_core::brief::Standing {
+                        path: decision.path,
+                        title: decision.title,
+                        as_of: decision.updated_at.to_string().chars().take(10).collect(),
+                        source_session: decision.source_session.map(|session| {
+                            session.to_string().chars().take(8).collect()
+                        }),
+                    })
                     .collect::<Vec<_>>(),
                 &scope.recall,
             ),
@@ -3258,27 +3265,70 @@ mod tests {
             }],
         };
 
-        let mut last = None;
-        for body in ["First reading.", "Second reading."] {
-            last = Some(
-                recompile(
-                    &harness.state.store,
-                    &harness.state.wiki.lock(),
-                    &scope,
-                    &closed,
-                    &read_again(body),
-                    Provenance::counted(),
-                    None,
-                    now(),
-                )
-                .expect("recompiled"),
-            );
-        }
+        recompile(
+            &harness.state.store,
+            &harness.state.wiki.lock(),
+            &scope,
+            &closed,
+            &read_again("First reading."),
+            Provenance::counted(),
+            None,
+            now(),
+        )
+        .expect("first recompile");
+
+        // Human curation between consolidations is not owned by the model.
+        // The next pass may update what the note says, but it must not turn a
+        // pinned semantic decision back into an unpinned procedural page or
+        // erase its chain/source metadata.
+        let current = harness
+            .state
+            .wiki
+            .lock()
+            .read_versioned_page(&scope.scope, &path)
+            .expect("versioned page");
+        let original_source = current.parsed.frontmatter.session;
+        harness
+            .state
+            .wiki
+            .lock()
+            .patch_page(
+                &scope.scope,
+                scope.project_id,
+                &path,
+                &current.revision,
+                &anamnesis_wiki::PagePatch {
+                    tier: Some(anamnesis_core::page::Tier::Semantic),
+                    pinned: Some(true),
+                    canonical: Some(true),
+                    entities: Some(vec![
+                        anamnesis_core::page::Entity::parse("handoff").unwrap(),
+                    ]),
+                    supersedes: Some(
+                        anamnesis_core::page::PagePath::parse("gotchas/older.md").unwrap(),
+                    ),
+                    ..anamnesis_wiki::PagePatch::default()
+                },
+                "human: curate durable note",
+            )
+            .expect("curate note");
+
+        let last = recompile(
+            &harness.state.store,
+            &harness.state.wiki.lock(),
+            &scope,
+            &closed,
+            &read_again("Second reading."),
+            Provenance::counted(),
+            None,
+            now(),
+        )
+        .expect("second recompile");
 
         // What it wrote, said out loud. A recompile that reports one path
         // while three files changed is one somebody has to check against
         // `git log` to believe.
-        let reported = last.expect("two recompiles");
+        let reported = last;
         assert_eq!(reported.notes, vec![path.as_str().to_owned()]);
         assert!(
             reported.page.starts_with("sessions/"),
@@ -3293,6 +3343,22 @@ mod tests {
             .read_page(&scope.scope, &path)
             .expect("the note");
         assert!(parsed.body.contains("Second reading."), "{:?}", parsed.body);
+        assert_eq!(
+            parsed.frontmatter.tier,
+            anamnesis_core::page::Tier::Semantic
+        );
+        assert!(parsed.frontmatter.pinned);
+        assert!(parsed.frontmatter.canonical);
+        assert_eq!(parsed.frontmatter.entities[0].as_str(), "handoff");
+        assert_eq!(
+            parsed
+                .frontmatter
+                .supersedes
+                .as_ref()
+                .map(|path| path.as_str()),
+            Some("gotchas/older.md")
+        );
+        assert_eq!(parsed.frontmatter.session, original_source);
 
         let indexed = harness
             .state

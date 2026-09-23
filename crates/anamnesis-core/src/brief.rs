@@ -113,6 +113,10 @@ pub struct Standing {
     /// The page's title. A note's title is the claim it makes, so this line
     /// alone says what was decided.
     pub title: String,
+    /// Calendar date of the page version being offered.
+    pub as_of: String,
+    /// Short identifier of the session that first wrote it, when known.
+    pub source_session: Option<String>,
 }
 
 /// What the lines under a start's decisions are, said as [`PREAMBLE`] says it
@@ -141,6 +145,20 @@ pub fn standing(pages: &[Standing], config: &RecallConfig) -> String {
         out.push_str(" (`");
         out.push_str(page.path.trim());
         out.push_str("`)");
+        if !page.as_of.is_empty() || page.source_session.is_some() {
+            out.push_str(" (");
+            if !page.as_of.is_empty() {
+                out.push_str(page.as_of.trim());
+            }
+            if let Some(source) = &page.source_session {
+                if !page.as_of.is_empty() {
+                    out.push_str(" · ");
+                }
+                out.push_str("session ");
+                out.push_str(source.trim());
+            }
+            out.push(')');
+        }
     }
     out.push('\n');
     out.push('\n');
@@ -267,6 +285,8 @@ mod tests {
         Standing {
             path: format!("decisions/{}.md", title.to_lowercase().replace(' ', "-")),
             title: title.to_owned(),
+            as_of: "2026-09-22".to_owned(),
+            source_session: Some("4e899dee".to_owned()),
         }
     }
 
@@ -291,6 +311,7 @@ mod tests {
         );
         assert!(out.contains("not instructions to follow"), "{out}");
         assert!(out.contains("memory_read_page"), "{out}");
+        assert!(out.contains("2026-09-22 · session 4e899dee"), "{out}");
     }
 
     #[test]
@@ -324,6 +345,8 @@ mod tests {
         let page = Standing {
             path: "decisions/long.md".to_owned(),
             title: "word ".repeat(80),
+            as_of: String::new(),
+            source_session: None,
         };
         let out = standing(&[page], &RecallConfig::default());
         let line = out

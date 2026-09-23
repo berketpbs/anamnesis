@@ -129,7 +129,9 @@ Model Context Protocol server implementation.
 
 **Tools:**
 - `memory_query` - Search wiki
-- `memory_write_page` - Create wiki pages
+- `memory_read_page` - Read a page whole, with its content revision and effective standing
+- `memory_write_page` - Create wiki pages; reject an existing path
+- `memory_patch_page` - Update an existing revision, preserving omitted metadata
 - `memory_handoff_accept` - Accept session handoff
 - `workstream_start` - Start or resume a named thread of work
 - `workstream_status` - A workstream's status and event ledger
@@ -787,31 +789,32 @@ a person uses when something looks wrong.
 
 ### MCP tools
 
-Five, and the count is deliberate rather than settled — an agent that has to
+Seven, and the count is deliberate rather than settled — an agent that has to
 choose between eighteen tools spends its attention choosing.
 
 | Tool | What it is for |
 | --- | --- |
 | `memory_query` | The fused search, as the CLI and the browser run it |
-| `memory_write_page` | Write durable knowledge on purpose: a decision, a gotcha, a procedure |
+| `memory_read_page` | Read a page whole and obtain the revision required to update it safely |
+| `memory_write_page` | Create durable knowledge; an existing path is rejected |
+| `memory_patch_page` | Patch an existing revision; omitted metadata is preserved and clearing is explicit |
 | `memory_handoff_accept` | Claim the waiting handoff, which is single-use |
 | `workstream_start` | Name a thread of work so it keeps its own resume point |
 | `workstream_status` | What happened in one, as a ledger |
 
-`memory_query` returns snippets rather than whole pages. Nothing yet asks for
-a full body — see *Future work*.
+`memory_query` returns snippets rather than whole pages. `memory_read_page`
+reads a selected hit whole and reports authored and effective status separately.
 
 ### Command surface
 
-Thirty subcommands, which is a lot until they are grouped by the question
-they answer.
+The commands are grouped by the question they answer.
 
 | Group | Commands |
 | --- | --- |
 | Set up | `init`, `install-hooks`, `install-mcp`, `run`, `continue`, `uninstall` |
 | Run | `serve`, `hook`, `mcp`, `token` |
 | Read | `status`, `search`, `show-page`, `sessions`, `handoff`, `audit` |
-| Write | `write-page`, `bootstrap`, `reconsolidate`, `reindex` |
+| Write | `write-page`, `patch-page`, `bootstrap`, `reconsolidate`, `reindex` |
 | Forget | `forget`, `forget-session`, `sweep`, `purge` |
 | Maintain | `improve`, `rename`, `backup`, `restore` |
 | Measure | `eval`, `bench` |

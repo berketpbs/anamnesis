@@ -881,6 +881,22 @@ anamnesis write-page \
 or status is refused rather than defaulted, because filing a page as episodic
 when `semantic` was meant puts it where the sweep can reach it.
 
+`write-page` creates only. To update an existing page, first read its exact
+revision and then patch only the fields you mean to change:
+
+```bash
+anamnesis show-page decisions/0002-storage.md
+anamnesis patch-page \
+  --path decisions/0002-storage.md \
+  --expected-revision <revision-from-show-page> \
+  --body "Corrected decision text"
+```
+
+Omitted frontmatter is preserved and listed in the response. Nullable fields
+are removed only with an explicit `--clear-field`, for example
+`--clear-field supersedes`; doing that may make the predecessor current again,
+so the command prints the chain effect as a warning.
+
 ### Share a Page Across Projects
 
 Some things are true of every project you work on, not one of them. Those go
