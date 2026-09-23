@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Closing a terminal no longer hands the next agent silence.** A session
+  whose terminal is closed sends no end event, so until the reaper gave up on
+  it twelve hours later there was no page and no note, and the agent opened
+  beside it a minute later started as if nothing had happened before. When a
+  session starts, open sessions in the same slot that have been quiet for
+  `[sessions] handover_after_seconds` (default 120; 0 turns it off) are now
+  written up first and their note is handed to it. The quiet session is not
+  ended — the note says it is still open — and it is written up once per
+  silence, so a third terminal is not handed the note the second one took.
 - **Session handoffs keep a recorded resume checkpoint outside the model's
   judgement.** Consolidation now separates harness notifications from human
   prompts, puts the latest real request and the last four actions in a

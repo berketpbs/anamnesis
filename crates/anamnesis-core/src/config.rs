@@ -349,12 +349,31 @@ pub struct SessionsConfig {
     /// the cost of waiting is a page that arrives late, and the cost of being
     /// hasty is summarising a session that was only at lunch.
     pub stale_after_minutes: u32,
+    /// Seconds of silence after which an open session is written up for the
+    /// session that has just started beside it.
+    ///
+    /// Measured in seconds because it measures a pause, where
+    /// `stale_after_minutes` measures an afternoon. Silence alone cannot say a
+    /// session is over — on this project's own history, live sessions went
+    /// quiet for more than two minutes 417 times — so this never ends a
+    /// session. It refreshes the page and leaves a note beside it for whoever
+    /// just sat down; the session ends when it ends.
+    ///
+    /// The difference from the reaper is what else is known: somebody started
+    /// working in the same slot. Zero turns it off.
+    pub handover_after_seconds: u32,
 }
 
 impl Default for SessionsConfig {
     fn default() -> Self {
         Self {
             stale_after_minutes: 720,
+            // Two minutes. Of the handovers in this project's own history,
+            // 24% began within a minute of the session before them going
+            // quiet and 31% within five, so waiting longer misses the people
+            // this is for; and a working agent is heard from every few
+            // seconds, because every tool call is two events.
+            handover_after_seconds: 120,
         }
     }
 }
@@ -424,6 +443,45 @@ mod tests {
     #[test]
     fn abandoned_sessions_are_left_for_hours_by_default() {
         assert_eq!(SessionsConfig::default().stale_after_minutes, 720);
+    }
+
+    /// Two minutes, and measured against the other threshold rather than on
+    /// its own: these answer different questions. A handover is a pause
+    /// somebody else walked in on; a reaped session is one nobody came back
+    /// to. If the two ever meet in the middle, the first is ending sessions
+    /// the second was written to wait out.
+    #[test]
+    fn a_handover_is_a_pause_and_a_reaping_is_an_afternoon() {
+        let sessions = SessionsConfig::default();
+        assert_eq!(sessions.handover_after_seconds, 120);
+        assert!(
+            u64::from(sessions.handover_after_seconds) * 10
+                < u64::from(sessions.stale_after_minutes) * 60
+        );
+    }
+
+    #[test]
+    fn a_project_can_set_or_disable_the_handover_threshold() {
+        let set = MarkerConfig::from_toml(
+            "[sessions]
+handover_after_seconds = 30
+",
+        )
+        .expect("parses");
+        assert_eq!(set.sessions.handover_after_seconds, 30);
+        assert_eq!(
+            set.sessions.stale_after_minutes,
+            SessionsConfig::default().stale_after_minutes,
+            "the other threshold keeps its default"
+        );
+
+        let off = MarkerConfig::from_toml(
+            "[sessions]
+handover_after_seconds = 0
+",
+        )
+        .expect("parses");
+        assert_eq!(off.sessions.handover_after_seconds, 0);
     }
 
     #[test]

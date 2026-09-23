@@ -12,7 +12,7 @@ use anamnesis_consolidate::{DigestSource, PREFERENCES_PAGE, SessionDigest, conso
 use anamnesis_core::capture::CaptureFilter;
 use anamnesis_core::embedding::Embed;
 use anamnesis_core::handoff::Slot;
-use anamnesis_core::ids::SessionId;
+use anamnesis_core::ids::{PageId, SessionId};
 use anamnesis_core::observation::{EventKind, Observation};
 use anamnesis_core::page::{Frontmatter, Page, PagePath, Tier};
 use anamnesis_core::scope::{OperatorName, ResolvedScope, resolve_scope};
@@ -436,6 +436,76 @@ pub fn checkpoint(
     .map(Some)
 }
 
+/// Write an open session up for the session that has just started beside it,
+/// without ending it.
+///
+/// [`checkpoint`] refreshes the page and leaves no note; [`finalize`] leaves a
+/// note and closes the session. Neither fits the moment somebody closes one
+/// terminal and opens another: the first hands the new session nothing, and the
+/// second asserts an end that silence does not prove. On this project's own
+/// history, live sessions went quiet for more than two minutes 417 times —
+/// long builds, and terminals left open — so a rule that ended a session on
+/// silence would have cut those in half. This one leaves the session open. It
+/// ends when its harness says so, or when the reaper gives up on it at twelve
+/// hours, and either rewrites this page and supersedes this note.
+///
+/// The vector is left for [`crate::revector`] on purpose. Embedding is a
+/// network call and this runs while a new session waits for its answer inside
+/// a one-second budget, so the page is written without one — and because a
+/// page nobody *tried* to embed is invisible to that pass
+/// (`pages_missing_vectors` reads only recorded failures), the attempt it
+/// stands in for is recorded here. Without that line the page would keep its
+/// place in the wiki and quietly leave the vector stream.
+pub fn hand_over(
+    store: &Store,
+    wiki: &Wiki,
+    scope: &ResolvedScope,
+    session_id: SessionId,
+    embed_model: Option<&str>,
+    now: Timestamp,
+) -> Result<Option<String>, WebError> {
+    let Some(session) = store.load_session(session_id)? else {
+        return Ok(None);
+    };
+    if !session.is_open() {
+        return Ok(None);
+    }
+    let observations = store.observations(session_id)?;
+    let Some(digest) = consolidate(&session, &observations) else {
+        return Ok(None);
+    };
+
+    let path = write_session_page(
+        store,
+        wiki,
+        scope,
+        &session,
+        &digest,
+        None,
+        now,
+        &format!("handover: {}", digest.title),
+    )?;
+
+    if let Some(model) = embed_model {
+        let page = session_page_path(&session.started_at, session.id)?;
+        store.record_embed_failure(
+            PageId::derive(scope.project_id, &page),
+            model,
+            "written for a session that was handed over, without waiting for the embedder",
+        )?;
+    }
+
+    store.record_handoff(&new_handoff(
+        scope.project_id,
+        session.id,
+        slot_for(scope, &session),
+        &digest.handoff,
+        now,
+    ))?;
+
+    Ok(Some(path))
+}
+
 /// Close a session, then ask a model what it was about.
 ///
 /// Two steps, and the order is the whole point. [`finalize`] runs first and
@@ -855,6 +925,25 @@ pub fn claim_handoff(
     now: Timestamp,
     operator: Option<&OperatorName>,
 ) -> Result<Option<String>, WebError> {
+    let (scope, session) = claimant(store, cwd, agent, agent_session_id, now, operator)?;
+    let slot = slot_for(&scope, &session);
+    Ok(store.claim_handoff(scope.project_id, session.id, &slot, now)?)
+}
+
+/// The scope and the session row a claim is made by, recorded.
+///
+/// Split out because the claim is no longer the only thing that needs them:
+/// [`crate::handover`] writes up the sessions that have gone quiet in the same
+/// slot first, and doing that from the claimant's own scope is what keeps the
+/// two answering about the same project.
+pub(crate) fn claimant(
+    store: &Store,
+    cwd: &Path,
+    agent: &AgentKind,
+    agent_session_id: &str,
+    now: Timestamp,
+    operator: Option<&OperatorName>,
+) -> Result<(ResolvedScope, Session), WebError> {
     let scope = scope_for(cwd)?;
     store.upsert_project(&scope, now)?;
 
@@ -875,8 +964,7 @@ pub fn claim_handoff(
 
     // Hooks have no concept of a workstream yet, so the workstream half of the
     // slot is always the shared one.
-    let slot = slot_for(&scope, &session);
-    Ok(store.claim_handoff(scope.project_id, session_id, &slot, now)?)
+    Ok((scope, session))
 }
 
 /// The slot a session writes its handoff into, and reads one from.

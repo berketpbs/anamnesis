@@ -1098,6 +1098,28 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// When a note was last written from this session, whatever became of it.
+    ///
+    /// For a session that is still open, and so may be written up more than
+    /// once: a note written after its last event already says everything it
+    /// has to say, and writing it again would hand a second person the note
+    /// the first one already took. Compared in Rust for the reason
+    /// [`Store::open_sessions`] gives.
+    pub fn last_handoff_from(&self, session_id: SessionId) -> Result<Option<Timestamp>> {
+        let conn = self.connection();
+        let mut statement =
+            conn.prepare("SELECT created_at FROM handoffs WHERE from_session = ?1")?;
+        let rows = statement.query_map(params![session_id.to_string()], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut latest: Option<Timestamp> = None;
+        for raw in rows {
+            let at = parse_time(&raw?);
+            latest = Some(latest.map_or(at, |seen| seen.max(at)));
+        }
+        Ok(latest)
+    }
+
     /// A project's sessions, most recent first.
     pub fn recent_sessions(
         &self,
