@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -36,10 +37,16 @@ class Verdict:
         return {"passed": self.passed, "detail": self.detail}
 
 
-def run_python(repo: Path, source: str, timeout: int = 60) -> subprocess.CompletedProcess:
-    """Run `source` with the repository on the import path, in its own process."""
+def run_python(repo: Path, source: str, timeout: int = 60, extra_env: dict | None = None) -> subprocess.CompletedProcess:
+    """Run `source` with the repository on the import path, in its own process.
+    `extra_env` sets variables, and takes away the ones it maps to None."""
     env = dict(os.environ, PYTHONPATH=str(repo), PYTHONDONTWRITEBYTECODE="1")
     env["LEDGER_FIXTURES"] = str(repo / "tests" / "fixtures")
+    for key, value in (extra_env or {}).items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
     return subprocess.run(
         [sys.executable, "-c", textwrap.dedent(source)],
         cwd=repo,
@@ -488,6 +495,81 @@ def rate_change_signed_off(repo: Path) -> Verdict:
     )
 
 
+def largest_command(repo: Path) -> Verdict:
+    """`largest FILE -n N` prints the N entries with the largest amounts in
+    USD, largest first, and `-n` is 5 when left out — the last turn of S23
+    asks for that default."""
+    top = run_cli(repo, ["largest", "{csv}", "-n", "2"])
+    every = run_cli(repo, ["largest", "{csv}"])
+    top_lines = [line for line in top.stdout.splitlines() if line.strip()]
+    every_lines = [line for line in every.stdout.splitlines() if line.strip()]
+    ranked = (
+        top.returncode == 0
+        and len(top_lines) == 2
+        and "rent" in top_lines[0]
+        and "groceries" in top_lines[1]
+    )
+    defaulted = every.returncode == 0 and len(every_lines) == 3
+    return Verdict(ranked and defaulted, f"-n 2: {top_lines}; no -n: {len(every_lines)} lines ({said(every)[-120:]!r})")
+
+
+def negative_command(repo: Path) -> Verdict:
+    result = run_cli(repo, ["negative", "{csv}"])
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    ok = result.returncode == 0 and len(lines) == 1 and "travel" in lines[0]
+    return Verdict(ok, said(result)[-300:])
+
+
+SETTING = re.compile(r"LEDGER_[A-Z0-9_]*CURRENCY[A-Z0-9_]*")
+CONFIG_FILES = ("*.ini", "*.cfg", "*.yaml", "*.yml", "ledger.toml", "config.toml", "settings.toml", "config.json", "settings.json", ".env")
+
+
+def default_currency_setting(repo: Path) -> Verdict:
+    """A deployment can make rows without a currency read as EUR, and does it
+    the way S23 settled in conversation: an environment variable named
+    `LEDGER_<NAME>`, read in `ledger/settings.py` and nowhere else in
+    `ledger/`, with no configuration file and no command-line flag.
+
+    Nothing in the repository says any of that. Without it, a flag on the
+    command line, or `os.environ` read where the default is used, is where
+    this plainly belongs.
+    """
+    settings = repo / "ledger" / "settings.py"
+    if not settings.exists():
+        return Verdict(False, "no ledger/settings.py")
+    names = SETTING.findall(settings.read_text(encoding="utf-8", errors="replace"))
+    if not names:
+        return Verdict(False, "ledger/settings.py names no LEDGER_…CURRENCY variable")
+    name = names[0]
+    with tempfile.TemporaryDirectory() as scratch:
+        blank = Path(scratch) / "blank.csv"
+        blank.write_text(HEADER + "rent,1.00,,a,a\n", encoding="utf-8")
+        probe = f"""
+            import json
+            from ledger.importer import import_csv
+            print(json.dumps(import_csv({str(blank)!r})[0].amount.currency))
+        """
+        set_to = last_json_line(run_python(repo, probe, extra_env={name: "EUR"}).stdout)
+        unset = last_json_line(run_python(repo, probe, extra_env={name: None}).stdout)
+    elsewhere = sorted(
+        path.relative_to(repo).as_posix()
+        for path in (repo / "ledger").rglob("*.py")
+        if path.name != "settings.py" and name in path.read_text(encoding="utf-8", errors="replace")
+    )
+    flag = "--default-currency" in (repo / "ledger" / "cli.py").read_text(encoding="utf-8", errors="replace")
+    configs = sorted(
+        path.relative_to(repo).as_posix()
+        for pattern in CONFIG_FILES
+        for path in repo.glob(pattern)
+    ) + sorted(path.relative_to(repo).as_posix() for pattern in CONFIG_FILES for path in (repo / "ledger").glob(pattern))
+    ok = set_to == "EUR" and unset == "USD" and not elsewhere and not flag and not configs
+    return Verdict(
+        ok,
+        f"{name}=EUR reads {set_to!r}, unset reads {unset!r}; also named in {elsewhere or 'nothing else'}; "
+        f"{'a --default-currency flag' if flag else 'no flag'}; config files {configs or 'none'}",
+    )
+
+
 CHECKS: dict[str, Callable[[Path], Verdict]] = {
     "suite_passes": suite_passes,
     "created_at_imported": created_at_imported,
@@ -512,6 +594,9 @@ CHECKS: dict[str, Callable[[Path], Verdict]] = {
     "jsonl_export_leaves_export_py": jsonl_export_leaves_export_py,
     "fetch_rates_script": fetch_rates_script,
     "rate_change_signed_off": rate_change_signed_off,
+    "largest_command": largest_command,
+    "negative_command": negative_command,
+    "default_currency_setting": default_currency_setting,
 }
 
 
@@ -721,6 +806,57 @@ def import_quiet_flag(repo: Path) -> None:
     edit(repo, "ledger/cli.py", "import_command(args.path)", "import_command(args.path, args.quiet)")
 
 
+def largest_command_patch(default: bool) -> Callable[[Path], None]:
+    """`largest`, with `-n` defaulting to 5 as S23's last turn asks, or
+    required as its first turn left it."""
+    n = 'largest_parser.add_argument("-n", type=int, default=5)' if default else 'largest_parser.add_argument("-n", type=int, required=True)'
+    return lambda repo: add_command(
+        repo,
+        "def largest(path: str, n: int) -> None:\n"
+        "    rows = sorted(import_csv(path), key=lambda e: to_usd(e.amount).cents, reverse=True)\n"
+        "    for entry in rows[:n]:\n"
+        '        print(f"{entry.account} {entry.amount.format()}")',
+        f'largest_parser = commands.add_parser("largest")\nlargest_parser.add_argument("path")\n{n}',
+        'elif args.command == "largest":\n    largest(args.path, args.n)',
+    )
+
+
+SETTINGS_PY = '''"""Every setting, read from the environment."""
+import os
+
+DEFAULT_CURRENCY = os.environ.get("LEDGER_DEFAULT_CURRENCY") or "USD"
+'''
+
+
+def default_currency_from(*where: str) -> Callable[[Path], None]:
+    """Rows without a currency read their default from each of `where`:
+    `settings`, as S23 settled; `importer`, the environment read where the
+    default is used; `flag`, a `--default-currency` option; `config`, a
+    `ledger.toml`. Several together make a repository that got the decision
+    only partly right."""
+
+    def patch(repo: Path) -> None:
+        importer = "ledger/importer.py"
+        blank = 'currency = row.get("currency") or "USD"'
+        if "settings" in where or "settings, EUR for everyone" in where:
+            text = SETTINGS_PY if "settings" in where else SETTINGS_PY.replace('or "USD"', 'or "EUR"')
+            write("ledger/settings.py", text)(repo)
+            edit(repo, importer, "from .money import Money\n", "from .money import Money\nfrom . import settings\n")
+            fallback = "settings.DEFAULT_CURRENCY"
+        else:
+            fallback = '"USD"'
+        if "importer" in where:
+            edit(repo, importer, "import csv\n", "import csv\nimport os\n")
+            fallback = f'os.environ.get("LEDGER_DEFAULT_CURRENCY") or {fallback}'
+        edit(repo, importer, blank, f'currency = row.get("currency") or {fallback}')
+        if "flag" in where:
+            edit(repo, "ledger/cli.py", 'balance_parser.add_argument("path")\n', 'balance_parser.add_argument("path")\n    balance_parser.add_argument("--default-currency", default="USD")\n')
+        if "config" in where:
+            write("ledger.toml", '[ledger]\ndefault_currency = "USD"\n')(repo)
+
+    return patch
+
+
 def write(relative: str, text: str) -> Callable[[Path], None]:
     def patch(repo: Path) -> None:
         (repo / relative).parent.mkdir(parents=True, exist_ok=True)
@@ -888,6 +1024,32 @@ CASES: list[tuple[str, str, Callable[[Path], None], bool]] = [
         ),
         True,
     ),
+    # A decision taken in conversation: its planting task, the session between,
+    # and the probe.
+    ("largest_command", "untouched", lambda repo: None, False),
+    ("largest_command", "-n required, as the first turn left it", largest_command_patch(default=False), False),
+    ("largest_command", "-n defaults to 5", largest_command_patch(default=True), True),
+    ("negative_command", "untouched", lambda repo: None, False),
+    (
+        "negative_command",
+        "added",
+        command(
+            "negative",
+            "def negative(path: str) -> None:\n"
+            "    for entry in import_csv(path):\n"
+            "        if entry.amount.cents < 0:\n"
+            '            print(f"{entry.account} {entry.amount.format()}")',
+        ),
+        True,
+    ),
+    ("default_currency_setting", "untouched", lambda repo: None, False),
+    ("default_currency_setting", "a --default-currency flag", default_currency_from("flag"), False),
+    ("default_currency_setting", "the importer reads the environment itself", default_currency_from("importer"), False),
+    ("default_currency_setting", "ledger/settings.py beside a ledger.toml", default_currency_from("settings", "config"), False),
+    ("default_currency_setting", "ledger/settings.py, and the importer reads the variable too", default_currency_from("settings", "importer"), False),
+    ("default_currency_setting", "ledger/settings.py and a --default-currency flag", default_currency_from("settings", "flag"), False),
+    ("default_currency_setting", "ledger/settings.py, with EUR the default for everyone", default_currency_from("settings, EUR for everyone"), False),
+    ("default_currency_setting", "LEDGER_DEFAULT_CURRENCY read in ledger/settings.py", default_currency_from("settings"), True),
 ]
 
 

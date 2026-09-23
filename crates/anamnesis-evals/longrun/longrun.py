@@ -20,7 +20,7 @@ judged by a check in checks.py that runs the code rather than asking a model.
     python longrun.py run --anamnesis PATH one repeat of the scenario, both arms
     python longrun.py report              every run so far, side by side
 
-A repeat asks the consolidation model about twenty-two sessions, more than a
+A repeat asks the consolidation model about twenty-five sessions, more than a
 free Gemini tier allows in a day, which is why it is meant to run once a night
 rather than all at once.
 """
@@ -39,6 +39,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 import urllib.error
@@ -172,7 +173,27 @@ def load_scenario(path: Path = SCENARIO) -> dict:
                     re.compile(pattern)
                 except re.error as error:
                     problems.append(f"{session['id']} knowledge {pattern!r}: {error}")
-        session["prompt"] = " ".join(session["prompt"].split())
+        # A session is one prompt, or a conversation: `turns`, each sent once
+        # the agent has answered the one before, all in one session. A probe
+        # stays one prompt, since `codex exec` takes one.
+        if ("prompt" in session) == ("turns" in session):
+            problems.append(f"{session['id']} needs exactly one of prompt and turns")
+            continue
+        turns = session["turns"] if "turns" in session else [session["prompt"]]
+        if not turns:
+            problems.append(f"{session['id']} has no turns")
+            continue
+        if len(turns) > 1 and session["kind"] == "probe":
+            problems.append(f"{session['id']} is a probe with several turns, which a Codex probe cannot send")
+        session["turns"] = [" ".join(turn.split()) for turn in turns]
+        session["prompt"] = session["turns"][0]
+        for pattern in session.get("noise", []):
+            try:
+                re.compile(pattern)
+            except re.error as error:
+                problems.append(f"{session['id']} noise {pattern!r}: {error}")
+        if "noise" in session and session["kind"] != "plant":
+            problems.append(f"{session['id']} names noise but plants nothing")
     if problems:
         raise SystemExit("scenario.toml: " + "; ".join(problems))
     return scenario
@@ -334,7 +355,10 @@ def summarize_stream(stream: str) -> dict:
     tools: Counter = Counter()
     tool_errors = 0
     init: dict = {}
-    result: dict = {}
+    # One per answer the agent gave: a conversation of several turns ends each
+    # of them with a result of its own. Turns, time, tokens and denials are
+    # that answer's alone and add up; the cost is the session's so far.
+    results: list[dict] = []
     for line in stream.splitlines():
         try:
             event = json.loads(line)
@@ -352,22 +376,37 @@ def summarize_stream(stream: str) -> dict:
                 if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error"):
                     tool_errors += 1
         elif kind == "result":
-            result = event
+            results.append(event)
+    result = results[-1] if results else {}
     mcp = {server.get("name"): server.get("status") for server in init.get("mcp_servers", []) or []}
-    denials = Counter(denial.get("tool_name", "?") for denial in result.get("permission_denials") or [])
-    usage = result.get("usage", {}) or {}
+    denials = Counter(
+        denial.get("tool_name", "?") for each in results for denial in each.get("permission_denials") or []
+    )
+
+    def total(field: str, of=lambda event: event):
+        """Summed over the answers that report it; None when none does."""
+        values = [of(each).get(field) for each in results if of(each).get(field) is not None]
+        return sum(values) if values else None
+
+    def usage(event: dict) -> dict:
+        return event.get("usage", {}) or {}
+
     return {
         "claude_session": init.get("session_id") or result.get("session_id"),
         "mcp_servers": mcp,
-        "turns": result.get("num_turns"),
+        "answers": len(results),
+        "turns": total("num_turns"),
         "cost_usd": result.get("total_cost_usd"),
-        "duration_s": round((result.get("duration_ms") or 0) / 1000, 1),
-        "is_error": result.get("is_error"),
+        "duration_s": round((total("duration_ms") or 0) / 1000, 1),
+        "is_error": any(each.get("is_error") for each in results) if results else None,
         "stop": result.get("subtype") or result.get("terminal_reason"),
-        "input_tokens": (usage.get("input_tokens") or 0)
-        + (usage.get("cache_read_input_tokens") or 0)
-        + (usage.get("cache_creation_input_tokens") or 0),
-        "output_tokens": usage.get("output_tokens"),
+        "input_tokens": sum(
+            (usage(each).get("input_tokens") or 0)
+            + (usage(each).get("cache_read_input_tokens") or 0)
+            + (usage(each).get("cache_creation_input_tokens") or 0)
+            for each in results
+        ),
+        "output_tokens": total("output_tokens", usage),
         "permission_denials": sum(denials.values()),
         "denials_by_tool": dict(denials),
         "tools": dict(tools),
@@ -522,24 +561,99 @@ def recall_asked(port: int, repo: Path, wiki: Path, prompt: str) -> dict | None:
     return {"blocks": 1, "pages": pages, "via": "asked"}
 
 
-def run_claude(claude: str, repo: Path, prompt: str, model: str, max_turns: int, mcp_config: Path | None, log: Path) -> dict:
-    started = time.time()
+def user_message(text: str) -> str:
+    """One turn of a conversation, as `--input-format stream-json` reads it."""
+    return json.dumps({"type": "user", "message": {"role": "user", "content": text}}) + "\n"
+
+
+def converse(args: list[str], repo: Path, turns: list[str]) -> tuple[str, str, int | None]:
+    """Hold one session through `turns`: each is sent once the answer to the
+    one before it has come back, and the session ends after the last.
+
+    Not one `claude -p` per turn with `--resume`: every process that exits
+    ends its session, and the server would summarise the conversation at its
+    first turn. Not every turn written at once either: queued on stdin, they
+    are answered as one prompt, and a decision taken in the second of four
+    turns would be nothing of the kind. This is how a person talks to an agent
+    in one terminal — the prompt hook fires once per turn and the session
+    starts and ends once, which is what was checked against Claude Code on
+    2026-09-23.
+    """
+    proc = subprocess.Popen(
+        args + ["--input-format", "stream-json"],
+        cwd=repo,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=claude_env(),
+    )
+    errors: list[str] = []
+    # Read beside the conversation, so that a full stderr pipe cannot stall it.
+    reader = threading.Thread(target=lambda: errors.append(proc.stderr.read()), daemon=True)
+    reader.start()
+    timed_out = threading.Event()
+
+    def stop() -> None:
+        timed_out.set()
+        proc.kill()
+
+    watchdog = threading.Timer(SESSION_TIMEOUT, stop)
+    watchdog.start()
+    lines: list[str] = []
     try:
-        proc = subprocess.run(
-            claude_args(claude, model, max_turns, mcp_config),
-            cwd=repo,
-            input=prompt,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=claude_env(),
-            timeout=SESSION_TIMEOUT,
-        )
-        stdout, stderr, code = proc.stdout, proc.stderr, proc.returncode
-    except subprocess.TimeoutExpired as expired:
-        stdout = expired.stdout.decode("utf-8", "replace") if isinstance(expired.stdout, bytes) else (expired.stdout or "")
-        stderr, code = "timed out", None
+        pending = iter(turns)
+        proc.stdin.write(user_message(next(pending)))
+        proc.stdin.flush()
+        for line in proc.stdout:
+            lines.append(line)
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") != "result":
+                continue
+            following = next(pending, None)
+            if following is None:
+                proc.stdin.close()
+            else:
+                proc.stdin.write(user_message(following))
+                proc.stdin.flush()
+        code = proc.wait()
+    except (BrokenPipeError, OSError):
+        # The agent went away mid-conversation; what it said so far is the log.
+        code = proc.wait()
+    finally:
+        watchdog.cancel()
+    reader.join(timeout=10)
+    stderr = "timed out" if timed_out.is_set() else "".join(errors)
+    return "".join(lines), stderr, None if timed_out.is_set() else code
+
+
+def run_claude(claude: str, repo: Path, turns: list[str], model: str, max_turns: int, mcp_config: Path | None, log: Path) -> dict:
+    started = time.time()
+    args = claude_args(claude, model, max_turns, mcp_config)
+    if len(turns) > 1:
+        stdout, stderr, code = converse(args, repo, turns)
+    else:
+        try:
+            proc = subprocess.run(
+                args,
+                cwd=repo,
+                input=turns[0],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=claude_env(),
+                timeout=SESSION_TIMEOUT,
+            )
+            stdout, stderr, code = proc.stdout, proc.stderr, proc.returncode
+        except subprocess.TimeoutExpired as expired:
+            stdout = expired.stdout.decode("utf-8", "replace") if isinstance(expired.stdout, bytes) else (expired.stdout or "")
+            stderr, code = "timed out", None
     log.write_text(stdout, encoding="utf-8")
     log.with_suffix(".stderr.txt").write_text(stderr, encoding="utf-8")
     summary = summarize_stream(stdout)
@@ -962,6 +1076,39 @@ def memory_files_read(stream: str) -> int:
     return count
 
 
+def plant_pages(run: dict, plant: str | None) -> list[tuple[str, str]] | None:
+    """Every page a planting session left in one memory-arm run, with its
+    text: the ones consolidation wrote for it and the ones its agent wrote over
+    MCP. None for a run without its directory on disk or without that session."""
+    run_dir = run.get("_dir")
+    planted = next((r for r in run["sessions"] if r["arm"] == "memory" and r["session"] == plant), None)
+    if not run_dir or not plant or planted is None:
+        return None
+    wiki = Path(run_dir) / "memory" / "data" / "wiki" / "longrun" / f"ledger-{run['run'].lower()}"
+    planted_session, written = planted_pages(run, plant)
+    pages = session_pages(wiki, planted_session)
+    for path in sorted(written - {path for path, _ in pages}):
+        if (wiki / path).is_file():
+            pages.append((path, (wiki / path).read_text(encoding="utf-8", errors="replace")))
+    return pages
+
+
+def noise_kept(pages: list[tuple[str, str]], noise: list[str]) -> list[str]:
+    """The pages outside `sessions/` that carry any of `noise`, case aside.
+
+    `noise` is what a planting session is told that is not worth keeping — a
+    word said to check the session is being recorded. Its session page and the
+    handoff may mention it, since they tell what happened; a decision, gotcha
+    or procedure holding it is a note that should not have been written, and
+    on 2026-09-20 a test word like it became a decision of its own.
+    """
+    return sorted(
+        path
+        for path, text in pages
+        if not path.startswith("sessions/") and any(re.search(pattern, text, re.IGNORECASE) for pattern in noise)
+    )
+
+
 def knowledge_path(run: dict, record: dict, needs: str | None, knowledge: list[list[str]]) -> dict | None:
     """How far a probe's planted knowledge got in one memory-arm run.
 
@@ -974,19 +1121,11 @@ def knowledge_path(run: dict, record: dict, needs: str | None, knowledge: list[l
     None for a run without its directory on disk. Each answer is None where it
     cannot be said.
     """
-    run_dir = run.get("_dir")
-    planted = next((r for r in run["sessions"] if r["arm"] == "memory" and r["session"] == needs), None)
-    if not run_dir or not needs or planted is None:
+    pages = plant_pages(run, needs)
+    if pages is None:
         return None
-    run_dir = Path(run_dir)
-    wiki = run_dir / "memory" / "data" / "wiki" / "longrun" / f"ledger-{run['run'].lower()}"
-    planted_session, written = planted_pages(run, needs)
-    pages = session_pages(wiki, planted_session)
-    for path in sorted(written - {path for path, _ in pages}):
-        if (wiki / path).is_file():
-            pages.append((path, (wiki / path).read_text(encoding="utf-8", errors="replace")))
     paths = {path for path, _ in pages}
-    transcript = run_dir / "memory" / "sessions" / f"{record['session']}.jsonl"
+    transcript = Path(run["_dir"]) / "memory" / "sessions" / f"{record['session']}.jsonl"
     stream = transcript.read_text(encoding="utf-8", errors="replace") if transcript.exists() else None
     tools = (
         memory_tools_saw(stream, paths)
@@ -1041,7 +1180,7 @@ def isolation_check(claude: str, model: str, scratch: Path) -> dict:
     control arm with memory of its own.
     """
     scratch.mkdir(parents=True, exist_ok=True)
-    summary = run_claude(claude, scratch, ISOLATION_PROMPT, model, 2, None, scratch / "isolation.jsonl")
+    summary = run_claude(claude, scratch, [ISOLATION_PROMPT], model, 2, None, scratch / "isolation.jsonl")
     return {"answer": summary["answer"].strip(), "isolated": isolation_verdict(summary), "cost_usd": summary["cost_usd"]}
 
 
@@ -1539,7 +1678,7 @@ def run_one(args, claude: str, scenario: dict, session: dict, arm: str, repo: Pa
         page = None
     else:
         mcp_config = repo / ".mcp.json" if arm == "memory" else None
-        agent = run_claude(claude, repo, session["prompt"], args.model, args.max_turns, mcp_config, log)
+        agent = run_claude(claude, repo, session["turns"], args.model, args.max_turns, mcp_config, log)
         page = wait_for_page(data, project, agent["claude_session"], server_log, log_from) if arm == "memory" else None
         recall = recall_offered(data, project, agent["claude_session"]) if arm == "memory" else None
     diff = commit_session(repo, session["id"])
@@ -1758,6 +1897,35 @@ def report_lines(scenario: dict, runs: list[dict]) -> list[str]:
             f"{column('shown')} | {column('opened')} | {column('read_files')} | {column('passed')} |"
         )
 
+    # The other half of what a planting session leaves: not only whether the
+    # rule was kept, but whether what was said only in passing was kept as if
+    # it were one.
+    noisy = [session for session in scenario["session"] if session.get("noise")]
+    if noisy:
+        lines += [
+            "",
+            "## What a plant kept that it should not have",
+            "",
+            "Over the memory arm's runs: how many times a planting session left a note outside "
+            "`sessions/` holding something it was told only in passing (`noise` in scenario.toml), "
+            "such as a word said to check that the session was recorded. Its session page may say "
+            "it; a decision or gotcha should not.",
+            "",
+            "| Plant | Runs | Noted | Pages |",
+            "|---|---|---|---|",
+        ]
+        for session in noisy:
+            found = [
+                noise_kept(pages, session["noise"])
+                for run in runs
+                if (pages := plant_pages(run, session["id"])) is not None
+            ]
+            where = sorted({path for paths in found for path in paths})
+            lines.append(
+                f"| {session['id']} | {len(found)} | {sum(bool(paths) for paths in found)} | "
+                f"{', '.join(f'`{path}`' for path in where) or '—'} |"
+            )
+
     lines += [
         "",
         "## Effort per session",
@@ -1938,6 +2106,109 @@ def cmd_selftest(_: argparse.Namespace) -> int:
         print(f"FAIL summarize_stream: {wrong}")
         return 1
     print("ok   summarize_stream reads turns, tokens, tool errors, memory calls and what was refused")
+
+    # A conversation ends each answer with a result of its own. Its turns,
+    # tokens and refusals are that answer's and add up; its cost is the
+    # session's so far, as Claude Code reported it on 2026-09-23.
+    conversation = "\n".join(
+        json.dumps(
+            {
+                "type": "result",
+                "session_id": "s",
+                "num_turns": turns,
+                "total_cost_usd": cost,
+                "duration_ms": 1000,
+                "usage": {"input_tokens": 10, "output_tokens": 2},
+                "permission_denials": [{"tool_name": "Bash"}] * refused,
+                "result": answer,
+            }
+        )
+        for turns, cost, refused, answer in ((3, 0.011, 1, "OK"), (1, 0.014, 0, "BANANA"), (2, 0.017, 1, "PELICAN"))
+    )
+    summary = summarize_stream(conversation)
+    expected = {
+        "answers": 3,
+        "turns": 6,
+        "cost_usd": 0.017,
+        "duration_s": 3.0,
+        "input_tokens": 30,
+        "output_tokens": 6,
+        "permission_denials": 2,
+        "answer": "PELICAN",
+    }
+    wrong = {key: summary[key] for key, value in expected.items() if summary[key] != value}
+    if wrong:
+        print(f"FAIL summarize_stream over a conversation: {wrong}")
+        return 1
+    print("ok   summarize_stream adds a conversation's answers up and keeps its last cost")
+
+    # Every session is one prompt or a conversation, and a probe is one prompt
+    # because a Codex probe can send no more.
+    for label, session, complaint in (
+        ("both prompt and turns", {"prompt": "a", "turns": ["a"]}, "exactly one of prompt and turns"),
+        ("neither", {}, "exactly one of prompt and turns"),
+        ("a probe with two turns", {"kind": "probe", "turns": ["a", "b"]}, "several turns"),
+        ("noise on a probe", {"kind": "probe", "prompt": "a", "noise": ["X"]}, "names noise but plants nothing"),
+    ):
+        entry = {"id": "T1", "kind": "plant", "check": "suite_passes", **session}
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch) / "scenario.toml"
+            path.write_text(
+                "name = 't'\n[[session]]\n" + "".join(f"{key} = {json.dumps(value)}\n" for key, value in entry.items()),
+                encoding="utf-8",
+            )
+            try:
+                load_scenario(path)
+                said = ""
+            except SystemExit as error:
+                said = str(error)
+        if complaint not in said:
+            print(f"FAIL load_scenario accepts {label}: {said!r}")
+            return 1
+    print("ok   load_scenario takes a prompt or turns, and keeps a probe to one prompt")
+
+    # A conversation reaches the agent one turn at a time, in order, and ends
+    # when the last has been answered. The agent here takes its time over each
+    # answer while a thread of its own notes when every message arrives, so a
+    # turn sent before the one ahead of it was answered arrives early, and
+    # says so in the answer.
+    fake_agent = """
+import json, queue, sys, threading, time
+arrived = queue.Queue()
+def read():
+    for line in sys.stdin:
+        arrived.put((time.monotonic(), json.loads(line)["message"]["content"]))
+    arrived.put(None)
+threading.Thread(target=read, daemon=True).start()
+answered = 0.0
+while (item := arrived.get()) is not None:
+    at, text = item
+    early = "early" if at < answered else "after"
+    time.sleep(0.3)
+    answered = time.monotonic()
+    print(json.dumps({"type": "result", "num_turns": 1, "result": f"{text}:{early}"}), flush=True)
+"""
+    with tempfile.TemporaryDirectory() as scratch:
+        agent = Path(scratch) / "agent.py"
+        agent.write_text(fake_agent, encoding="utf-8")
+        stdout, _, code = converse([sys.executable, str(agent)], Path(scratch), ["first", "second", "third"])
+    answers = [event.get("result") for event in map(json.loads, stdout.splitlines())]
+    if code != 0 or answers != ["first:after", "second:after", "third:after"]:
+        print(f"FAIL converse: exit {code}, answers {answers}")
+        return 1
+    print("ok   converse sends each turn once the one before it is answered, and ends after the last")
+
+    # A word said in passing may be told on the session page; a note holding
+    # it is the mistake.
+    pages = [
+        ("sessions/2026-09-23-a.md", "The person gave the check word orchid-19."),
+        ("decisions/check-word.md", "The check word is ORCHID-19."),
+        ("decisions/settings.md", "Settings are LEDGER_ environment variables."),
+    ]
+    if noise_kept(pages, [r"ORCHID-19"]) != ["decisions/check-word.md"] or noise_kept(pages[:1] + pages[2:], [r"ORCHID-19"]):
+        print("FAIL noise_kept does not tell a note holding the word from a session page telling it")
+        return 1
+    print("ok   noise_kept counts a note that holds a passing word, not the session page that tells it")
 
     # A session that is given a shell it may not use spends turns finding that
     # out, so the tool is taken away rather than refused. Both arms are

@@ -6,7 +6,7 @@ something, do the right thing because memory kept it?
 
 ## What runs
 
-`scenario.toml` is twenty-two sessions on `fixture/`, a small Python bookkeeping
+`scenario.toml` is twenty-five sessions on `fixture/`, a small Python bookkeeping
 library. Every session is a headless `claude -p` and runs twice, once in each
 arm, on two copies of the fixture:
 
@@ -23,9 +23,9 @@ The sessions come in three kinds:
 
 | Kind | Sessions | What it does |
 |---|---|---|
-| plant | S01-S05, S13-S17 | the session finds out or is told something the repository does not say |
-| distractor | S06-S07 | unrelated work, so the plant is not simply the last page |
-| probe | S08-S12, S18-S22 | a task that needs a plant; its check is the measurement |
+| plant | S01-S05, S13-S17, S23 | the session finds out or is told something the repository does not say |
+| distractor | S06-S07, S24 | unrelated work, so the plant is not simply the last page |
+| probe | S08-S12, S18-S22, S25 | a task that needs a plant; its check is the measurement |
 
 The first five probes are also what stands between the second five plants
 and the first. In the second five, each planting session is an ordinary task
@@ -45,6 +45,37 @@ can, so a control arm that passes one has guessed.
 | S20 `export-jsonl` | S15: `export.py` stays as it is, formats go under `ledger/formats/` | the command works and `export.py` is unchanged |
 | S21 `tools/fetch_rates.py` | S16: the internal rates service and its header | the script names `fx.internal.example/v2/rates` and `X-Ledger-Team: finance` |
 | S22 GBP rate | S17: rate changes ask `@dana-fin` to sign off | GBP is 1.29 and `PR.md` names the rate and `@dana-fin` |
+| S25 default currency | S23: settings are `LEDGER_<NAME>` variables read in `ledger/settings.py` | the variable makes a blank currency EUR, nothing else in `ledger/` names it, and there is no flag or config file |
+
+### A decision taken in conversation
+
+S01-S22 are each told what they plant in a single prompt. S23 is how a
+decision is usually made: a conversation of four turns in one session. The
+agent builds a `largest` command, is then asked how the project should be
+made configurable, lists the options, and is told which one was chosen and
+which was dropped — environment variables named `LEDGER_<NAME>`, read only in
+`ledger/settings.py`, no `ledger.toml` and no flags — with nothing to build
+for it. A last turn goes back to `largest`, so the decision is neither the
+first nor the last thing the session did. No file says it, and no pull
+request carries it.
+
+A session with `turns` in `scenario.toml` is held open through all of them:
+each turn is sent once the agent has answered the one before it
+(`--input-format stream-json`), so the prompt hook fires once per turn and the
+session starts and ends once, which is how a person talks to an agent in one
+terminal. Neither of the easy ways does that: turns written at once are
+answered as one prompt, and a `claude -p --resume` per turn ends the session
+after every turn, so the server writes it up after the first.
+
+S24 is unrelated work between the plant and its probe, so the handoff waiting
+for S25 is S24's, and a pass has to come from what S23 left in memory. A probe
+stays one prompt, since `codex exec` takes one.
+
+The third turn also says, in passing, a word to check that the session is
+being recorded. `noise` in `scenario.toml` names it, and `report` counts the
+runs in which the session left it in a note outside `sessions/`: telling it on
+the session page is what happened, keeping it as a decision is the memory
+filling up with what nobody needs.
 
 S19 asks for `--strict` rather than a better plain `import` because S08 has a
 bad row logged and skipped: by then a plain import of a bad file succeeds.
@@ -171,7 +202,7 @@ another harness is another experiment.
 
 ## The model the memory arm writes with
 
-A repeat is twenty-two consolidation requests plus whatever the enrich pass
+A repeat is twenty-five consolidation requests plus whatever the enrich pass
 asks again, against a Google free tier of 20 per day per model that is shared
 with any server already running on the same key: more than a whole day's
 quota. The first complete run, of twelve sessions, spent it by S10. `settings.local.env.example` points the arm at a local Ollama model
@@ -183,7 +214,7 @@ measures nothing. Point a run at it with `--settings-env`, and leave it off to
 measure the setup this machine actually runs.
 
 A repeat of the first twelve sessions took 17 to 29 minutes in the three
-complete runs of 2026-09-21 and -22; twenty-two have not been timed yet. It costs a few dollars of agent usage, and on a free Gemini tier
+complete runs of 2026-09-21 and -22; twenty-five have not been timed yet. It costs a few dollars of agent usage, and on a free Gemini tier
 it asks the consolidation model for more than a day's quota, so repeats are
 meant to run one a night, on a paid key or the local model.
 
