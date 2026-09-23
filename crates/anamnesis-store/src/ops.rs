@@ -33,6 +33,33 @@ pub struct OpenSession {
     pub last_seen: Timestamp,
 }
 
+/// The newest note in a slot, as [`Store::latest_handoff`] finds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LatestHandoff {
+    /// The session it was written from.
+    pub from_session: SessionId,
+    /// What it says.
+    pub body: String,
+    /// When it was written.
+    pub written: Timestamp,
+    /// How recent the work it describes is: its session's last event before
+    /// it was written, or the writing itself when there was none.
+    ///
+    /// The two differ for a session written up while still open — a terminal
+    /// quiet for half an hour and written up now is half an hour old news —
+    /// and it is this one that says whether another session has done anything
+    /// since.
+    pub as_of: Timestamp,
+    /// Whether somebody dropped it rather than handing it on.
+    ///
+    /// A note superseded by a newer one is expired too, but then it is not
+    /// the newest; the newest being expired means it was discarded on
+    /// purpose, and must not come back.
+    pub dropped: bool,
+    /// The session that took it, if one has.
+    pub taken_by: Option<SessionId>,
+}
+
 /// What wrote a session's page.
 ///
 /// Kept apart from the model's name because the two answer different
@@ -1098,22 +1125,30 @@ impl Store {
         .map_err(Into::into)
     }
 
-    /// When the note waiting in a slot was written, if one is waiting.
+    /// The newest note written in a slot, whatever became of it.
     ///
-    /// For deciding whether a newer note may supersede it. A session that
-    /// went quiet *before* this note was written has nothing to say that the
-    /// note's author did not come after, and writing it up would expire the
-    /// note the person is most likely carrying on from. Compared in Rust for
-    /// the reason [`Store::open_sessions`] gives.
-    pub fn pending_handoff_written(
+    /// Two questions hang off it. Whether an open session beside a new one
+    /// has anything to say that this note's author did not come after — a
+    /// session that went quiet *before* the note was written has not, and
+    /// handing it over would put older work in front of newer. And, when
+    /// nothing is pending, what the new session should be told anyway: the
+    /// note already went to somebody, but it is still the latest account of
+    /// the slot, and a person switching agents twice in a minute expects the
+    /// third one to know it too.
+    ///
+    /// Compared in Rust for the reason [`Store::open_sessions`] gives. When two
+    /// notes share an instant — a counted note and the model's prose that
+    /// superseded it are written with the same timestamp — the one that was
+    /// not expired is the newer.
+    pub fn latest_handoff(
         &self,
         project_id: ProjectId,
         slot: &Slot,
-    ) -> Result<Option<Timestamp>> {
+    ) -> Result<Option<LatestHandoff>> {
         let conn = self.connection();
         let mut statement = conn.prepare(
-            "SELECT created_at FROM handoffs
-             WHERE project_id = ?1 AND state = 'pending'
+            "SELECT from_session, body, created_at, state, to_session FROM handoffs
+             WHERE project_id = ?1
                AND COALESCE(workstream_id, '') = COALESCE(?2, '')
                AND COALESCE(operator, '') = COALESCE(?3, '')",
         )?;
@@ -1123,36 +1158,67 @@ impl Store {
                 slot.workstream_key(),
                 slot.operator_key()
             ],
-            |row| row.get::<_, String>(0),
+            |row| {
+                Ok(LatestHandoff {
+                    from_session: parse_id(row.get::<_, String>(0)?),
+                    body: row.get(1)?,
+                    written: parse_time(&row.get::<_, String>(2)?),
+                    as_of: parse_time(&row.get::<_, String>(2)?),
+                    dropped: row.get::<_, String>(3)? == "expired",
+                    taken_by: row.get::<_, Option<String>>(4)?.map(parse_id),
+                })
+            },
         )?;
-        let mut latest: Option<Timestamp> = None;
-        for raw in rows {
-            let at = parse_time(&raw?);
-            latest = Some(latest.map_or(at, |seen| seen.max(at)));
+        let mut latest: Option<LatestHandoff> = None;
+        for row in rows {
+            let row = row?;
+            let newer = latest
+                .as_ref()
+                .is_none_or(|seen| (row.written, !row.dropped) > (seen.written, !seen.dropped));
+            if newer {
+                latest = Some(row);
+            }
+        }
+        drop(statement);
+
+        // What the note covers ends at its session's last event before it was
+        // written, not at the writing: a still-open session written up long
+        // after it went quiet is news only as of when it went quiet.
+        if let Some(note) = latest.as_mut() {
+            let mut events = conn.prepare("SELECT at FROM observations WHERE session_id = ?1")?;
+            let times = events.query_map(params![note.from_session.to_string()], |row| {
+                row.get::<_, String>(0)
+            })?;
+            let mut covered: Option<Timestamp> = None;
+            for raw in times {
+                let at = parse_time(&raw?);
+                if at <= note.written {
+                    covered = Some(covered.map_or(at, |seen| seen.max(at)));
+                }
+            }
+            if let Some(at) = covered {
+                note.as_of = at;
+            }
         }
         Ok(latest)
     }
 
-    /// When a note was last written from this session, whatever became of it.
+    /// The kind of a session's newest observation, if it has one.
     ///
-    /// For a session that is still open, and so may be written up more than
-    /// once: a note written after its last event already says everything it
-    /// has to say, and writing it again would hand a second person the note
-    /// the first one already took. Compared in Rust for the reason
-    /// [`Store::open_sessions`] gives.
-    pub fn last_handoff_from(&self, session_id: SessionId) -> Result<Option<Timestamp>> {
+    /// Whether an open session is in the middle of a turn or waiting on its
+    /// person: one whose last word was the agent's answer has finished what it
+    /// was asked and is idle until somebody types, however recently it spoke.
+    pub fn last_event_kind(&self, session_id: SessionId) -> Result<Option<EventKind>> {
         let conn = self.connection();
-        let mut statement =
-            conn.prepare("SELECT created_at FROM handoffs WHERE from_session = ?1")?;
-        let rows = statement.query_map(params![session_id.to_string()], |row| {
-            row.get::<_, String>(0)
-        })?;
-        let mut latest: Option<Timestamp> = None;
-        for raw in rows {
-            let at = parse_time(&raw?);
-            latest = Some(latest.map_or(at, |seen| seen.max(at)));
-        }
-        Ok(latest)
+        let kind = conn
+            .query_row(
+                "SELECT kind FROM observations WHERE session_id = ?1
+                 ORDER BY at DESC, rowid DESC LIMIT 1",
+                params![session_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(kind.as_deref().map(EventKind::from_storage))
     }
 
     /// A project's sessions, most recent first.
@@ -2179,6 +2245,48 @@ mod tests {
             None,
             "and nothing new was left waiting"
         );
+    }
+
+    /// The counted note and the model's prose that replaced it share an
+    /// instant — seen live, both at 01:35:10.1106461 — and the expired one of
+    /// the two must not read as the newest note having been dropped.
+    #[test]
+    fn the_newest_note_is_the_one_that_replaced_its_twin() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+        store
+            .record_handoff(&new_handoff(
+                project,
+                session.id,
+                Slot::shared(),
+                "counted",
+                now(),
+            ))
+            .expect("first");
+        store
+            .supersede_pending_handoff(&new_handoff(
+                project,
+                session.id,
+                Slot::shared(),
+                "the model's",
+                now(),
+            ))
+            .expect("supersede");
+        let claimant = next_session(&store, project, workspace);
+        store
+            .claim_handoff(project, claimant, &Slot::shared(), now())
+            .expect("claim");
+
+        let latest = store
+            .latest_handoff(project, &Slot::shared())
+            .expect("latest")
+            .expect("a note");
+
+        assert_eq!(latest.body, "the model's");
+        assert!(!latest.dropped);
+        assert_eq!(latest.taken_by, Some(claimant));
+        assert_eq!(latest.from_session, session.id);
     }
 
     /// The retry queue: counted means a model was asked and did not answer, or

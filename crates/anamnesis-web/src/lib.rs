@@ -978,7 +978,7 @@ async fn deliver_handoff(
         // closed rather than ended, and then there is nothing to claim. Writing
         // it up here is what makes the answer below the one the person expects
         // instead of the silence that means "there was nobody before you".
-        handover::hand_over_peers(
+        let swept = handover::hand_over_peers(
             &store,
             &wiki,
             embed_model.as_deref(),
@@ -988,7 +988,10 @@ async fn deliver_handoff(
             now,
         );
 
-        let claimed = store.claim_handoff(scope.project_id, session.id, &slot, now)?;
+        let claimed = match store.claim_handoff(scope.project_id, session.id, &slot, now)? {
+            Some(note) => Some(note),
+            None => handover::hand_on(&store, &scope, session.id, &slot, swept)?,
+        };
 
         // Only when there was one to take: a session that asked and found
         // nothing changed nothing, and every session asks.

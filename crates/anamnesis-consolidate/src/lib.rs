@@ -670,7 +670,7 @@ fn render_handoff(
         )
     } else {
         format!(
-            "A session still open beside this one ({}, started {}), quiet long enough to be handed over. This is where it had got to.\n",
+            "A session still open beside this one ({}, started {}). This is where it had got to.\n",
             session.agent, session.started_at
         )
     });

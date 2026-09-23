@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 
 use anamnesis_core::handoff::Slot;
 use anamnesis_core::ids::SessionId;
+use anamnesis_core::observation::EventKind;
 use anamnesis_core::scope::ResolvedScope;
 use anamnesis_store::Store;
 use jiff::Timestamp;
@@ -38,19 +39,20 @@ use jiff::Timestamp;
 use crate::WebError;
 use crate::pipeline;
 
-/// How many quiet sessions one claim will write up.
+/// How many sessions one claim will try before giving up on writing any.
 ///
-/// More than one because two terminals left open is ordinary; bounded because
-/// this runs while a new session waits for its answer. Whatever is left over is
-/// written up by the next claim, or by the reaper.
+/// More than one because the newest session beside a new one may have nothing
+/// worth a page — a terminal opened and closed again, say — and the one before
+/// it does. Bounded because this runs while a new session waits for its
+/// answer.
 const AT_MOST: usize = 4;
 
 /// How much of the claim's second this pass may spend before stopping.
 ///
 /// Checked *between* sessions, never before the first: the common case is one
-/// quiet session, and a budget that could skip it would make the whole pass a
-/// coin toss. The hook's own budget is one second (`anamnesis-cli`'s capture
-/// path), and what it does when that runs out is print a notice and carry on.
+/// session, and a budget that could skip it would make the whole pass a coin
+/// toss. The hook's own budget is one second (`anamnesis-cli`'s capture path),
+/// and what it does when that runs out is print a notice and carry on.
 const BUDGET: Duration = Duration::from_millis(750);
 
 /// How long to wait for the wiki when something else is writing to it.
@@ -59,27 +61,56 @@ const BUDGET: Duration = Duration::from_millis(750);
 /// with whatever is already pending, and a bad reason to make a person wait.
 const FOR_THE_WIKI: Duration = Duration::from_millis(200);
 
-/// The sessions this claim should write up: open, in the same slot, quiet for
-/// long enough, not the claimant itself, and not already written up since
-/// their last event.
+/// What a sweep did, for the claim that comes after it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Swept {
+    /// Whether a session was written up, and so holds the slot now.
+    pub written: bool,
+    /// Whether a session newer than the slot's last note was left unwritten
+    /// for a reason that was not its own: the wiki was busy, the budget ran
+    /// out, the write failed.
+    ///
+    /// Then the slot's last note is not the latest account of it, and must not
+    /// be handed on as though it were — that would put older work in front of
+    /// newer, the mistake this module exists to prevent.
+    pub unsettled: bool,
+}
+
+impl Swept {
+    const UNSETTLED: Self = Self {
+        written: false,
+        unsettled: true,
+    };
+}
+
+/// The sessions this claim may write up, newest first: open, in the same
+/// slot, not the claimant itself, active since the slot's last note was
+/// written, and not in the middle of a turn.
 ///
-/// That last condition is what keeps a note single-use. A session handed over
-/// to the terminal opened after it is still open and still quiet when a third
-/// one starts; writing it up again would hand the third person the note the
-/// second already took, and commit the same page twice. Once it moves again
-/// it has something new to say, and is written up again.
+/// **Active since the last note, whatever became of it.** A session that went
+/// quiet before the slot's newest note was written has nothing to say that the
+/// note's author did not come after. Once that was checked against the note
+/// *waiting* in the slot, and it was not enough: observed live, a Claude
+/// session ended and left its note, the Codex opened next took it, and the
+/// Claude opened a minute after that was handed a Codex terminal that had been
+/// sitting quiet for thirty-five minutes — older than everything the person had
+/// just been looking at. The note had been taken, so nothing was waiting, so
+/// nothing stood in the way. A note that was taken is still the newest account
+/// of the slot.
 ///
-/// Nor one that went quiet before the note already waiting in the slot was
-/// written. `record_handoff` expires whatever is pending, so writing such a
-/// session up would replace the note of a session that ended *after* it went
-/// quiet — the one the person just closed — with a "still open" note about an
-/// older terminal. Observed live: a Claude session ended, a Codex opened a
-/// minute later, and it was handed the Codex terminal from before that.
+/// This is also what keeps a write-up from being handed out twice: its note is
+/// written after the session's last event, so until the session moves again it
+/// is not a candidate.
 ///
-/// Oldest silence first, so the session that stopped most recently records its
-/// note last and holds the slot. `record_handoff` supersedes an unread note, so
-/// the order decides which one the claim takes.
-fn quiet_peers(
+/// **Not in the middle of a turn.** A session whose last event is the agent's
+/// answer has done what it was asked and is waiting for its person, and is
+/// handed over at once: somebody who asks Codex something, reads the answer
+/// and opens Claude thirty seconds later is carrying on from that answer. A
+/// session last seen running a tool, or with a prompt still unanswered, is at
+/// work — two terminals open at once is a working pattern, and a long build is
+/// a silence. That one waits out `handover_after_seconds` first, which is long
+/// enough to tell a terminal closed mid-turn from one still busy.
+fn candidates(
     store: &Store,
     scope: &ResolvedScope,
     claimant: SessionId,
@@ -91,22 +122,15 @@ fn quiet_peers(
         return Ok(Vec::new());
     }
 
-    let waiting = store.pending_handoff_written(scope.project_id, slot)?;
-    let mut quiet: Vec<(Timestamp, SessionId)> = Vec::new();
+    let noted = store
+        .latest_handoff(scope.project_id, slot)?
+        .map(|note| note.as_of);
+    let mut found: Vec<(Timestamp, SessionId)> = Vec::new();
     for open in store.open_sessions()? {
         if open.id == claimant {
             continue;
         }
-        if now.as_second() - open.last_seen.as_second() < after {
-            continue;
-        }
-        if waiting.is_some_and(|written| written >= open.last_seen) {
-            continue;
-        }
-        if store
-            .last_handoff_from(open.id)?
-            .is_some_and(|written| written >= open.last_seen)
-        {
+        if noted.is_some_and(|written| written >= open.last_seen) {
             continue;
         }
         let Some(session) = store.load_session(open.id)? else {
@@ -115,20 +139,27 @@ fn quiet_peers(
         if session.project_id != scope.project_id || pipeline::slot_for(scope, &session) != *slot {
             continue;
         }
-        quiet.push((open.last_seen, open.id));
+        let answered = store.last_event_kind(open.id)? == Some(EventKind::AssistantMessage);
+        if !answered && now.as_second() - open.last_seen.as_second() < after {
+            continue;
+        }
+        found.push((open.last_seen, open.id));
     }
 
-    quiet.sort_by_key(|(last_seen, id)| (*last_seen, *id));
-    quiet.truncate(AT_MOST);
-    Ok(quiet.into_iter().map(|(_, id)| id).collect())
+    found.sort_by_key(|(last_seen, id)| std::cmp::Reverse((*last_seen, *id)));
+    Ok(found.into_iter().map(|(_, id)| id).collect())
 }
 
-/// Write up the quiet sessions in this slot, and say how many were written.
+/// Write up the newest session beside this one that has anything to say.
+///
+/// One, not all of them: every write-up records a note and the newer
+/// supersedes the older, so writing more would only commit pages nobody is
+/// waiting for while somebody waits. The rest keep their place for their own
+/// `SessionEnd`, or the reaper.
 ///
 /// Called with the index and the wiki in hand, on the thread that is about to
-/// answer a claim. Failures are logged and swallowed: a session that could not
-/// be written up is a session the next claim or the reaper will write up, and
-/// nothing here is worth failing a claim over.
+/// answer a claim. Failures are logged and swallowed — nothing here is worth
+/// failing a claim over — and reported in [`Swept::unsettled`] instead.
 pub(crate) fn hand_over_peers(
     store: &Store,
     wiki: &parking_lot::Mutex<anamnesis_wiki::Wiki>,
@@ -137,28 +168,27 @@ pub(crate) fn hand_over_peers(
     claimant: SessionId,
     slot: &Slot,
     now: Timestamp,
-) -> usize {
-    let peers = match quiet_peers(store, scope, claimant, slot, now) {
+) -> Swept {
+    let peers = match candidates(store, scope, claimant, slot, now) {
         Ok(peers) => peers,
         Err(error) => {
             tracing::warn!(%error, "could not look for sessions to hand over");
-            return 0;
+            return Swept::UNSETTLED;
         }
     };
 
     let started = Instant::now();
-    let mut written = 0;
     for (index, peer) in peers.iter().enumerate() {
-        if index > 0 && started.elapsed() > BUDGET {
+        if index >= AT_MOST || (index > 0 && started.elapsed() > BUDGET) {
             tracing::debug!(
                 left = peers.len() - index,
                 "stopped handing sessions over: a claim was waiting"
             );
-            break;
+            return Swept::UNSETTLED;
         }
         let Some(held) = wiki.try_lock_for(FOR_THE_WIKI) else {
-            tracing::debug!("left a quiet session for later: the wiki is busy");
-            break;
+            tracing::debug!("left a session for later: the wiki is busy");
+            return Swept::UNSETTLED;
         };
         match pipeline::hand_over(store, &held, scope, *peer, embed_model, now) {
             Ok(Some(page)) => {
@@ -166,19 +196,56 @@ pub(crate) fn hand_over_peers(
                     session = %peer,
                     project = %scope.scope,
                     %page,
-                    "wrote up a quiet session for the one that just started"
+                    "wrote up an open session for the one that just started"
                 );
-                written += 1;
+                return Swept {
+                    written: true,
+                    unsettled: false,
+                };
             }
             Ok(None) => {}
-            Err(error) => tracing::warn!(
-                %error,
-                session = %peer,
-                "could not write up a quiet session; it keeps its place in the queue"
-            ),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    session = %peer,
+                    "could not write up an open session; it keeps its place in the queue"
+                );
+                return Swept::UNSETTLED;
+            }
         }
     }
-    written
+    Swept::default()
+}
+
+/// The slot's newest note again, for a session that found nothing waiting.
+///
+/// A note is claimed once, and that is right for two sessions starting at the
+/// same instant. It was wrong for the person it is for: Claude ends, Codex
+/// opens and takes the note, the person closes Codex a minute later having
+/// read it and done nothing, opens Claude — and is told nothing, because the
+/// note was taken. The note is still the newest account of the slot, since
+/// nobody has done anything after it. So it is handed on.
+///
+/// Not when the sweep was unsettled (something newer may exist), not when the
+/// newest note was dropped on purpose, and not to the session that wrote it or
+/// already took it.
+pub(crate) fn hand_on(
+    store: &Store,
+    scope: &ResolvedScope,
+    claimant: SessionId,
+    slot: &Slot,
+    swept: Swept,
+) -> Result<Option<String>, WebError> {
+    if swept.unsettled || scope.sessions.handover_after_seconds == 0 {
+        return Ok(None);
+    }
+    let Some(note) = store.latest_handoff(scope.project_id, slot)? else {
+        return Ok(None);
+    };
+    if note.dropped || note.from_session == claimant || note.taken_by == Some(claimant) {
+        return Ok(None);
+    }
+    Ok(Some(note.body))
 }
 
 #[cfg(test)]
@@ -295,7 +362,7 @@ mod tests {
         id
     }
 
-    fn sweep(harness: &Harness, claimant: SessionId, embed_model: Option<&str>) -> usize {
+    fn sweep(harness: &Harness, claimant: SessionId, embed_model: Option<&str>) -> bool {
         hand_over_peers(
             &harness.state.store,
             &harness.state.wiki,
@@ -305,6 +372,7 @@ mod tests {
             &slot(),
             now(),
         )
+        .written
     }
 
     fn claimed(harness: &Harness, claimant: SessionId) -> Option<String> {
@@ -335,7 +403,7 @@ mod tests {
         let quiet = session_quiet_for(&harness, "the-closed-terminal", 180);
         let new = starting(&harness);
 
-        assert_eq!(sweep(&harness, new, None), 1);
+        assert!(sweep(&harness, new, None));
 
         let note = claimed(&harness, new).expect("a note to take");
         assert!(note.contains("make the-closed-terminal pass"), "{note}");
@@ -354,7 +422,7 @@ mod tests {
         let quiet = session_quiet_for(&harness, "still-working", 30);
         let new = starting(&harness);
 
-        assert_eq!(sweep(&harness, new, None), 0);
+        assert!(!sweep(&harness, new, None));
 
         assert!(claimed(&harness, new).is_none());
         assert_eq!(state_of(&harness, quiet), "open");
@@ -365,7 +433,7 @@ mod tests {
         let harness = harness();
         let id = session_quiet_for(&harness, "the-only-one", 600);
 
-        assert_eq!(sweep(&harness, id, None), 0);
+        assert!(!sweep(&harness, id, None));
         assert!(claimed(&harness, id).is_none());
     }
 
@@ -375,7 +443,7 @@ mod tests {
         session_quiet_for(&harness, "the-closed-terminal", 60 * 60 * 24);
         let new = starting(&harness);
 
-        assert_eq!(sweep(&harness, new, None), 0);
+        assert!(!sweep(&harness, new, None));
         assert!(claimed(&harness, new).is_none());
     }
 
@@ -441,7 +509,7 @@ mod tests {
         session_quiet_for(&harness, "newer", 180);
         let new = starting(&harness);
 
-        assert_eq!(sweep(&harness, new, None), 2);
+        assert!(sweep(&harness, new, None));
 
         let note = claimed(&harness, new).expect("a note to take");
         assert!(note.contains("make newer pass"), "{note}");
@@ -489,7 +557,7 @@ mod tests {
         with_note_from(&harness, "the-session-that-ended", 60);
         let new = starting(&harness);
 
-        assert_eq!(sweep(&harness, new, None), 0);
+        assert!(!sweep(&harness, new, None));
 
         let note = claimed(&harness, new).expect("a note to take");
         assert!(note.contains("the-session-that-ended"), "{note}");
@@ -504,25 +572,26 @@ mod tests {
         session_quiet_for(&harness, "the-closed-terminal", 180);
         let new = starting(&harness);
 
-        assert_eq!(sweep(&harness, new, None), 1);
+        assert!(sweep(&harness, new, None));
 
         let note = claimed(&harness, new).expect("a note to take");
         assert!(note.contains("make the-closed-terminal pass"), "{note}");
     }
 
     /// A third terminal opened beside a session that was already handed over
-    /// is not handed its note a second time: the person in the second terminal
-    /// took it, and the session has not moved since.
+    /// does not write it up a second time: the session has not moved since,
+    /// so there is no new page to commit. What the third is told is
+    /// [`hand_on`]'s business, below.
     #[test]
-    fn a_quiet_session_is_handed_over_once() {
+    fn a_quiet_session_is_written_up_once() {
         let harness = harness();
         session_quiet_for(&harness, "the-closed-terminal", 180);
         let second = starting(&harness);
-        assert_eq!(sweep(&harness, second, None), 1);
+        assert!(sweep(&harness, second, None));
         assert!(claimed(&harness, second).is_some());
 
         let third = starting_as(&harness, "the-third-one");
-        assert_eq!(sweep(&harness, third, None), 0);
+        assert!(!sweep(&harness, third, None));
         assert!(claimed(&harness, third).is_none());
     }
 
@@ -556,8 +625,298 @@ mod tests {
             .expect("observation");
 
         let third = starting_as(&harness, "the-third-one");
-        assert_eq!(sweep(&harness, third, None), 1);
+        assert!(sweep(&harness, third, None));
         let note = claimed(&harness, third).expect("a note to take");
         assert!(note.contains("exporter"), "{note}");
+    }
+
+    /// An open session that was asked something `asked` seconds ago and
+    /// answered `answered` seconds ago, and has been waiting for its person
+    /// since.
+    fn answered_session(
+        harness: &Harness,
+        name: &str,
+        asked: i64,
+        answered: i64,
+        answer: &str,
+    ) -> SessionId {
+        let id = SessionId::derive(harness.scope.project_id, name);
+        let session = new_session(
+            id,
+            harness.scope.project_id,
+            harness.scope.workspace_id,
+            AgentKind::Codex,
+            harness.scope.root.clone(),
+            seconds_ago(asked + 5),
+            None,
+        );
+        let store = &harness.state.store;
+        store.ensure_session(&session).expect("session");
+        for (kind, body, at) in [
+            (
+                EventKind::UserPrompt,
+                format!("what did {name} leave?"),
+                asked,
+            ),
+            (EventKind::AssistantMessage, answer.to_owned(), answered),
+        ] {
+            store
+                .insert_observation(&new_observation(
+                    id,
+                    kind,
+                    None,
+                    BoundedBody::truncating(body, 1024),
+                    seconds_ago(at),
+                ))
+                .expect("observation");
+        }
+        id
+    }
+
+    /// What the web handler does for a session that has just started: write
+    /// up whoever is beside it, claim what is waiting, and hand on the slot's
+    /// newest note when nothing is.
+    fn arrives(harness: &Harness, claimant: SessionId) -> Option<String> {
+        let swept = hand_over_peers(
+            &harness.state.store,
+            &harness.state.wiki,
+            None,
+            &harness.scope,
+            claimant,
+            &slot(),
+            now(),
+        );
+        match claimed(harness, claimant) {
+            Some(note) => Some(note),
+            None => hand_on(
+                &harness.state.store,
+                &harness.scope,
+                claimant,
+                &slot(),
+                swept,
+            )
+            .expect("hand on"),
+        }
+    }
+
+    /// The sequence that failed live on 2026-09-23, step by step. A Codex
+    /// terminal was left open and quiet; a Claude session did the real work
+    /// and ended; the Codex opened next was told about that work, answered,
+    /// and was left open in turn; the Claude opened a minute later was handed
+    /// the Codex terminal from thirty-five minutes before, not the one it had
+    /// just been looking at.
+    #[test]
+    fn each_agent_is_handed_the_newest_work_not_the_oldest_open_terminal() {
+        let harness = harness();
+        session_quiet_for(&harness, "codex-left-open", 35 * 60);
+        with_note_from(&harness, "claude-that-deployed", 90);
+
+        let codex = starting_as(&harness, "codex-next");
+        let told = arrives(&harness, codex).expect("codex is told something");
+        assert!(told.contains("claude-that-deployed"), "{told}");
+
+        answered_session(
+            &harness,
+            "codex-that-answered",
+            60,
+            47,
+            "the fix is live and the server runs 1.2.1",
+        );
+
+        let claude = starting_as(&harness, "claude-after");
+        let told = arrives(&harness, claude).expect("claude is told something");
+        assert!(told.contains("the fix is live"), "{told}");
+        assert!(!told.contains("codex-left-open"), "{told}");
+    }
+
+    /// The same sequence, with the Codex in between still mid-turn: nothing
+    /// newer than the ended session's note can be written up, and the terminal
+    /// left open half an hour earlier must not be written up in its place just
+    /// because the note has already been taken.
+    #[test]
+    fn a_terminal_left_open_does_not_outrank_a_note_already_taken() {
+        let harness = harness();
+        session_quiet_for(&harness, "codex-left-open", 35 * 60);
+        with_note_from(&harness, "claude-that-deployed", 90);
+        let codex = starting_as(&harness, "codex-next");
+        assert!(arrives(&harness, codex).is_some());
+
+        let claude = starting_as(&harness, "claude-after");
+        let told = arrives(&harness, claude).expect("claude is told something");
+
+        assert!(told.contains("claude-that-deployed"), "{told}");
+        assert!(!told.contains("codex-left-open"), "{told}");
+    }
+
+    /// A terminal closed mid-turn is not a candidate until its silence is
+    /// long enough, and an older session written up meanwhile must not bury
+    /// it: that note is fresh ink on old work, and the closed terminal's work
+    /// is newer than what it describes.
+    #[test]
+    fn a_terminal_closed_mid_turn_is_not_buried_by_an_older_write_up() {
+        let harness = harness();
+        answered_session(&harness, "answered-earlier", 900, 600, "the older answer");
+        session_quiet_for(&harness, "closed-mid-turn", 30);
+
+        let first = starting_as(&harness, "first-to-arrive");
+        let told = arrives(&harness, first).expect("told about the older answer");
+        assert!(told.contains("the older answer"), "{told}");
+
+        let later = now() + jiff::Span::new().seconds(200);
+        let second = starting_as(&harness, "second-to-arrive");
+        let swept = hand_over_peers(
+            &harness.state.store,
+            &harness.state.wiki,
+            None,
+            &harness.scope,
+            second,
+            &slot(),
+            later,
+        );
+        assert!(swept.written, "{swept:?}");
+        let told = harness
+            .state
+            .store
+            .claim_handoff(harness.scope.project_id, second, &slot(), later)
+            .expect("claim")
+            .expect("a note to take");
+        assert!(told.contains("make closed-mid-turn pass"), "{told}");
+    }
+
+    /// A session whose last word was its answer is waiting for its person, not
+    /// working, and the person who read that answer and switched agents is
+    /// carrying on from it — however few seconds ago it was.
+    #[test]
+    fn a_session_that_has_answered_is_handed_over_at_once() {
+        let harness = harness();
+        answered_session(
+            &harness,
+            "just-answered",
+            25,
+            20,
+            "the parser now keeps comments",
+        );
+        let new = starting(&harness);
+
+        assert!(sweep(&harness, new, None));
+
+        let note = claimed(&harness, new).expect("a note to take");
+        assert!(note.contains("the parser now keeps comments"), "{note}");
+        assert!(note.contains("still open"), "{note}");
+    }
+
+    /// Claude ends, Codex opens and takes the note, the person closes Codex
+    /// having done nothing and opens Claude again. Nothing has happened since
+    /// the note, so the note is still where things stand.
+    #[test]
+    fn a_taken_note_is_handed_on_while_nothing_has_happened_since() {
+        let harness = harness();
+        with_note_from(&harness, "claude-that-ended", 120);
+
+        let codex = starting_as(&harness, "codex-opened-and-closed");
+        let first = arrives(&harness, codex).expect("codex is told");
+        let claude = starting_as(&harness, "claude-again");
+        let second = arrives(&harness, claude).expect("claude is told the same");
+
+        assert_eq!(first, second);
+        assert!(second.contains("claude-that-ended"), "{second}");
+    }
+
+    /// Handed on to somebody new, not back to whoever already has it or wrote
+    /// it.
+    #[test]
+    fn a_note_is_not_handed_back_to_the_session_that_has_it() {
+        let harness = harness();
+        let author = with_note_from(&harness, "claude-that-ended", 120);
+        let codex = starting_as(&harness, "codex");
+        assert!(arrives(&harness, codex).is_some());
+
+        assert!(arrives(&harness, codex).is_none(), "it already took it");
+        assert!(arrives(&harness, author).is_none(), "it wrote it");
+    }
+
+    /// Somebody decided the next session is better off without it.
+    #[test]
+    fn a_dropped_note_is_not_handed_on() {
+        let harness = harness();
+        with_note_from(&harness, "a-bad-summary", 120);
+        harness
+            .state
+            .store
+            .discard_handoff(harness.scope.project_id, &slot())
+            .expect("discard");
+
+        let new = starting(&harness);
+        assert!(arrives(&harness, new).is_none());
+    }
+
+    /// When newer work exists and could not be written up, the older note is
+    /// not the latest account of the slot, and handing it on would be the
+    /// mistake this module was written to stop. Silence is the honest answer.
+    #[test]
+    fn an_older_note_is_not_handed_on_in_front_of_newer_work() {
+        let harness = harness();
+        with_note_from(&harness, "claude-that-ended", 600);
+        let codex = starting_as(&harness, "codex");
+        assert!(arrives(&harness, codex).is_some());
+        answered_session(&harness, "codex-that-worked", 120, 60, "newer work");
+
+        let claude = starting_as(&harness, "claude");
+        let busy = harness.state.wiki.lock();
+        let swept = hand_over_peers(
+            &harness.state.store,
+            &harness.state.wiki,
+            None,
+            &harness.scope,
+            claude,
+            &slot(),
+            now(),
+        );
+        drop(busy);
+
+        assert!(swept.unsettled);
+        assert!(claimed(&harness, claude).is_none());
+        assert!(
+            hand_on(&harness.state.store, &harness.scope, claude, &slot(), swept)
+                .expect("hand on")
+                .is_none()
+        );
+    }
+
+    /// The newest session beside the new one had nothing worth a page — it
+    /// was opened and closed again — so the one before it is written up.
+    #[test]
+    fn a_session_with_nothing_to_say_gives_way_to_the_one_before_it() {
+        let harness = harness();
+        answered_session(&harness, "did-the-work", 300, 240, "the exporter passes");
+        let empty = SessionId::derive(harness.scope.project_id, "opened-and-closed");
+        harness
+            .state
+            .store
+            .ensure_session(&new_session(
+                empty,
+                harness.scope.project_id,
+                harness.scope.workspace_id,
+                AgentKind::Codex,
+                harness.scope.root.clone(),
+                seconds_ago(200),
+                None,
+            ))
+            .expect("session");
+        harness
+            .state
+            .store
+            .insert_observation(&new_observation(
+                empty,
+                EventKind::SessionStart,
+                None,
+                BoundedBody::truncating("startup", 1024),
+                seconds_ago(200),
+            ))
+            .expect("observation");
+        let new = starting_as(&harness, "the-new-one");
+
+        let told = arrives(&harness, new).expect("told about the work");
+        assert!(told.contains("the exporter passes"), "{told}");
     }
 }

@@ -16,10 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `[sessions] handover_after_seconds` (default 120; 0 turns it off) are now
   written up first and their note is handed to it. The quiet session is not
   ended — the note says it is still open — and it is written up once per
-  silence, so a third terminal is not handed the note the second one took.
-  A session that went quiet before the note already waiting was written is
-  left alone: writing it up would replace the note of the session the person
-  just ended with a "still open" note about an older terminal beside it.
+  silence. A session that went quiet before the slot's newest note was
+  written is left alone, whether or not that note has been taken yet: writing
+  it up would put an older terminal in front of the work the person just
+  finished.
 - **Session handoffs keep a recorded resume checkpoint outside the model's
   judgement.** Consolidation now separates harness notifications from human
   prompts, puts the latest real request and the last four actions in a
@@ -171,6 +171,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   questions and led with the right page, and how often it answered questions
   it could not. Recall by name gave 1 false alarm in 171. The same count runs in
   CI as a test, so a change that makes recall chatty fails there.
+
+### Changed
+- **Switching agents back and forth hands each one the newest work.** Three
+  things stood between a person and that, all seen live on one evening of
+  Claude ↔ Codex switching. A note went to one session only, so Claude →
+  Codex → Claude left the third with nothing, or with an older terminal still
+  open beside it; now, when nothing newer has happened since, the slot's
+  newest note is handed on (not to the session that wrote or already took it,
+  and not once it has been discarded). A session that had just answered had
+  to sit out `handover_after_seconds` first, so switching within two minutes
+  of reading Codex's answer lost it; a session whose last event is its
+  agent's answer is waiting for its person, not working, and is now handed
+  over at once — the threshold still holds for one caught mid-turn. And only
+  the newest open session with something to say is written up, instead of
+  every quiet one.
 
 ### Fixed
 - **The long-run eval counts a rule the planting agent wrote itself.** A page

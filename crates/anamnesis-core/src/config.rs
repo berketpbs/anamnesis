@@ -361,6 +361,11 @@ pub struct SessionsConfig {
     ///
     /// The difference from the reaper is what else is known: somebody started
     /// working in the same slot. Zero turns it off.
+    ///
+    /// It applies to a session caught mid-turn. One whose last event is its
+    /// agent's answer is waiting for its person rather than working, and is
+    /// written up at once — somebody who read that answer and switched agents
+    /// is carrying on from it.
     pub handover_after_seconds: u32,
 }
 
