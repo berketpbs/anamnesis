@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The long-run eval measures a decision taken in conversation.** Every
+  earlier plant was told its rule in one prompt. S23 is a conversation of four
+  turns in one session: the agent is asked how the project should be made
+  configurable, lists the options, and is told which was chosen and which was
+  dropped, with nothing to build and no file to say so; the work then goes on.
+  S25 asks, one unrelated session later, for a configurable default currency,
+  and passes only if it follows that decision. A scenario session can now hold
+  `turns`, each sent once the one before it is answered, so the prompt hook
+  fires per turn and the session starts and ends once — writing them at once
+  had them answered as one prompt, and resuming per turn ended the session
+  after each. S23 is also told a check word in passing, and `report` counts
+  the runs that kept it in a note outside `sessions/`, the way a test word
+  once became a decision of its own.
 - **Closing a terminal no longer hands the next agent silence.** A session
   whose terminal is closed sends no end event, so until the reaper gave up on
   it twelve hours later there was no page and no note, and the agent opened

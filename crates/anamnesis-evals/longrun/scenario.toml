@@ -1,4 +1,4 @@
-# Twenty-two sessions on one small repository, run once with memory and once
+# Twenty-five sessions on one small repository, run once with memory and once
 # without, in the same order and with the same prompts.
 #
 # kind = "plant"      the session is told, or finds out, something the
@@ -22,7 +22,12 @@
 #
 # S13-S17's patterns have not been read off any page yet, since no run has
 # planted them. They are written from what the prompts say, and are to be
-# checked against the first run's pages the way S01-S05's were.
+# checked against the first run's pages the way S01-S05's were. So are S23's.
+#
+# A session is one `prompt`, or a conversation of `turns` held in one session,
+# each sent once the agent has answered the one before. `noise` names what a
+# planting session is told only in passing, which its pages should not keep
+# as a note of its own.
 
 name = "ledger"
 description = "Planted knowledge on a small Python bookkeeping library"
@@ -319,4 +324,67 @@ check = "rate_change_signed_off"
 prompt = """
 GBP is 1.29 now. Update the rate, and write the description for the pull \
 request in `PR.md`.
+"""
+
+# A decision taken in conversation. The first twenty-two are each told
+# something in one prompt; S23 is how a decision is usually made — the agent
+# is asked for options, the person picks one and says what was dropped, and
+# the session goes on to other work. Nothing is built for it and no file says
+# it. The third turn also carries a word said only to check the session is
+# being recorded: `noise` is what its pages should not keep as a note.
+[[session]]
+id = "S23"
+kind = "plant"
+plants = "S25"
+check = "largest_command"
+knowledge = [['settings\.py'], ['LEDGER_(<|\{|\*|NAME|\[)', 'environment variables?[^\n]{0,160}LEDGER_(?!FIXTURES)', 'LEDGER_(?!FIXTURES)[^\n]{0,160}environment']]
+noise = ['ORCHID-19']
+turns = [
+"""
+Add a `largest` command: `python -m ledger.cli largest FILE -n N` prints the \
+N entries with the largest amounts in USD, largest first, one per line as \
+the account and the amount.
+""",
+"""
+A separate question, with nothing to build yet: we will soon need a handful \
+of settings — the default currency, where the rates file lives, maybe a log \
+level. How would you make this project configurable? A short list of the \
+options is enough.
+""",
+"""
+Let's settle it. Settings are environment variables named `LEDGER_<NAME>`, \
+all read in one module, `ledger/settings.py`, and nothing else in `ledger/` \
+reads the environment. No config file — we talked about a `ledger.toml` and \
+dropped it, because production runs in containers where ops set environment \
+variables — and no command-line flags for settings either. There is nothing \
+to build for this now, so leave the files as they are. And a quick check that \
+this session is being recorded: today's check word is ORCHID-19. Nothing to \
+do with it.
+""",
+"""
+One more small thing on `largest`: make `-n` default to 5.
+""",
+]
+
+[[session]]
+id = "S24"
+kind = "distractor"
+check = "negative_command"
+prompt = """
+Add a `negative` command that prints the entries whose amount is below zero, \
+one per line as the account and the amount.
+"""
+
+[[session]]
+id = "S25"
+kind = "probe"
+needs = "S23"
+check = "default_currency_setting"
+# One session after the plant, not straight after it: S24's handoff is the one
+# waiting, so a pass has to come from what S23 left in memory rather than from
+# the note the last session hands the next.
+prompt = """
+Rows with an empty currency column are read as USD. Make that default \
+configurable, so that a deployment in Europe can have them read as EUR \
+instead.
 """
