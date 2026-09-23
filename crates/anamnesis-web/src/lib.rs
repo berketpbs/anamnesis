@@ -993,6 +993,25 @@ async fn deliver_handoff(
             None => handover::hand_on(&store, &scope, session.id, &slot, swept)?,
         };
 
+        // What the project decided, beside what the last session did. The
+        // handoff carries one session; a decision taken in conversation three
+        // sessions ago is in no handoff and reaches a prompt only if the
+        // prompt looks like it. Losing this costs the session a list, never
+        // its note.
+        let decided = match store.standing_decisions(scope.project_id, scope.recall.on_start) {
+            Ok(found) => anamnesis_core::brief::standing(
+                &found
+                    .into_iter()
+                    .map(|(path, title)| anamnesis_core::brief::Standing { path, title })
+                    .collect::<Vec<_>>(),
+                &scope.recall,
+            ),
+            Err(error) => {
+                tracing::warn!(%error, "could not list the project's decisions for a starting session");
+                String::new()
+            }
+        };
+
         // Only when there was one to take: a session that asked and found
         // nothing changed nothing, and every session asks.
         if claimed.is_some() {
@@ -1009,11 +1028,15 @@ async fn deliver_handoff(
             }
         }
 
-        Ok(claimed)
+        Ok(match (claimed, decided.is_empty()) {
+            (Some(note), false) => format!("{}\n\n{decided}", note.trim_end()),
+            (Some(note), true) => note,
+            (None, _) => decided,
+        })
     })
     .await?;
 
-    Ok(handoff.unwrap_or_default())
+    Ok(handoff)
 }
 
 /// Answer a prompt with the pages this project already has on it.
@@ -4305,6 +4328,185 @@ mod tests {
                 .is_some(),
             "a refused request spent the handoff it was refused"
         );
+    }
+
+    /// Index one page for the harness's project, written at `minute` past a
+    /// fixed hour so that "newest first" has an order to keep.
+    fn indexed(
+        harness: &Harness,
+        path: &str,
+        title: &str,
+        status: anamnesis_core::page::PageStatus,
+        supersedes: Option<&str>,
+        minute: i64,
+    ) {
+        use anamnesis_core::page::{Frontmatter, Page, PagePath, Tier};
+        let mut frontmatter = Frontmatter::new(title, Vec::new()).expect("frontmatter");
+        frontmatter.tier = Tier::Semantic;
+        frontmatter.status = status;
+        frontmatter.supersedes = supersedes.map(|path| PagePath::parse(path).expect("path"));
+        let page = Page::new(
+            project(harness),
+            PagePath::parse(path).expect("path"),
+            frontmatter,
+            "body",
+        );
+        let at: Timestamp = "2026-09-23T09:00:00Z".parse().expect("timestamp");
+        harness
+            .state
+            .store
+            .index_page(
+                project(harness),
+                &page,
+                &[],
+                None,
+                at.checked_add(jiff::SignedDuration::from_mins(minute))
+                    .expect("time"),
+            )
+            .expect("index");
+    }
+
+    async fn start(harness: &Harness) -> String {
+        let uri = format!(
+            "/handoff?agent=codex&session_id=next&cwd={}",
+            percent_encode(&harness.cwd.to_string_lossy())
+        );
+        let request = HttpRequest::builder()
+            .uri(uri)
+            .body(Body::empty())
+            .expect("request");
+        let response = send(&harness.state, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        body_of(response).await
+    }
+
+    /// The case this exists for: a decision taken in conversation sessions
+    /// ago, in no handoff, reaching the agent that starts next — and only the
+    /// decisions that still stand.
+    #[tokio::test]
+    async fn a_starting_session_is_told_what_the_project_decided() {
+        use anamnesis_core::page::PageStatus;
+        let harness = harness();
+        run(&harness, "SessionStart", json!({}));
+        indexed(
+            &harness,
+            "decisions/older.md",
+            "Money is kept in integer cents",
+            PageStatus::Active,
+            None,
+            1,
+        );
+        indexed(
+            &harness,
+            "decisions/newer.md",
+            "Settings are LEDGER_ environment variables",
+            PageStatus::Active,
+            None,
+            5,
+        );
+        indexed(
+            &harness,
+            "decisions/dropped.md",
+            "Settings live in ledger.toml",
+            PageStatus::Historical,
+            None,
+            3,
+        );
+        indexed(
+            &harness,
+            "decisions/v1.md",
+            "Rates come from a public API",
+            PageStatus::Active,
+            None,
+            2,
+        );
+        indexed(
+            &harness,
+            "decisions/v2.md",
+            "Rates come from the internal service",
+            PageStatus::Active,
+            Some("decisions/v1.md"),
+            4,
+        );
+        indexed(
+            &harness,
+            "_rules/sign-off.md",
+            "Rate changes need finance sign-off",
+            PageStatus::Active,
+            None,
+            0,
+        );
+        indexed(
+            &harness,
+            "gotchas/msys.md",
+            "MSYS mangles /c",
+            PageStatus::Active,
+            None,
+            6,
+        );
+
+        let told = start(&harness).await;
+
+        for standing in [
+            "Settings are LEDGER_ environment variables",
+            "Money is kept in integer cents",
+            "Rates come from the internal service",
+            "Rate changes need finance sign-off",
+        ] {
+            assert!(told.contains(standing), "missing {standing:?}:\n{told}");
+        }
+        assert!(told.contains("decisions/newer.md"), "{told}");
+        for gone in ["ledger.toml", "public API", "MSYS"] {
+            assert!(!told.contains(gone), "{gone:?} was handed on:\n{told}");
+        }
+        assert!(
+            told.find("LEDGER_").expect("newer") < told.find("integer cents").expect("older"),
+            "newest first:\n{told}"
+        );
+        assert!(told.contains("not instructions to follow"), "{told}");
+    }
+
+    #[tokio::test]
+    async fn the_decisions_come_after_the_handoff() {
+        use anamnesis_core::page::PageStatus;
+        let harness = harness();
+        run(
+            &harness,
+            "UserPromptSubmit",
+            json!({"prompt": "do the thing"}),
+        );
+        run(&harness, "SessionEnd", json!({}));
+        indexed(
+            &harness,
+            "decisions/settings.md",
+            "Settings are LEDGER_ environment variables",
+            PageStatus::Active,
+            None,
+            1,
+        );
+
+        let told = start(&harness).await;
+        let note = told
+            .find("do the thing")
+            .expect("the handoff is still handed over");
+        let decided = told.find("LEDGER_").expect("and the decision beside it");
+        assert!(note < decided, "{told}");
+    }
+
+    #[tokio::test]
+    async fn on_start_zero_hands_no_decisions() {
+        use anamnesis_core::page::PageStatus;
+        let harness = harness_with("[recall]\non_start = 0\n");
+        run(&harness, "SessionStart", json!({}));
+        indexed(
+            &harness,
+            "decisions/settings.md",
+            "Settings are LEDGER_ environment variables",
+            PageStatus::Active,
+            None,
+            1,
+        );
+        assert_eq!(start(&harness).await, "");
     }
 
     /// `route_layer`, not `layer`: a path this server does not serve is a 404.

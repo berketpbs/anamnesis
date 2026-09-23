@@ -1413,6 +1413,40 @@ impl Store {
             .map_err(Into::into)
     }
 
+    /// The decisions and rules a project holds now, as `(path, title)`: pinned
+    /// and canonical first, then the most recently written, at most `limit`.
+    ///
+    /// Now means the head of its chain and `active`. A decision another page
+    /// supersedes has been decided again, and one marked historical or
+    /// do-not-answer-from is exactly what a starting session should not be
+    /// told as the way things are.
+    pub fn standing_decisions(
+        &self,
+        project_id: ProjectId,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.connection();
+        let mut statement = conn.prepare(
+            "SELECT path, title FROM pages
+             WHERE project_id = ?1 AND is_latest = 1 AND status = 'active'
+               AND (path LIKE 'decisions/%' OR path LIKE '\\_rules/%' ESCAPE '\\')
+             ORDER BY pinned DESC, canonical DESC, updated_at DESC, path
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(
+            params![
+                project_id.to_string(),
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     /// When this project last captured anything, if it ever has.
     ///
     /// The question `anamnesis status` asks on someone's behalf is "is my work

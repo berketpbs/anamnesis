@@ -901,7 +901,9 @@ interval_minutes = 60
 # What a prompt is handed back from this project's own pages. `min_similarity`
 # is a number about one embedder; `by_name` answers from the prompt's words when
 # there is no embedder or it fails, and `min_coverage` is a share, not a number
-# about a model — see "Recall at prompt time" above.
+# about a model — see "Recall at prompt time" above. `on_start` is how many of
+# the project's standing decisions and rules a starting session is handed beside
+# its handoff, whatever it goes on to ask; 0 hands none.
 [recall]
 on_prompt = true
 pages = 3
@@ -909,6 +911,8 @@ snippet_chars = 240
 min_similarity = 0.55
 by_name = true
 min_coverage = 0.5
+min_words = 3
+on_start = 5
 ```
 
 Unknown keys are an error, so a typo surfaces instead of quietly sending memory
