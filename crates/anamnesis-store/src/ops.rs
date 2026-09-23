@@ -1475,7 +1475,7 @@ impl Store {
                     path: row.get(0)?,
                     title: row.get(1)?,
                     updated_at: parse_time(&row.get::<_, String>(2)?),
-                    source_session: row.get::<_, Option<String>>(3)?.map(|id| parse_id(id)),
+                    source_session: row.get::<_, Option<String>>(3)?.map(parse_id),
                 })
             },
         )?;

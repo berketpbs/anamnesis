@@ -480,6 +480,7 @@ impl Wiki {
         let path = self.repo.path().join("anamnesis-write.lock");
         let lock = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&path)
@@ -826,12 +827,15 @@ fn all_page_fields() -> Vec<String> {
     .collect()
 }
 
+/// A patched page with the fields it changed, preserved, and cleared.
+type Materialized = (Page, Vec<String>, Vec<String>, Vec<String>);
+
 fn materialize_patch(
     project_id: anamnesis_core::ids::ProjectId,
     path: PagePath,
     parsed: ParsedPage,
     patch: &PagePatch,
-) -> Result<(Page, Vec<String>, Vec<String>, Vec<String>)> {
+) -> Result<Materialized> {
     let conflicts = [
         (
             patch.supersedes.is_some(),

@@ -405,13 +405,13 @@ pub fn cmd_patch_page(
     if let Some(replacement) = store.superseded_by(scope.project_id, &page_path)? {
         println!("   WARNING: this page remains retired; it was superseded by {replacement}");
     }
-    if patched.cleared.iter().any(|field| field == "supersedes") {
-        if let Some(predecessor) = patched.previous_supersedes {
-            let is_latest = store
-                .page_is_latest(scope.project_id, &predecessor)?
-                .unwrap_or(true);
-            println!("   WARNING: clearing supersedes made {predecessor} is_latest={is_latest}");
-        }
+    if patched.cleared.iter().any(|field| field == "supersedes")
+        && let Some(predecessor) = patched.previous_supersedes
+    {
+        let is_latest = store
+            .page_is_latest(scope.project_id, &predecessor)?
+            .unwrap_or(true);
+        println!("   WARNING: clearing supersedes made {predecessor} is_latest={is_latest}");
     }
     Ok(())
 }
