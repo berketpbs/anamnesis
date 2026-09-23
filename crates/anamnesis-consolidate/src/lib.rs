@@ -658,10 +658,22 @@ fn render_handoff(
     files: &[String],
 ) -> String {
     let mut out = String::new();
-    out.push_str(&format!(
-        "Previous session ({}, started {}).\n",
-        session.agent, session.started_at
-    ));
+    // Whether the session is over is not a flag somebody passes: one being
+    // summarised at its end carries that end, and one written up for the agent
+    // who has just sat down beside it does not. Calling a session that is still
+    // running "previous" would be the one sentence in this note its reader
+    // could not check.
+    out.push_str(&if session.ended_at.is_some() {
+        format!(
+            "Previous session ({}, started {}).\n",
+            session.agent, session.started_at
+        )
+    } else {
+        format!(
+            "A session still open beside this one ({}, started {}), quiet long enough to be handed over. This is where it had got to.\n",
+            session.agent, session.started_at
+        )
+    });
 
     if let Some(last) = last_human_prompt(prompts) {
         out.push_str(&format!(

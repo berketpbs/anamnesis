@@ -514,6 +514,7 @@ workspace =",
     fn a_session_is_overdue_only_once_the_threshold_has_passed() {
         let config = SessionsConfig {
             stale_after_minutes: 30,
+            ..SessionsConfig::default()
         };
         let at = |minutes| OpenSession {
             id: SessionId::new(),

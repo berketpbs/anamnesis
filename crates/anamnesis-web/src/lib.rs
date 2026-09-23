@@ -35,6 +35,7 @@ pub mod api;
 pub mod auth;
 mod boundary;
 pub mod enrich;
+mod handover;
 pub mod improve;
 mod pipeline;
 pub mod reap;
@@ -959,17 +960,39 @@ async fn deliver_handoff(
         .ok_or_else(|| WebError::BadRequest("session_id is required".to_owned()))?;
 
     let store = state.store.clone();
+    let wiki = state.wiki.clone();
+    let embed_model = state
+        .embedder
+        .as_ref()
+        .map(|embedder| embedder.model().to_owned());
     let agent = query.agent();
     let operator = identity.operator().cloned();
     let handoff = off_runtime(move || -> Result<_, WebError> {
         let now = Timestamp::now();
-        let claimed = claim_handoff(&store, &cwd, &agent, &session_id, now, operator.as_ref())?;
+        let (scope, session) =
+            pipeline::claimant(&store, &cwd, &agent, &session_id, now, operator.as_ref())?;
+        let slot = pipeline::slot_for(&scope, &session);
+
+        // Before the claim rather than after it: the session this one is taking
+        // over from may still be open, because the terminal it ran in was
+        // closed rather than ended, and then there is nothing to claim. Writing
+        // it up here is what makes the answer below the one the person expects
+        // instead of the silence that means "there was nobody before you".
+        handover::hand_over_peers(
+            &store,
+            &wiki,
+            embed_model.as_deref(),
+            &scope,
+            session.id,
+            &slot,
+            now,
+        );
+
+        let claimed = store.claim_handoff(scope.project_id, session.id, &slot, now)?;
 
         // Only when there was one to take: a session that asked and found
         // nothing changed nothing, and every session asks.
-        if claimed.is_some()
-            && let Ok(scope) = pipeline::scope_for(&cwd)
-        {
+        if claimed.is_some() {
             let entry = anamnesis_core::audit::AuditEntry::new(
                 anamnesis_core::audit::Action::HandoffClaimed,
                 anamnesis_core::audit::Via::Http,

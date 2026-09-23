@@ -545,6 +545,94 @@ fn claude_code_records_a_session_and_the_next_one_is_handed_its_note() {
     assert!(again.is_empty(), "a note is handed once: {again:?}");
 }
 
+/// A terminal closed rather than ended sends no `SessionEnd`, and the agent
+/// opened beside it a moment later is the one person who needs the note. The
+/// threshold is set to a second so the test does not wait out two minutes.
+#[test]
+fn a_session_whose_terminal_was_closed_is_handed_to_the_next_one() {
+    let data = tempfile::tempdir().expect("data dir");
+    let repo = tempfile::tempdir().expect("repo dir");
+    std::fs::write(
+        repo.path().join(".anamnesis.toml"),
+        "[scope]
+workspace = \"default\"
+project = \"closed-terminal\"
+
+[sessions]
+handover_after_seconds = 1
+",
+    )
+    .expect("marker");
+    let (_server, server) = serve(data.path());
+
+    // Everything but the end: the terminal was closed.
+    for payload in [
+        event(
+            "the-closed-terminal",
+            "SessionStart",
+            repo.path(),
+            json!({"source": "startup"}),
+        ),
+        event(
+            "the-closed-terminal",
+            "UserPromptSubmit",
+            repo.path(),
+            json!({"prompt": "Make the importer skip rows with an empty amount."}),
+        ),
+        event(
+            "the-closed-terminal",
+            "PostToolUse",
+            repo.path(),
+            json!({
+                "tool_name": "Bash",
+                "tool_input": {"command": "cargo test -p importer"},
+                "tool_response": {"stdout": "test result: ok. 9 passed", "exit_code": 0},
+            }),
+        ),
+    ] {
+        hook(data.path(), "claude-code", &server, &payload);
+    }
+    let listed = anamnesis(data.path())
+        .arg("sessions")
+        .current_dir(repo.path())
+        .output()
+        .expect("sessions runs");
+    let listed = String::from_utf8_lossy(&listed.stdout).into_owned();
+    assert!(!listed.contains(" closed "), "{listed}");
+
+    std::thread::sleep(Duration::from_millis(2500));
+
+    let handed = hook(
+        data.path(),
+        "codex",
+        &server,
+        &event(
+            "the-next-terminal",
+            "SessionStart",
+            repo.path(),
+            json!({"source": "startup"}),
+        ),
+    );
+    assert!(handed.contains("empty amount"), "{handed:?}");
+    assert!(handed.contains("still open"), "{handed:?}");
+
+    let again = hook(
+        data.path(),
+        "claude-code",
+        &server,
+        &event(
+            "a-third-terminal",
+            "SessionStart",
+            repo.path(),
+            json!({"source": "startup"}),
+        ),
+    );
+    assert!(
+        !again.contains("empty amount"),
+        "a note is handed once: {again:?}"
+    );
+}
+
 /// Gemini CLI parses stdout as one JSON object on every event, so every event
 /// gets one — empty when there is nothing to say — and the note rides in it.
 #[test]
