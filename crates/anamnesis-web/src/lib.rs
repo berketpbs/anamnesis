@@ -3083,6 +3083,7 @@ mod tests {
                 path: path.clone(),
                 title: "The server has an owner".to_owned(),
                 body: body.to_owned(),
+                supersedes: None,
             }],
         };
 
@@ -3131,6 +3132,122 @@ mod tests {
             indexed.len(),
             2,
             "one session page and one note, not one note per reading: {indexed:?}"
+        );
+    }
+
+    /// A session that settles differently what a page records retires that
+    /// page: the new note names it, and it stops being the head of its chain.
+    /// A name for a page that is not there retires nothing, and says nothing.
+    #[tokio::test]
+    async fn a_note_that_decides_again_retires_the_page_it_replaces() {
+        use anamnesis_core::page::{Frontmatter, Page, PagePath, PageStatus, Tier};
+        let harness = harness();
+        let (scope, session_id) = recorded(&harness);
+        finalize_and_enrich(
+            &harness.state.store,
+            &harness.state.wiki,
+            &scope,
+            session_id,
+            None,
+            now(),
+            &settings(Arc::new(Fake::broken())),
+        )
+        .await
+        .expect("finalized")
+        .expect("the counted page");
+        let closed = harness
+            .state
+            .store
+            .load_session(session_id)
+            .expect("load")
+            .expect("a session");
+
+        let old = PagePath::parse("decisions/settings-live-in-ledger-toml.md").expect("path");
+        let mut frontmatter =
+            Frontmatter::new("Settings live in ledger.toml", Vec::new()).expect("frontmatter");
+        frontmatter.tier = Tier::Semantic;
+        frontmatter.status = PageStatus::Active;
+        let page = Page::new(
+            scope.project_id,
+            old.clone(),
+            frontmatter,
+            "An earlier session chose a file.",
+        );
+        harness
+            .state
+            .wiki
+            .lock()
+            .write_page(&scope.scope, &page, "an earlier decision")
+            .expect("write");
+        harness
+            .state
+            .store
+            .index_page(scope.project_id, &page, &[], None, now())
+            .expect("index");
+
+        let new = PagePath::parse("decisions/settings-are-ledger-environment-variables.md")
+            .expect("path");
+        let orphan =
+            PagePath::parse("decisions/rates-come-from-the-internal-service.md").expect("path");
+        let digest = anamnesis_consolidate::SessionDigest {
+            title: "Settled the settings".to_owned(),
+            body: "## What. The person chose environment variables.".to_owned(),
+            handoff: "h".to_owned(),
+            entities: Vec::new(),
+            notes: vec![
+                anamnesis_consolidate::Note {
+                    kind: anamnesis_consolidate::NoteKind::Decision,
+                    path: new.clone(),
+                    title: "Settings are LEDGER environment variables".to_owned(),
+                    body: "Read in ledger/settings.py; ledger.toml was dropped.".to_owned(),
+                    supersedes: Some(old.clone()),
+                },
+                anamnesis_consolidate::Note {
+                    kind: anamnesis_consolidate::NoteKind::Decision,
+                    path: orphan.clone(),
+                    title: "Rates come from the internal service".to_owned(),
+                    body: "Not the public API.".to_owned(),
+                    supersedes: Some(PagePath::parse("decisions/nowhere.md").expect("path")),
+                },
+            ],
+        };
+        recompile(
+            &harness.state.store,
+            &harness.state.wiki.lock(),
+            &scope,
+            &closed,
+            &digest,
+            Provenance::counted(),
+            None,
+            now(),
+        )
+        .expect("recompiled");
+
+        assert_eq!(
+            harness
+                .state
+                .store
+                .superseded_by(scope.project_id, &old)
+                .expect("lookup"),
+            Some(new.clone()),
+            "the page the session decided against is no longer the current one"
+        );
+        let written = harness
+            .state
+            .wiki
+            .lock()
+            .read_page(&scope.scope, &new)
+            .expect("the note");
+        assert_eq!(written.frontmatter.supersedes, Some(old));
+        let orphaned = harness
+            .state
+            .wiki
+            .lock()
+            .read_page(&scope.scope, &orphan)
+            .expect("the note");
+        assert_eq!(
+            orphaned.frontmatter.supersedes, None,
+            "a chain to a page that is not there retires nothing"
         );
     }
 

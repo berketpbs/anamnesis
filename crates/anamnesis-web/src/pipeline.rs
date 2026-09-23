@@ -833,6 +833,16 @@ fn try_write_notes(
         // know which of them are its own.
         frontmatter.tier = note.kind.tier();
         frontmatter.session = Some(session.id);
+        // Only a page that is there: the model was shown a list of paths and
+        // may still name one that is not, and a chain that points at nothing
+        // retires nothing while claiming to. A page that is there stops being
+        // the head of its chain when this one is indexed, so it is no longer
+        // what a query or a starting session is told.
+        frontmatter.supersedes = note
+            .supersedes
+            .as_ref()
+            .filter(|replaced| wiki.exists(&scope.scope, replaced))
+            .cloned();
 
         pages.push(Page::new(
             scope.project_id,

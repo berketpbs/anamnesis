@@ -158,6 +158,9 @@ pub struct Note {
     pub title: String,
     /// Markdown body.
     pub body: String,
+    /// The page this note replaces, when the session settled differently
+    /// something that page records. Written only if that page exists.
+    pub supersedes: Option<PagePath>,
 }
 
 /// The result of consolidating one session.
