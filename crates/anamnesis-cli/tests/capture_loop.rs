@@ -542,7 +542,13 @@ fn claude_code_records_a_session_and_the_next_one_is_handed_its_note() {
             json!({"source": "startup"}),
         ),
     );
-    assert!(again.is_empty(), "a note is handed once: {again:?}");
+    // The second session asked and did nothing, so the first one's note is
+    // still where things stand, and a person switching agents again expects
+    // the third to know it as well.
+    assert_eq!(
+        again, handed,
+        "nothing happened since the note, so it is handed on: {again:?}"
+    );
 }
 
 /// A terminal closed rather than ended sends no `SessionEnd`, and the agent
@@ -627,10 +633,10 @@ handover_after_seconds = 1
             json!({"source": "startup"}),
         ),
     );
-    assert!(
-        !again.contains("empty amount"),
-        "a note is handed once: {again:?}"
-    );
+    // The closed terminal is not written up a second time, but what it left
+    // is still the newest account of the project: the terminal in between
+    // only started.
+    assert_eq!(again, handed, "{again:?}");
 }
 
 /// Gemini CLI parses stdout as one JSON object on every event, so every event

@@ -1653,7 +1653,7 @@ Probing memory at http://127.0.0.1:8080
 Use it rather than firing a hook by hand. A hand-fired hook is a real event,
 so it makes a real session that is counted, listed, and eventually summarised
 into a page of its own - and if it is a `SessionStart`, it *claims the waiting
-handoff*, which is single-use. Anything a probe of the older kind already left
+handoff* and takes part in deciding what the next session is told. Anything a probe of the older kind already left
 behind comes out with `anamnesis forget-session`.
 
 Unlike the hook, a probe exits non-zero when memory would not record, so it
