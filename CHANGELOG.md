@@ -197,6 +197,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI as a test, so a change that makes recall chatty fails there.
 
 ### Changed
+- **A note is what the person settled, and a new one retires the page it
+  replaces.** Consolidation is now told that options the agent listed, or a
+  change it proposed, are a decision only once the person chose or accepted
+  one or the agent carried it out, and that a subagent's report is evidence,
+  not a decision. It is told what is not a note at all: a word or code given
+  to check that the session is being recorded, a smoke test, a result that
+  holds only today, a setup step now done, or a claim that a tool is broken
+  when it was fixed or worked around in the same session. A test word given
+  that way had become a decision page of its own, and a gotcha saying the
+  project had no recall at prompts stayed after recall shipped. And a note
+  may now name, in `supersedes`, a listed page whose decision the session
+  reversed; it is written only when that page exists, and the page stops
+  being the head of its chain, so queries and starting sessions stop being
+  told it. Until now nothing retired a decision but a person editing the
+  frontmatter by hand, and an agent asked for the newer value was handed the
+  older one first.
 - **Switching agents back and forth hands each one the newest work.** Three
   things stood between a person and that, all seen live on one evening of
   Claude ↔ Codex switching. A note went to one session only, so Claude →

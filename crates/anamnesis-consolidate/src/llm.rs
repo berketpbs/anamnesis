@@ -185,6 +185,22 @@ later session looking for it will not think to look in a page about that other \
 work. Give it a note of its own, in the person's words — a decision for a \
 rule, a procedure for a way of doing something — and still mention it on the \
 session page.
+- A decision is what the person settled, not what was suggested. Options the \
+agent listed, and a change it proposed, are a decision only once the person \
+chose or accepted one, or the agent carried it out; then the note says what \
+was chosen and what was dropped. A subagent's report is evidence, not a \
+decision.
+- Something said about the session rather than the project is not a note: a \
+word or code given to check that the session is being recorded or that memory \
+works, a smoke test, a result that holds only today, a setup step that was \
+missing and is now done, or a claim that a tool is broken when it was fixed \
+or worked around in the same session. The session page may say it happened; a \
+note would keep telling later sessions something that is no longer true, or \
+never was about the project.
+- When the session settles differently something a listed page records — a \
+decision reversed, a rule replaced, a gotcha no longer so — write the new note \
+and give its `supersedes` the path of that page, exactly as the list writes \
+it. Leave it out otherwise: a note that merely relates to a page links it.
 - A note's title is the claim it makes, so that a listing of them argues with \
 somebody scanning it: `A moved crate breaks the Docker build`, not `Docker \
 notes`. Do not label it with its own kind — it is already filed under one — \
@@ -232,6 +248,10 @@ pub fn schema() -> Value {
                         "body": {
                             "type": "string",
                             "description": "The page, in markdown. Use ## for sections; no level-1 heading.",
+                        },
+                        "supersedes": {
+                            "type": "string",
+                            "description": "Only when this note replaces what a page already in this memory records: that page's path, exactly as the prompt lists it.",
                         },
                     },
                     "required": ["kind", "title", "body"],
@@ -1428,11 +1448,20 @@ fn read_notes(value: &Value) -> Vec<Note> {
             continue;
         }
 
+        // A path, and not this note's own or a session's record: a session
+        // page is what happened, and nothing a later session decides makes it
+        // not have happened. Whether the page exists is for the writer to
+        // check, against the wiki rather than against what the model was shown.
+        let supersedes = PagePath::parse(text("supersedes").trim())
+            .ok()
+            .filter(|replaced| *replaced != path && !replaced.is_session_record());
+
         notes.push(Note {
             kind,
             path,
             title,
             body,
+            supersedes,
         });
         if notes.len() == MAX_NOTES {
             break;
@@ -2938,6 +2967,69 @@ mod tests {
         );
         assert_eq!(note.title, "A moved crate breaks the Docker build");
         assert_eq!(note.kind.tier(), anamnesis_core::page::Tier::Procedural);
+    }
+
+    /// A note may name the page it replaces. What it names has to be a page a
+    /// later decision can retire: not a session's record, which is what
+    /// happened, and not the note itself.
+    #[test]
+    fn a_note_names_the_page_it_replaces_and_nothing_else() {
+        let note = |supersedes: &str| {
+            let reply = json!({
+                "title": "t",
+                "body": "b",
+                "handoff": "h",
+                "entities": [],
+                "notes": [{
+                    "kind": "decision",
+                    "title": "Settings are LEDGER environment variables",
+                    "body": "Read in ledger/settings.py; ledger.toml was dropped.",
+                    "supersedes": supersedes,
+                }],
+            });
+            let digest = digest_from_json(&reply, &session()).expect("a digest");
+            let [note] = &digest.notes[..] else {
+                panic!("one note, got {:?}", digest.notes);
+            };
+            note.supersedes
+                .as_ref()
+                .map(|path| path.as_str().to_owned())
+        };
+
+        assert_eq!(
+            note("decisions/settings-live-in-ledger-toml.md").as_deref(),
+            Some("decisions/settings-live-in-ledger-toml.md")
+        );
+        assert_eq!(
+            note("sessions/2026-09-20-abcd.md"),
+            None,
+            "a session record is what happened"
+        );
+        assert_eq!(
+            note("decisions/settings-are-ledger-environment-variables.md"),
+            None,
+            "a note does not replace itself"
+        );
+        assert_eq!(note("../outside.md"), None);
+        assert_eq!(note(""), None);
+    }
+
+    /// The prompt says what a note is not, in the terms the long-run eval
+    /// measures: a decision is what the person settled, and a word said to
+    /// check the recording is not one.
+    #[test]
+    fn the_prompt_keeps_suggestions_and_check_words_out_of_notes() {
+        assert!(SYSTEM.contains("A decision is what the person settled, not what was suggested."));
+        assert!(
+            SYSTEM.contains("a word or code given to check that the session is being recorded")
+        );
+        assert!(SYSTEM.contains("`supersedes`"));
+        assert!(
+            schema()["properties"]["notes"]["items"]["properties"]
+                .get("supersedes")
+                .is_some(),
+            "the prompt names a field the schema does not offer"
+        );
     }
 
     /// The normal reply. A session that taught the project nothing durable is
