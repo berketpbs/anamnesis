@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   written up first and their note is handed to it. The quiet session is not
   ended — the note says it is still open — and it is written up once per
   silence, so a third terminal is not handed the note the second one took.
+  A session that went quiet before the note already waiting was written is
+  left alone: writing it up would replace the note of the session the person
+  just ended with a "still open" note about an older terminal beside it.
 - **Session handoffs keep a recorded resume checkpoint outside the model's
   judgement.** Consolidation now separates harness notifications from human
   prompts, puts the latest real request and the last four actions in a

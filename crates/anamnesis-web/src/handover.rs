@@ -69,6 +69,13 @@ const FOR_THE_WIKI: Duration = Duration::from_millis(200);
 /// second already took, and commit the same page twice. Once it moves again
 /// it has something new to say, and is written up again.
 ///
+/// Nor one that went quiet before the note already waiting in the slot was
+/// written. `record_handoff` expires whatever is pending, so writing such a
+/// session up would replace the note of a session that ended *after* it went
+/// quiet — the one the person just closed — with a "still open" note about an
+/// older terminal. Observed live: a Claude session ended, a Codex opened a
+/// minute later, and it was handed the Codex terminal from before that.
+///
 /// Oldest silence first, so the session that stopped most recently records its
 /// note last and holds the slot. `record_handoff` supersedes an unread note, so
 /// the order decides which one the claim takes.
@@ -84,12 +91,16 @@ fn quiet_peers(
         return Ok(Vec::new());
     }
 
+    let waiting = store.pending_handoff_written(scope.project_id, slot)?;
     let mut quiet: Vec<(Timestamp, SessionId)> = Vec::new();
     for open in store.open_sessions()? {
         if open.id == claimant {
             continue;
         }
         if now.as_second() - open.last_seen.as_second() < after {
+            continue;
+        }
+        if waiting.is_some_and(|written| written >= open.last_seen) {
             continue;
         }
         if store
@@ -434,6 +445,69 @@ mod tests {
 
         let note = claimed(&harness, new).expect("a note to take");
         assert!(note.contains("make newer pass"), "{note}");
+    }
+
+    /// A session that ended `seconds` ago and left its note as it did.
+    fn with_note_from(harness: &Harness, name: &str, seconds: i64) -> SessionId {
+        let id = SessionId::derive(harness.scope.project_id, name);
+        let session = new_session(
+            id,
+            harness.scope.project_id,
+            harness.scope.workspace_id,
+            AgentKind::ClaudeCode,
+            harness.scope.root.clone(),
+            seconds_ago(seconds + 60),
+            None,
+        );
+        let store = &harness.state.store;
+        store.ensure_session(&session).expect("session");
+        store
+            .close_session(id, seconds_ago(seconds))
+            .expect("close");
+        harness
+            .state
+            .store
+            .record_handoff(&anamnesis_store::new_handoff(
+                harness.scope.project_id,
+                id,
+                slot(),
+                &format!("the note {name} left"),
+                seconds_ago(seconds),
+            ))
+            .expect("handoff");
+        id
+    }
+
+    /// What happened live: a Codex terminal was left open, a Claude session
+    /// beside it then ended and left its note, and the Codex opened after that
+    /// was handed the older terminal instead. The session that ended last is
+    /// the one the person just closed.
+    #[test]
+    fn a_note_written_after_the_silence_is_not_superseded() {
+        let harness = harness();
+        session_quiet_for(&harness, "the-older-terminal", 300);
+        with_note_from(&harness, "the-session-that-ended", 60);
+        let new = starting(&harness);
+
+        assert_eq!(sweep(&harness, new, None), 0);
+
+        let note = claimed(&harness, new).expect("a note to take");
+        assert!(note.contains("the-session-that-ended"), "{note}");
+    }
+
+    /// The other way round the quiet session is the newer news, and a stale
+    /// note from before it must not keep it from being handed over.
+    #[test]
+    fn a_note_older_than_the_silence_still_gives_way() {
+        let harness = harness();
+        with_note_from(&harness, "yesterday", 3_600);
+        session_quiet_for(&harness, "the-closed-terminal", 180);
+        let new = starting(&harness);
+
+        assert_eq!(sweep(&harness, new, None), 1);
+
+        let note = claimed(&harness, new).expect("a note to take");
+        assert!(note.contains("make the-closed-terminal pass"), "{note}");
     }
 
     /// A third terminal opened beside a session that was already handed over
