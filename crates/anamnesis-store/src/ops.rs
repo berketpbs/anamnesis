@@ -1098,6 +1098,41 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// When the note waiting in a slot was written, if one is waiting.
+    ///
+    /// For deciding whether a newer note may supersede it. A session that
+    /// went quiet *before* this note was written has nothing to say that the
+    /// note's author did not come after, and writing it up would expire the
+    /// note the person is most likely carrying on from. Compared in Rust for
+    /// the reason [`Store::open_sessions`] gives.
+    pub fn pending_handoff_written(
+        &self,
+        project_id: ProjectId,
+        slot: &Slot,
+    ) -> Result<Option<Timestamp>> {
+        let conn = self.connection();
+        let mut statement = conn.prepare(
+            "SELECT created_at FROM handoffs
+             WHERE project_id = ?1 AND state = 'pending'
+               AND COALESCE(workstream_id, '') = COALESCE(?2, '')
+               AND COALESCE(operator, '') = COALESCE(?3, '')",
+        )?;
+        let rows = statement.query_map(
+            params![
+                project_id.to_string(),
+                slot.workstream_key(),
+                slot.operator_key()
+            ],
+            |row| row.get::<_, String>(0),
+        )?;
+        let mut latest: Option<Timestamp> = None;
+        for raw in rows {
+            let at = parse_time(&raw?);
+            latest = Some(latest.map_or(at, |seen| seen.max(at)));
+        }
+        Ok(latest)
+    }
+
     /// When a note was last written from this session, whatever became of it.
     ///
     /// For a session that is still open, and so may be written up more than
