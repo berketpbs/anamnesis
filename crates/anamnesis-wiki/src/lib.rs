@@ -15,10 +15,14 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use std::collections::BTreeSet;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
-use anamnesis_core::page::{Frontmatter, Page, PagePath};
+use anamnesis_core::page::{Entity, Frontmatter, Page, PagePath, PageStatus, Tier};
 use anamnesis_core::scope::{ProjectName, ResolvedScope, Scope, WorkspaceName};
+use fs2::FileExt;
+use jiff::Timestamp;
 
 mod markdown;
 
@@ -53,6 +57,25 @@ pub enum WikiError {
     /// A core validation rejected the input.
     #[error(transparent)]
     Core(#[from] anamnesis_core::CoreError),
+    /// A create operation named a page that already exists.
+    #[error("page already exists at {0}")]
+    AlreadyExists(PagePath),
+    /// A patch operation named a page that does not exist.
+    #[error("no page exists at {0}")]
+    NotFound(PagePath),
+    /// A page changed after the caller read it.
+    #[error("page {path} changed: expected revision {expected}, found {actual}")]
+    RevisionConflict {
+        /// Page whose content changed.
+        path: PagePath,
+        /// Opaque revision supplied by the caller.
+        expected: String,
+        /// Opaque revision of the current file.
+        actual: String,
+    },
+    /// A patch both supplied and cleared the same field.
+    #[error("patch both supplies and clears {0}")]
+    ConflictingPatch(&'static str),
 }
 
 impl From<git2::Error> for WikiError {
@@ -63,6 +86,106 @@ impl From<git2::Error> for WikiError {
 
 /// Convenience alias for results produced by this crate.
 pub type Result<T> = std::result::Result<T, WikiError>;
+
+/// A nullable or collection frontmatter field that a patch may explicitly clear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ClearField {
+    /// Remove the link to the page this one replaced.
+    Supersedes,
+    /// Remove the expiry timestamp.
+    ExpiresAt,
+    /// Remove all declared entities.
+    Entities,
+    /// Remove the page's one-line abstract.
+    Abstract,
+}
+
+impl ClearField {
+    /// Stable API spelling of this field.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Supersedes => "supersedes",
+            Self::ExpiresAt => "expires_at",
+            Self::Entities => "entities",
+            Self::Abstract => "abstract",
+        }
+    }
+}
+
+/// Fields an update intends to change; every absent field is preserved.
+#[derive(Debug, Clone, Default)]
+pub struct PagePatch {
+    /// Replacement title, when supplied.
+    pub title: Option<String>,
+    /// Replacement Markdown body, when supplied.
+    pub body: Option<String>,
+    /// Replacement temporal tier, when supplied.
+    pub tier: Option<Tier>,
+    /// Replacement authored trust status, when supplied.
+    pub status: Option<PageStatus>,
+    /// Replacement pin flag, when supplied.
+    pub pinned: Option<bool>,
+    /// Replacement canonical flag, when supplied.
+    pub canonical: Option<bool>,
+    /// Replacement supersession target, when supplied.
+    pub supersedes: Option<PagePath>,
+    /// Replacement salience, when supplied.
+    pub salience: Option<f64>,
+    /// Replacement entity list, when supplied.
+    pub entities: Option<Vec<Entity>>,
+    /// Replacement expiry, when supplied.
+    pub expires_at: Option<Timestamp>,
+    /// Replacement page abstract, when supplied.
+    pub page_abstract: Option<String>,
+    /// Fields deliberately removed rather than preserved.
+    pub clear: BTreeSet<ClearField>,
+}
+
+/// A page read with the opaque content revision needed for a safe patch.
+#[derive(Debug, Clone)]
+pub struct VersionedPage {
+    /// Parsed frontmatter and body.
+    pub parsed: ParsedPage,
+    /// Git-blob hash of the exact bytes read from disk.
+    pub revision: String,
+}
+
+/// Result of merging a patch into a page.
+#[derive(Debug, Clone)]
+pub struct PatchedPage {
+    /// Fully materialized page after the patch.
+    pub page: Page,
+    /// Commit containing the change.
+    pub commit: String,
+    /// Git-blob hash of the new document.
+    pub revision: String,
+    /// Fields whose values were supplied by the patch.
+    pub changed: Vec<String>,
+    /// Existing fields kept because the patch did not mention them.
+    pub preserved: Vec<String>,
+    /// Fields deliberately cleared.
+    pub cleared: Vec<String>,
+    /// Supersession target before the patch, for reporting chain effects.
+    pub previous_supersedes: Option<PagePath>,
+}
+
+/// One consolidation-owned page: create it when absent, otherwise merge its patch.
+#[derive(Debug, Clone)]
+pub struct MergePage {
+    /// Complete page used only when the path does not exist.
+    pub create: Page,
+    /// Fields consolidation owns when the page already exists.
+    pub patch: PagePatch,
+}
+
+/// Result of an atomic validation and one-commit batch merge.
+#[derive(Debug, Clone)]
+pub struct MergedPages {
+    /// Fully materialized pages written and ready to index.
+    pub pages: Vec<Page>,
+    /// Commit containing the batch.
+    pub commit: String,
+}
 
 /// Identity recorded on wiki commits.
 const COMMIT_NAME: &str = "anamnesis";
@@ -125,23 +248,154 @@ impl Wiki {
         self.locate(scope, path).is_file()
     }
 
-    /// Write a page and commit it, returning the commit id.
-    pub fn write_page(&self, scope: &Scope, page: &Page, message: &str) -> Result<String> {
-        let absolute = self.locate(scope, &page.path);
-        let parent = absolute
-            .parent()
-            .expect("a page path always has a parent directory")
-            .to_path_buf();
-        std::fs::create_dir_all(&parent).map_err(|source| WikiError::Io {
-            path: parent.clone(),
+    /// Read a page together with an opaque revision of the exact bytes read.
+    pub fn read_versioned_page(&self, scope: &Scope, path: &PagePath) -> Result<VersionedPage> {
+        let absolute = self.locate(scope, path);
+        let text = std::fs::read_to_string(&absolute).map_err(|source| WikiError::Io {
+            path: absolute,
             source,
         })?;
+        Ok(VersionedPage {
+            parsed: parse_document(path.as_str(), &text)?,
+            revision: revision(text.as_bytes()),
+        })
+    }
 
-        let document = render_document(&page.frontmatter, &page.body)?;
-        write_atomically(&absolute, document.as_bytes())?;
+    /// Create a page, refusing to turn creation into a silent replacement.
+    pub fn create_page(&self, scope: &Scope, page: &Page, message: &str) -> Result<PatchedPage> {
+        self.with_write_lock(|| {
+            if self.exists(scope, &page.path) {
+                return Err(WikiError::AlreadyExists(page.path.clone()));
+            }
+            let document = render_document(&page.frontmatter, &page.body)?;
+            self.write_document(scope, &page.path, &document)?;
+            let commit = self.commit(&[self.relative(scope, &page.path)], message)?;
+            Ok(PatchedPage {
+                page: page.clone(),
+                commit,
+                revision: revision(document.as_bytes()),
+                changed: all_page_fields(),
+                preserved: Vec::new(),
+                cleared: Vec::new(),
+                previous_supersedes: None,
+            })
+        })
+    }
 
-        let relative = self.relative(scope, &page.path);
-        self.commit(&[relative], message)
+    /// Patch one existing page after verifying the revision the caller read.
+    pub fn patch_page(
+        &self,
+        scope: &Scope,
+        project_id: anamnesis_core::ids::ProjectId,
+        path: &PagePath,
+        expected_revision: &str,
+        patch: &PagePatch,
+        message: &str,
+    ) -> Result<PatchedPage> {
+        self.with_write_lock(|| {
+            let current = self
+                .read_versioned_page(scope, path)
+                .map_err(|error| match error {
+                    WikiError::Io { source, .. }
+                        if source.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        WikiError::NotFound(path.clone())
+                    }
+                    other => other,
+                })?;
+            if current.revision != expected_revision {
+                return Err(WikiError::RevisionConflict {
+                    path: path.clone(),
+                    expected: expected_revision.to_owned(),
+                    actual: current.revision,
+                });
+            }
+            self.patch_versioned(scope, project_id, path, current, patch, message)
+        })
+    }
+
+    /// Create a consolidation-owned page or merge only the fields it owns.
+    pub fn merge_page(
+        &self,
+        scope: &Scope,
+        mutation: &MergePage,
+        message: &str,
+    ) -> Result<PatchedPage> {
+        self.with_write_lock(|| {
+            if !self.exists(scope, &mutation.create.path) {
+                let document =
+                    render_document(&mutation.create.frontmatter, &mutation.create.body)?;
+                self.write_document(scope, &mutation.create.path, &document)?;
+                let commit =
+                    self.commit(&[self.relative(scope, &mutation.create.path)], message)?;
+                return Ok(PatchedPage {
+                    page: mutation.create.clone(),
+                    commit,
+                    revision: revision(document.as_bytes()),
+                    changed: all_page_fields(),
+                    preserved: Vec::new(),
+                    cleared: Vec::new(),
+                    previous_supersedes: None,
+                });
+            }
+            let current = self.read_versioned_page(scope, &mutation.create.path)?;
+            self.patch_versioned(
+                scope,
+                mutation.create.project_id,
+                &mutation.create.path,
+                current,
+                &mutation.patch,
+                message,
+            )
+        })
+    }
+
+    /// Validate and merge several consolidation-owned pages in one commit.
+    pub fn merge_pages(
+        &self,
+        scope: &Scope,
+        mutations: &[MergePage],
+        message: &str,
+    ) -> Result<Option<MergedPages>> {
+        if mutations.is_empty() {
+            return Ok(None);
+        }
+        self.with_write_lock(|| {
+            let mut pages = Vec::with_capacity(mutations.len());
+            let mut documents = Vec::with_capacity(mutations.len());
+            for mutation in mutations {
+                let page = if self.exists(scope, &mutation.create.path) {
+                    let current = self.read_versioned_page(scope, &mutation.create.path)?;
+                    materialize_patch(
+                        mutation.create.project_id,
+                        mutation.create.path.clone(),
+                        current.parsed,
+                        &mutation.patch,
+                    )?
+                    .0
+                } else {
+                    mutation.create.clone()
+                };
+                documents.push(render_document(&page.frontmatter, &page.body)?);
+                pages.push(page);
+            }
+            let mut relatives = Vec::with_capacity(pages.len());
+            for (page, document) in pages.iter().zip(&documents) {
+                self.write_document(scope, &page.path, document)?;
+                relatives.push(self.relative(scope, &page.path));
+            }
+            let commit = self.commit(&relatives, message)?;
+            Ok(Some(MergedPages { pages, commit }))
+        })
+    }
+
+    /// Write a page and commit it, returning the commit id.
+    pub fn write_page(&self, scope: &Scope, page: &Page, message: &str) -> Result<String> {
+        self.with_write_lock(|| {
+            let document = render_document(&page.frontmatter, &page.body)?;
+            self.write_document(scope, &page.path, &document)?;
+            self.commit(&[self.relative(scope, &page.path)], message)
+        })
     }
 
     /// Write several pages and record them in one commit.
@@ -172,25 +426,79 @@ impl Wiki {
         if pages.is_empty() {
             return Ok(None);
         }
+        self.with_write_lock(|| {
+            let mut relatives = Vec::with_capacity(pages.len());
+            for page in pages {
+                let document = render_document(&page.frontmatter, &page.body)?;
+                self.write_document(scope, &page.path, &document)?;
+                relatives.push(self.relative(scope, &page.path));
+            }
+            self.commit(&relatives, message).map(Some)
+        })
+    }
 
-        let mut relatives = Vec::with_capacity(pages.len());
-        for page in pages {
-            let absolute = self.locate(scope, &page.path);
-            let parent = absolute
-                .parent()
-                .expect("a page path always has a parent directory")
-                .to_path_buf();
-            std::fs::create_dir_all(&parent).map_err(|source| WikiError::Io {
-                path: parent.clone(),
+    fn patch_versioned(
+        &self,
+        scope: &Scope,
+        project_id: anamnesis_core::ids::ProjectId,
+        path: &PagePath,
+        current: VersionedPage,
+        patch: &PagePatch,
+        message: &str,
+    ) -> Result<PatchedPage> {
+        let previous_supersedes = current.parsed.frontmatter.supersedes.clone();
+        let (page, changed, preserved, cleared) =
+            materialize_patch(project_id, path.clone(), current.parsed, patch)?;
+        let document = render_document(&page.frontmatter, &page.body)?;
+        self.write_document(scope, path, &document)?;
+        let commit = self.commit(&[self.relative(scope, path)], message)?;
+        Ok(PatchedPage {
+            page,
+            commit,
+            revision: revision(document.as_bytes()),
+            changed,
+            preserved,
+            cleared,
+            previous_supersedes,
+        })
+    }
+
+    fn write_document(&self, scope: &Scope, path: &PagePath, document: &str) -> Result<()> {
+        let absolute = self.locate(scope, path);
+        let parent = absolute
+            .parent()
+            .expect("a page path always has a parent directory")
+            .to_path_buf();
+        std::fs::create_dir_all(&parent).map_err(|source| WikiError::Io {
+            path: parent,
+            source,
+        })?;
+        write_atomically(&absolute, document.as_bytes())
+    }
+
+    fn with_write_lock<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+        let path = self.repo.path().join("anamnesis-write.lock");
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|source| WikiError::Io {
+                path: path.clone(),
                 source,
             })?;
-
-            let document = render_document(&page.frontmatter, &page.body)?;
-            write_atomically(&absolute, document.as_bytes())?;
-            relatives.push(self.relative(scope, &page.path));
+        FileExt::lock_exclusive(&lock).map_err(|source| WikiError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        let result = operation();
+        let unlocked = FileExt::unlock(&lock).map_err(|source| WikiError::Io { path, source });
+        match (result, unlocked) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(value), Ok(())) => Ok(value),
         }
-
-        self.commit(&relatives, message).map(Some)
     }
 
     /// Delete pages and record their removal in one commit.
@@ -218,31 +526,33 @@ impl Wiki {
             return Ok(None);
         }
 
-        let scope_root = self
-            .root
-            .join(scope.workspace.as_str())
-            .join(scope.project.as_str());
+        self.with_write_lock(|| {
+            let scope_root = self
+                .root
+                .join(scope.workspace.as_str())
+                .join(scope.project.as_str());
 
-        for path in paths {
-            let absolute = self.locate(scope, path);
-            match std::fs::remove_file(&absolute) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(source) => {
-                    return Err(WikiError::Io {
-                        path: absolute,
-                        source,
-                    });
+            for path in paths {
+                let absolute = self.locate(scope, path);
+                match std::fs::remove_file(&absolute) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(source) => {
+                        return Err(WikiError::Io {
+                            path: absolute,
+                            source,
+                        });
+                    }
                 }
+                prune_empty_parents(&absolute, &scope_root);
             }
-            prune_empty_parents(&absolute, &scope_root);
-        }
 
-        let relatives: Vec<PathBuf> = paths
-            .iter()
-            .map(|path| self.relative(scope, path))
-            .collect();
-        self.commit_removals(&relatives, message)
+            let relatives: Vec<PathBuf> = paths
+                .iter()
+                .map(|path| self.relative(scope, path))
+                .collect();
+            self.commit_removals(&relatives, message)
+        })
     }
 
     /// Move every page from one scope's directory to another's, in one commit.
@@ -257,70 +567,73 @@ impl Wiki {
     /// directory they live in changes — which is exactly what a project being
     /// renamed means on disk.
     pub fn move_scope(&self, from: &Scope, to: &Scope, message: &str) -> Result<Option<String>> {
-        let source = self.scope_root(from);
-        let destination = self.scope_root(to);
-        if !source.exists() {
-            return Ok(None);
-        }
-        if destination.exists() {
-            return Err(WikiError::Io {
-                path: destination,
-                source: std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
-                    "the destination scope already has a directory",
-                ),
-            });
-        }
+        self.with_write_lock(|| {
+            let source = self.scope_root(from);
+            let destination = self.scope_root(to);
+            if !source.exists() {
+                return Ok(None);
+            }
+            if destination.exists() {
+                return Err(WikiError::Io {
+                    path: destination,
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        "the destination scope already has a directory",
+                    ),
+                });
+            }
 
-        let paths = self.pages(from)?;
-        let removals: Vec<PathBuf> = paths.iter().map(|path| self.relative(from, path)).collect();
+            let paths = self.pages(from)?;
+            let removals: Vec<PathBuf> =
+                paths.iter().map(|path| self.relative(from, path)).collect();
 
-        if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| WikiError::Io {
-                path: parent.to_path_buf(),
-                source,
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent).map_err(|source| WikiError::Io {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+            }
+            std::fs::rename(&source, &destination).map_err(|source_error| WikiError::Io {
+                path: source.clone(),
+                source: source_error,
             })?;
-        }
-        std::fs::rename(&source, &destination).map_err(|source_error| WikiError::Io {
-            path: source.clone(),
-            source: source_error,
-        })?;
 
-        let mut index = self.repo.index()?;
-        for relative in &removals {
-            let _ = index.remove_path(relative);
-        }
-        for path in &paths {
-            index.add_path(&self.relative(to, path))?;
-        }
-        index.write()?;
-        let tree_id = index.write_tree()?;
+            let mut index = self.repo.index()?;
+            for relative in &removals {
+                let _ = index.remove_path(relative);
+            }
+            for path in &paths {
+                index.add_path(&self.relative(to, path))?;
+            }
+            index.write()?;
+            let tree_id = index.write_tree()?;
 
-        let parents = match self.repo.head() {
-            Ok(head) => vec![head.peel_to_commit()?],
-            Err(_) => Vec::new(),
-        };
-        // Nothing moved that git was tracking — a scope whose pages were never
-        // committed. The files are where they should be either way, and an
-        // empty commit would claim otherwise.
-        if let Some(parent) = parents.first()
-            && parent.tree_id() == tree_id
-        {
-            return Ok(None);
-        }
+            let parents = match self.repo.head() {
+                Ok(head) => vec![head.peel_to_commit()?],
+                Err(_) => Vec::new(),
+            };
+            // Nothing moved that git was tracking — a scope whose pages were never
+            // committed. The files are where they should be either way, and an
+            // empty commit would claim otherwise.
+            if let Some(parent) = parents.first()
+                && parent.tree_id() == tree_id
+            {
+                return Ok(None);
+            }
 
-        let tree = self.repo.find_tree(tree_id)?;
-        let signature = git2::Signature::now(COMMIT_NAME, COMMIT_EMAIL)?;
-        let parent_refs: Vec<&git2::Commit<'_>> = parents.iter().collect();
-        let id = self.repo.commit(
-            Some("HEAD"),
-            &signature,
-            &signature,
-            message,
-            &tree,
-            &parent_refs,
-        )?;
-        Ok(Some(id.to_string()))
+            let tree = self.repo.find_tree(tree_id)?;
+            let signature = git2::Signature::now(COMMIT_NAME, COMMIT_EMAIL)?;
+            let parent_refs: Vec<&git2::Commit<'_>> = parents.iter().collect();
+            let id = self.repo.commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                message,
+                &tree,
+                &parent_refs,
+            )?;
+            Ok(Some(id.to_string()))
+        })
     }
 
     /// Read a page back from disk.
@@ -486,6 +799,143 @@ impl Wiki {
         }
         Ok(walk.count())
     }
+}
+
+fn revision(bytes: &[u8]) -> String {
+    git2::Oid::hash_object(git2::ObjectType::Blob, bytes)
+        .expect("hashing bytes as a git blob cannot fail")
+        .to_string()
+}
+
+fn all_page_fields() -> Vec<String> {
+    [
+        "title",
+        "body",
+        "tier",
+        "status",
+        "pinned",
+        "canonical",
+        "supersedes",
+        "salience",
+        "entities",
+        "expires_at",
+        "session",
+        "abstract",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+/// A patched page with the fields it changed, preserved, and cleared.
+type Materialized = (Page, Vec<String>, Vec<String>, Vec<String>);
+
+fn materialize_patch(
+    project_id: anamnesis_core::ids::ProjectId,
+    path: PagePath,
+    parsed: ParsedPage,
+    patch: &PagePatch,
+) -> Result<Materialized> {
+    let conflicts = [
+        (
+            patch.supersedes.is_some(),
+            ClearField::Supersedes,
+            "supersedes",
+        ),
+        (
+            patch.expires_at.is_some(),
+            ClearField::ExpiresAt,
+            "expires_at",
+        ),
+        (patch.entities.is_some(), ClearField::Entities, "entities"),
+        (
+            patch.page_abstract.is_some(),
+            ClearField::Abstract,
+            "abstract",
+        ),
+    ];
+    for (supplied, field, name) in conflicts {
+        if supplied && patch.clear.contains(&field) {
+            return Err(WikiError::ConflictingPatch(name));
+        }
+    }
+
+    let mut frontmatter = parsed.frontmatter;
+    let mut body = parsed.body;
+    let mut changed = Vec::new();
+    let mut preserved = Vec::new();
+    let mut cleared = Vec::new();
+
+    macro_rules! replace_or_preserve {
+        ($field:ident, $name:literal) => {
+            if let Some(value) = &patch.$field {
+                frontmatter.$field = value.clone();
+                changed.push($name.to_owned());
+            } else {
+                preserved.push($name.to_owned());
+            }
+        };
+    }
+    if let Some(value) = &patch.title {
+        frontmatter.title = value.clone();
+        changed.push("title".to_owned());
+    } else {
+        preserved.push("title".to_owned());
+    }
+    if let Some(value) = &patch.body {
+        body = value.clone();
+        changed.push("body".to_owned());
+    } else {
+        preserved.push("body".to_owned());
+    }
+    replace_or_preserve!(tier, "tier");
+    replace_or_preserve!(status, "status");
+    replace_or_preserve!(pinned, "pinned");
+    replace_or_preserve!(canonical, "canonical");
+    replace_or_preserve!(salience, "salience");
+
+    if patch.clear.contains(&ClearField::Supersedes) {
+        frontmatter.supersedes = None;
+        cleared.push("supersedes".to_owned());
+    } else if let Some(value) = &patch.supersedes {
+        frontmatter.supersedes = Some(value.clone());
+        changed.push("supersedes".to_owned());
+    } else {
+        preserved.push("supersedes".to_owned());
+    }
+    if patch.clear.contains(&ClearField::ExpiresAt) {
+        frontmatter.expires_at = None;
+        cleared.push("expires_at".to_owned());
+    } else if let Some(value) = patch.expires_at {
+        frontmatter.expires_at = Some(value);
+        changed.push("expires_at".to_owned());
+    } else {
+        preserved.push("expires_at".to_owned());
+    }
+    if patch.clear.contains(&ClearField::Entities) {
+        frontmatter.entities.clear();
+        cleared.push("entities".to_owned());
+    } else {
+        replace_or_preserve!(entities, "entities");
+    }
+    if patch.clear.contains(&ClearField::Abstract) {
+        frontmatter.page_abstract = None;
+        cleared.push("abstract".to_owned());
+    } else if let Some(value) = &patch.page_abstract {
+        frontmatter.page_abstract = Some(value.clone());
+        changed.push("abstract".to_owned());
+    } else {
+        preserved.push("abstract".to_owned());
+    }
+    // Source provenance belongs to the first writer, never to an editor.
+    preserved.push("session".to_owned());
+
+    Ok((
+        Page::new(project_id, path, frontmatter, body),
+        changed,
+        preserved,
+        cleared,
+    ))
 }
 
 /// Remove the directories a deleted page left empty, up to `stop`.
@@ -675,6 +1125,102 @@ mod tests {
         assert_eq!(read.frontmatter.tier, Tier::Semantic);
         assert_eq!(read.frontmatter.status, PageStatus::Active);
         assert_eq!(read.body.trim(), page.body);
+    }
+
+    #[test]
+    fn patch_preserves_every_field_it_does_not_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let wiki = Wiki::open(dir.path()).unwrap();
+        let mut page = sample("old body");
+        page.frontmatter.pinned = true;
+        page.frontmatter.canonical = true;
+        page.frontmatter.entities = vec![Entity::parse("SQLite").unwrap()];
+        page.frontmatter.supersedes = Some(PagePath::parse("decisions/0000-storage.md").unwrap());
+        page.frontmatter.session = Some(anamnesis_core::ids::SessionId::new());
+        wiki.create_page(&scope(), &page, "create").unwrap();
+        let read = wiki.read_versioned_page(&scope(), &page.path).unwrap();
+
+        let patched = wiki
+            .patch_page(
+                &scope(),
+                page.project_id,
+                &page.path,
+                &read.revision,
+                &PagePatch {
+                    title: Some("Better title".to_owned()),
+                    body: Some("new body".to_owned()),
+                    ..PagePatch::default()
+                },
+                "patch",
+            )
+            .unwrap();
+
+        assert_eq!(patched.page.frontmatter.tier, Tier::Semantic);
+        assert!(patched.page.frontmatter.pinned);
+        assert!(patched.page.frontmatter.canonical);
+        assert_eq!(patched.page.frontmatter.entities.len(), 1);
+        assert_eq!(
+            patched.page.frontmatter.supersedes.as_ref(),
+            page.frontmatter.supersedes.as_ref()
+        );
+        assert_eq!(patched.page.frontmatter.session, page.frontmatter.session);
+        for name in ["tier", "pinned", "canonical", "entities", "supersedes"] {
+            assert!(patched.preserved.iter().any(|field| field == name));
+        }
+    }
+
+    #[test]
+    fn clearing_supersedes_is_explicit_and_a_stale_patch_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let wiki = Wiki::open(dir.path()).unwrap();
+        let mut page = sample("body");
+        page.frontmatter.supersedes = Some(PagePath::parse("decisions/0000-storage.md").unwrap());
+        wiki.create_page(&scope(), &page, "create").unwrap();
+        let read = wiki.read_versioned_page(&scope(), &page.path).unwrap();
+        let mut clear = BTreeSet::new();
+        clear.insert(ClearField::Supersedes);
+        let patched = wiki
+            .patch_page(
+                &scope(),
+                page.project_id,
+                &page.path,
+                &read.revision,
+                &PagePatch {
+                    clear,
+                    ..PagePatch::default()
+                },
+                "clear",
+            )
+            .unwrap();
+        assert!(patched.page.frontmatter.supersedes.is_none());
+        assert_eq!(patched.cleared, vec!["supersedes"]);
+
+        let error = wiki
+            .patch_page(
+                &scope(),
+                page.project_id,
+                &page.path,
+                &read.revision,
+                &PagePatch {
+                    body: Some("stale".to_owned()),
+                    ..PagePatch::default()
+                },
+                "stale",
+            )
+            .unwrap_err();
+        assert!(matches!(error, WikiError::RevisionConflict { .. }));
+    }
+
+    #[test]
+    fn create_refuses_an_existing_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let wiki = Wiki::open(dir.path()).unwrap();
+        let page = sample("body");
+        wiki.create_page(&scope(), &page, "create").unwrap();
+        assert!(matches!(
+            wiki.create_page(&scope(), &page, "again"),
+            Err(WikiError::AlreadyExists(_))
+        ));
     }
 
     fn at(path: &str, body: &str) -> Page {

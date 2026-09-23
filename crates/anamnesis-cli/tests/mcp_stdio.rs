@@ -176,6 +176,7 @@ fn a_harness_can_list_write_find_and_read_over_stdio() {
     for tool in [
         "memory_query",
         "memory_write_page",
+        "memory_patch_page",
         "memory_read_page",
         "memory_handoff_accept",
         "workstream_start",
@@ -218,23 +219,41 @@ fn a_harness_can_list_write_find_and_read_over_stdio() {
         text_of(&read).contains("breaks the MCP stream"),
         "the whole body comes back: {read}"
     );
+    let revision = read["structuredContent"]["revision"]
+        .as_str()
+        .expect("a read carries its patch revision");
+    let patched = server.call(
+        6,
+        "memory_patch_page",
+        json!({
+            "path": "gotchas/stdio-is-for-frames.md",
+            "expected_revision": revision,
+            "body": "Only protocol frames belong on stdout; send logs to stderr.",
+        }),
+    );
+    assert!(
+        patched["structuredContent"]["preserved"]
+            .as_array()
+            .is_some_and(|fields| fields.iter().any(|field| field == "entities")),
+        "omitted frontmatter is reported as preserved: {patched}"
+    );
 
     // An unknown tool is refused as a protocol answer, not by a crash that
     // takes the stream down with it.
     server.send(&json!({
         "jsonrpc": "2.0",
-        "id": 6,
+        "id": 7,
         "method": "tools/call",
         "params": { "name": "memory_nonexistent", "arguments": {} },
     }));
-    let refused = server.answer(6);
+    let refused = server.answer(7);
     assert!(
         refused.get("error").is_some() || refused["result"]["isError"] == true,
         "{refused}"
     );
-    server.send(&json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/list" }));
+    server.send(&json!({ "jsonrpc": "2.0", "id": 8, "method": "tools/list" }));
     assert!(
-        server.answer(7)["result"]["tools"].is_array(),
+        server.answer(8)["result"]["tools"].is_array(),
         "and it still answers"
     );
 }
@@ -273,6 +292,7 @@ fn every_tool_says_whether_it_changes_memory() {
     let reads = ["memory_query", "memory_read_page", "workstream_status"];
     let writes = [
         "memory_write_page",
+        "memory_patch_page",
         "memory_handoff_accept",
         "workstream_start",
     ];

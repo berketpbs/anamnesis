@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A page is updated from the revision that was read, not overwritten.**
+  `memory_write_page` replaced whatever stood at a path, and every field it
+  was not given went back to its default: correcting a decision's body
+  dropped its `supersedes` link and made the page it had retired current
+  again. Writing now only creates, and an existing path is refused. Updating
+  is `memory_patch_page` (and `anamnesis patch-page`): it takes the revision
+  `memory_read_page` or `show-page` printed, refuses if the page changed
+  since, changes only the fields it is given and lists the ones it kept. A
+  field is removed only by naming it in `clear_fields`, and clearing
+  `supersedes` is reported with what it does to the chain. Consolidation
+  merges the fields it owns into an existing page in the same way, and every
+  wiki write now holds one lock. The long-run eval's S23 also checks that the
+  option the conversation dropped does not survive as a current decision.
 - **A session's decisions are written down when it goes quiet, not when it
   ends.** Notes were written only by the model that summarises a session at
   its end, and a terminal closed rather than ended has no end for twelve

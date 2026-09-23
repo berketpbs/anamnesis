@@ -339,6 +339,10 @@ plants = "S25"
 check = "largest_command"
 knowledge = [['settings\.py'], ['LEDGER_(<|\{|\*|NAME|\[)', 'environment variables?[^\n]{0,160}LEDGER_(?!FIXTURES)', 'LEDGER_(?!FIXTURES)[^\n]{0,160}environment']]
 noise = ['ORCHID-19']
+# A rejected option must not survive as a current decision. This expression is
+# deliberately about the affirmative title, not any mention of ledger.toml:
+# the chosen decision may explain that it was considered and dropped.
+rejected_decisions = ['(?i)^settings (live|are stored) in ledger\.toml']
 turns = [
 """
 Add a `largest` command: `python -m ledger.cli largest FILE -n N` prints the \

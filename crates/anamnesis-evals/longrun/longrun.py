@@ -194,6 +194,13 @@ def load_scenario(path: Path = SCENARIO) -> dict:
                 problems.append(f"{session['id']} noise {pattern!r}: {error}")
         if "noise" in session and session["kind"] != "plant":
             problems.append(f"{session['id']} names noise but plants nothing")
+        for pattern in session.get("rejected_decisions", []):
+            try:
+                re.compile(pattern)
+            except re.error as error:
+                problems.append(f"{session['id']} rejected decision {pattern!r}: {error}")
+        if "rejected_decisions" in session and session["kind"] != "plant":
+            problems.append(f"{session['id']} names rejected decisions but plants nothing")
     if problems:
         raise SystemExit("scenario.toml: " + "; ".join(problems))
     return scenario
@@ -1109,6 +1116,75 @@ def noise_kept(pages: list[tuple[str, str]], noise: list[str]) -> list[str]:
     )
 
 
+def frontmatter_value(text: str, field: str) -> str | None:
+    """One scalar from the small YAML frontmatter shape longrun needs.
+
+    This is intentionally not a general YAML parser. The wiki renderer writes
+    these values one per line; the eval only needs title, status and
+    supersedes, and has no optional dependency on PyYAML.
+    """
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        name, separator, value = line.partition(":")
+        if separator and name.strip() == field:
+            value = value.strip().strip("'\"")
+            return None if not value or value == "null" else value
+    return None
+
+
+def active_decision_pages(wiki: Path) -> list[tuple[str, str]]:
+    """Decision/rule chain heads whose authored status is active.
+
+    Read from markdown rather than the index so the probe measures the durable
+    memory a new index would reproduce. Supersession is derived from authored
+    links the same way the store derives `is_latest`.
+    """
+    pages: dict[str, tuple[str, str | None, str]] = {}
+    for namespace in ("decisions", "_rules"):
+        root = wiki / namespace
+        if not root.is_dir():
+            continue
+        for page in sorted(root.rglob("*.md")):
+            text = page.read_text(encoding="utf-8", errors="replace")
+            path = page.relative_to(wiki).as_posix()
+            status = frontmatter_value(text, "status") or "active"
+            title = frontmatter_value(text, "title") or path
+            pages[path] = (status, frontmatter_value(text, "supersedes"), title)
+    retired = {supersedes for _, supersedes, _ in pages.values() if supersedes}
+    return sorted(
+        (path, title)
+        for path, (status, _, title) in pages.items()
+        if status == "active" and path not in retired
+    )
+
+
+def rejected_decisions(pages: list[tuple[str, str]], patterns: list[str]) -> list[str]:
+    """Current decision titles that assert an option the person rejected."""
+    return sorted(
+        path
+        for path, title in pages
+        if any(re.search(pattern, title) for pattern in patterns)
+    )
+
+
+def run_wiki(run: dict) -> Path | None:
+    """This run's project wiki, when its artifacts are still on disk."""
+    if not run.get("_dir"):
+        return None
+    return (
+        Path(run["_dir"])
+        / "memory"
+        / "data"
+        / "wiki"
+        / "longrun"
+        / f"ledger-{run['run'].lower()}"
+    )
+
+
 def knowledge_path(run: dict, record: dict, needs: str | None, knowledge: list[list[str]]) -> dict | None:
     """How far a probe's planted knowledge got in one memory-arm run.
 
@@ -1926,6 +2002,36 @@ def report_lines(scenario: dict, runs: list[dict]) -> list[str]:
                 f"{', '.join(f'`{path}`' for path in where) or '—'} |"
             )
 
+    rejected = [session for session in scenario["session"] if session.get("rejected_decisions")]
+    if rejected:
+        lines += [
+            "",
+            "## Rejected options that survived as decisions",
+            "",
+            "An option discussed and explicitly dropped must not remain an active chain head. "
+            "This reads the durable wiki, derives supersession from its frontmatter, and checks "
+            "current decision titles against `rejected_decisions` in scenario.toml.",
+            "",
+            "| Plant | Runs | Clean | Active rejected pages |",
+            "|---|---|---|---|",
+        ]
+        for session in rejected:
+            found = []
+            for run in runs:
+                wiki = run_wiki(run)
+                if wiki is not None and wiki.is_dir():
+                    found.append(
+                        rejected_decisions(
+                            active_decision_pages(wiki),
+                            session["rejected_decisions"],
+                        )
+                    )
+            where = sorted({path for paths in found for path in paths})
+            lines.append(
+                f"| {session['id']} | {len(found)} | {sum(not paths for paths in found)}/{len(found)} | "
+                f"{', '.join(f'`{path}`' for path in where) or '—'} |"
+            )
+
     lines += [
         "",
         "## Effort per session",
@@ -2209,6 +2315,37 @@ while (item := arrived.get()) is not None:
         print("FAIL noise_kept does not tell a note holding the word from a session page telling it")
         return 1
     print("ok   noise_kept counts a note that holds a passing word, not the session page that tells it")
+
+    # The failure S23 is meant to catch: both options were discussed, B was
+    # chosen, and A must not stay an active decision. The mutation removes the
+    # supersedes edge from B, exactly what an unsafe partial rewrite did in the
+    # product; A becomes a chain head and the detector must turn red.
+    with tempfile.TemporaryDirectory() as scratch:
+        wiki = Path(scratch)
+        decisions = wiki / "decisions"
+        decisions.mkdir()
+        rejected_page = decisions / "settings-live-in-ledger-toml.md"
+        rejected_page.write_text(
+            "---\ntitle: Settings live in ledger.toml\nstatus: active\n---\nRejected option.\n",
+            encoding="utf-8",
+        )
+        chosen_page = decisions / "settings-are-environment-variables.md"
+        chosen = (
+            "---\ntitle: Settings are LEDGER environment variables\nstatus: active\n"
+            "supersedes: decisions/settings-live-in-ledger-toml.md\n---\nChosen option.\n"
+        )
+        chosen_page.write_text(chosen, encoding="utf-8")
+        pattern = [r"(?i)^settings (live|are stored) in ledger\.toml"]
+        green = rejected_decisions(active_decision_pages(wiki), pattern)
+        chosen_page.write_text(
+            chosen.replace("supersedes: decisions/settings-live-in-ledger-toml.md\n", ""),
+            encoding="utf-8",
+        )
+        red = rejected_decisions(active_decision_pages(wiki), pattern)
+    if green or red != ["decisions/settings-live-in-ledger-toml.md"]:
+        print(f"FAIL rejected decision mutation: green={green!r}, red={red!r}")
+        return 1
+    print("ok   removing supersedes makes the rejected-option probe turn red")
 
     # A session that is given a shell it may not use spends turns finding that
     # out, so the tool is taken away rather than refused. Both arms are

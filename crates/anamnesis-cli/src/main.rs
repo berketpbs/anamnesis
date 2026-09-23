@@ -54,7 +54,10 @@ use capture::{cmd_hook, cmd_probe};
 use cli::{Cli, Commands};
 use evals::cmd_eval;
 use improve::cmd_improve;
-use pages::{PageOptions, cmd_forget, cmd_search, cmd_show_page, cmd_write_page};
+use pages::{
+    PageOptions, PatchPageOptions, cmd_forget, cmd_patch_page, cmd_search, cmd_show_page,
+    cmd_write_page,
+};
 use purge::cmd_purge;
 use reconsolidate::cmd_reconsolidate;
 use reindex::cmd_reindex;
@@ -233,6 +236,42 @@ fn run() -> anyhow::Result<()> {
                     canonical,
                     entities: entity,
                     supersedes,
+                    global,
+                },
+                cli.data_dir.clone(),
+            )?;
+        }
+        Commands::PatchPage {
+            path,
+            expected_revision,
+            title,
+            body,
+            pinned,
+            expires_at,
+            tier,
+            status,
+            canonical,
+            entity,
+            supersedes,
+            page_abstract,
+            clear_fields,
+            global,
+        } => {
+            cmd_patch_page(
+                &path,
+                PatchPageOptions {
+                    expected_revision,
+                    title,
+                    body,
+                    pinned,
+                    expires_at,
+                    tier,
+                    status,
+                    canonical,
+                    entities: entity,
+                    supersedes,
+                    page_abstract,
+                    clear_fields,
                     global,
                 },
                 cli.data_dir.clone(),

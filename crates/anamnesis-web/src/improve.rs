@@ -31,7 +31,9 @@ use std::time::Duration;
 use anamnesis_core::config::{AutoImproveConfig, MarkerConfig};
 use anamnesis_core::ids::ProjectId;
 use anamnesis_core::improve::{ProposalKind, ProposalState, propose};
-use anamnesis_core::page::{Page, PagePath, Tier};
+#[cfg(test)]
+use anamnesis_core::page::Page;
+use anamnesis_core::page::{PagePath, Tier};
 use anamnesis_core::scope::{Scope, find_marker};
 use anamnesis_store::{Filed, ProjectRow, Store, StoredProposal};
 use anamnesis_wiki::Wiki;
@@ -169,21 +171,25 @@ fn promote(
     // Read from the wiki rather than from the index: the page may have been
     // edited by hand since the proposal was filed, and the promotion must
     // keep whatever it says now.
-    let parsed = wiki.read_page(scope, &path)?;
-    if parsed.frontmatter.tier.is_durable() {
+    let current = wiki.read_versioned_page(scope, &path)?;
+    if current.parsed.frontmatter.tier.is_durable() {
         store.decide_proposal(proposal.id, ProposalState::Resolved, now)?;
         return Ok(Outcome::AlreadyDurable);
     }
 
-    let mut frontmatter = parsed.frontmatter;
-    frontmatter.tier = Tier::Semantic;
-    let mut page = Page::new(project_id, path.clone(), frontmatter, parsed.body);
-
-    let commit = wiki.write_page(
+    let promoted = wiki.patch_page(
         scope,
-        &page,
+        project_id,
+        &path,
+        &current.revision,
+        &anamnesis_wiki::PagePatch {
+            tier: Some(Tier::Semantic),
+            ..anamnesis_wiki::PagePatch::default()
+        },
         &format!("improve: promote {path} to the semantic tier"),
     )?;
+    let commit = promoted.commit;
+    let mut page = promoted.page;
     page.git_commit = Some(commit.clone());
 
     store.index_page(

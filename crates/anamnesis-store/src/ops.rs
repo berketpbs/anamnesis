@@ -60,6 +60,19 @@ pub struct LatestHandoff {
     pub taken_by: Option<SessionId>,
 }
 
+/// One current decision offered to a starting session, with its provenance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StandingDecision {
+    /// Project-relative wiki path.
+    pub path: String,
+    /// Claim the page title makes.
+    pub title: String,
+    /// When the indexed page was last changed.
+    pub updated_at: Timestamp,
+    /// Session that first created the page, when it is still in the ledger.
+    pub source_session: Option<SessionId>,
+}
+
 /// What wrote a session's page.
 ///
 /// Kept apart from the model's name because the two answer different
@@ -930,6 +943,22 @@ impl Store {
         Ok(replacement.as_deref().map(crate::convert::parse_page_path))
     }
 
+    /// Whether a page is the head of its supersession chain, if it is indexed.
+    pub fn page_is_latest(
+        &self,
+        project_id: ProjectId,
+        path: &anamnesis_core::page::PagePath,
+    ) -> Result<Option<bool>> {
+        let conn = self.connection();
+        conn.query_row(
+            "SELECT is_latest FROM pages WHERE project_id = ?1 AND path = ?2",
+            params![project_id.to_string(), path.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     /// Record a handoff, expiring any that was still waiting.
     ///
     /// Expiring first is what upholds the single-pending invariant the schema
@@ -1413,7 +1442,7 @@ impl Store {
             .map_err(Into::into)
     }
 
-    /// The decisions and rules a project holds now, as `(path, title)`: pinned
+    /// The decisions and rules a project holds now: pinned
     /// and canonical first, then the most recently written, at most `limit`.
     ///
     /// Now means the head of its chain and `active`. A decision another page
@@ -1424,13 +1453,13 @@ impl Store {
         &self,
         project_id: ProjectId,
         limit: usize,
-    ) -> Result<Vec<(String, String)>> {
+    ) -> Result<Vec<StandingDecision>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
         let conn = self.connection();
         let mut statement = conn.prepare(
-            "SELECT path, title FROM pages
+            "SELECT path, title, updated_at, session_id FROM pages
              WHERE project_id = ?1 AND is_latest = 1 AND status = 'active'
                AND (path LIKE 'decisions/%' OR path LIKE '\\_rules/%' ESCAPE '\\')
              ORDER BY pinned DESC, canonical DESC, updated_at DESC, path
@@ -1441,7 +1470,14 @@ impl Store {
                 project_id.to_string(),
                 i64::try_from(limit).unwrap_or(i64::MAX)
             ],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            |row| {
+                Ok(StandingDecision {
+                    path: row.get(0)?,
+                    title: row.get(1)?,
+                    updated_at: parse_time(&row.get::<_, String>(2)?),
+                    source_session: row.get::<_, Option<String>>(3)?.map(parse_id),
+                })
+            },
         )?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
