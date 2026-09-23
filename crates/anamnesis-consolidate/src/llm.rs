@@ -97,6 +97,13 @@ pub struct Surroundings<'a> {
     /// prompt that invites linking without saying what exists invites invented
     /// paths — links that resolve to nothing and mean nothing.
     pub pages: &'a [String],
+    /// Notes this session has already left, as `(path, title)`.
+    ///
+    /// A session can be asked about more than once — while it is quiet and
+    /// again when it ends — and a note is filed under its title. Told what
+    /// it already wrote, the model can give a decision that still holds the
+    /// same title, and the page is updated rather than written twice.
+    pub own_notes: &'a [(String, String)],
 }
 
 /// What the model is being asked to do.
@@ -886,6 +893,18 @@ pub fn render_prompt_reporting(
         out.push_str("\n# Project preferences\n\n");
         out.push_str(&clip_to_tokens(text, share));
         out.push('\n');
+    }
+
+    if !surroundings.own_notes.is_empty() {
+        out.push_str("\n# Notes this session already left\n\n");
+        out.push_str(
+            "Written from an earlier part of this same session. A note that still \
+             holds is given again under the same title, so the page is updated rather \
+             than repeated; one the session went on to change is given as it stands now.\n\n",
+        );
+        for (path, title) in surroundings.own_notes {
+            out.push_str(&format!("- {title} (`{path}`)\n"));
+        }
     }
 
     if !surroundings.pages.is_empty() {
@@ -2416,6 +2435,7 @@ mod tests {
             &working_session(),
             Surroundings {
                 pages: &pages,
+                own_notes: &[],
                 ..Surroundings::default()
             },
             6_500,
@@ -2439,6 +2459,7 @@ mod tests {
             &working_session(),
             Surroundings {
                 pages: &pages,
+                own_notes: &[],
                 ..Surroundings::default()
             },
             1_000,

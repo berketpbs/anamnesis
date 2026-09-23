@@ -381,6 +381,19 @@ pub struct SessionsConfig {
     /// written up at once — somebody who read that answer and switched agents
     /// is carrying on from it.
     pub handover_after_seconds: u32,
+    /// Seconds of silence after an agent's answer before an open session's
+    /// decisions are written down, without waiting for it to end.
+    ///
+    /// A decision taken in conversation was written only when the session
+    /// ended: on `SessionEnd`, or twelve hours later when the reaper gave up
+    /// on a terminal somebody closed. Closing Claude and opening Codex a
+    /// minute later handed Codex a note counted from the transcript and
+    /// none of the decisions. So once the agent has answered and nobody has
+    /// said anything for this long, a model is asked once for the notes the
+    /// session has left so far; the page and the handoff are left to the
+    /// paths that already write them. Asked again only after the session
+    /// has moved. Needs a model; zero turns it off.
+    pub notes_after_seconds: u32,
 }
 
 impl Default for SessionsConfig {
@@ -393,6 +406,10 @@ impl Default for SessionsConfig {
             // this is for; and a working agent is heard from every few
             // seconds, because every tool call is two events.
             handover_after_seconds: 120,
+            // The same two minutes, for the same reason: a person who has
+            // read the answer and switched agents does it within that, and a
+            // session at work is heard from every few seconds.
+            notes_after_seconds: 120,
         }
     }
 }

@@ -79,7 +79,7 @@ pub struct Asking(Arc<Mutex<HashSet<SessionId>>>);
 impl Asking {
     /// Hold `session` until the returned claim is dropped, unless somebody
     /// already holds it.
-    fn claim(&self, session: SessionId) -> Option<Claim> {
+    pub(crate) fn claim(&self, session: SessionId) -> Option<Claim> {
         self.0.lock().insert(session).then(|| Claim {
             asking: self.clone(),
             session,
@@ -88,7 +88,7 @@ impl Asking {
 }
 
 /// One session held by [`Asking`], released however the asking ends.
-struct Claim {
+pub(crate) struct Claim {
     asking: Asking,
     session: SessionId,
 }
@@ -97,6 +97,30 @@ impl Drop for Claim {
     fn drop(&mut self) {
         self.asking.0.lock().remove(&self.session);
     }
+}
+
+/// The notes `session` has already left, as `(path, title)`: every page it
+/// wrote other than its own session page.
+///
+/// Read from the index for which pages, and from the wiki for what each is
+/// called, since the title is what a note is filed under and so what the
+/// model has to give again for the page to be updated rather than repeated.
+pub(crate) fn notes_left_by(
+    store: &Store,
+    wiki: &Wiki,
+    scope: &ResolvedScope,
+    session: &anamnesis_core::session::Session,
+) -> Result<Vec<(String, String)>, WebError> {
+    let own = crate::pipeline::session_page_path(&session.started_at, session.id)?;
+    Ok(store
+        .pages_from_session(session.id)?
+        .into_iter()
+        .filter(|path| path != &own && !path.is_session_record())
+        .filter_map(|path| {
+            let page = wiki.read_page(&scope.scope, &path).ok()?;
+            Some((path.as_str().to_owned(), page.frontmatter.title))
+        })
+        .collect())
 }
 
 /// Ask a model to rewrite one closed session's page.
@@ -151,7 +175,7 @@ pub async fn enrich(
             // The session's own page is left out of the list: it exists by now
             // — `finalize` wrote it — and a page that links to itself has said
             // nothing.
-            let (preferences, pages) = {
+            let (preferences, pages, own_notes) = {
                 let wiki = wiki.lock();
                 let own = crate::pipeline::session_page_path(&session.started_at, session.id)?;
                 let pages = wiki
@@ -161,13 +185,14 @@ pub async fn enrich(
                     .filter(|path| path != &own)
                     .map(|path| path.as_str().to_owned())
                     .collect::<Vec<_>>();
-                (read_preferences(&wiki, &scope), pages)
+                let own_notes = notes_left_by(&store, &wiki, &scope, &session)?;
+                (read_preferences(&wiki, &scope), pages, own_notes)
             };
-            Ok(Ok((session, observations, preferences, pages)))
+            Ok(Ok((session, observations, preferences, pages, own_notes)))
         })
         .await?
     };
-    let (session, observations, preferences, pages) = match loaded {
+    let (session, observations, preferences, pages, own_notes) = match loaded {
         Ok(loaded) => loaded,
         Err(outcome) => return Ok(outcome),
     };
@@ -179,6 +204,7 @@ pub async fn enrich(
         Surroundings {
             preferences: preferences.as_deref(),
             pages: &pages,
+            own_notes: &own_notes,
         },
         llm.max_input_tokens,
         llm.max_output_tokens,

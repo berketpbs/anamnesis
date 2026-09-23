@@ -773,7 +773,7 @@ fn write_session_page(
 /// `recompile:` messages are a shape other things read; one commit for the
 /// batch because a consolidation deciding a session left a decision, a gotcha
 /// and a procedure behind is a single decision about this project's memory.
-fn write_notes(
+pub(crate) fn write_notes(
     store: &Store,
     wiki: &Wiki,
     scope: &ResolvedScope,

@@ -40,6 +40,7 @@ pub mod improve;
 mod pipeline;
 pub mod reap;
 pub mod revector;
+pub mod settle;
 mod shutdown;
 pub mod ui;
 pub mod watch;
@@ -601,6 +602,12 @@ pub async fn serve_on(
     // page is a tally because a model answered 503 for an afternoon is a fault
     // nobody would think to go looking for.
     tokio::spawn(enrich::run_enricher(state.clone()));
+
+    // Notes before a session ends. A decision taken in conversation was
+    // written only at the end, and a terminal closed rather than ended has no
+    // end for twelve hours; the agent opened beside it a minute later was
+    // told nothing of it. Returns at once without a model.
+    tokio::spawn(settle::run_settler(state.clone()));
 
     // The same net for vectors: a page written while the embedder was down is
     // filed as missing one, and this sends it again once the embedder answers.
@@ -2264,6 +2271,170 @@ mod tests {
     /// The budgets every test uses, around whichever provider it supplies.
     fn settings(provider: Arc<dyn Provider>) -> LlmSettings {
         LlmSettings::watched(provider, 6_500, 2_000)
+    }
+
+    /// A model reply that settles one decision, as a quiet session's would.
+    fn deciding_reply() -> serde_json::Value {
+        json!({
+            "title": "Settled how settings are read",
+            "body": "## What\n\nThe person chose environment variables.",
+            "handoff": "Settings are LEDGER_ variables.",
+            "entities": [],
+            "notes": [{
+                "kind": "decision",
+                "title": "Settings are LEDGER environment variables",
+                "body": "Read in ledger/settings.py. A ledger.toml was considered and dropped.",
+            }],
+        })
+    }
+
+    /// A session that settled something in conversation and answered: the
+    /// person has read the answer, and may be about to close the terminal.
+    fn answered(harness: &Harness) {
+        run(
+            harness,
+            "UserPromptSubmit",
+            json!({"prompt": "settle it: environment variables, no ledger.toml"}),
+        );
+        run(
+            harness,
+            "Stop",
+            json!({"last_assistant_message": "Settled: LEDGER_ variables read in ledger/settings.py."}),
+        );
+    }
+
+    fn later(seconds: i64) -> Timestamp {
+        now()
+            .checked_add(jiff::SignedDuration::from_secs(seconds))
+            .expect("time")
+    }
+
+    /// The case this exists for: the decision is in the wiki while the
+    /// session is still open, before any end and without a handoff.
+    #[tokio::test]
+    async fn a_session_that_answered_and_went_quiet_leaves_its_decisions() {
+        let harness = harness();
+        answered(&harness);
+        let fake = Arc::new(Fake::answering(deciding_reply()));
+        let state = harness.state.clone().with_llm(Some(settings(fake.clone())));
+
+        let mut asked = settle::Asked::new();
+        let report = settle::settle(&state, later(180), &mut asked).await;
+
+        let [(_, notes)] = &report.asked[..] else {
+            panic!("one session asked about: {report:?}");
+        };
+        assert_eq!(
+            notes,
+            &vec!["decisions/settings-are-ledger-environment-variables.md".to_owned()]
+        );
+        let session = harness
+            .state
+            .store
+            .recent_sessions(project(&harness), 1)
+            .expect("sessions")
+            .remove(0);
+        assert_eq!(session.state, "open", "a silence is not an end");
+        assert!(
+            harness
+                .state
+                .store
+                .peek_handoff(project(&harness), &anamnesis_core::handoff::Slot::default())
+                .expect("peek")
+                .is_none(),
+            "the handoff is the handover's to leave"
+        );
+
+        // Asked once per silence: the same silence is not asked about again.
+        let again = settle::settle(&state, later(600), &mut asked).await;
+        assert!(again.asked.is_empty(), "{again:?}");
+    }
+
+    #[tokio::test]
+    async fn a_session_is_not_asked_before_its_silence_or_mid_turn() {
+        let harness = harness();
+        answered(&harness);
+        let state = harness
+            .state
+            .clone()
+            .with_llm(Some(settings(Arc::new(Fake::answering(deciding_reply())))));
+        let mut asked = settle::Asked::new();
+        assert!(
+            settle::settle(&state, later(30), &mut asked)
+                .await
+                .asked
+                .is_empty(),
+            "too soon"
+        );
+
+        run(
+            &harness,
+            "PreToolUse",
+            json!({"tool_name": "Bash", "tool_input": {"command": "cargo build"}}),
+        );
+        assert!(
+            settle::settle(&state, later(600), &mut asked)
+                .await
+                .asked
+                .is_empty(),
+            "a session last seen starting a tool is at work, however long the build"
+        );
+    }
+
+    #[tokio::test]
+    async fn notes_after_seconds_zero_asks_nothing() {
+        let harness = harness_with("[sessions]\nnotes_after_seconds = 0\n");
+        answered(&harness);
+        let state = harness
+            .state
+            .clone()
+            .with_llm(Some(settings(Arc::new(Fake::answering(deciding_reply())))));
+        let mut asked = settle::Asked::new();
+        assert!(
+            settle::settle(&state, later(600), &mut asked)
+                .await
+                .asked
+                .is_empty()
+        );
+    }
+
+    /// Asked again after the session moved on, the model is told what the
+    /// session already wrote, so a decision that holds keeps its page.
+    #[tokio::test]
+    async fn asked_again_the_model_is_told_the_notes_already_left() {
+        let harness = harness();
+        answered(&harness);
+        let fake = Arc::new(Fake::answering(deciding_reply()));
+        let state = harness.state.clone().with_llm(Some(settings(fake.clone())));
+        let mut asked = settle::Asked::new();
+        settle::settle(&state, later(180), &mut asked).await;
+        assert!(
+            !fake.prompt().contains("Notes this session already left"),
+            "nothing was left yet"
+        );
+
+        run(
+            &harness,
+            "UserPromptSubmit",
+            json!({"prompt": "and the log level too"}),
+        );
+        run(
+            &harness,
+            "Stop",
+            json!({"last_assistant_message": "LEDGER_LOG_LEVEL, same module."}),
+        );
+        let report = settle::settle(&state, later(400), &mut asked).await;
+
+        assert_eq!(report.asked.len(), 1, "{report:?}");
+        let prompt = fake.prompt();
+        assert!(
+            prompt.contains("Notes this session already left"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("Settings are LEDGER environment variables"),
+            "{prompt}"
+        );
     }
 
     /// Record a small session without closing it, and hand back its scope.
