@@ -198,6 +198,7 @@ pub fn cmd_reconsolidate(
             Surroundings {
                 preferences: preferences.as_deref(),
                 pages: &pages,
+                own_notes: &[],
             },
             config.max_input_tokens,
             config.max_output_tokens,
@@ -336,6 +337,7 @@ fn cmd_show_prompt(
             Surroundings {
                 preferences: preferences.as_deref(),
                 pages: &pages,
+                own_notes: &[],
             },
             max_input_tokens,
         );

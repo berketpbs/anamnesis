@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A session's decisions are written down when it goes quiet, not when it
+  ends.** Notes were written only by the model that summarises a session at
+  its end, and a terminal closed rather than ended has no end for twelve
+  hours. Settling something with Claude, closing it and opening Codex a
+  minute later handed Codex a note counted from the transcript and none of
+  the decisions. Now, once an open session's agent has answered and nobody
+  has said anything for `[sessions] notes_after_seconds` (default 120; 0 turns
+  it off), a model is asked once for the notes the session has left so far.
+  Only the notes: the page and the handoff stay with the paths that write
+  them. A session is asked again only after it has moved, never mid-turn, and
+  never while another question about it is out. Whenever a session is asked
+  about — quiet, or at its end — the model is told the notes it already left,
+  so a decision that still holds keeps its title and its page is updated
+  rather than written twice. Needs a model.
 - **The long-run eval measures a decision taken in conversation.** Every
   earlier plant was told its rule in one prompt. S23 is a conversation of four
   turns in one session: the agent is asked how the project should be made
