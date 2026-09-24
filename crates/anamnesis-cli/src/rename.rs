@@ -52,7 +52,8 @@ pub fn cmd_rename(new_name: &str, apply: bool, data_dir: Option<PathBuf>) -> any
     let counted = store.purge_preview(scope.project_id)?;
     let wiki = anamnesis_wiki::Wiki::open(data.wiki())?;
     let pages = wiki.pages(&scope.scope)?;
-    let transcripts = transcripts_of(&data, &scope.scope);
+    let raw = anamnesis_store::RawSpool::new(data.raw());
+    let transcripts = raw.scope_dir(&scope.scope);
     let marker = scope.marker.clone();
 
     println!("🔁 Renaming {} → {renamed}", scope.scope);
@@ -70,10 +71,7 @@ pub fn cmd_rename(new_name: &str, apply: bool, data_dir: Option<PathBuf>) -> any
     println!("              → {}", wiki.scope_root(&renamed).display());
     if transcripts.exists() {
         println!("  transcripts {}", transcripts.display());
-        println!(
-            "              → {}",
-            transcripts_of(&data, &renamed).display()
-        );
+        println!("              → {}", raw.scope_dir(&renamed).display());
     }
     match &marker {
         Some(path) => println!("  marker      {} (project = \"{name}\")", path.display()),
@@ -102,9 +100,14 @@ pub fn cmd_rename(new_name: &str, apply: bool, data_dir: Option<PathBuf>) -> any
     // recomputed.
     let moved = store.rename_project(scope.project_id, target, &name, &key, Timestamp::now())?;
 
-    // Then the transcripts, which are only ever a directory.
+    // Then the transcripts, which are only ever a directory. Their headers
+    // go on naming the old project — nothing rewrites a transcript — so the
+    // directory says which project that was. Written before the move, so
+    // the note and the transcripts arrive in one step: written after, a
+    // failure to write it would leave them moved and unrecognisable.
     if transcripts.exists() {
-        let destination = transcripts_of(&data, &renamed);
+        raw.record_previous(&scope.scope, scope.project_id, &scope.scope)?;
+        let destination = raw.scope_dir(&renamed);
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -141,13 +144,6 @@ pub fn cmd_rename(new_name: &str, apply: bool, data_dir: Option<PathBuf>) -> any
     println!();
     println!("  The next session will resolve {renamed}. Nothing else has to change.");
     Ok(())
-}
-
-/// Where a scope's transcripts live.
-fn transcripts_of(data: &anamnesis_core::datadir::DataDir, scope: &Scope) -> PathBuf {
-    data.raw()
-        .join(scope.workspace.as_str())
-        .join(scope.project.as_str())
 }
 
 /// Write `project = "<name>"` into the marker file, keeping everything else.

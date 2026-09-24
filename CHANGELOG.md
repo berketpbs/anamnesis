@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A renamed project's sessions come back when its index is rebuilt.**
+  `rename` moved sessions to the new project in the index and moved their
+  transcripts to the new directory, but a transcript's header keeps naming
+  the project it was recorded under, and `reindex` read only the header: if
+  the index of a renamed project was lost, every session from before the
+  rename was lost with it. The rename now leaves a `previous-projects` note
+  in the transcript directory, and a rebuild adopts a transcript only when it
+  is filed there *and* names a project the note lists — two repositories with
+  the same name share a directory, and an old name can be started again, so
+  either condition alone would hand one project another's sessions.
+  Transcripts are still never rewritten.
+
 ### Added
 - **`anamnesis reindex --check` says whether the index could be rebuilt.**
   The index is meant to be disposable, and nothing tested that: a path that
