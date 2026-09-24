@@ -376,6 +376,62 @@ impl PageStatus {
     }
 }
 
+/// Where what a page says came from.
+///
+/// Not a confidence score: a reason. A rule the person stated, a gotcha the
+/// agent ran into and wrote down, and a fact read off the repository's history
+/// are three different grounds for believing a page, and a reader deciding
+/// how far to trust one is owed which of them it stands on.
+///
+/// Set by the path that writes the page, never guessed afterwards. The one
+/// that needs judgement — whether a session's note is something the person
+/// said — is not taken on a model's word: the note has to quote the person,
+/// and the quote has to be found in what they typed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Origin {
+    /// The person said or settled it, in words the page quotes.
+    Human,
+    /// The agent wrote it: something it found out, inferred, or chose to keep.
+    Agent,
+    /// Read off the repository, such as its git history.
+    Repo,
+}
+
+impl Origin {
+    /// Canonical lowercase identifier, as written in frontmatter and stored.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Human => "human",
+            Self::Agent => "agent",
+            Self::Repo => "repo",
+        }
+    }
+
+    /// Recover an origin from its stored or written form.
+    ///
+    /// `None` for anything else, rather than an error: an origin misspelt in
+    /// a page somebody edited by hand is a page whose origin is unknown, not
+    /// a page that can no longer be read.
+    pub fn from_storage(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "human" => Some(Self::Human),
+            "agent" => Some(Self::Agent),
+            "repo" => Some(Self::Repo),
+            _ => None,
+        }
+    }
+}
+
+/// Read `origin:` leniently: see [`Origin::from_storage`].
+fn lenient_origin<'de, D>(deserializer: D) -> std::result::Result<Option<Origin>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Option<String> = serde::Deserialize::deserialize(deserializer)?;
+    Ok(raw.as_deref().and_then(Origin::from_storage))
+}
+
 /// YAML frontmatter carried at the top of every page.
 ///
 /// This is the wiki-side view: everything here is authored, and the markdown
@@ -429,6 +485,22 @@ pub struct Frontmatter {
     /// here, in the code and in the file.
     #[serde(rename = "abstract", skip_serializing_if = "Option::is_none")]
     pub page_abstract: Option<String>,
+    /// Where what the page says came from, when the path that wrote it knew.
+    ///
+    /// Absent on every page from before it existed and on pages written by
+    /// hand or through the command line, where who is typing is not something
+    /// this can see. Absent means unknown, and nothing is ranked by it.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_origin"
+    )]
+    pub origin: Option<Origin>,
+    /// The person's own words a `human` page rests on, as they typed them.
+    ///
+    /// The evidence for the origin, kept beside it so that anyone reading
+    /// the page can check the claim against the session it names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quote: Option<String>,
 }
 
 impl Default for Frontmatter {
@@ -445,6 +517,8 @@ impl Default for Frontmatter {
             expires_at: None,
             session: None,
             page_abstract: None,
+            origin: None,
+            quote: None,
         }
     }
 }

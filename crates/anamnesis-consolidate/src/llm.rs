@@ -16,7 +16,7 @@
 use std::collections::{HashSet, VecDeque};
 
 use anamnesis_core::observation::{EventKind, Observation, RESULT_MARKER, is_harness_prompt};
-use anamnesis_core::page::{Entity, PagePath};
+use anamnesis_core::page::{Entity, Origin, PagePath};
 use anamnesis_core::session::Session;
 use anamnesis_llm::{
     Completion, CompletionOutput, LlmError, Provider, clip_to_tokens, estimate_tokens,
@@ -39,6 +39,9 @@ pub const PREFERENCES_PAGE: &str = "_prompts/consolidation.md";
 
 /// Longest title accepted from a model, in characters, before the date.
 const MAX_TITLE_CHARS: usize = 72;
+
+/// Longest quote a note keeps as its evidence, in characters.
+const MAX_QUOTE_CHARS: usize = 300;
 
 /// Share of the prompt budget the preferences page may take.
 ///
@@ -204,6 +207,12 @@ missing and is now done, or a claim that a tool is broken when it was fixed \
 or worked around in the same session. The session page may say it happened; a \
 note would keep telling later sessions something that is no longer true, or \
 never was about the project.
+- When the person said or settled what a note records, give the note a \
+`quote`: their own words from one of their prompts, copied exactly, a sentence \
+or less. It is checked against what they typed, and a note whose quote is not \
+found there is recorded as the agent's. Leave it out for what the agent found \
+out or worked out itself, and never quote a file, a tool's output or the \
+agent: those are not the person.
 - When the session settles differently something a listed page records — a \
 decision reversed, a rule replaced, a gotcha no longer so — write the new note \
 and give its `supersedes` the path of that page, exactly as the list writes \
@@ -259,6 +268,10 @@ pub fn schema() -> Value {
                         "supersedes": {
                             "type": "string",
                             "description": "Only when this note replaces what a page already in this memory records: that page's path, exactly as the prompt lists it.",
+                        },
+                        "quote": {
+                            "type": "string",
+                            "description": "Only when the person said or settled this: their words, copied exactly from one of their prompts, a sentence or less.",
                         },
                     },
                     "required": ["kind", "title", "body"],
@@ -447,6 +460,12 @@ pub async fn consolidate_attributed(
                     "session consolidated by model"
                 );
                 let digest = disclosing(digest, observations.len(), omitted);
+                // Before anything is written: a note is the person's only if
+                // what it quotes is something the person typed.
+                let digest = SessionDigest {
+                    notes: crate::grounded(digest.notes, observations),
+                    ..digest
+                };
                 // A model may accurately describe three hours of work and
                 // still omit the final test verdict and the inspection that
                 // followed it. Those are the two facts a replacement agent
@@ -1475,12 +1494,20 @@ fn read_notes(value: &Value) -> Vec<Note> {
             .ok()
             .filter(|replaced| *replaced != path && !replaced.is_session_record());
 
+        // Kept as the model gave it and judged later, against the prompts
+        // this function is not shown: see `grounded`.
+        let quote = Some(text("quote").trim())
+            .filter(|quote| !quote.is_empty())
+            .map(|quote| clip(quote, MAX_QUOTE_CHARS));
+
         notes.push(Note {
             kind,
             path,
             title,
             body,
             supersedes,
+            origin: Origin::Agent,
+            quote,
         });
         if notes.len() == MAX_NOTES {
             break;
@@ -1599,6 +1626,62 @@ mod tests {
         assert_eq!(digest.title, "2026-08-20: LLM provider added");
         assert!(digest.body.contains("What happened"));
         assert!(digest.handoff.contains("cargo test"));
+    }
+
+    /// Whatever a model says about whose a note is, the note leaves
+    /// consolidation as the person's only with words the person typed: the
+    /// first note quotes the prompt, the second quotes the model's own
+    /// telling of it, and only the first is `human`.
+    #[tokio::test]
+    async fn a_note_is_the_persons_only_when_its_quote_is_in_their_prompt() {
+        let mut observations = working_session();
+        observations.push(observation(
+            EventKind::UserPrompt,
+            "From now on every provider reads its key from the credential store.",
+            None,
+        ));
+        let mut reply = good_reply();
+        reply["notes"] = json!([
+            {
+                "kind": "decision",
+                "title": "Provider keys live in the credential store",
+                "body": "Every provider reads its key from the credential store.",
+                "quote": "every provider reads its key from the credential store",
+            },
+            {
+                "kind": "gotcha",
+                "title": "The provider retries on 529",
+                "body": "A 529 is retried twice.",
+                "quote": "the person said a 529 is retried twice",
+            },
+        ]);
+
+        let digest = consolidate_with_llm(
+            &Fake(Ok(reply)),
+            &session(),
+            &observations,
+            Surroundings::default(),
+            6_500,
+            2_000,
+        )
+        .await
+        .expect("a digest");
+
+        let origins: Vec<(Origin, Option<&str>)> = digest
+            .notes
+            .iter()
+            .map(|note| (note.origin, note.quote.as_deref()))
+            .collect();
+        assert_eq!(
+            origins,
+            [
+                (
+                    Origin::Human,
+                    Some("every provider reads its key from the credential store")
+                ),
+                (Origin::Agent, None),
+            ]
+        );
     }
 
     /// Regression for the 873-event Claude session whose model-written page

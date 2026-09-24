@@ -422,6 +422,8 @@ fn page(
     let mut frontmatter = Frontmatter::new(title, entities)?;
     frontmatter.tier = tier;
     frontmatter.salience = salience;
+    // Every bootstrap page is read off the repository's history.
+    frontmatter.origin = Some(anamnesis_core::page::Origin::Repo);
     Ok(Draft {
         path: PagePath::parse(path)?,
         frontmatter,
@@ -1207,6 +1209,27 @@ mod tests {
             "{:?}",
             overview.frontmatter.entities
         );
+    }
+
+    /// Everything bootstrap writes is read off the repository, and every page
+    /// says so.
+    #[test]
+    fn every_seeded_page_says_it_was_read_from_the_repository() {
+        let fixture = Fixture::new();
+        fixture.commit(&[("src/lib.rs", "fn main() {}")], "feat: a", "Ada", at(0));
+
+        let survey = survey(fixture.path(), DEFAULT_MAX_COMMITS).expect("survey");
+        let drafts = draft(&survey, now()).expect("drafts");
+
+        assert!(!drafts.is_empty());
+        for draft in &drafts {
+            assert_eq!(
+                draft.frontmatter.origin,
+                Some(anamnesis_core::page::Origin::Repo),
+                "{}",
+                draft.path.as_str()
+            );
+        }
     }
 
     /// On the default branch there is one fact, not two.

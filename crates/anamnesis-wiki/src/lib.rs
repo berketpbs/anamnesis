@@ -137,6 +137,14 @@ pub struct PagePatch {
     pub expires_at: Option<Timestamp>,
     /// Replacement page abstract, when supplied.
     pub page_abstract: Option<String>,
+    /// The person's words that make this page theirs, when a later writer
+    /// found them.
+    ///
+    /// An upgrade and nothing else: supplied, the page becomes `human` with
+    /// this as its quote; absent, the origin the page has is kept. Nothing
+    /// that edits a page can make it less the person's than it was, since
+    /// the words it quoted were said whoever edits it next.
+    pub said: Option<String>,
     /// Fields deliberately removed rather than preserved.
     pub clear: BTreeSet<ClearField>,
 }
@@ -926,6 +934,13 @@ fn materialize_patch(
         changed.push("abstract".to_owned());
     } else {
         preserved.push("abstract".to_owned());
+    }
+    if let Some(quote) = &patch.said {
+        frontmatter.origin = Some(anamnesis_core::page::Origin::Human);
+        frontmatter.quote = Some(quote.clone());
+        changed.push("origin".to_owned());
+    } else {
+        preserved.push("origin".to_owned());
     }
     // Source provenance belongs to the first writer, never to an editor.
     preserved.push("session".to_owned());

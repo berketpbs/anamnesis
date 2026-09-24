@@ -711,8 +711,8 @@ so there is no way to record a session whose workspace and project disagree.
 ### pages
 `id`, `project_id`, `path`, `title`, `body`, `tier`, `status`, `pinned`,
 `canonical`, `supersedes`, `supersedes_target`, `is_latest`, `salience`,
-`access_count`, `last_accessed_at`, `expires_at`, `git_commit`, `created_at`,
-`updated_at`.
+`access_count`, `last_accessed_at`, `expires_at`, `git_commit`, `origin`,
+`created_at`, `updated_at`.
 
 Supersession is stored twice on purpose, the same way a wikilink is:
 `supersedes_target` is the path a page *authored* and `supersedes` is the row
@@ -722,6 +722,16 @@ has not seen yet and resolve when it arrives. `is_latest` is derived from
 those claims rather than asserted by whoever wrote last, which is what
 retrieval filters on: a replaced page stops being offered, without anything
 having to edit the markdown someone else wrote.
+
+`origin` is where what a page says came from — `human`, `agent` or `repo` —
+copied from the frontmatter so that a starting session's decisions and a
+prompt's recall can say it without opening every file. It is set by the path
+that writes the page and never inferred afterwards: bootstrap writes `repo`,
+`memory_write_page` writes `agent`, and consolidation writes `human` only for
+a note whose `quote:` is found in a prompt the person typed, not in tool
+output, a file, or a harness notification. Pages from before the column
+existed, and pages written by hand or from the command line, have none, which
+means unknown. Nothing ranks by it.
 
 Entities are *not* a column: they live in `entities` and `page_entities`, so
 the entity retrieval stream can weight them by inverse frequency. Links live

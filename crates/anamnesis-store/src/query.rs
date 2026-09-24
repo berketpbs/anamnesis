@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 
 use anamnesis_core::ids::{PageId, ProjectId};
-use anamnesis_core::page::{Entity, PagePath, PageStatus, Tier};
+use anamnesis_core::page::{Entity, Origin, PagePath, PageStatus, Tier};
 use anamnesis_core::retrieval::{RRF_K, Tuning, fuse_and_rank, fuse_standing, tokenize};
 use jiff::Timestamp;
 use rusqlite::types::Value;
@@ -77,6 +77,8 @@ pub struct PageHit {
     pub pinned: bool,
     /// Declared authoritative on its subject.
     pub canonical: bool,
+    /// Where what the page says came from, when known. Shown, not ranked by.
+    pub origin: Option<Origin>,
     /// Fused relevance score, with standing in the places it was fused from.
     pub score: f64,
     /// What the page's standing was worth: the factor on the place each
@@ -137,6 +139,7 @@ struct PageRow {
     status: PageStatus,
     pinned: bool,
     canonical: bool,
+    origin: Option<Origin>,
 }
 
 /// What a page's standing is worth, from the row the streams returned.
@@ -282,6 +285,7 @@ impl Store {
                     status: row.status,
                     pinned: row.pinned,
                     canonical: row.canonical,
+                    origin: row.origin,
                     score,
                     standing: standings.get(&id).copied().unwrap_or(1.0),
                     snippet: snippet_of(&row.body),
@@ -462,6 +466,7 @@ impl Store {
                     status: row.status,
                     pinned: row.pinned,
                     canonical: row.canonical,
+                    origin: row.origin,
                     score,
                     standing: standing_of(tuning, row),
                     snippet: snippet_of(&row.body),
@@ -1164,7 +1169,7 @@ impl Store {
         }
         let placeholders = placeholders(ids.len());
         let sql = format!(
-            "SELECT id, project_id, path, title, body, tier, status, pinned, canonical
+            "SELECT id, project_id, path, title, body, tier, status, pinned, canonical, origin
              FROM pages WHERE id IN ({placeholders})"
         );
         let values: Vec<Value> = ids.iter().map(|id| Value::Text(id.to_string())).collect();
@@ -1182,12 +1187,13 @@ impl Store {
                 row.get::<_, String>(6)?,
                 row.get::<_, bool>(7)?,
                 row.get::<_, bool>(8)?,
+                row.get::<_, Option<String>>(9)?,
             ))
         })?;
 
         let mut out = HashMap::new();
         for row in rows {
-            let (id, project_id, path, title, body, tier, status, pinned, canonical) = row?;
+            let (id, project_id, path, title, body, tier, status, pinned, canonical, origin) = row?;
             out.insert(
                 parse_id(id),
                 PageRow {
@@ -1199,6 +1205,7 @@ impl Store {
                     status: PageStatus::from_storage(&status),
                     pinned,
                     canonical,
+                    origin: origin.as_deref().and_then(Origin::from_storage),
                 },
             );
         }

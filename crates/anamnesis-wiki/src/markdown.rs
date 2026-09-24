@@ -292,4 +292,58 @@ mod tests {
         assert_eq!(parsed.frontmatter.session, None);
         assert_eq!(parsed.frontmatter.title, "Typed by a person");
     }
+
+    /// The origin and the words it rests on are written and read back as the
+    /// page's own metadata, and a page that has neither gains no key for them.
+    #[test]
+    fn an_origin_and_its_quote_survive_the_round_trip() {
+        let mut fm = frontmatter();
+        fm.origin = Some(anamnesis_core::page::Origin::Human);
+        fm.quote = Some("rate changes need sign-off from @omar-fin".to_owned());
+
+        let text = render_document(&fm, "Body").unwrap();
+        assert!(text.contains("origin: human"), "{text}");
+        let parsed = parse_document("x.md", &text).unwrap();
+        assert_eq!(
+            parsed.frontmatter.origin,
+            Some(anamnesis_core::page::Origin::Human)
+        );
+        assert_eq!(
+            parsed.frontmatter.quote.as_deref(),
+            Some("rate changes need sign-off from @omar-fin")
+        );
+
+        let plain = render_document(&frontmatter(), "Body").unwrap();
+        assert!(!plain.contains("origin"), "{plain}");
+        assert!(!plain.contains("quote"), "{plain}");
+    }
+
+    /// An origin misspelt by hand is an origin nobody knows, not a page that
+    /// no longer opens: every other field on it still reads.
+    #[test]
+    fn a_misspelt_origin_reads_as_unknown_rather_than_breaking_the_page() {
+        let text = "---
+title: Typed by a person
+origin: humna
+---
+
+Body
+";
+        let parsed = parse_document("x.md", text).unwrap();
+        assert_eq!(parsed.frontmatter.origin, None);
+        assert_eq!(parsed.frontmatter.title, "Typed by a person");
+
+        let text = "---
+title: Typed by a person
+origin: Human
+---
+
+Body
+";
+        let parsed = parse_document("x.md", text).unwrap();
+        assert_eq!(
+            parsed.frontmatter.origin,
+            Some(anamnesis_core::page::Origin::Human)
+        );
+    }
 }

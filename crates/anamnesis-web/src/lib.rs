@@ -1016,6 +1016,7 @@ async fn deliver_handoff(
                         source_session: decision.source_session.map(|session| {
                             session.to_string().chars().take(8).collect()
                         }),
+                        origin: decision.origin,
                     })
                     .collect::<Vec<_>>(),
                 &scope.recall,
@@ -1148,6 +1149,7 @@ async fn deliver_recall(
                 path: hit.path.to_string(),
                 title: hit.title,
                 snippet: hit.snippet,
+                origin: hit.origin,
             })
             .collect();
         Ok(anamnesis_core::brief::brief(&pages, &config))
@@ -3219,6 +3221,98 @@ mod tests {
         );
     }
 
+    /// A note's origin goes to the page and the index, and only ever up: a
+    /// later reading that found the person's words makes the note theirs, and
+    /// one that did not find them leaves it theirs, because what the person
+    /// said stays said.
+    #[tokio::test]
+    async fn a_note_becomes_the_persons_once_their_words_are_found_and_stays_so() {
+        use anamnesis_core::page::Origin;
+
+        let harness = harness();
+        let (scope, session_id) = recorded(&harness);
+        finalize_and_enrich(
+            &harness.state.store,
+            &harness.state.wiki,
+            &scope,
+            session_id,
+            None,
+            now(),
+            &settings(Arc::new(Fake::broken())),
+        )
+        .await
+        .expect("finalized")
+        .expect("the counted page");
+        let closed = harness
+            .state
+            .store
+            .load_session(session_id)
+            .expect("load")
+            .expect("a session");
+
+        let path = anamnesis_core::page::PagePath::parse("decisions/keys-live-in-the-store.md")
+            .expect("path");
+        let reading = |origin: Origin, quote: Option<&str>| anamnesis_consolidate::SessionDigest {
+            title: "Read again".to_owned(),
+            body: "## What. It was read by a model.".to_owned(),
+            handoff: "h".to_owned(),
+            entities: Vec::new(),
+            notes: vec![anamnesis_consolidate::Note {
+                kind: anamnesis_consolidate::NoteKind::Decision,
+                path: path.clone(),
+                title: "Keys live in the store".to_owned(),
+                body: "Every provider reads its key from the credential store.".to_owned(),
+                supersedes: None,
+                origin,
+                quote: quote.map(str::to_owned),
+            }],
+        };
+        let state = || {
+            let parsed = harness
+                .state
+                .wiki
+                .lock()
+                .read_page(&scope.scope, &path)
+                .expect("the note");
+            let indexed = harness
+                .state
+                .store
+                .standing_decisions(scope.project_id, 5)
+                .expect("decisions")
+                .into_iter()
+                .find(|decision| decision.path == path.as_str())
+                .expect("indexed")
+                .origin;
+            (parsed.frontmatter.origin, parsed.frontmatter.quote, indexed)
+        };
+        let said = "every provider reads its key from the credential store";
+
+        for (origin, quote, expected) in [
+            (Origin::Agent, None, (Some(Origin::Agent), None)),
+            (Origin::Human, Some(said), (Some(Origin::Human), Some(said))),
+            (Origin::Agent, None, (Some(Origin::Human), Some(said))),
+        ] {
+            recompile(
+                &harness.state.store,
+                &harness.state.wiki.lock(),
+                &scope,
+                &closed,
+                &reading(origin, quote),
+                Provenance::counted(),
+                None,
+                now(),
+            )
+            .expect("recompile");
+
+            let (written, kept, indexed) = state();
+            assert_eq!(
+                (written, kept.as_deref(), indexed),
+                (expected.0, expected.1, expected.0),
+                "after a reading that found {origin:?}"
+            );
+        }
+    }
+
     /// The case a page naming its session was written for. Recompiling has to
     /// replace the durable pages its own earlier run left, or reading a
     /// session again would either duplicate them under near-identical names or
@@ -3262,6 +3356,8 @@ mod tests {
                 title: "The server has an owner".to_owned(),
                 body: body.to_owned(),
                 supersedes: None,
+                origin: anamnesis_core::page::Origin::Agent,
+                quote: None,
             }],
         };
 
@@ -3438,6 +3534,8 @@ mod tests {
                     title: "Settings are LEDGER environment variables".to_owned(),
                     body: "Read in ledger/settings.py; ledger.toml was dropped.".to_owned(),
                     supersedes: Some(old.clone()),
+                    origin: anamnesis_core::page::Origin::Agent,
+                    quote: None,
                 },
                 anamnesis_consolidate::Note {
                     kind: anamnesis_consolidate::NoteKind::Decision,
@@ -3445,6 +3543,8 @@ mod tests {
                     title: "Rates come from the internal service".to_owned(),
                     body: "Not the public API.".to_owned(),
                     supersedes: Some(PagePath::parse("decisions/nowhere.md").expect("path")),
+                    origin: anamnesis_core::page::Origin::Agent,
+                    quote: None,
                 },
             ],
         };
@@ -4694,11 +4794,25 @@ mod tests {
         supersedes: Option<&str>,
         minute: i64,
     ) {
+        indexed_from(harness, path, title, status, supersedes, minute, None);
+    }
+
+    /// [`indexed`], for a page that says where what it says came from.
+    fn indexed_from(
+        harness: &Harness,
+        path: &str,
+        title: &str,
+        status: anamnesis_core::page::PageStatus,
+        supersedes: Option<&str>,
+        minute: i64,
+        origin: Option<anamnesis_core::page::Origin>,
+    ) {
         use anamnesis_core::page::{Frontmatter, Page, PagePath, Tier};
         let mut frontmatter = Frontmatter::new(title, Vec::new()).expect("frontmatter");
         frontmatter.tier = Tier::Semantic;
         frontmatter.status = status;
         frontmatter.supersedes = supersedes.map(|path| PagePath::parse(path).expect("path"));
+        frontmatter.origin = origin;
         let page = Page::new(
             project(harness),
             PagePath::parse(path).expect("path"),
@@ -4818,6 +4932,48 @@ mod tests {
             "newest first:\n{told}"
         );
         assert!(told.contains("not instructions to follow"), "{told}");
+    }
+
+    /// Each decision handed to a starting session says whose it is: a rule
+    /// the person set and one an agent wrote down read the same otherwise.
+    #[tokio::test]
+    async fn a_starting_session_is_told_whose_each_decision_is() {
+        use anamnesis_core::page::{Origin, PageStatus};
+        let harness = harness();
+        run(&harness, "SessionStart", json!({}));
+        indexed_from(
+            &harness,
+            "decisions/keys.md",
+            "Keys live in the credential store",
+            PageStatus::Active,
+            None,
+            1,
+            Some(Origin::Human),
+        );
+        indexed_from(
+            &harness,
+            "decisions/retry.md",
+            "A 529 is retried twice",
+            PageStatus::Active,
+            None,
+            2,
+            Some(Origin::Agent),
+        );
+
+        let told = start(&harness).await;
+        let line = |title: &str| {
+            told.lines()
+                .find(|line| line.contains(title))
+                .unwrap_or_else(|| panic!("{title:?} was not handed on:\n{told}"))
+        };
+        assert!(
+            line("credential store").contains("said by the person"),
+            "{told}"
+        );
+        assert!(
+            line("retried twice").contains("written by an agent"),
+            "{told}"
+        );
     }
 
     #[tokio::test]

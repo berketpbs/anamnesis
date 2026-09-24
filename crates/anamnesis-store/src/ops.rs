@@ -71,6 +71,8 @@ pub struct StandingDecision {
     pub updated_at: Timestamp,
     /// Session that first created the page, when it is still in the ledger.
     pub source_session: Option<SessionId>,
+    /// Where what the page says came from, when known.
+    pub origin: Option<anamnesis_core::page::Origin>,
 }
 
 /// What wrote a session's page.
@@ -870,9 +872,9 @@ impl Store {
             "INSERT INTO pages
                  (id, project_id, path, title, body, tier, status, pinned, canonical,
                   salience, expires_at, git_commit, supersedes_target, session_id,
-                  created_at, updated_at)
+                  created_at, updated_at, origin)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                     (SELECT id FROM sessions WHERE id = ?14), ?15, ?15)
+                     (SELECT id FROM sessions WHERE id = ?14), ?15, ?15, ?16)
              ON CONFLICT (id) DO UPDATE SET
                  title             = excluded.title,
                  body              = excluded.body,
@@ -885,7 +887,8 @@ impl Store {
                  git_commit        = excluded.git_commit,
                  supersedes_target = excluded.supersedes_target,
                  session_id        = excluded.session_id,
-                 updated_at        = excluded.updated_at",
+                 updated_at        = excluded.updated_at,
+                 origin            = excluded.origin",
             params![
                 page.id.to_string(),
                 page.project_id.to_string(),
@@ -902,6 +905,7 @@ impl Store {
                 target.clone(),
                 fm.session.map(|id| id.to_string()),
                 now.to_string(),
+                fm.origin.map(|origin| origin.as_str()),
             ],
         )?;
 
@@ -1371,7 +1375,7 @@ impl Store {
                 // rebuild would rewrite it and renew its decay clock.
                 "SELECT title, body, tier, status, pinned, canonical, salience,
                         expires_at, supersedes_target, session_id,
-                        (SELECT id FROM sessions WHERE id = ?2)
+                        (SELECT id FROM sessions WHERE id = ?2), origin
                  FROM pages WHERE id = ?1",
                 params![page.id.to_string(), fm.session.map(|id| id.to_string())],
                 |row| {
@@ -1387,6 +1391,7 @@ impl Store {
                         row.get::<_, Option<String>>(8)?,
                         row.get::<_, Option<String>>(9)?,
                         row.get::<_, Option<String>>(10)?,
+                        row.get::<_, Option<String>>(11)?,
                     ))
                 },
             )
@@ -1404,6 +1409,7 @@ impl Store {
             target,
             session,
             linkable,
+            origin,
         )) = found
         else {
             return Ok(false);
@@ -1411,6 +1417,7 @@ impl Store {
 
         Ok((
             title, body, tier, status, pinned, canonical, salience, expires, target, session,
+            origin,
         ) == (
             fm.title.clone(),
             page.body.clone(),
@@ -1422,6 +1429,7 @@ impl Store {
             fm.expires_at.map(|at| at.to_string()),
             fm.supersedes.as_ref().map(|p| p.as_str().to_owned()),
             linkable,
+            fm.origin.map(|origin| origin.as_str().to_owned()),
         ))
     }
 
@@ -1459,7 +1467,7 @@ impl Store {
         }
         let conn = self.connection();
         let mut statement = conn.prepare(
-            "SELECT path, title, updated_at, session_id FROM pages
+            "SELECT path, title, updated_at, session_id, origin FROM pages
              WHERE project_id = ?1 AND is_latest = 1 AND status = 'active'
                AND (path LIKE 'decisions/%' OR path LIKE '\\_rules/%' ESCAPE '\\')
              ORDER BY pinned DESC, canonical DESC, updated_at DESC, path
@@ -1476,6 +1484,10 @@ impl Store {
                     title: row.get(1)?,
                     updated_at: parse_time(&row.get::<_, String>(2)?),
                     source_session: row.get::<_, Option<String>>(3)?.map(parse_id),
+                    origin: row
+                        .get::<_, Option<String>>(4)?
+                        .as_deref()
+                        .and_then(anamnesis_core::page::Origin::from_storage),
                 })
             },
         )?;
@@ -3675,7 +3687,7 @@ mod tests {
 
         use anamnesis_core::page::{PageStatus, Tier};
 
-        let edits: [Edit; 8] = [
+        let edits: [Edit; 9] = [
             ("body", |p| p.body = "Something else.".to_owned()),
             ("title", |p| p.frontmatter.title = "Renamed".to_owned()),
             ("tier", |p| p.frontmatter.tier = Tier::Semantic),
@@ -3686,6 +3698,9 @@ mod tests {
             ("canonical", |p| p.frontmatter.canonical = true),
             ("salience", |p| p.frontmatter.salience = 0.25),
             ("expires_at", |p| p.frontmatter.expires_at = Some(now())),
+            ("origin", |p| {
+                p.frontmatter.origin = Some(anamnesis_core::page::Origin::Human)
+            }),
         ];
 
         for (field, edit) in edits {
