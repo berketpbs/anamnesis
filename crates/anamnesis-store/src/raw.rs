@@ -29,7 +29,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anamnesis_core::ids::SessionId;
+use anamnesis_core::ids::{ProjectId, SessionId};
 use anamnesis_core::observation::Observation;
 use anamnesis_core::scope::Scope;
 use anamnesis_core::session::Session;
@@ -74,6 +74,12 @@ pub enum RawRecord {
     Observation(Box<Observation>),
 }
 
+/// The file in a scope's transcript directory naming the projects its
+/// transcripts were recorded under before the scope was renamed.
+///
+/// Not `.jsonl`, so no walk of the spool ever mistakes it for a transcript.
+const PREVIOUS_PROJECTS: &str = "previous-projects";
+
 /// An append-only transcript store rooted at one directory.
 #[derive(Debug, Clone)]
 pub struct RawSpool {
@@ -89,6 +95,61 @@ impl RawSpool {
     /// Root directory of the spool.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The directory every transcript recorded under `scope` is filed in.
+    pub fn scope_dir(&self, scope: &Scope) -> PathBuf {
+        self.root
+            .join(scope.workspace.as_str())
+            .join(scope.project.as_str())
+    }
+
+    /// Note, in `scope`'s directory, that its transcripts were recorded under
+    /// `previous`, which was called `was`.
+    ///
+    /// A rename moves a project's transcripts to the directory of its new
+    /// name, and there they stay exactly as written: a transcript is
+    /// append-only, and a header rewritten to claim the new project would be
+    /// the one line in the file nobody recorded. So the headers keep naming
+    /// the old project, and this note is what lets a rebuild of the new one
+    /// recognise them. Written before the directory moves, so it travels
+    /// with the transcripts it speaks for.
+    pub fn record_previous(
+        &self,
+        scope: &Scope,
+        previous: ProjectId,
+        was: &Scope,
+    ) -> Result<(), RawError> {
+        let dir = self.scope_dir(scope);
+        let io = |source| RawError::Io {
+            path: dir.join(PREVIOUS_PROJECTS),
+            source,
+        };
+        std::fs::create_dir_all(&dir).map_err(io)?;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join(PREVIOUS_PROJECTS))
+            .map_err(io)?;
+        // The id is what a rebuild reads; the name is for whoever opens the
+        // file to find out what it is.
+        writeln!(file, "{previous} {was}").map_err(io)?;
+        Ok(())
+    }
+
+    /// The projects `scope`'s transcripts were recorded under before a
+    /// rename, oldest first. Empty for a scope that was never renamed into.
+    pub fn previous_projects(&self, scope: &Scope) -> Result<Vec<ProjectId>, RawError> {
+        let path = self.scope_dir(scope).join(PREVIOUS_PROJECTS);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => return Err(RawError::Io { path, source }),
+        };
+        Ok(text
+            .lines()
+            .filter_map(|line| line.split_whitespace().next()?.parse().ok())
+            .collect())
     }
 
     /// Where a session's transcript lives.
@@ -112,9 +173,7 @@ impl RawSpool {
         let stamp = started_at.to_string();
         let date = stamp.split('T').next().unwrap_or("undated").to_owned();
         let short: String = session_id.to_string().chars().take(8).collect();
-        self.root
-            .join(scope.workspace.as_str())
-            .join(scope.project.as_str())
+        self.scope_dir(scope)
             .join(date)
             .join(format!("{short}.jsonl"))
     }
@@ -132,10 +191,7 @@ impl RawSpool {
     pub fn locate_all(&self, scope: &Scope, session_id: SessionId) -> Vec<PathBuf> {
         let short: String = session_id.to_string().chars().take(8).collect();
         let name = format!("{short}.jsonl");
-        let project = self
-            .root
-            .join(scope.workspace.as_str())
-            .join(scope.project.as_str());
+        let project = self.scope_dir(scope);
 
         let Ok(dates) = std::fs::read_dir(&project) else {
             return Vec::new();
@@ -669,5 +725,40 @@ mod tests {
             .redact_file(&path, &anamnesis_core::sanitize::Redactor::new(), true)
             .unwrap();
         assert_eq!(again.changed, 0);
+    }
+
+    #[test]
+    fn a_scope_never_renamed_into_has_no_previous_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let spool = RawSpool::new(dir.path());
+
+        assert!(spool.previous_projects(&scope()).unwrap().is_empty());
+    }
+
+    /// Renamed twice, a directory holds transcripts from both earlier
+    /// projects, and the note has to name both.
+    #[test]
+    fn previous_projects_accumulate_across_renames() {
+        let dir = tempfile::tempdir().unwrap();
+        let spool = RawSpool::new(dir.path());
+        let first = ProjectId::from_uuid(uuid::Uuid::from_u128(1));
+        let second = ProjectId::from_uuid(uuid::Uuid::from_u128(2));
+
+        spool.record_previous(&scope(), first, &scope()).unwrap();
+        spool.record_previous(&scope(), second, &scope()).unwrap();
+
+        assert_eq!(spool.previous_projects(&scope()).unwrap(), [first, second]);
+    }
+
+    /// The note sits among the transcripts and must never be read as one.
+    #[test]
+    fn the_note_is_not_a_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let spool = RawSpool::new(dir.path());
+        spool
+            .record_previous(&scope(), ProjectId::from_uuid(uuid::Uuid::nil()), &scope())
+            .unwrap();
+
+        assert!(spool.files().unwrap().is_empty());
     }
 }

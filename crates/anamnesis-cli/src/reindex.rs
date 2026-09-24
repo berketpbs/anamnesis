@@ -223,6 +223,15 @@ fn rebuild_sessions(
     let mut observations = 0;
     let mut orphaned = 0;
 
+    // Transcripts recorded before this scope was renamed into still name the
+    // project they were recorded under. They are recognised by both halves
+    // at once — filed in this scope's directory *and* naming a project this
+    // scope used to be — because either alone is wrong: two repositories
+    // with the same name and different remotes share a directory, and a
+    // project renamed away from can be started again under its old name.
+    let home = raw.scope_dir(&scope.scope);
+    let previous = raw.previous_projects(&scope.scope)?;
+
     for file in raw.files()? {
         let records = raw.read_file(&file)?;
 
@@ -240,9 +249,16 @@ fn rebuild_sessions(
 
         // A spool holds every project under one root, so a rebuild scoped to
         // one project has to ignore the rest.
-        if session.project_id != scope.project_id {
+        let renamed_from = previous.contains(&session.project_id) && file.starts_with(&home);
+        if session.project_id != scope.project_id && !renamed_from {
             continue;
         }
+        // Filed under the project it belongs to now, which is where `rename`
+        // moved the row the live index holds. Its id stays as recorded: the
+        // rename kept session ids, and every observation names its session
+        // by that id.
+        let mut session = session;
+        session.project_id = scope.project_id;
 
         store.ensure_session(&reopened(&session))?;
         sessions.insert(session.id);
@@ -1397,5 +1413,109 @@ mod tests {
         assert_eq!(checked.unreadable, ["broken.md"]);
         assert!(checked.drift.is_empty(), "{:?}", checked.drift);
         assert!(!checked.is_clean());
+    }
+
+    /// A session recorded under `project` and filed in `filed_in`'s
+    /// directory, written to the spool only — as `rename` leaves one.
+    fn spool_foreign(
+        harness: &Harness,
+        project: anamnesis_core::ids::ProjectId,
+        filed_in: &anamnesis_core::scope::Scope,
+    ) -> Session {
+        let session = new_session(
+            anamnesis_core::ids::SessionId::derive(project, "recorded-before"),
+            project,
+            harness.scope.workspace_id,
+            AgentKind::ClaudeCode,
+            "/repo".into(),
+            now(),
+            None,
+        );
+        let observation = new_observation(
+            session.id,
+            EventKind::UserPrompt,
+            None,
+            BoundedBody::truncating("before the rename", 1024),
+            now(),
+        );
+        harness
+            .raw
+            .append(filed_in, &session, &observation)
+            .expect("spool");
+        session
+    }
+
+    fn scope_named(name: &str) -> anamnesis_core::scope::Scope {
+        anamnesis_core::scope::Scope {
+            workspace: anamnesis_core::scope::WorkspaceName::parse("default").expect("workspace"),
+            project: anamnesis_core::scope::ProjectName::parse(name).expect("name"),
+        }
+    }
+
+    fn old_project() -> anamnesis_core::ids::ProjectId {
+        anamnesis_core::ids::ProjectId::from_uuid(uuid::Uuid::from_u128(0x01d))
+    }
+
+    /// The rename case: filed here, naming the project this scope was before.
+    /// It comes back under the project it belongs to now, keeping the id
+    /// every one of its observations names it by.
+    #[test]
+    fn a_transcript_recorded_before_a_rename_is_rebuilt_under_the_new_project() {
+        let harness = harness();
+        harness
+            .raw
+            .record_previous(
+                &harness.scope.scope,
+                old_project(),
+                &scope_named("old-name"),
+            )
+            .expect("note");
+        let session = spool_foreign(&harness, old_project(), &harness.scope.scope);
+
+        let report = rebuilt(&harness);
+
+        assert_eq!((report.sessions, report.observations), (1, 1));
+        let stored = harness
+            .store
+            .load_session(session.id)
+            .expect("load")
+            .expect("the session is back");
+        assert_eq!(stored.project_id, harness.scope.project_id);
+    }
+
+    /// Two repositories with the same name and different remotes resolve to
+    /// the same directory and different projects. The directory alone must
+    /// not hand one of them the other's sessions.
+    #[test]
+    fn a_neighbour_sharing_the_directory_is_not_adopted() {
+        let harness = harness();
+        let neighbour = anamnesis_core::ids::ProjectId::from_uuid(uuid::Uuid::from_u128(0xbeef));
+        spool_foreign(&harness, neighbour, &harness.scope.scope);
+
+        let report = rebuilt(&harness);
+
+        assert_eq!(report.sessions, 0);
+    }
+
+    /// A name renamed away from can be taken up again — a clone without the
+    /// new marker resolves it — and its new sessions are filed under the old
+    /// directory with the old id. The note belongs to the directory it was
+    /// written in, and speaks for nothing outside it.
+    #[test]
+    fn the_old_project_started_again_elsewhere_is_not_adopted() {
+        let harness = harness();
+        harness
+            .raw
+            .record_previous(
+                &harness.scope.scope,
+                old_project(),
+                &scope_named("old-name"),
+            )
+            .expect("note");
+        spool_foreign(&harness, old_project(), &scope_named("old-name"));
+
+        let report = rebuilt(&harness);
+
+        assert_eq!(report.sessions, 0);
     }
 }

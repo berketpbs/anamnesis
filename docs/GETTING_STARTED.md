@@ -1415,6 +1415,15 @@ and the marker file is pinned to the new name — without that last step the
 next event would re-derive the old identity and the rename would read as
 having quietly failed. Comments in the marker are kept.
 
+Transcripts are never rewritten, so each one's header goes on naming the
+project it was recorded under. The rename leaves a `previous-projects` file
+in the transcript directory naming that project, and `reindex` rebuilds a
+transcript into the new project only when it is in that directory *and* names
+a project listed there. A project renamed before this file existed has none,
+and `anamnesis reindex --check` reports its older sessions as held only by the
+index. To repair it, write the file by hand: one line per earlier project, its
+id first — the `project_id` on the first line of any of its transcripts.
+
 Renaming into a project that already has memory is refused. Merging two
 memories is a different operation with different answers — which page wins
 where both have `decisions.md` — and a rename is no place to decide them.
