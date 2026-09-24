@@ -1518,4 +1518,55 @@ mod tests {
 
         assert_eq!(report.sessions, 0);
     }
+
+    /// The origin lives in the page, so a rebuild restores it, and an index
+    /// that lost it — or never had it, having been built before the column
+    /// existed — is told apart from one that did not.
+    #[test]
+    fn an_origin_is_rebuilt_from_its_page_and_checked() {
+        let harness = harness();
+        let mut frontmatter = Frontmatter::new("Keys live in the store", Vec::new()).expect("fm");
+        frontmatter.origin = Some(anamnesis_core::page::Origin::Human);
+        frontmatter.quote = Some("every provider reads its key from the store".to_owned());
+        let page = Page::new(
+            harness.scope.project_id,
+            PagePath::parse("decisions/keys.md").expect("path"),
+            frontmatter,
+            "Every provider reads its key from the credential store.",
+        );
+        harness
+            .wiki
+            .write_page(&harness.scope.scope, &page, "write")
+            .expect("write");
+        rebuilt(&harness);
+
+        let decided = harness
+            .store
+            .standing_decisions(harness.scope.project_id, 5)
+            .expect("decisions");
+        assert_eq!(decided[0].origin, Some(anamnesis_core::page::Origin::Human));
+        assert!(checked(&harness).is_clean());
+
+        // As the wiki holds it, so that the origin is the only difference.
+        let on_disk = harness
+            .wiki
+            .read_page(&harness.scope.scope, &page.path)
+            .expect("read");
+        let mut forgotten = Page::new(
+            harness.scope.project_id,
+            page.path.clone(),
+            on_disk.frontmatter,
+            on_disk.body,
+        );
+        forgotten.frontmatter.origin = None;
+        harness
+            .store
+            .upsert_page(&forgotten, now())
+            .expect("upsert");
+
+        assert_eq!(
+            checked(&harness).drift.pages.differing,
+            [("decisions/keys.md".to_owned(), vec!["origin"])]
+        );
+    }
 }

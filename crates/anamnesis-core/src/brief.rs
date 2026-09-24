@@ -44,6 +44,7 @@
 //! the right number, and whether an agent handed this actually uses it.
 
 use crate::config::RecallConfig;
+use crate::page::Origin;
 
 /// One page offered back to a prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +55,23 @@ pub struct Recalled {
     pub title: String,
     /// The matching part of it, already extracted by the query.
     pub snippet: String,
+    /// Where what the page says came from, when known.
+    pub origin: Option<Origin>,
+}
+
+/// A few words saying where a page's claim came from, for a line in a brief.
+///
+/// The agent reading a brief is deciding how far to rely on each line, and
+/// "the person said so" and "an agent wrote this down" are different grounds
+/// even when the words are the same. Nothing for a page whose origin is not
+/// known: every page from before it was recorded, and every page written by
+/// hand, where saying "unknown" on each line would be noise.
+fn provenance(origin: Option<Origin>) -> Option<&'static str> {
+    origin.map(|origin| match origin {
+        Origin::Human => "said by the person",
+        Origin::Agent => "written by an agent",
+        Origin::Repo => "read from the repository",
+    })
 }
 
 /// The sentence that says what the lines under it are.
@@ -91,7 +109,12 @@ pub fn brief(pages: &[Recalled], config: &RecallConfig) -> String {
         out.push_str(page.title.trim());
         out.push_str(" (`");
         out.push_str(page.path.trim());
-        out.push_str("`)");
+        out.push('`');
+        if let Some(said) = provenance(page.origin) {
+            out.push_str(", ");
+            out.push_str(said);
+        }
+        out.push(')');
         let snippet = tidy(&page.snippet, config.snippet_chars);
         if !snippet.is_empty() {
             out.push_str(" — ");
@@ -117,6 +140,8 @@ pub struct Standing {
     pub as_of: String,
     /// Short identifier of the session that first wrote it, when known.
     pub source_session: Option<String>,
+    /// Where what the page says came from, when known.
+    pub origin: Option<Origin>,
 }
 
 /// What the lines under a start's decisions are, said as [`PREAMBLE`] says it
@@ -145,18 +170,19 @@ pub fn standing(pages: &[Standing], config: &RecallConfig) -> String {
         out.push_str(" (`");
         out.push_str(page.path.trim());
         out.push_str("`)");
-        if !page.as_of.is_empty() || page.source_session.is_some() {
+        let mut facts: Vec<String> = Vec::new();
+        if !page.as_of.is_empty() {
+            facts.push(page.as_of.trim().to_owned());
+        }
+        if let Some(source) = &page.source_session {
+            facts.push(format!("session {}", source.trim()));
+        }
+        if let Some(said) = provenance(page.origin) {
+            facts.push(said.to_owned());
+        }
+        if !facts.is_empty() {
             out.push_str(" (");
-            if !page.as_of.is_empty() {
-                out.push_str(page.as_of.trim());
-            }
-            if let Some(source) = &page.source_session {
-                if !page.as_of.is_empty() {
-                    out.push_str(" · ");
-                }
-                out.push_str("session ");
-                out.push_str(source.trim());
-            }
+            out.push_str(&facts.join(" · "));
             out.push(')');
         }
     }
@@ -208,6 +234,7 @@ mod tests {
             path: "notes/a-page.md".to_owned(),
             title: title.to_owned(),
             snippet: snippet.to_owned(),
+            origin: None,
         }
     }
 
@@ -287,6 +314,7 @@ mod tests {
             title: title.to_owned(),
             as_of: "2026-09-22".to_owned(),
             source_session: Some("4e899dee".to_owned()),
+            origin: None,
         }
     }
 
@@ -347,6 +375,7 @@ mod tests {
             title: "word ".repeat(80),
             as_of: String::new(),
             source_session: None,
+            origin: None,
         };
         let out = standing(&[page], &RecallConfig::default());
         let line = out
@@ -362,5 +391,62 @@ mod tests {
         let out = brief(&[page("T", "short")], &RecallConfig::default());
         assert!(out.contains("— short"), "{out}");
         assert!(!out.contains('…'), "{out}");
+    }
+
+    /// A starting session is told which decisions the person made and which
+    /// an agent wrote down, beside when and in which session: the grounds for
+    /// believing a line are part of the line.
+    #[test]
+    fn a_decision_says_where_it_came_from() {
+        let mut said = decision("Settings are environment variables");
+        said.origin = Some(Origin::Human);
+        let mut found = decision("A moved crate breaks the build");
+        found.origin = Some(Origin::Agent);
+
+        let out = standing(
+            &[said, found, decision("Older rule")],
+            &RecallConfig::default(),
+        );
+
+        assert!(
+            out.contains("(2026-09-22 · session 4e899dee · said by the person)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("(2026-09-22 · session 4e899dee · written by an agent)"),
+            "{out}"
+        );
+        let older = out
+            .lines()
+            .find(|line| line.contains("Older rule"))
+            .expect("line");
+        assert!(
+            older.ends_with("(2026-09-22 · session 4e899dee)"),
+            "{older}"
+        );
+    }
+
+    /// Recall says it too, inside the parenthesis that names the page, and
+    /// says nothing for a page whose origin was never recorded.
+    #[test]
+    fn a_recalled_page_says_where_it_came_from() {
+        let mut read = page("Contributors", "who works here");
+        read.origin = Some(Origin::Repo);
+
+        let out = brief(
+            &[read, page("Old note", "unknown")],
+            &RecallConfig::default(),
+        );
+
+        assert!(
+            out.contains(
+                "- Contributors (`notes/a-page.md`, read from the repository) — who works here"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("- Old note (`notes/a-page.md`) — unknown"),
+            "{out}"
+        );
     }
 }

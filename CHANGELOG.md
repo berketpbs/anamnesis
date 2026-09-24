@@ -21,6 +21,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Transcripts are still never rewritten.
 
 ### Added
+- **A page says where what it says came from: `origin: human | agent | repo`.**
+  A rule the person stated, a gotcha an agent ran into, and a fact read off
+  the git history are different grounds for believing a page, and until now
+  they read alike. Whatever writes a page now records which it is: bootstrap
+  writes `repo`, `memory_write_page` writes `agent`, and a consolidation note
+  is `human` only when the model gave it a `quote:` and those words are found
+  in a prompt the person typed. Case, spacing, and the model's own quotation
+  marks don't matter. Tool output, file contents, and harness notifications
+  don't count, and a quote under 12 characters ("yes do it") grounds nothing.
+  A line an agent read in a README therefore cannot come out as something the
+  person said. The quote is kept in the page as its evidence. A later reading
+  can make a note the person's, never less so. The decisions handed to a
+  starting session and the pages offered at a prompt say it in their line
+  ("said by the person", "written by an agent", "read from the repository");
+  `memory_query` and `memory_read_page` return it. It is stored as a column
+  (`V19`) so those can read it without opening files, rebuilt by `reindex`,
+  and compared by `reindex --check`. Older pages, and pages written by hand or
+  from the command line, have none: unknown, shown as nothing. Nothing is
+  ranked by it yet — that waits on measuring whether it should move places.
 - **The long-run eval measures a rule that was retired, and counts applying
   it against memory.** Every earlier plant added a rule. S26 replaces S17's —
   rate changes are now signed off by `@omar-fin`, not `@dana-fin` — in

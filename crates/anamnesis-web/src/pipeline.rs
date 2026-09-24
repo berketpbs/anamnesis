@@ -14,7 +14,7 @@ use anamnesis_core::embedding::Embed;
 use anamnesis_core::handoff::Slot;
 use anamnesis_core::ids::{PageId, SessionId};
 use anamnesis_core::observation::{EventKind, Observation};
-use anamnesis_core::page::{Frontmatter, Page, PagePath, Tier};
+use anamnesis_core::page::{Frontmatter, Origin, Page, PagePath, Tier};
 use anamnesis_core::scope::{OperatorName, ResolvedScope, resolve_scope};
 use anamnesis_core::session::{AgentKind, Session};
 use anamnesis_hooks::ParsedHook;
@@ -845,6 +845,10 @@ fn try_write_notes(
         // know which of them are its own.
         frontmatter.tier = note.kind.tier();
         frontmatter.session = Some(session.id);
+        // Checked against what the person typed before it got here: a note
+        // is `human` only with the words that make it so.
+        frontmatter.origin = Some(note.origin);
+        frontmatter.quote = note.quote.clone();
         // Only a page that is there: the model was shown a list of paths and
         // may still name one that is not, and a chain that points at nothing
         // retires nothing while claiming to. A page that is there stops being
@@ -875,6 +879,12 @@ fn try_write_notes(
                     .as_ref()
                     .filter(|replaced| wiki.exists(&scope.scope, replaced))
                     .cloned(),
+                // A rewrite that found the person's words makes the page
+                // theirs; one that did not leaves it as it was, because a
+                // later reading that missed the quote does not unsay it.
+                said: (note.origin == Origin::Human)
+                    .then(|| note.quote.clone())
+                    .flatten(),
                 ..PagePatch::default()
             },
         });

@@ -356,6 +356,9 @@ pub fn cmd_patch_page(
         entities,
         expires_at,
         page_abstract: options.page_abstract,
+        // Who is typing at a terminal is not something this can see: the
+        // person, or an agent running the command for them.
+        said: None,
         clear,
         ..PagePatch::default()
     };

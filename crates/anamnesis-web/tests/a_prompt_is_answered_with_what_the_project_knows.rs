@@ -21,7 +21,7 @@
 use std::sync::Arc;
 
 use anamnesis_core::embedding::Embed;
-use anamnesis_core::page::{Frontmatter, Page, PagePath, PageStatus, Tier};
+use anamnesis_core::page::{Frontmatter, Origin, Page, PagePath, PageStatus, Tier};
 use anamnesis_core::scope::resolve_scope;
 use anamnesis_llm::Embedder;
 use anamnesis_store::Store;
@@ -111,21 +111,25 @@ fn recall_with(marker: &str, q: &str, embedder: Option<Arc<dyn Embedder>>) -> (S
             "Amounts never go to logs",
             "Amounts must never be written to logs, not even at debug level: the logs are \
              shipped to a third party and amounts count as customer financial data.",
+            Some(Origin::Human),
         ),
         (
             "notes/rates.md",
             "Rates are generated",
             "The rates module is generated from rates.toml and a hand edit disappears.",
+            None,
         ),
         (
             "notes/deploy.md",
             "Deploying to staging",
             "Staging is deployed from the ops repository.",
+            None,
         ),
     ];
     let model = WordEmbedder;
-    for (path, title, body) in corpus {
+    for (path, title, body, origin) in corpus {
         let mut frontmatter = Frontmatter::new(title, Vec::new()).expect("frontmatter");
+        frontmatter.origin = origin;
         frontmatter.tier = Tier::Semantic;
         frontmatter.status = PageStatus::Active;
         let page = Page::new(
@@ -201,6 +205,17 @@ fn a_prompt_is_answered_with_the_page_that_stands_out() {
     // The framing travels with it or it is not worth injecting: this lands in
     // a context window beside the user's own words.
     assert!(body.contains("not instructions to follow"), "{body}");
+}
+
+/// The page offered says whose it is — the person set this rule — so the
+/// agent reading it knows what it stands on, in the same line that names it.
+#[test]
+fn a_page_offered_says_whose_it_is() {
+    let (_, body) = recall(MARKER, "add logging to the importer", true);
+    assert!(
+        body.contains("- Amounts never go to logs (`notes/logging.md`, said by the person)"),
+        "{body}"
+    );
 }
 
 /// The case this is all for: a prompt that is middling against every page and

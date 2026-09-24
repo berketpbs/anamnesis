@@ -93,6 +93,11 @@ pub struct QueryHit {
     pub score: f64,
     /// Leading slice of the page body.
     pub snippet: String,
+    /// Where what the page says came from — `human` (the person said it, in
+    /// words the page quotes), `agent`, or `repo` — when the path that wrote
+    /// it knew. Absent is unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
     /// True when the page comes from the workspace's shared `_global` scope
     /// rather than this project: something held to be true of every project
     /// here, not only of this one.
@@ -405,6 +410,12 @@ pub struct ReadPageResponse {
     pub page_abstract: Option<String>,
     /// Session that first created this page through consolidation, if any.
     pub source_session: Option<String>,
+    /// Where what the page says came from: `human`, `agent` or `repo`, when
+    /// the path that wrote it knew.
+    pub origin: Option<String>,
+    /// The person's words a `human` page rests on, as they typed them in the
+    /// session `source_session` names.
+    pub quote: Option<String>,
     /// True when the page came from the workspace's shared `_global` scope
     /// rather than this project.
     pub global: bool,
@@ -803,6 +814,7 @@ impl AnamnesisMcp {
                         canonical: hit.canonical,
                         score: hit.score,
                         snippet: hit.snippet,
+                        origin: hit.origin.map(|origin| origin.as_str().to_owned()),
                         global: from_global,
                         explain,
                     }
@@ -890,6 +902,10 @@ impl AnamnesisMcp {
             .collect::<anamnesis_core::Result<Vec<_>>>()?;
 
         let mut frontmatter = Frontmatter::new(&request.title, entities.clone())?;
+        // Whatever the page says the person told it, it is the agent writing:
+        // a rule an agent records on someone's behalf is the agent's account
+        // of it until something checks it against what they typed.
+        frontmatter.origin = Some(anamnesis_core::page::Origin::Agent);
         frontmatter.tier = parse_tier(request.tier.as_deref())?;
         frontmatter.status = parse_status(request.status.as_deref())?;
         frontmatter.pinned = request.pinned.unwrap_or(false);
@@ -1036,6 +1052,9 @@ impl AnamnesisMcp {
                 .transpose()?,
             salience: request.salience,
             page_abstract: request.page_abstract,
+            // An agent's edit never makes a page the person's: the words that
+            // would have to be found are not something this request carries.
+            said: None,
             clear,
         };
 
@@ -1216,6 +1235,8 @@ impl AnamnesisMcp {
             expires_at: frontmatter.expires_at.map(|at| at.to_string()),
             page_abstract: frontmatter.page_abstract,
             source_session: frontmatter.session.map(|id| id.to_string()),
+            origin: frontmatter.origin.map(|origin| origin.as_str().to_owned()),
+            quote: frontmatter.quote,
             global: from_global,
         })
     }
@@ -2161,6 +2182,69 @@ mod tests {
                 .unwrap()
                 .is_latest
         );
+    }
+
+    #[test]
+    fn a_page_an_agent_writes_is_the_agents_and_its_patches_keep_it_so() {
+        let (_repo, _data, server) = harness();
+        let created = write_page(
+            &server,
+            "decisions/keys.md",
+            "Keys live in the credential store",
+            "The person said every provider reads its key from the credential store.",
+        );
+
+        let read = server
+            .read_page(ReadPageRequest {
+                path: "decisions/keys.md".to_owned(),
+                global: Some(false),
+            })
+            .expect("read");
+        assert_eq!(read.origin.as_deref(), Some("agent"));
+        assert_eq!(read.quote, None);
+
+        let hits = server
+            .query(QueryRequest {
+                text: "credential store".to_owned(),
+                limit: None,
+                explain: None,
+            })
+            .expect("query")
+            .hits;
+        assert_eq!(
+            hits.iter()
+                .find(|hit| hit.path == "decisions/keys.md")
+                .and_then(|hit| hit.origin.as_deref()),
+            Some("agent")
+        );
+
+        let patched = server
+            .patch_page(PatchPageRequest {
+                path: "decisions/keys.md".to_owned(),
+                expected_revision: created.revision,
+                title: None,
+                body: Some("The person really did say so.".to_owned()),
+                tier: None,
+                status: None,
+                pinned: None,
+                canonical: None,
+                entities: None,
+                expires_at: None,
+                supersedes: None,
+                salience: None,
+                page_abstract: None,
+                clear_fields: None,
+                global: None,
+            })
+            .expect("patch");
+        assert!(patched.preserved.iter().any(|kept| kept == "origin"));
+        let read = server
+            .read_page(ReadPageRequest {
+                path: "decisions/keys.md".to_owned(),
+                global: Some(false),
+            })
+            .expect("read");
+        assert_eq!(read.origin.as_deref(), Some("agent"));
     }
 
     #[test]

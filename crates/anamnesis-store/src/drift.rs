@@ -85,7 +85,7 @@ struct Rows {
 const PAGES: Rows = Rows {
     sql: "SELECT id, path,
                  path, title, body, tier, status, pinned, canonical, salience,
-                 expires_at, supersedes, supersedes_target, is_latest, session_id
+                 expires_at, supersedes, supersedes_target, is_latest, session_id, origin
           FROM pages WHERE project_id = ?1",
     columns: &[
         "path",
@@ -101,6 +101,7 @@ const PAGES: Rows = Rows {
         "supersedes_target",
         "is_latest",
         "session_id",
+        "origin",
     ],
 };
 
