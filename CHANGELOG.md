@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`anamnesis reindex --check` says whether the index could be rebuilt.**
+  The index is meant to be disposable, and nothing tested that: a path that
+  writes a row without its durable copy — a transcript write that failed and
+  was logged — would be found the day the database was lost. The check
+  rebuilds the project and its shared scope from the wiki and the
+  transcripts into memory, compares pages, their names and links, and every
+  observation with the index in use, and exits non-zero on a difference,
+  naming which side holds what. A page on disk that will not parse is
+  reported as the file to fix rather than as a row reindex would drop, and
+  `reindex` itself now names such pages instead of only logging them.
+  Nothing is written. On this project's own memory: 167 pages and 22,200
+  observations, in step, in three seconds.
 - **A page is updated from the revision that was read, not overwritten.**
   `memory_write_page` replaced whatever stood at a path, and every field it
   was not given went back to its default: correcting a decision's body

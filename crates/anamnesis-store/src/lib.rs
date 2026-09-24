@@ -28,6 +28,7 @@ use rusqlite::Connection;
 
 mod audit;
 mod convert;
+mod drift;
 mod improve;
 mod migrations;
 mod named;
@@ -40,6 +41,7 @@ mod rename;
 mod sweep;
 mod workstream;
 
+pub use drift::{Divergence, Drift};
 pub use improve::{Filed, ProjectRow, StoredProposal};
 pub use named::Naming;
 pub use ops::{

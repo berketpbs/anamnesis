@@ -786,7 +786,12 @@ pub enum Commands {
     ///
     /// Safe to run at any time: every identifier is derived, so a rebuild
     /// reproduces the same rows rather than duplicating them.
-    Reindex,
+    Reindex {
+        /// Rebuild into memory and compare with the index in use, writing
+        /// nothing; exits non-zero when they differ
+        #[arg(long)]
+        check: bool,
+    },
 
     /// Seed an empty memory from the repository's git history
     ///

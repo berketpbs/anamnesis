@@ -269,7 +269,9 @@ Command-line interface.
   and copying one of them produces a database that opens and is quietly
   stale. `models/` and `logs/` are left out
 - `search`, `write-page`, `show-page`, `sessions`, `handoff`
-- `reindex` — rebuild the index from `wiki/` and `raw/`
+- `reindex` — rebuild the index from `wiki/` and `raw/`; `--check` rebuilds
+  into memory instead and compares the result with the index in use, row by
+  row, writing nothing
 - `bootstrap` — seed a new project's memory from its git history
 - `sweep` — forget pages that have decayed; reports unless `--apply`
 - `forget` — remove named pages on purpose, from the wiki and the index
