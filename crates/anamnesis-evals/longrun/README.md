@@ -6,7 +6,7 @@ something, do the right thing because memory kept it?
 
 ## What runs
 
-`scenario.toml` is twenty-five sessions on `fixture/`, a small Python bookkeeping
+`scenario.toml` is twenty-eight sessions on `fixture/`, a small Python bookkeeping
 library. Every session is a headless `claude -p` and runs twice, once in each
 arm, on two copies of the fixture:
 
@@ -23,9 +23,9 @@ The sessions come in three kinds:
 
 | Kind | Sessions | What it does |
 |---|---|---|
-| plant | S01-S05, S13-S17, S23 | the session finds out or is told something the repository does not say |
-| distractor | S06-S07, S24 | unrelated work, so the plant is not simply the last page |
-| probe | S08-S12, S18-S22, S25 | a task that needs a plant; its check is the measurement |
+| plant | S01-S05, S13-S17, S23, S26 | the session finds out or is told something the repository does not say |
+| distractor | S06-S07, S24, S27 | unrelated work, so the plant is not simply the last page |
+| probe | S08-S12, S18-S22, S25, S28 | a task that needs a plant; its check is the measurement |
 
 The first five probes are also what stands between the second five plants
 and the first. In the second five, each planting session is an ordinary task
@@ -46,6 +46,7 @@ can, so a control arm that passes one has guessed.
 | S21 `tools/fetch_rates.py` | S16: the internal rates service and its header | the script names `fx.internal.example/v2/rates` and `X-Ledger-Team: finance` |
 | S22 GBP rate | S17: rate changes ask `@dana-fin` to sign off | GBP is 1.29 and `PR.md` names the rate and `@dana-fin` |
 | S25 default currency | S23: settings are `LEDGER_<NAME>` variables read in `ledger/settings.py` | the variable makes a blank currency EUR, nothing else in `ledger/` names it, and there is no flag or config file |
+| S28 EUR rate | S26: rate changes are now signed off by `@omar-fin`, not S17's `@dana-fin` | EUR is 1.11 and `PR.md` names the rate and `@omar-fin`; naming only `@dana-fin` is reported as misled |
 
 ### A decision taken in conversation
 
@@ -82,6 +83,24 @@ S23 also names the affirmative title of the rejected `ledger.toml` option in
 wiki's authored `supersedes` links and reports whether that rejected option
 survived as a current decision. The selftest removes the chosen page's
 supersedes link as a mutation and requires this probe to turn red.
+
+### A rule that was retired
+
+Every other plant adds a rule. S26 replaces one: in passing, during an
+unrelated task, the person says that Dana has moved to treasury and rate
+changes are now signed off by `@omar-fin`. By then memory holds S17's rule,
+S22's session in which it was applied, and the repository a `PR.md` from S22
+that asks `@dana-fin` — so the old rule is not a faint trace but the better
+supported of the two. S27 is unrelated work, and S28 is a rate change.
+
+S28's check has three outcomes instead of two. `@omar-fin` asked passes, with
+or without a word about who used to sign off. Nobody asked fails. Only
+`@dana-fin` asked is *misled*: not a miss but the retired rule applied, with
+the authority of something remembered. `report` shows how often each arm was
+misled, and counts a pair in which neither arm passed and memory was misled as
+a pair control won, since memory is the reason that answer was wrong. A memory
+that forgets costs a probe; one that hands over the rule it should have
+retired costs more, and the report says so.
 
 S19 asks for `--strict` rather than a better plain `import` because S08 has a
 bad row logged and skipped: by then a plain import of a bad file succeeds.
@@ -208,7 +227,7 @@ another harness is another experiment.
 
 ## The model the memory arm writes with
 
-A repeat is twenty-five consolidation requests plus whatever the enrich pass
+A repeat is twenty-eight consolidation requests plus whatever the enrich pass
 asks again, against a Google free tier of 20 per day per model that is shared
 with any server already running on the same key: more than a whole day's
 quota. The first complete run, of twelve sessions, spent it by S10. `settings.local.env.example` points the arm at a local Ollama model
@@ -220,7 +239,7 @@ measures nothing. Point a run at it with `--settings-env`, and leave it off to
 measure the setup this machine actually runs.
 
 A repeat of the first twelve sessions took 17 to 29 minutes in the three
-complete runs of 2026-09-21 and -22; twenty-five have not been timed yet. It costs a few dollars of agent usage, and on a free Gemini tier
+complete runs of 2026-09-21 and -22; twenty-eight have not been timed yet. It costs a few dollars of agent usage, and on a free Gemini tier
 it asks the consolidation model for more than a day's quota, so repeats are
 meant to run one a night, on a paid key or the local model.
 

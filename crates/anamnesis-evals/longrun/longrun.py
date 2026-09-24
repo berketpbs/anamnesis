@@ -20,7 +20,7 @@ judged by a check in checks.py that runs the code rather than asking a model.
     python longrun.py run --anamnesis PATH one repeat of the scenario, both arms
     python longrun.py report              every run so far, side by side
 
-A repeat asks the consolidation model about twenty-five sessions, more than a
+A repeat asks the consolidation model about twenty-eight sessions, more than a
 free Gemini tier allows in a day, which is why it is meant to run once a night
 rather than all at once.
 """
@@ -160,9 +160,11 @@ def load_scenario(path: Path = SCENARIO) -> dict:
     for session in sessions:
         if session["check"] not in checks.CHECKS:
             problems.append(f"{session['id']} names an unknown check {session['check']!r}")
-        for field in ("plants", "needs"):
+        for field in ("plants", "needs", "retires"):
             if field in session and session[field] not in ids:
                 problems.append(f"{session['id']} {field} {session[field]!r}, which is not a session")
+        if "retires" in session and session["kind"] != "plant":
+            problems.append(f"{session['id']} retires a rule but plants nothing")
         if session["kind"] not in ("plant", "distractor", "probe"):
             problems.append(f"{session['id']} has kind {session['kind']!r}")
         if "knowledge" in session and session["kind"] != "plant":
@@ -1842,9 +1844,10 @@ def report_lines(scenario: dict, runs: list[dict]) -> list[str]:
         "",
         "## Probes",
         "",
-        "| Probe | Needs | Memory passed | Control passed | Memory calls (mean) |",
-        "|---|---|---|---|---|",
+        "| Probe | Needs | Memory passed | Control passed | Misled (memory · control) | Memory calls (mean) |",
+        "|---|---|---|---|---|---|",
     ]
+    by_id = {session["id"]: session for session in scenario["session"]}
     for session in scenario["session"]:
         if session["kind"] != "probe":
             continue
@@ -1856,10 +1859,18 @@ def report_lines(scenario: dict, runs: list[dict]) -> list[str]:
         con_pass = sum(record["check"]["passed"] for record in control)
         calls = [record["agent"]["memory_calls"] or 0 for _, record in memory]
         mem_cell = f"{mem_pass}/{len(counted)}" + (f" ({excluded} excluded)" if excluded else "")
+        retires = "retires" in by_id.get(session.get("needs"), {})
         lines.append(
             f"| {session['id']} {session['check']} | {session.get('needs', '')} | {mem_cell} | "
-            f"{con_pass}/{len(control)} | {mean(calls)} |"
+            f"{con_pass}/{len(control)} | {misled_cell(retires, counted, control)} | {mean(calls)} |"
         )
+    lines += [
+        "",
+        "Misled counts the runs that failed a probe by applying a rule a later session retired "
+        "(`retires` in scenario.toml), and is shown only for a probe that needs the replacement. "
+        "It is a failure the pass rate cannot tell from forgetting, and a worse one: the agent was "
+        "not left without an answer but handed the wrong one.",
+    ]
 
     # What the pass rate above cannot say on its own: a probe that failed may
     # never have been shown what it needed, or been shown it and not used it.
@@ -1905,8 +1916,8 @@ def report_lines(scenario: dict, runs: list[dict]) -> list[str]:
         "Grouped by the model that wrote the memory arm's pages, since those are different "
         "experiments.",
         "",
-        "| Pages by | Pairs | Left out | Memory only | Control only | Both | Neither | p |",
-        "|---|---|---|---|---|---|---|---|",
+        "| Pages by | Pairs | Left out | Memory only | Control only | Both | Neither | Misled | p |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     probes = [session for session in scenario["session"] if session["kind"] == "probe"]
     groups: dict[str, list] = {}
@@ -1923,13 +1934,16 @@ def report_lines(scenario: dict, runs: list[dict]) -> list[str]:
         tally = Counter(outcomes)
         lines.append(
             f"| {writer} | {len(outcomes)} | {tally['']} | {tally['memory']} | {tally['control']} | "
-            f"{tally['both']} | {tally['neither']} | {sign_test(tally['memory'], tally['control']):.2f} |"
+            f"{tally['both']} | {tally['neither']} | {tally['misled']} | "
+            f"{pairs_p(tally):.2f} |"
         )
     lines += [
         "",
         "p is the chance of a split at least this lopsided between memory-only and control-only "
         "pairs if memory made no difference. Even with every disagreement in memory's favour it "
         "takes six of them before p falls below 0.05; a difference short of that is not yet one.",
+        "Misled is a pair in which neither arm passed and the memory arm applied a retired rule: "
+        "memory made that answer worse than no memory did, so p counts it with control's.",
     ]
     if reasons:
         lines.append("Left out: " + ", ".join(f"{reason} ×{count}" for reason, count in sorted(reasons.items())) + ".")
@@ -2144,6 +2158,23 @@ def sign_test(memory_only: int, control_only: int) -> float:
     return min(1.0, 2 * tail / 2**disagreed)
 
 
+def pairs_p(tally: Counter) -> float:
+    """The sign test over one group of pairs, a misled memory arm counted as a
+    pair control won: neither passed, and memory is why one of them was
+    wrong."""
+    return sign_test(tally["memory"], tally["control"] + tally["misled"])
+
+
+def misled_cell(retires: bool, memory: list[dict], control: list[dict]) -> str:
+    """How many of each arm's runs applied a retired rule, for a probe that
+    needs the rule that replaced it; `-` for any other probe, where the
+    question does not arise."""
+    if not retires:
+        return "-"
+    stale = lambda records: sum(bool(record["check"].get("stale")) for record in records)  # noqa: E731
+    return f"{stale(memory)}/{len(memory)} · {stale(control)}/{len(control)}"
+
+
 def pair_verdict(run: dict, session: dict, valid) -> tuple[str, str | None]:
     """One probe of one run, both arms: which arm passed, or why the pair says
     nothing about memory.
@@ -2167,6 +2198,10 @@ def pair_verdict(run: dict, session: dict, valid) -> tuple[str, str | None]:
             if planted is None or not planted["check"]["passed"]:
                 return "", f"{arm} failed {needs}'s own task"
     m, c = memory["check"]["passed"], control["check"]["passed"]
+    # Applying a retired rule is worse than applying none. A pair that neither
+    # arm passed is not a tie when memory is the reason one of them was wrong.
+    if not m and not c and memory["check"].get("stale"):
+        return "misled", None
     return ("memory" if m and not c else "control" if c and not m else "both" if m else "neither"), None
 
 
@@ -2255,6 +2290,7 @@ def cmd_selftest(_: argparse.Namespace) -> int:
         ("neither", {}, "exactly one of prompt and turns"),
         ("a probe with two turns", {"kind": "probe", "turns": ["a", "b"]}, "several turns"),
         ("noise on a probe", {"kind": "probe", "prompt": "a", "noise": ["X"]}, "names noise but plants nothing"),
+        ("a probe that retires", {"kind": "probe", "prompt": "a", "retires": "T1"}, "retires a rule but plants nothing"),
     ):
         entry = {"id": "T1", "kind": "plant", "check": "suite_passes", **session}
         with tempfile.TemporaryDirectory() as scratch:
@@ -2605,6 +2641,9 @@ while (item := arrived.get()) is not None:
         ("S16", "Rates come from `https://fx.internal.example/v2/rates`; nothing was done with it.", False),
         ("S17", "A change to an exchange rate needs `@dana-fin` to sign off in the pull request's description.", True),
         ("S17", "A change to an exchange rate needs sign-off from finance.", False),
+        ("S26", "Rate changes now need sign-off from `@omar-fin`; Dana moved to the treasury team.", True),
+        ("S26", "A change to an exchange rate needs `@dana-fin` to sign off.", False),
+        ("S26", "Added a `rates` command that prints each currency and its rate, sorted by code.", False),
     ]
     knowledge = {session["id"]: session.get("knowledge", []) for session in scenario["session"]}
     for session, text, expected in judged + written:
@@ -2679,8 +2718,9 @@ while (item := arrived.get()) is not None:
 
     # The first run's S09: the control arm failed S03's own task, so its
     # failure at S09 is not forgetting, and the pair is left out.
-    def record(session: str, arm: str, passed: bool) -> dict:
-        return {"session": session, "arm": arm, "check": {"passed": passed}}
+    def record(session: str, arm: str, passed: bool | str) -> dict:
+        # "stale": failed by applying a rule a later session retired.
+        return {"session": session, "arm": arm, "check": {"passed": passed is True, "stale": passed == "stale"}}
 
     probe = {"id": "S09", "needs": "S03"}
     everything = lambda run, record: True  # noqa: E731
@@ -2691,6 +2731,9 @@ while (item := arrived.get()) is not None:
         ([("S03", True, True), ("S09", False, False)], everything, ("neither", None)),
         ([("S03", True, True), ("S09", True, False)], lambda run, record: False, ("", "memory arm excluded")),
         ([("S03", True, True)], everything, ("", "an arm did not run")),
+        ([("S03", True, True), ("S09", "stale", False)], everything, ("misled", None)),
+        ([("S03", True, True), ("S09", "stale", True)], everything, ("control", None)),
+        ([("S03", True, True), ("S09", False, "stale")], everything, ("neither", None)),
     ]
     for sessions, valid, expected in pairs:
         run = {"sessions": [r for sid, m, c in sessions for r in (record(sid, "memory", m), record(sid, "control", c))]}
@@ -2698,6 +2741,25 @@ while (item := arrived.get()) is not None:
             print(f"FAIL pair_verdict({sessions}): {got}, expected {expected}")
             return 1
     print("ok   sign_test and pair_verdict: a pair counts only when both arms could do the planting task")
+
+    # A retired rule applied is counted per arm, and only where it can happen.
+    memory = [record("S28", "memory", verdict) for verdict in ("stale", True, "stale")]
+    control = [record("S28", "control", verdict) for verdict in (False, False, "stale")]
+    for retires, expected in ((True, "2/3 · 1/3"), (False, "-")):
+        if (got := misled_cell(retires, memory, control)) != expected:
+            print(f"FAIL misled_cell(retires={retires}): {got!r}, expected {expected!r}")
+            return 1
+    # Six pairs memory won and six it misled are no evidence for memory; read
+    # as ties, the same six wins would clear 0.05.
+    if (got := pairs_p(Counter(memory=6, misled=6))) != 1.0:
+        print(f"FAIL pairs_p: six wins and six misled read as {got}, expected 1.0")
+        return 1
+    # The verdict a run stores is `as_dict()`; a stale that does not survive it
+    # never reaches the report.
+    if not checks.Verdict(False, "asked @dana-fin", stale=True).as_dict().get("stale"):
+        print("FAIL Verdict.as_dict drops stale")
+        return 1
+    print("ok   misled_cell, pairs_p and pair_verdict: a retired rule applied counts against memory, not as a tie")
 
     here = Path("C:/Users/x/AppData/Local/anamnesis-longrun/runs/r/.probe")
     elsewhere = Path(

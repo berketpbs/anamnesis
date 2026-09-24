@@ -21,6 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Transcripts are still never rewritten.
 
 ### Added
+- **The long-run eval measures a rule that was retired, and counts applying
+  it against memory.** Every earlier plant added a rule. S26 replaces S17's —
+  rate changes are now signed off by `@omar-fin`, not `@dana-fin` — in
+  passing, at a point where memory holds the old rule, a session that applied
+  it, and a `PR.md` in the repository asking `@dana-fin`. S28 is a rate change after
+  an unrelated S27. Its check has a third outcome: asking only `@dana-fin` is
+  *misled*, the retired rule applied rather than nothing remembered. `report`
+  shows how often each arm was misled, and a pair neither arm passed in which
+  memory was misled counts as one control won, since memory is why that
+  answer was wrong.
 - **`anamnesis reindex --check` says whether the index could be rebuilt.**
   The index is meant to be disposable, and nothing tested that: a path that
   writes a row without its durable copy — a transcript write that failed and
