@@ -60,7 +60,7 @@ use pages::{
 };
 use purge::cmd_purge;
 use reconsolidate::cmd_reconsolidate;
-use reindex::cmd_reindex;
+use reindex::{cmd_reindex, cmd_reindex_check};
 use rename::cmd_rename;
 use run::{cmd_continue, cmd_run};
 use serve::{cmd_mcp, cmd_serve};
@@ -505,8 +505,11 @@ fn run() -> anyhow::Result<()> {
         Commands::Rename { name, apply } => {
             cmd_rename(&name, apply, cli.data_dir.clone())?;
         }
-        Commands::Reindex => {
+        Commands::Reindex { check: false } => {
             cmd_reindex(cli.data_dir.clone())?;
+        }
+        Commands::Reindex { check: true } => {
+            cmd_reindex_check(cli.data_dir.clone())?;
         }
         Commands::Bootstrap {
             repo,

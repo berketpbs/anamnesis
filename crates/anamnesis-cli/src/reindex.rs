@@ -36,7 +36,7 @@ use crate::format::plural;
 use crate::project::global_scope;
 
 /// What a rebuild put back.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Rebuilt {
     /// Pages indexed from the wiki.
     pub pages: usize,
@@ -50,6 +50,12 @@ pub struct Rebuilt {
     pub orphaned_files: usize,
     /// Index rows dropped because the wiki no longer holds their page.
     pub removed: usize,
+    /// Pages whose file is there and could not be read, by path.
+    ///
+    /// Named rather than counted: the index keeps whatever it last read of
+    /// them, which is the right thing to do and also the reason nothing else
+    /// will ever point at the file that needs fixing.
+    pub unreadable: Vec<String>,
     /// Whether stale rows were left alone because the scope's wiki directory
     /// is not there at all. Reported rather than acted on: see
     /// [`rebuild_pages`].
@@ -84,12 +90,13 @@ pub fn rebuild(
     report.pages = pages.indexed;
     report.removed = pages.removed;
     report.skipped_removal = pages.skipped_removal;
+    report.unreadable = pages.unreadable;
 
     Ok(report)
 }
 
 /// What one pass over the wiki did to the index.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Pages {
     /// Pages read from the wiki and written to the index.
     indexed: usize,
@@ -97,6 +104,8 @@ struct Pages {
     removed: usize,
     /// Whether removal was declined because the scope directory is missing.
     skipped_removal: bool,
+    /// Pages on disk that would not parse.
+    unreadable: Vec<String>,
 }
 
 /// Re-index every page in the wiki, and forget the ones it no longer holds.
@@ -132,6 +141,7 @@ fn rebuild_pages(
             Ok(parsed) => parsed,
             Err(error) => {
                 tracing::warn!(%error, %path, "skipping unreadable page");
+                report.unreadable.push(path.as_str().to_owned());
                 continue;
             }
         };
@@ -326,6 +336,15 @@ pub fn cmd_reindex(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
         "  {} session(s), {} observation(s) recovered",
         report.sessions, report.observations
     );
+    if !report.unreadable.is_empty() {
+        println!(
+            "  {} could not be read and kept what the index last had:",
+            plural(report.unreadable.len() as i64, "page")
+        );
+        for path in &report.unreadable {
+            println!("    {path}");
+        }
+    }
     if report.orphaned_files > 0 {
         println!(
             "  {} transcript file(s) had no session header and were skipped",
@@ -349,6 +368,233 @@ pub fn cmd_reindex(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
     println!("  session should know, and reviving a stale one is worse than none.");
 
     Ok(())
+}
+
+/// What comparing one scope with a rebuild of it found.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Checked {
+    /// Where the index differs from the rebuild, pages that could not be read
+    /// left out of it.
+    pub drift: anamnesis_store::Drift,
+    /// Pages whose file is there and would not parse.
+    ///
+    /// Kept apart because the rebuild skips them and the index keeps them,
+    /// which reads as "only in the index" — and the remedy for that, a
+    /// reindex, leaves them exactly where they are. The file is what needs
+    /// fixing.
+    pub unreadable: Vec<String>,
+}
+
+impl Checked {
+    /// Whether the index is exactly what a rebuild would produce.
+    pub fn is_clean(&self) -> bool {
+        self.drift.is_empty() && self.unreadable.is_empty()
+    }
+}
+
+/// Rebuild one scope into a scratch index and compare it with `live`.
+///
+/// The scratch index is in memory and nothing is embedded: vectors are not
+/// compared, and asking a model for every page to throw the answers away
+/// would make a read-only check the slowest command there is.
+pub fn check(
+    live: &Store,
+    wiki: &Wiki,
+    raw: &RawSpool,
+    scope: &ResolvedScope,
+    now: Timestamp,
+) -> anyhow::Result<Checked> {
+    let rebuilt = Store::open_in_memory()?;
+    rebuilt.migrate()?;
+    let report = rebuild(&rebuilt, wiki, raw, scope, None, now)?;
+    let mut drift = live.drift_from(&rebuilt, scope.project_id)?;
+
+    // An unreadable page's rows are the index's last good reading of it, and
+    // a reindex keeps them. Reported once, as the page, not again as every
+    // name and link it held.
+    let unreadable = report.unreadable;
+    let of_unreadable = |label: &String| {
+        unreadable
+            .iter()
+            .any(|path| label == path || label.starts_with(&format!("{path} → ")))
+    };
+    drift.pages.only_live.retain(|label| !of_unreadable(label));
+    drift
+        .entities
+        .only_live
+        .retain(|label| !of_unreadable(label));
+    drift.links.only_live.retain(|label| !of_unreadable(label));
+
+    Ok(Checked { drift, unreadable })
+}
+
+/// Compare the index in use with what `reindex` would build, writing nothing.
+///
+/// The index is only safe to lose if a rebuild reproduces it, and nothing
+/// else ever tests that: a path that writes a row without its durable copy is
+/// found the day the database is gone. This finds it on a day it is not.
+pub fn cmd_reindex_check(data_dir: Option<PathBuf>) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    let scope = resolve_scope(&cwd)?;
+    let data = DataDir::resolve(data_dir)?;
+
+    // Every open below would otherwise create what it opens, and a check that
+    // leaves an empty database or wiki behind has written something after all.
+    let db = data.db_file();
+    if !db.exists() {
+        anyhow::bail!("there is no index at {} to compare", db.display());
+    }
+    if !data.wiki().exists() {
+        anyhow::bail!(
+            "there is no wiki at {} to rebuild from",
+            data.wiki().display()
+        );
+    }
+
+    // Not migrated: an index a step behind this build would be reported as
+    // drifting by exactly the migration, which is not what anybody asked.
+    let live = Store::open(&db)?;
+    let scratch = Store::open_in_memory()?;
+    scratch.migrate()?;
+    let (ours, theirs) = (live.schema_version()?, scratch.schema_version()?);
+    if ours != theirs {
+        anyhow::bail!(
+            "the index is at schema {} and this build at {}; start the server from this build to migrate it, then check again",
+            ours.map_or("none".to_owned(), |v| v.to_string()),
+            theirs.map_or("none".to_owned(), |v| v.to_string()),
+        );
+    }
+    drop(scratch);
+
+    let wiki = Wiki::open(data.wiki())?;
+    let raw = RawSpool::new(data.raw());
+
+    println!("🔎 Comparing the index with a rebuild of {}", scope.scope);
+    println!("   index:       {}", db.display());
+    println!(
+        "   wiki:        {}",
+        data.wiki_scope(&scope.scope).display()
+    );
+    println!("   transcripts: {}", raw.root().display());
+
+    let now = Timestamp::now();
+    let mut drifted = print_drift(
+        &scope.scope.to_string(),
+        &check(&live, &wiki, &raw, &scope, now)?,
+    );
+    let global = global_scope(&scope, &data);
+    if data.wiki_global(&scope.scope.workspace).exists() {
+        drifted |= print_drift(
+            &global.scope.to_string(),
+            &check(&live, &wiki, &raw, &global, now)?,
+        );
+    }
+
+    println!();
+    println!("  Not compared: vectors, handoffs, access counts, session state.");
+    println!("  A rebuild does not reproduce those, by design.");
+    if !drifted {
+        return Ok(());
+    }
+    println!();
+    println!("  A row written in the last few seconds can show up while the server");
+    println!("  is between the wiki and the index; check again before acting on it.");
+    anyhow::bail!("the index differs from what a rebuild would produce")
+}
+
+/// Print one scope's comparison. Returns whether anything differed.
+fn print_drift(scope: &str, checked: &Checked) -> bool {
+    let drift = &checked.drift;
+    println!();
+    println!("  {scope}");
+    if !checked.unreadable.is_empty() {
+        println!(
+            "    {} on disk that will not parse — the index keeps its last copy, and reindex cannot change that:",
+            plural(checked.unreadable.len() as i64, "page")
+        );
+        for path in &checked.unreadable {
+            println!("        {path}");
+        }
+    }
+    print_divergence(
+        "pages",
+        &drift.pages,
+        "in the index, not in the wiki — reindex drops them",
+        "in the wiki, not in the index — reindex adds them",
+        "differ from their page — reindex rewrites them",
+    );
+    print_divergence(
+        "entities",
+        &drift.entities,
+        "filed in the index, not by any page — reindex drops them",
+        "named by a page, missing from the index — reindex adds them",
+        "",
+    );
+    print_divergence(
+        "links",
+        &drift.links,
+        "in the index, not in any page — reindex drops them",
+        "in a page, missing from the index — reindex adds them",
+        "resolve differently from a rebuild — reindex re-resolves them",
+    );
+    print_divergence(
+        "observations",
+        &drift.observations,
+        "in the index and in no transcript — lost if the index is, and reindex cannot bring them back",
+        "in a transcript, missing from the index — reindex restores them",
+        "differ from their transcript — reindex keeps the index's copy",
+    );
+    !checked.is_clean()
+}
+
+/// How many examples of one kind of difference are worth printing.
+///
+/// Enough to recognise a pattern — a day, a session, a directory — and few
+/// enough that a thousand of the same thing does not bury the summary.
+const EXAMPLES: usize = 5;
+
+fn print_divergence(
+    noun: &str,
+    divergence: &anamnesis_store::Divergence,
+    only_live: &str,
+    only_rebuilt: &str,
+    differing: &str,
+) {
+    if divergence.is_empty() {
+        println!("    {noun:<13} {} compared, in step", divergence.live);
+        return;
+    }
+    println!("    {noun:<13} {} compared", divergence.live);
+    let group = |count: usize, what: &str, labels: &mut dyn Iterator<Item = String>| {
+        if count == 0 {
+            return;
+        }
+        println!("      {count} {what}");
+        for label in labels.take(EXAMPLES) {
+            println!("        {label}");
+        }
+        if count > EXAMPLES {
+            println!("        … and {} more", count - EXAMPLES);
+        }
+    };
+    group(
+        divergence.only_live.len(),
+        only_live,
+        &mut divergence.only_live.iter().cloned(),
+    );
+    group(
+        divergence.only_rebuilt.len(),
+        only_rebuilt,
+        &mut divergence.only_rebuilt.iter().cloned(),
+    );
+    group(
+        divergence.differing.len(),
+        differing,
+        &mut divergence
+            .differing
+            .iter()
+            .map(|(label, columns)| format!("{label}  ({})", columns.join(", "))),
+    );
 }
 
 #[cfg(test)]
@@ -1034,5 +1280,122 @@ mod tests {
         )
         .expect("rebuild");
         assert_eq!(report, Rebuilt::default());
+    }
+
+    fn checked(harness: &Harness) -> Checked {
+        check(
+            &harness.store,
+            &harness.wiki,
+            &harness.raw,
+            &harness.scope,
+            now(),
+        )
+        .expect("check")
+    }
+
+    /// The baseline every other check is read against: an index that is
+    /// exactly what its sources rebuild to reports nothing. A check that
+    /// flagged a healthy memory would be switched off by the first person to
+    /// run it.
+    #[test]
+    fn an_index_its_sources_rebuild_to_is_clean() {
+        let harness = harness();
+        wiki_page(&harness, "decisions/a.md", "A", "Links to [[b]].");
+        wiki_page(&harness, "b.md", "B", "Nothing.");
+        spool_session(&harness, "session-1", &["first", "second"]);
+        rebuilt(&harness);
+
+        let checked = checked(&harness);
+
+        assert!(checked.is_clean(), "{checked:?}");
+        assert_eq!(checked.drift.pages.live, 2);
+        assert_eq!(checked.drift.observations.live, 2);
+    }
+
+    /// What the check is for. The server writes the index first and the
+    /// spool second, and a spool write that fails is logged and stepped over
+    /// — which leaves an observation that exists only in the one copy this
+    /// system calls disposable.
+    #[test]
+    fn an_observation_that_never_reached_a_transcript_is_reported() {
+        let harness = harness();
+        let session = spool_session(&harness, "session-1", &["spooled"]);
+        rebuilt(&harness);
+        harness
+            .store
+            .insert_observation(&new_observation(
+                session.id,
+                EventKind::UserPrompt,
+                None,
+                BoundedBody::truncating("never spooled", 1024),
+                now(),
+            ))
+            .expect("insert");
+
+        let checked = checked(&harness);
+
+        assert_eq!(checked.drift.observations.only_live.len(), 1, "{checked:?}");
+        assert!(!checked.is_clean());
+    }
+
+    /// Read-only means read-only: a page the index is missing is reported,
+    /// and still missing afterwards. The rebuild happened somewhere else.
+    #[test]
+    fn a_check_writes_nothing_to_the_index_it_checks() {
+        let harness = harness();
+        wiki_page(&harness, "decisions/a.md", "A", "Indexed.");
+        rebuilt(&harness);
+        wiki_page(&harness, "decisions/late.md", "Late", "Only on disk.");
+        spool_session(&harness, "session-1", &["only in the transcript"]);
+
+        let checked = checked(&harness);
+
+        assert_eq!(checked.drift.pages.only_rebuilt, ["decisions/late.md"]);
+        assert_eq!(checked.drift.observations.only_rebuilt.len(), 1);
+        assert_eq!(
+            harness
+                .store
+                .page_count(harness.scope.project_id)
+                .expect("pages"),
+            1
+        );
+        assert_eq!(
+            harness
+                .store
+                .session_count(harness.scope.project_id)
+                .expect("sessions"),
+            0
+        );
+    }
+
+    /// A page that will not parse is skipped by the rebuild and kept by the
+    /// index, which reads as "only in the index" — and the remedy printed
+    /// for that, a reindex, changes nothing. It is reported once, as a file
+    /// to fix, and not again as every name and link it held.
+    #[test]
+    fn an_unreadable_page_is_reported_as_the_file_and_nothing_else() {
+        let harness = harness();
+        let page = Page::new(
+            harness.scope.project_id,
+            PagePath::parse("broken.md").expect("path"),
+            Frontmatter::new(
+                "Broken",
+                vec![anamnesis_core::page::Entity::parse("redis").expect("entity")],
+            )
+            .expect("frontmatter"),
+            "Links to [[elsewhere]].",
+        );
+        harness
+            .wiki
+            .write_page(&harness.scope.scope, &page, "write")
+            .expect("write");
+        rebuilt(&harness);
+        std::fs::write(page_file(&harness, "broken.md"), "no frontmatter here").expect("corrupt");
+
+        let checked = checked(&harness);
+
+        assert_eq!(checked.unreadable, ["broken.md"]);
+        assert!(checked.drift.is_empty(), "{:?}", checked.drift);
+        assert!(!checked.is_clean());
     }
 }

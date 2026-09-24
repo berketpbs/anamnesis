@@ -1465,6 +1465,22 @@ anamnesis reindex
 Safe to run against a live database: every identifier is derived, so a rebuild
 reproduces the same rows rather than duplicating them.
 
+Whether the database really is disposable is something you can check without
+losing it:
+
+```bash
+anamnesis reindex --check
+```
+
+This rebuilds into memory and compares the result with the index in use —
+pages, the names and links they are filed under, and every observation —
+writing nothing. It exits non-zero when they differ, and says which way: a
+row only in the index is one a rebuild would lose (an observation whose
+transcript write failed, say), a row only in the rebuild is one `reindex`
+would restore, and a page on disk that will not parse is named as a file to
+fix. Vectors, handoffs, access counts and session state are not compared,
+because a rebuild does not reproduce them.
+
 ### Back Up
 
 ```bash
