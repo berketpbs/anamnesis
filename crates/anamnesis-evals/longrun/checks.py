@@ -32,9 +32,13 @@ FIXTURE = Path(__file__).resolve().parent / "fixture"
 class Verdict:
     passed: bool
     detail: str
+    # Failed by doing what a rule said after a later session retired it. Worse
+    # than failing without it: the agent was not left without an answer, it
+    # was handed the wrong one with the authority of something remembered.
+    stale: bool = False
 
     def as_dict(self) -> dict:
-        return {"passed": self.passed, "detail": self.detail}
+        return {"passed": self.passed, "detail": self.detail, "stale": self.stale}
 
 
 def run_python(repo: Path, source: str, timeout: int = 60, extra_env: dict | None = None) -> subprocess.CompletedProcess:
@@ -495,6 +499,74 @@ def rate_change_signed_off(repo: Path) -> Verdict:
     )
 
 
+def head_command(repo: Path) -> Verdict:
+    """`head FILE -n N` prints the first N entries in file order, and three
+    when `-n` is left out."""
+    two = run_cli(repo, ["head", "{csv}", "-n", "2"])
+    every = run_cli(repo, ["head", "{csv}"])
+    two_lines = [line for line in two.stdout.splitlines() if line.strip()]
+    every_lines = [line for line in every.stdout.splitlines() if line.strip()]
+    ok = (
+        two.returncode == 0
+        and len(two_lines) == 2
+        and "rent" in two_lines[0]
+        and "groceries" in two_lines[1]
+        and every.returncode == 0
+        and len(every_lines) == 3
+    )
+    return Verdict(ok, f"-n 2: {two_lines}; no -n: {len(every_lines)} lines ({said(every)[-120:]!r})")
+
+
+def rates_command(repo: Path) -> Verdict:
+    """`rates` prints every currency in `rates.toml` with its rate, one per
+    line, sorted by code. Read against the file as the session left it: by
+    S26 the memory arm has changed rates the control arm may not have."""
+    try:
+        expected = tomllib.loads((repo / "rates.toml").read_text(encoding="utf-8")).get("rates", {})
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        return Verdict(False, f"rates.toml unreadable: {error}")
+    result = run_cli(repo, ["rates"])
+    printed = {}
+    for line in result.stdout.splitlines():
+        code = re.search(r"\b([A-Z]{3})\b", line)
+        number = re.search(r"-?\d+(?:\.\d+)?", line[code.end():] if code else "")
+        if code and number:
+            printed[code.group(1)] = float(number.group(0))
+    codes = list(printed)
+    ok = (
+        result.returncode == 0
+        and printed == {code: float(rate) for code, rate in expected.items()}
+        and codes == sorted(codes)
+    )
+    return Verdict(ok, f"printed {printed}, rates.toml {expected} ({said(result)[-120:]!r})")
+
+
+def rate_change_signed_off_after_handover(repo: Path) -> Verdict:
+    """EUR is 1.11 in `rates.toml`, and `PR.md` describes that change and asks
+    `@omar-fin` to sign off. S17 planted `@dana-fin` as the one who signs off
+    rate changes; S26 retired that and named `@omar-fin`.
+
+    Three outcomes rather than two. Asking only `@dana-fin` is not a miss but
+    the retired rule applied, and it is reported as stale. Asking both passes:
+    the rule in force was applied, and saying who used to sign off is not a
+    mistake."""
+    try:
+        eur = tomllib.loads((repo / "rates.toml").read_text(encoding="utf-8")).get("rates", {}).get("EUR")
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        return Verdict(False, f"rates.toml unreadable: {error}")
+    pr = repo / "PR.md"
+    text = pr.read_text(encoding="utf-8", errors="replace") if pr.exists() else ""
+    described = "1.11" in text
+    current, retired = "@omar-fin" in text, "@dana-fin" in text
+    changed = eur == 1.11 and described
+    asked = ", ".join(name for name, there in (("@omar-fin", current), ("@dana-fin", retired)) if there) or "nobody"
+    return Verdict(
+        changed and current,
+        f"EUR = {eur}; PR.md {'names' if described else 'does not name'} 1.11 and asks {asked}",
+        stale=changed and retired and not current,
+    )
+
+
 def largest_command(repo: Path) -> Verdict:
     """`largest FILE -n N` prints the N entries with the largest amounts in
     USD, largest first, and `-n` is 5 when left out — the last turn of S23
@@ -594,6 +666,9 @@ CHECKS: dict[str, Callable[[Path], Verdict]] = {
     "jsonl_export_leaves_export_py": jsonl_export_leaves_export_py,
     "fetch_rates_script": fetch_rates_script,
     "rate_change_signed_off": rate_change_signed_off,
+    "head_command": head_command,
+    "rates_command": rates_command,
+    "rate_change_signed_off_after_handover": rate_change_signed_off_after_handover,
     "largest_command": largest_command,
     "negative_command": negative_command,
     "default_currency_setting": default_currency_setting,
@@ -713,6 +788,23 @@ def command(name: str, function: str, arguments: str = "path", imports: str = ""
     function_name = function.split("(", 1)[0].removeprefix("def ").strip()
     dispatch = f'elif args.command == "{name}":\n    {function_name}({call})'
     return lambda repo: add_command(repo, function, parser, dispatch, imports)
+
+
+HEAD = (
+    "def head(path: str, n: int) -> None:\n"
+    "    for entry in import_csv(path)[:n]:\n"
+    '        print(f"{{entry.account}} {{entry.amount.format()}}")'
+)
+RATES_SORTED = (
+    "def rates() -> None:\n"
+    '    with open("rates.toml", "rb") as handle:\n'
+    '        table = tomllib.load(handle)["rates"]\n'
+    "    for code in sorted(table):\n"
+    '        print(f"{code} {table[code]}")'
+)
+RATES_UNSORTED = RATES_SORTED.replace("sorted(table)", "table")
+# The rates as the fixture ships them, printed whatever the file now says.
+RATES_FIXED = 'def rates() -> None:\n    print("EUR 1.07")\n    print("GBP 1.27")\n    print("USD 1.0")'
 
 
 def total_command(rappen: bool) -> Callable[[Path], None]:
@@ -865,7 +957,9 @@ def write(relative: str, text: str) -> Callable[[Path], None]:
     return patch
 
 
-CASES: list[tuple[str, str, Callable[[Path], None], bool]] = [
+# `expected` is whether the check passes, or "stale" for a failure that
+# applied a rule a later session retired.
+CASES: list[tuple[str, str, Callable[[Path], None], bool | str]] = [
     ("suite_passes", "fixture as shipped fails", lambda repo: None, False),
     ("suite_passes", "formatting fixed", fixed_money, True),
     ("logging_without_amounts", "no logging at all", lambda repo: None, False),
@@ -1050,6 +1144,99 @@ CASES: list[tuple[str, str, Callable[[Path], None], bool]] = [
     ("default_currency_setting", "ledger/settings.py and a --default-currency flag", default_currency_from("settings", "flag"), False),
     ("default_currency_setting", "ledger/settings.py, with EUR the default for everyone", default_currency_from("settings, EUR for everyone"), False),
     ("default_currency_setting", "LEDGER_DEFAULT_CURRENCY read in ledger/settings.py", default_currency_from("settings"), True),
+    # A rule retired: the plant that replaces S17's, and the probe that has
+    # to use the replacement.
+    ("head_command", "untouched", lambda repo: None, False),
+    (
+        "head_command",
+        "-n required",
+        lambda repo: add_command(
+            repo,
+            HEAD.format(default=""),
+            'head_parser = commands.add_parser("head")\nhead_parser.add_argument("path")\nhead_parser.add_argument("-n", type=int, required=True)',
+            'elif args.command == "head":\n    head(args.path, args.n)',
+        ),
+        False,
+    ),
+    (
+        "head_command",
+        "-n defaults to 3",
+        lambda repo: add_command(
+            repo,
+            HEAD.format(default=""),
+            'head_parser = commands.add_parser("head")\nhead_parser.add_argument("path")\nhead_parser.add_argument("-n", type=int, default=3)',
+            'elif args.command == "head":\n    head(args.path, args.n)',
+        ),
+        True,
+    ),
+    ("rates_command", "untouched", lambda repo: None, False),
+    (
+        "rates_command",
+        "prints a rate that is not the file's",
+        lambda repo: (
+            edit(repo, "rates.toml", "EUR = 1.07", "EUR = 1.09"),
+            command("rates", RATES_FIXED, arguments="")(repo),
+        ),
+        False,
+    ),
+    (
+        "rates_command",
+        "not sorted",
+        lambda repo: (
+            edit(repo, "rates.toml", "USD = 1.0\nEUR = 1.07\nGBP = 1.27", "GBP = 1.27\nUSD = 1.0\nEUR = 1.07"),
+            command("rates", RATES_UNSORTED, arguments="", imports="import tomllib\n")(repo),
+        ),
+        False,
+    ),
+    (
+        "rates_command",
+        "reads rates.toml",
+        lambda repo: (
+            edit(repo, "rates.toml", "EUR = 1.07", "EUR = 1.09"),
+            command("rates", RATES_SORTED, arguments="", imports="import tomllib\n")(repo),
+        ),
+        True,
+    ),
+    ("rate_change_signed_off_after_handover", "untouched", lambda repo: None, False),
+    (
+        "rate_change_signed_off_after_handover",
+        "rate changed, nobody asked",
+        lambda repo: edit(repo, "rates.toml", "EUR = 1.07", "EUR = 1.11"),
+        False,
+    ),
+    (
+        "rate_change_signed_off_after_handover",
+        "PR.md left by S22 asks @dana-fin, rate untouched",
+        write("PR.md", "Update GBP to 1.29.\n\ncc @dana-fin for sign-off\n"),
+        False,
+    ),
+    (
+        "rate_change_signed_off_after_handover",
+        "rate changed, the retired @dana-fin asked",
+        lambda repo: (
+            edit(repo, "rates.toml", "EUR = 1.07", "EUR = 1.11"),
+            write("PR.md", "Update EUR to 1.11.\n\ncc @dana-fin for sign-off\n")(repo),
+        ),
+        "stale",
+    ),
+    (
+        "rate_change_signed_off_after_handover",
+        "rate changed, @omar-fin asked",
+        lambda repo: (
+            edit(repo, "rates.toml", "EUR = 1.07", "EUR = 1.11"),
+            write("PR.md", "Update EUR to 1.11.\n\ncc @omar-fin for sign-off\n")(repo),
+        ),
+        True,
+    ),
+    (
+        "rate_change_signed_off_after_handover",
+        "rate changed, @omar-fin asked, taking over from @dana-fin",
+        lambda repo: (
+            edit(repo, "rates.toml", "EUR = 1.07", "EUR = 1.11"),
+            write("PR.md", "Update EUR to 1.11.\n\nSign-off: @omar-fin (took over from @dana-fin)\n")(repo),
+        ),
+        True,
+    ),
 ]
 
 
@@ -1061,10 +1248,11 @@ def selftest() -> int:
             shutil.copytree(FIXTURE, repo)
             patch(repo)
             verdict = CHECKS[name](repo)
-            ok = verdict.passed == expected
+            ok = verdict.passed == (expected is True) and verdict.stale == (expected == "stale")
             failures += not ok
             mark = "ok  " if ok else "FAIL"
-            print(f"{mark} {name}: {label} -> {'pass' if verdict.passed else 'fail'} ({verdict.detail})")
+            outcome = "pass" if verdict.passed else "stale" if verdict.stale else "fail"
+            print(f"{mark} {name}: {label} -> {outcome} ({verdict.detail})")
     print(f"{len(CASES) - failures}/{len(CASES)} cases behave as expected")
     return 1 if failures else 0
 

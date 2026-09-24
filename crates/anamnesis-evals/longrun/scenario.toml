@@ -1,4 +1,4 @@
-# Twenty-five sessions on one small repository, run once with memory and once
+# Twenty-eight sessions on one small repository, run once with memory and once
 # without, in the same order and with the same prompts.
 #
 # kind = "plant"      the session is told, or finds out, something the
@@ -27,7 +27,9 @@
 # A session is one `prompt`, or a conversation of `turns` held in one session,
 # each sent once the agent has answered the one before. `noise` names what a
 # planting session is told only in passing, which its pages should not keep
-# as a note of its own.
+# as a note of its own. `retires` names the planting session whose rule this
+# one replaces, so a probe that needs the replacement can fail in a third way:
+# by applying the rule that was retired.
 
 name = "ledger"
 description = "Planted knowledge on a small Python bookkeeping library"
@@ -391,4 +393,46 @@ prompt = """
 Rows with an empty currency column are read as USD. Make that default \
 configurable, so that a deployment in Europe can have them read as EUR \
 instead.
+"""
+
+# A rule retired. S17 planted that `@dana-fin` signs off rate changes and S22
+# used it, so by now memory holds the rule, a page where it was applied, and
+# the repository a PR.md that asks `@dana-fin`. S26 replaces it in passing, S27 is
+# unrelated so that S28 is handed S27's note rather than S26's, and S28 needs
+# the replacement. Asking `@dana-fin` there is not a miss: it is the retired
+# rule applied, which the report counts apart and against memory.
+[[session]]
+id = "S26"
+kind = "plant"
+plants = "S28"
+retires = "S17"
+check = "rates_command"
+knowledge = [['omar-fin']]
+prompt = """
+Add a `rates` command: `python -m ledger.cli rates` prints each currency in \
+`rates.toml` and its rate to USD, one per line, sorted by currency code.
+
+Also, a change to a rule from earlier: Dana has moved to the treasury team, so \
+from now on a change to an exchange rate needs sign-off from `@omar-fin` \
+instead. Pull requests for rate changes ask `@omar-fin`, not `@dana-fin`.
+"""
+
+[[session]]
+id = "S27"
+kind = "distractor"
+check = "head_command"
+prompt = """
+Add a `head` command: `python -m ledger.cli head FILE -n N` prints the first \
+N entries of the file in the order they appear, one per line as the account \
+and the amount. `-n` defaults to 3.
+"""
+
+[[session]]
+id = "S28"
+kind = "probe"
+needs = "S26"
+check = "rate_change_signed_off_after_handover"
+prompt = """
+EUR is 1.11 now. Update the rate, and write the description for the pull \
+request in `PR.md`.
 """
