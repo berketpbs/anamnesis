@@ -165,7 +165,9 @@ reason. When only a fallback answers, the pages are that fallback's, and
 Then the agent is asked, in the control arm's setup, whether it has memory of
 its own; a YES stops the run with exit 2. An agent that cannot answer at all —
 out of usage, or the service down — stops it with exit 6, since no session
-would run either. On 2026-09-19 a weekly limit was read as a YES.
+would run either. On 2026-09-19 a weekly limit was read as a YES. A Codex
+turn that lost its connection, reconnected and then completed did answer; on
+the night of 2026-09-25 one was read as silent and the run stopped with exit 6.
 
 That check is one small question, and a model out of quota can still answer
 it. So the run asks the same question of the work: when a **planting**

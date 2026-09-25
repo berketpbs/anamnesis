@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **The long-run eval does not stop because Codex reconnected.** Codex reports
+  a dropped connection it is retrying as an error, and the eval read any error
+  as a session that failed. On the night of 2026-09-25 Codex answered the
+  isolation question NO after four reconnects and a fallback to HTTPS, the
+  answer was read as none, and the run stopped before its first session — the
+  night S28 was first to be measured. A Codex session now failed only when a
+  turn failed or an error came after the last turn that completed, Codex's
+  notice about its own transport is no longer counted as an action, and a run
+  stopped for want of an answer says the error Codex gave.
 - **A renamed project's sessions come back when its index is rebuilt.**
   `rename` moved sessions to the new project in the index and moved their
   transcripts to the new directory, but a transcript's header keeps naming

@@ -452,11 +452,18 @@ def summarize_codex(stream: str) -> dict:
     ask, and on 2026-09-22 it refused every memory call of a whole run —
     "MCP tool call requires approval, but approval policy is never" — while
     the console said "memory calls 1".
+
+    A session failed when a turn failed, or when an error came after the last
+    turn that completed. Codex reports a dropped connection it is retrying as
+    an error too, and a turn that then completes has recovered from it: on the
+    night of 2026-09-25 the isolation question was answered NO after four
+    reconnects and a fallback to HTTPS, read as no answer, and the run stopped
+    before its first session.
     """
     tools: Counter = Counter()
     refused: Counter = Counter()
-    thread = answer = None
-    errors = 0
+    thread = answer = said = None
+    failed = unrecovered = 0
     input_tokens = output_tokens = 0
     for line in stream.splitlines():
         try:
@@ -476,21 +483,30 @@ def summarize_codex(stream: str) -> dict:
                     refused[name] += 1
             if name == "agent_message":
                 answer = item.get("text") or answer
-            elif name != "reasoning":
+            # An error item is Codex's notice about itself, such as falling
+            # back to another transport, not something the session did.
+            elif name not in ("reasoning", "error"):
                 tools[name] += 1
         elif kind == "turn.completed":
             usage = event.get("usage") or {}
             input_tokens += usage.get("input_tokens") or 0
             output_tokens += usage.get("output_tokens") or 0
-        elif kind in ("turn.failed", "error"):
-            errors += 1
+            unrecovered = 0
+        elif kind == "turn.failed":
+            failed += 1
+            said = str((event.get("error") or {}).get("message", "")) or said
+        elif kind == "error":
+            unrecovered += 1
+            said = str(event.get("message", "")) or said
     return {
         "codex_thread": thread,
         "claude_session": None,
         "mcp_servers": {},
         "turns": None,
         "cost_usd": None,
-        "is_error": errors > 0,
+        "is_error": failed > 0 or unrecovered > 0,
+        # The last error Codex reported, recovered from or not.
+        "error": said,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "permission_denials": sum(refused.values()),
@@ -1534,7 +1550,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"  isolation (codex): {results['isolation_codex']['answer']!r}")
             if results["isolation_codex"]["isolated"] is None:
                 print(
-                    f"  Codex did not answer, so no probe would either; stopping. It said: {summary['stderr']!r}",
+                    "  Codex did not answer, so no probe would either; stopping. "
+                    f"It said: {summary['stderr'] or summary['error']!r}",
                     file=sys.stderr,
                 )
                 return 6
@@ -2517,6 +2534,45 @@ while (item := arrived.get()) is not None:
             print(f"FAIL isolation_verdict({stream[:60]!r}): {got!r}, expected {expected!r}")
             return 1
     print("ok   isolation_verdict tells an agent that could not answer from one that answered YES")
+
+    # What Codex wrote for the isolation question on the night of 2026-09-25,
+    # two of its four reconnects kept: it answered NO over HTTPS, and the run
+    # stopped as if it had not answered.
+    reconnect = "stream disconnected before completion: websocket closed by server before response.completed"
+    started = [{"type": "thread.started", "thread_id": "01a0daf0-b720-7122-9ace-aedee685c98e"}, {"type": "turn.started"}]
+    retried = [
+        {"type": "error", "message": f"Reconnecting... 2/5 ({reconnect})"},
+        {"type": "error", "message": f"Reconnecting... 5/5 ({reconnect})"},
+        {
+            "type": "item.completed",
+            "item": {"id": "item_0", "type": "error", "message": f"Falling back from WebSockets to HTTPS transport. {reconnect}"},
+        },
+    ]
+    answered = [
+        {"type": "item.completed", "item": {"id": "item_1", "type": "agent_message", "text": "NO"}},
+        {"type": "turn.completed", "usage": {"input_tokens": 12343, "cached_input_tokens": 9984, "output_tokens": 76}},
+    ]
+    failed = {"type": "turn.failed", "error": {"message": "You've hit your usage limit."}}
+    codex_answers = [
+        (started + retried + answered, True, 0),
+        (started + answered, True, 0),
+        (started + retried, None, 0),
+        (started + [failed], None, 0),
+        (started + [answered[0], failed], None, 0),
+        (started + answered + retried, None, 0),
+    ]
+    for events, expected, actions in codex_answers:
+        summary = summarize_codex("\n".join(json.dumps(event) for event in events))
+        if (got := isolation_verdict(summary)) is not expected or summary["actions"] != actions:
+            print(
+                f"FAIL isolation_verdict of Codex ({[event.get('type') for event in events]}): {got!r} "
+                f"with {summary['actions']} action(s), expected {expected!r} with {actions}"
+            )
+            return 1
+    if summarize_codex("\n".join(json.dumps(event) for event in started + [failed]))["error"] != "You've hit your usage limit.":
+        print("FAIL summarize_codex: a failed turn's reason is what the stopped run says Codex said")
+        return 1
+    print("ok   isolation_verdict of Codex: a turn that completed after reconnecting answered, one that failed did not")
 
     # A recall block as Claude Code recorded it in the run of 2026-09-18, cut
     # to two pages: one a planting session wrote, one an agent wrote over MCP,
