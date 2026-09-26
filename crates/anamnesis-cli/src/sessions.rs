@@ -6,7 +6,7 @@
 //! left when nobody does, and how to remove a session that should never have
 //! been one.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anamnesis_store::{RawSpool, SessionSummary, Store};
 
@@ -265,7 +265,7 @@ pub fn cmd_forget_session(
             println!("     transcript  none on disk");
         }
         for transcript in transcripts {
-            match lines_in(transcript) {
+            match raw.lines_in(transcript) {
                 Some(lines) => {
                     println!("     transcript  {} ({lines} lines)", transcript.display())
                 }
@@ -299,16 +299,35 @@ pub fn cmd_forget_session(
             session.id.to_string(),
             Some(format!("{} observation(s)", session.observation_count)),
         );
-        for transcript in files {
-            match std::fs::remove_file(transcript) {
-                Ok(()) => transcripts += 1,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => anyhow::bail!(
-                    "{} index row(s) were removed, but the transcript at {} could not be: {error}",
-                    rows,
-                    transcript.display()
-                ),
+        // Looked for again once they are gone. A running server compacts a
+        // transcript that has gone quiet into a compressed file beside it,
+        // and one that had read the session just before it was removed can
+        // write that file in the instant after; the compaction checks for
+        // exactly this, and this is the second lock on the same door.
+        let mut remaining = files.clone();
+        for _ in 0..3 {
+            if remaining.is_empty() {
+                break;
             }
+            for transcript in &remaining {
+                match std::fs::remove_file(transcript) {
+                    Ok(()) => transcripts += 1,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => anyhow::bail!(
+                        "{} index row(s) were removed, but the transcript at {} could not be: {error}",
+                        rows,
+                        transcript.display()
+                    ),
+                }
+            }
+            remaining = raw.locate_all(&scope.scope, session.id);
+        }
+        if !remaining.is_empty() {
+            anyhow::bail!(
+                "{} index row(s) were removed, but a transcript kept coming back at {}; stop the server and run this again",
+                rows,
+                remaining[0].display()
+            );
         }
     }
 
@@ -326,12 +345,6 @@ pub fn cmd_forget_session(
 /// Counted rather than sized because the unit a person can check against is
 /// the one `sessions` already prints: a session header and one line per
 /// observation.
-fn lines_in(path: &Path) -> Option<usize> {
-    std::fs::read_to_string(path)
-        .ok()
-        .map(|text| text.lines().count())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

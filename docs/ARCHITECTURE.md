@@ -303,6 +303,16 @@ the durable copy is bad, losing the event because a disk filled up is worse.
 The spool refuses an observation that has not been redacted, since it is the
 longest-lived copy in the system.
 
+It is also the one part of memory that only grows, so the server compacts it.
+A transcript nothing has been added to for a week is folded into
+`<id>.jsonl.gz` beside it — every line kept byte for byte, only the container
+changes, and `zcat` still reads it. A month of heavy use here was 25 MB of
+JSON and 4.5 MB compressed. A session resumed after that starts a plain
+`<id>.jsonl` again, header first, and every reader (`reindex`, `--check`,
+`redact`, `forget-session`) reads the two as one transcript. The compaction
+stages its file and puts it in place only if neither file changed while it
+worked, so a `redact` or a `forget-session` run beside it is not undone.
+
 ### Event vocabulary
 
 Five harnesses name the same moments differently, and every one of those names

@@ -164,7 +164,8 @@ anamnesis init
 This creates:
 - `<data_dir>/wiki/<workspace>/<project>/` - Wiki pages, in their own git repository
 - `<data_dir>/db/anamnesis.db` - SQLite index, rebuildable from the wiki
-- `<data_dir>/raw/` - Append-only transcripts the index can be rebuilt from
+- `<data_dir>/raw/` - Append-only transcripts the index can be rebuilt from; one
+  a week quiet is compressed to `.jsonl.gz` beside it, every line kept
 
 Identity comes from the git remote, so two clones of the same repository share
 one memory. To pin it explicitly instead, write a `.anamnesis.toml` in the

@@ -53,7 +53,7 @@ pub use purge::Purged;
 // public and returns one: without this a caller outside the crate can call the
 // method and has no way to name what it hands back.
 pub use query::{PageHit, StreamBreakdown};
-pub use raw::{RawError, RawRecord, RawSpool};
+pub use raw::{COMPACT_AFTER, Compaction, RawError, RawRecord, RawSpool};
 pub use redact::Redaction;
 pub use rename::{RenameError, Renamed};
 pub use sweep::SweepRow;

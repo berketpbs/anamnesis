@@ -21,6 +21,7 @@ jiff.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 parking_lot.workspace = true
+flate2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
