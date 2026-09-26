@@ -986,17 +986,51 @@ impl Store {
         .map_err(Into::into)
     }
 
-    /// Record a handoff, expiring any that was still waiting.
+    /// Record a handoff, expiring any that was still waiting — unless the slot
+    /// already holds an account of newer work.
     ///
     /// Expiring first is what upholds the single-pending invariant the schema
     /// enforces: a newer summary always replaces an unread older one, because
     /// handing a session two "where you left off" notes is worse than handing
     /// it the wrong one.
+    ///
+    /// *Newer* is about the work, not the writing. A note is written when its
+    /// session ends, and a session can end long after it last did anything:
+    /// on 2026-09-26 a Codex terminal left open overnight was closed by the
+    /// reaper eighteen hours after its last answer, and its note expired the
+    /// one a Claude session had left an hour after that answer — the note
+    /// that said a release had since been merged and installed. The next agent
+    /// would have been told the commit before it, and that nothing was to be
+    /// changed. So a note is not offered when a note already in the slot —
+    /// waiting, or handed out and still the latest account of it — describes
+    /// work that came after this one's. Its session's page is written all the
+    /// same; only the note, which would put older work in front of newer, is
+    /// not.
     pub fn record_handoff(&self, handoff: &Handoff) -> Result<()> {
         let workstream = handoff.workstream_id.map(|id| id.to_string());
         let operator = handoff.operator.as_ref().map(ToString::to_string);
         let mut conn = self.connection();
         let transaction = conn.transaction()?;
+
+        let covers = worked_until(&transaction, handoff.from_session, handoff.created_at)?
+            .unwrap_or(handoff.created_at);
+        if let Some(newer) = newer_account(
+            &transaction,
+            handoff.project_id,
+            workstream.as_deref(),
+            operator.as_deref(),
+            covers,
+        )? {
+            transaction.rollback()?;
+            tracing::info!(
+                session = %handoff.from_session,
+                %covers,
+                newer = %newer,
+                "left a note unoffered: the slot already describes newer work"
+            );
+            return Ok(());
+        }
+
         // Only a pending handoff in the *same* slot is superseded — a
         // workstream's handoff must not expire another workstream's, the
         // project-wide one, or one belonging to a different operator.
@@ -1040,6 +1074,12 @@ impl Store {
     /// not written at all and `false` comes back. Both statements share one
     /// transaction, because the whole point is that a claim arriving between
     /// them must not be overwritten.
+    ///
+    /// And only a note *this session* left is replaced. The model's prose
+    /// improves on its own session's counted note; a note waiting from any
+    /// other session was recorded after that one, which makes it the newer
+    /// account, and the model answering late — a retry hours after an outage
+    /// — is no reason to put this session back in front of it.
     pub fn supersede_pending_handoff(&self, handoff: &Handoff) -> Result<bool> {
         let workstream = handoff.workstream_id.map(|id| id.to_string());
         let operator = handoff.operator.as_ref().map(ToString::to_string);
@@ -1049,11 +1089,13 @@ impl Store {
             "UPDATE handoffs SET state = 'expired'
              WHERE project_id = ?1 AND state = 'pending'
                AND COALESCE(workstream_id, '') = COALESCE(?2, '')
-               AND COALESCE(operator, '') = COALESCE(?3, '')",
+               AND COALESCE(operator, '') = COALESCE(?3, '')
+               AND from_session = ?4",
             params![
                 handoff.project_id.to_string(),
                 workstream.clone(),
-                operator.clone()
+                operator.clone(),
+                handoff.from_session.to_string(),
             ],
         )?;
         if expired == 0 {
@@ -1237,24 +1279,13 @@ impl Store {
         }
         drop(statement);
 
-        // What the note covers ends at its session's last event before it was
+        // What the note covers ends at its session's last work before it was
         // written, not at the writing: a still-open session written up long
         // after it went quiet is news only as of when it went quiet.
-        if let Some(note) = latest.as_mut() {
-            let mut events = conn.prepare("SELECT at FROM observations WHERE session_id = ?1")?;
-            let times = events.query_map(params![note.from_session.to_string()], |row| {
-                row.get::<_, String>(0)
-            })?;
-            let mut covered: Option<Timestamp> = None;
-            for raw in times {
-                let at = parse_time(&raw?);
-                if at <= note.written {
-                    covered = Some(covered.map_or(at, |seen| seen.max(at)));
-                }
-            }
-            if let Some(at) = covered {
-                note.as_of = at;
-            }
+        if let Some(note) = latest.as_mut()
+            && let Some(at) = worked_until(&conn, note.from_session, note.written)?
+        {
+            note.as_of = at;
         }
         Ok(latest)
     }
@@ -1885,6 +1916,80 @@ fn read_observation(row: &Row<'_>) -> rusqlite::Result<Observation> {
         body: BoundedBody::from_stored(row.get::<_, String>(6)?, row.get(7)?),
         sanitized: row.get(8)?,
     })
+}
+
+/// When the work a session had done by `until` ends: its newest event at or
+/// before then, not counting its start or its end.
+///
+/// A start or an end says when a terminal was opened or closed, not that
+/// anything was done in it — and a terminal can be closed a day after its last
+/// answer. Counting the end would make that day-old note look as fresh as the
+/// moment it was closed. `None` for a session that never did anything.
+///
+/// Compared in Rust for the reason [`Store::open_sessions`] gives.
+fn worked_until(
+    conn: &rusqlite::Connection,
+    session: SessionId,
+    until: Timestamp,
+) -> Result<Option<Timestamp>> {
+    let mut events = conn.prepare_cached(
+        "SELECT at FROM observations
+         WHERE session_id = ?1 AND kind NOT IN ('session-start', 'session-end')",
+    )?;
+    let times = events.query_map(params![session.to_string()], |row| row.get::<_, String>(0))?;
+    let mut worked: Option<Timestamp> = None;
+    for raw in times {
+        let at = parse_time(&raw?);
+        if at <= until {
+            worked = Some(worked.map_or(at, |seen| seen.max(at)));
+        }
+    }
+    Ok(worked)
+}
+
+/// When the newest work described by a note in the slot ends, if any note
+/// there — waiting, or handed out — describes work after `covers`.
+///
+/// Expired notes are left out: they were superseded by a newer note, which is
+/// here to be compared in their place, or dropped on purpose. A note can only
+/// describe work up to when it was written, so notes written before `covers`
+/// are passed over without reading their sessions.
+fn newer_account(
+    conn: &rusqlite::Connection,
+    project_id: ProjectId,
+    workstream: Option<&str>,
+    operator: Option<&str>,
+    covers: Timestamp,
+) -> Result<Option<Timestamp>> {
+    let mut statement = conn.prepare_cached(
+        "SELECT from_session, created_at FROM handoffs
+         WHERE project_id = ?1 AND state <> 'expired'
+           AND COALESCE(workstream_id, '') = COALESCE(?2, '')
+           AND COALESCE(operator, '') = COALESCE(?3, '')",
+    )?;
+    let notes = statement
+        .query_map(
+            params![project_id.to_string(), workstream, operator],
+            |row| {
+                Ok((
+                    parse_id::<SessionId>(row.get::<_, String>(0)?),
+                    parse_time(&row.get::<_, String>(1)?),
+                ))
+            },
+        )?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    let mut newest: Option<Timestamp> = None;
+    for (session, written) in notes {
+        if written <= covers {
+            continue;
+        }
+        let as_of = worked_until(conn, session, written)?.unwrap_or(written);
+        if as_of > covers {
+            newest = Some(newest.map_or(as_of, |seen| seen.max(as_of)));
+        }
+    }
+    Ok(newest)
 }
 
 /// Build a handoff ready to be recorded.
@@ -2598,6 +2703,293 @@ mod tests {
 
         store.close_session(claimant, now()).expect("close");
         assert_eq!(store.open_taker_of(session.id).expect("taker"), None);
+    }
+
+    /// `hours` after the fixture's clock.
+    fn after(hours: i64) -> Timestamp {
+        now()
+            .checked_add(jiff::SignedDuration::from_hours(hours))
+            .expect("time")
+    }
+
+    /// A session named `name` that answered at each of `answered`, and whose
+    /// terminal was closed at `closed` if it was.
+    fn worked(
+        store: &Store,
+        project: ProjectId,
+        workspace: WorkspaceId,
+        name: &str,
+        answered: &[Timestamp],
+        closed: Option<Timestamp>,
+    ) -> SessionId {
+        let mut session = session_for(project, workspace);
+        session.id = SessionId::derive(project, name);
+        store.ensure_session(&session).expect("session");
+        let mut events: Vec<(EventKind, Timestamp)> = answered
+            .iter()
+            .map(|at| (EventKind::AssistantMessage, *at))
+            .collect();
+        events.extend(closed.map(|at| (EventKind::SessionEnd, at)));
+        for (kind, at) in events {
+            store
+                .insert_observation(&new_observation(
+                    session.id,
+                    kind,
+                    None,
+                    BoundedBody::truncating(format!("{name} {kind:?}"), 1024),
+                    at,
+                ))
+                .expect("observation");
+        }
+        session.id
+    }
+
+    /// What happened on 2026-09-26. A Codex terminal answered once and was
+    /// left open; a Claude session did an hour's more work, ended, and left
+    /// its note; eighteen hours after its answer the Codex terminal was
+    /// closed. Its note describes the older work, and must not take the place
+    /// of the one waiting.
+    #[test]
+    fn a_note_about_older_work_does_not_replace_a_newer_one_waiting() {
+        let (_dir, store, project, workspace) = fixture();
+        let codex = worked(
+            &store,
+            project,
+            workspace,
+            "codex",
+            &[after(0)],
+            Some(after(18)),
+        );
+        let claude = worked(
+            &store,
+            project,
+            workspace,
+            "claude",
+            &[after(1)],
+            Some(after(2)),
+        );
+        store
+            .record_handoff(&new_handoff(
+                project,
+                claude,
+                Slot::shared(),
+                "merged and installed",
+                after(2),
+            ))
+            .expect("claude's note");
+
+        store
+            .record_handoff(&new_handoff(
+                project,
+                codex,
+                Slot::shared(),
+                "the commit before, and change nothing",
+                after(18),
+            ))
+            .expect("codex's note");
+
+        assert_eq!(
+            store
+                .peek_handoff(project, &Slot::shared())
+                .expect("peek")
+                .as_deref(),
+            Some("merged and installed")
+        );
+    }
+
+    /// Taken is not superseded: the note a session was handed is still the
+    /// latest account of the slot, and an older one written after it is not
+    /// what the next session should be told.
+    #[test]
+    fn a_note_older_than_one_already_handed_out_is_not_offered() {
+        let (_dir, store, project, workspace) = fixture();
+        let codex = worked(&store, project, workspace, "codex", &[after(0)], None);
+        let claude = worked(
+            &store,
+            project,
+            workspace,
+            "claude",
+            &[after(1)],
+            Some(after(2)),
+        );
+        store
+            .record_handoff(&new_handoff(
+                project,
+                claude,
+                Slot::shared(),
+                "merged and installed",
+                after(2),
+            ))
+            .expect("claude's note");
+        let next = next_session(&store, project, workspace);
+        store
+            .claim_handoff(project, next, &Slot::shared(), after(3))
+            .expect("claim")
+            .expect("claude's note was waiting");
+
+        store
+            .record_handoff(&new_handoff(
+                project,
+                codex,
+                Slot::shared(),
+                "the commit before",
+                after(18),
+            ))
+            .expect("codex's note");
+
+        assert_eq!(
+            store.peek_handoff(project, &Slot::shared()).expect("peek"),
+            None
+        );
+        assert_eq!(
+            store
+                .latest_handoff(project, &Slot::shared())
+                .expect("latest")
+                .expect("a note")
+                .body,
+            "merged and installed"
+        );
+    }
+
+    /// The ordinary case is untouched: a note about newer work replaces one
+    /// about older work nobody has read — even when the older one was written
+    /// later, because its terminal was closed late.
+    #[test]
+    fn a_note_about_newer_work_still_replaces_an_older_one() {
+        let (_dir, store, project, workspace) = fixture();
+        let codex = worked(
+            &store,
+            project,
+            workspace,
+            "codex",
+            &[after(0)],
+            Some(after(18)),
+        );
+        let claude = worked(
+            &store,
+            project,
+            workspace,
+            "claude",
+            &[after(2)],
+            Some(after(19)),
+        );
+        store
+            .record_handoff(&new_handoff(
+                project,
+                codex,
+                Slot::shared(),
+                "older",
+                after(18),
+            ))
+            .expect("codex's note");
+        store
+            .record_handoff(&new_handoff(
+                project,
+                claude,
+                Slot::shared(),
+                "newer",
+                after(19),
+            ))
+            .expect("claude's note");
+
+        assert_eq!(
+            store
+                .peek_handoff(project, &Slot::shared())
+                .expect("peek")
+                .as_deref(),
+            Some("newer")
+        );
+    }
+
+    /// Closing a terminal is not work. A note written when a session closed a
+    /// day after its last answer is news as of that answer.
+    #[test]
+    fn a_session_closing_is_not_work_it_did() {
+        let (_dir, store, project, workspace) = fixture();
+        let codex = worked(
+            &store,
+            project,
+            workspace,
+            "codex",
+            &[after(0)],
+            Some(after(18)),
+        );
+        store
+            .record_handoff(&new_handoff(
+                project,
+                codex,
+                Slot::shared(),
+                "answered",
+                after(18),
+            ))
+            .expect("note");
+
+        let latest = store
+            .latest_handoff(project, &Slot::shared())
+            .expect("latest")
+            .expect("a note");
+        assert_eq!(latest.written, after(18));
+        assert_eq!(latest.as_of, after(0));
+    }
+
+    /// The model's prose replaces the counted note its own session left, and
+    /// never a newer session's note that is waiting in its place.
+    #[test]
+    fn the_model_s_note_replaces_only_its_own_session_s() {
+        let (_dir, store, project, workspace) = fixture();
+        let codex = worked(
+            &store,
+            project,
+            workspace,
+            "codex",
+            &[after(0)],
+            Some(after(1)),
+        );
+        let claude = worked(
+            &store,
+            project,
+            workspace,
+            "claude",
+            &[after(2)],
+            Some(after(3)),
+        );
+        store
+            .record_handoff(&new_handoff(
+                project,
+                codex,
+                Slot::shared(),
+                "counted",
+                after(1),
+            ))
+            .expect("codex's counted note");
+        store
+            .record_handoff(&new_handoff(
+                project,
+                claude,
+                Slot::shared(),
+                "newer",
+                after(3),
+            ))
+            .expect("claude's note");
+
+        let replaced = store
+            .supersede_pending_handoff(&new_handoff(
+                project,
+                codex,
+                Slot::shared(),
+                "the model's, hours late",
+                after(1),
+            ))
+            .expect("supersede");
+
+        assert!(!replaced);
+        assert_eq!(
+            store
+                .peek_handoff(project, &Slot::shared())
+                .expect("peek")
+                .as_deref(),
+            Some("newer")
+        );
     }
 
     /// A session that took an older note did not take over from where the
