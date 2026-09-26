@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **A resumed session is not handed a note about work older than its own.**
+  A session that starts again has its whole conversation back, and a note
+  about work it had already moved past tells it less than it knows, with the
+  authority of a handover. On 2026-09-26 a resumed Claude session, an hour of
+  work past a Codex terminal's last answer, was handed that terminal's note:
+  the commit before the one it had released, and the Codex session's
+  instruction to change nothing. It arrived by the second route there is:
+  `claude --resume` first starts a session that lives for ten seconds, which
+  took the note, and the resumed session was then handed the slot's newest
+  note again. A starting session is now handed a note — waiting or handed
+  on — only when it describes work after the session's own last step. Its
+  starts and its end don't count as steps. A fresh session has no steps and
+  is handed what it always was. The same rule keeps a resumed session from
+  claiming the note it left itself, which the next session to start is owed.
 - **A note about older work no longer takes the place of a newer one.** A
   note is written when its session ends, and a session can end long after
   it last did anything. On 2026-09-26 a Codex terminal left open overnight

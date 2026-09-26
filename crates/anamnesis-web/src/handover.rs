@@ -227,14 +227,16 @@ pub(crate) fn hand_over_peers(
 /// nobody has done anything after it. So it is handed on.
 ///
 /// Not when the sweep was unsettled (something newer may exist), not when the
-/// newest note was dropped on purpose, and not to the session that wrote it or
-/// already took it.
+/// newest note was dropped on purpose, not to the session that wrote it or
+/// already took it, and not when it describes nothing after `known` — the
+/// claimant's own last work, see [`handed`].
 pub(crate) fn hand_on(
     store: &Store,
     scope: &ResolvedScope,
     claimant: SessionId,
     slot: &Slot,
     swept: Swept,
+    known: Option<Timestamp>,
 ) -> Result<Option<String>, WebError> {
     if swept.unsettled || scope.sessions.handover_after_seconds == 0 {
         return Ok(None);
@@ -242,10 +244,59 @@ pub(crate) fn hand_on(
     let Some(note) = store.latest_handoff(scope.project_id, slot)? else {
         return Ok(None);
     };
-    if note.dropped || note.from_session == claimant || note.taken_by == Some(claimant) {
+    if note.dropped
+        || note.from_session == claimant
+        || note.taken_by == Some(claimant)
+        || old_news(note.as_of, known)
+    {
         return Ok(None);
     }
     Ok(Some(note.body))
+}
+
+/// What a starting session is handed: the note waiting in its slot, or else
+/// the slot's newest note again ([`hand_on`]) — and neither when it describes
+/// no work after the session's own.
+///
+/// A session that starts for the first time has done nothing, and anything is
+/// news to it. A session that is *resumed* has its whole conversation back,
+/// and a note about work older than its own last step tells it less than it
+/// already knows, with the authority of a handover: on 2026-09-26 a resumed
+/// Claude session, an hour of work past a Codex terminal's last answer, was
+/// handed that terminal's note — the commit before the one it had released,
+/// and the Codex session's instruction to change nothing. So the claimant's
+/// last work before this start is what a note has to be newer than. That
+/// also keeps a resumed session from claiming the note it left itself when
+/// it ended, which would take it from whoever starts next.
+///
+/// A note that is waiting and old news is left waiting: it may be news to
+/// the next session that starts fresh.
+pub(crate) fn handed(
+    store: &Store,
+    scope: &ResolvedScope,
+    claimant: SessionId,
+    slot: &Slot,
+    swept: Swept,
+    now: Timestamp,
+) -> Result<Option<String>, WebError> {
+    let known = store.last_work(claimant, now)?;
+    let waiting_is_old_news = store
+        .latest_handoff(scope.project_id, slot)?
+        .is_some_and(|note| {
+            note.taken_by.is_none() && !note.dropped && old_news(note.as_of, known)
+        });
+    if !waiting_is_old_news
+        && let Some(note) = store.claim_handoff(scope.project_id, claimant, slot, now)?
+    {
+        return Ok(Some(note));
+    }
+    hand_on(store, scope, claimant, slot, swept, known)
+}
+
+/// Whether a note describing work up to `as_of` tells a session that already
+/// knows its own work up to `known` nothing new.
+fn old_news(as_of: Timestamp, known: Option<Timestamp>) -> bool {
+    known.is_some_and(|known| as_of <= known)
 }
 
 #[cfg(test)]
@@ -686,17 +737,191 @@ mod tests {
             &slot(),
             now(),
         );
-        match claimed(harness, claimant) {
-            Some(note) => Some(note),
-            None => hand_on(
-                &harness.state.store,
-                &harness.scope,
-                claimant,
-                &slot(),
-                swept,
-            )
-            .expect("hand on"),
-        }
+        handed(
+            &harness.state.store,
+            &harness.scope,
+            claimant,
+            &slot(),
+            swept,
+            now(),
+        )
+        .expect("handed")
+    }
+
+    /// The claimant has done something `seconds` ago, as a resumed session has.
+    fn did_something(harness: &Harness, id: SessionId, seconds: i64) {
+        harness
+            .state
+            .store
+            .insert_observation(&new_observation(
+                id,
+                EventKind::AssistantMessage,
+                None,
+                BoundedBody::truncating("released and installed", 1024),
+                seconds_ago(seconds),
+            ))
+            .expect("observation");
+    }
+
+    /// What happened on 2026-09-26, with the release's own note out of the
+    /// way: a Codex terminal answered and was left open, the Claude session
+    /// that took over from it did an hour's more work, and the Codex terminal
+    /// ended long after. Resumed, the Claude session is not handed the Codex
+    /// note: it knows more than it says.
+    #[test]
+    fn a_resumed_session_is_not_handed_a_note_older_than_its_own_work() {
+        let harness = harness();
+        let codex = answered_session(
+            &harness,
+            "codex-left-open",
+            7_300,
+            7_200,
+            "e684e95 is the last commit",
+        );
+        let claude = starting_as(&harness, "claude-that-released");
+        did_something(&harness, claude, 3_600);
+        harness
+            .state
+            .store
+            .record_handoff(&anamnesis_store::new_handoff(
+                harness.scope.project_id,
+                codex,
+                slot(),
+                "the note codex-left-open left: change nothing",
+                seconds_ago(60),
+            ))
+            .expect("codex's note");
+
+        assert_eq!(arrives(&harness, claude), None);
+        assert!(
+            harness
+                .state
+                .store
+                .peek_handoff(harness.scope.project_id, &slot())
+                .expect("peek")
+                .is_some(),
+            "left waiting for a session to which it is news"
+        );
+    }
+
+    /// The same, the way `claude --resume` does it: a session that lives for
+    /// ten seconds starts first and takes the note, and the resumed one is
+    /// asked second, which is when a note is handed on.
+    #[test]
+    fn a_resumed_session_is_not_handed_on_a_note_older_than_its_own_work() {
+        let harness = harness();
+        let codex = answered_session(
+            &harness,
+            "codex-left-open",
+            7_300,
+            7_200,
+            "e684e95 is the last commit",
+        );
+        let claude = starting_as(&harness, "claude-that-released");
+        did_something(&harness, claude, 3_600);
+        harness
+            .state
+            .store
+            .close_session(claude, seconds_ago(3_000))
+            .expect("ended");
+        harness
+            .state
+            .store
+            .record_handoff(&anamnesis_store::new_handoff(
+                harness.scope.project_id,
+                codex,
+                slot(),
+                "the note codex-left-open left: change nothing",
+                seconds_ago(60),
+            ))
+            .expect("codex's note");
+        let fleeting = starting_as(&harness, "claude-resume-starts-this-first");
+        assert!(
+            arrives(&harness, fleeting).is_some(),
+            "news to a new session"
+        );
+
+        assert_eq!(arrives(&harness, claude), None);
+    }
+
+    /// Resumed after somebody else worked, a session is handed what they did.
+    #[test]
+    fn a_resumed_session_is_handed_what_happened_while_it_was_away() {
+        let harness = harness();
+        let claude = starting_as(&harness, "claude-that-went-away");
+        did_something(&harness, claude, 7_200);
+        harness
+            .state
+            .store
+            .close_session(claude, seconds_ago(7_000))
+            .expect("ended");
+        let codex = answered_session(
+            &harness,
+            "codex-worked-since",
+            3_700,
+            3_600,
+            "the exporter passes",
+        );
+        harness
+            .state
+            .store
+            .record_handoff(&anamnesis_store::new_handoff(
+                harness.scope.project_id,
+                codex,
+                slot(),
+                "the note codex-worked-since left",
+                seconds_ago(60),
+            ))
+            .expect("codex's note");
+        let fleeting = starting_as(&harness, "claude-resume-starts-this-first");
+        assert!(arrives(&harness, fleeting).is_some());
+
+        // Resuming is recorded before the handoff is asked for, and it is not
+        // work: counted as such, every note would be older than it.
+        harness
+            .state
+            .store
+            .insert_observation(&new_observation(
+                claude,
+                EventKind::SessionStart,
+                None,
+                BoundedBody::truncating("resume", 1024),
+                seconds_ago(1),
+            ))
+            .expect("resumed");
+
+        let told = arrives(&harness, claude).expect("the resumed session is told");
+        assert!(told.contains("codex-worked-since"), "{told}");
+    }
+
+    /// A session that ended and is resumed does not claim its own note, which
+    /// the next session to start is owed.
+    #[test]
+    fn a_resumed_session_does_not_take_its_own_note() {
+        let harness = harness();
+        let claude = starting_as(&harness, "claude-that-ended");
+        did_something(&harness, claude, 600);
+        harness
+            .state
+            .store
+            .close_session(claude, seconds_ago(500))
+            .expect("ended");
+        harness
+            .state
+            .store
+            .record_handoff(&anamnesis_store::new_handoff(
+                harness.scope.project_id,
+                claude,
+                slot(),
+                "the note claude-that-ended left",
+                seconds_ago(300),
+            ))
+            .expect("its own note");
+
+        assert_eq!(arrives(&harness, claude), None);
+        let next = starting_as(&harness, "codex-next");
+        let told = arrives(&harness, next).expect("the next session is told");
+        assert!(told.contains("claude-that-ended"), "{told}");
     }
 
     /// The sequence that failed live on 2026-09-23, step by step. A Codex
@@ -877,9 +1102,16 @@ mod tests {
         assert!(swept.unsettled);
         assert!(claimed(&harness, claude).is_none());
         assert!(
-            hand_on(&harness.state.store, &harness.scope, claude, &slot(), swept)
-                .expect("hand on")
-                .is_none()
+            hand_on(
+                &harness.state.store,
+                &harness.scope,
+                claude,
+                &slot(),
+                swept,
+                None
+            )
+            .expect("hand on")
+            .is_none()
         );
     }
 
