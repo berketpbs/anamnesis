@@ -121,6 +121,10 @@ const SOURCES: &[(&str, &str)] = &[
         "V19__page_origin",
         include_str!("../migrations/V19__page_origin.sql"),
     ),
+    (
+        "V20__handoff_followups",
+        include_str!("../migrations/V20__handoff_followups.sql"),
+    ),
 ];
 
 /// The name refinery gives its own bookkeeping table.

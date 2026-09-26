@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Switching agents straight away no longer costs the new one the fuller
+  note.** A session's note is handed over when the next session starts, and
+  the model's note for a session that has just ended arrives a median of 22
+  seconds after it (90% within 46). An agent opened in that time was handed
+  the counted note — the last request and the last answer, each cut at 400
+  characters — and the model's note that followed was dropped, along with any
+  mention of the decisions written with it: they were in no handoff, and not
+  yet in the wiki when that session's start listed the project's decisions.
+  The same happened to a terminal closed without an end, whose decisions are
+  written two minutes into its silence, after the next agent has started.
+  What arrives within ten minutes of such a takeover — the model's note, the
+  decisions, or both — is now kept for the session that took over, and only
+  for it, and handed over once with its next prompt, framed as an update to
+  the note it started with. It does not go through recall's gates, so a
+  one-word prompt receives it too. It is still not handed to anybody who
+  starts later. Schema V20 adds the table it is kept in. Harnesses with no
+  prompt channel (Cursor, OpenCode) do not receive it.
 - **The long-run eval does not stop because Codex reconnected.** Codex reports
   a dropped connection it is retrying as an error, and the eval read any error
   as a session that failed. On the night of 2026-09-25 Codex answered the
