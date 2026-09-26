@@ -1516,12 +1516,40 @@ impl Store {
     ///
     /// Returns whether a row was actually removed.
     pub fn delete_session(&self, session_id: SessionId) -> Result<bool> {
-        let conn = self.connection();
-        let removed = conn.execute(
+        let removed = self.scrubbed(
             "DELETE FROM sessions WHERE id = ?1",
-            params![session_id.to_string()],
+            &session_id.to_string(),
+            false,
         )?;
         Ok(removed > 0)
+    }
+
+    /// Run one statement that removes rows somebody asked to have removed,
+    /// with the space it frees zeroed rather than left as it was.
+    ///
+    /// SQLite leaves a deleted row's bytes where they were, in the page it
+    /// freed, until something happens to overwrite them. Measured on
+    /// 2026-09-27: after `forget-session --apply` no query could find the
+    /// session's prompts, and `anamnesis.db-wal` still held them. Zeroing
+    /// covers the database file; the log is emptied by [`Store::checkpoint`],
+    /// which the commands that forget call afterwards, as `redact` does.
+    ///
+    /// `pages` says whether pages go too. Their words are also in the
+    /// full-text index, which records a deletion as a marker and keeps the
+    /// words until its segments are merged; merging them here is what takes
+    /// the words out.
+    pub(crate) fn scrubbed(&self, sql: &str, id: &str, pages: bool) -> Result<usize> {
+        let conn = self.connection();
+        conn.pragma_update(None, "secure_delete", true)?;
+        let removed = (|| -> rusqlite::Result<usize> {
+            let removed = conn.execute(sql, params![id])?;
+            if pages && removed > 0 {
+                conn.execute("INSERT INTO pages_fts (pages_fts) VALUES ('optimize')", [])?;
+            }
+            Ok(removed)
+        })();
+        conn.pragma_update(None, "secure_delete", false)?;
+        Ok(removed?)
     }
 
     /// How many sessions a project has recorded.
@@ -3042,6 +3070,135 @@ mod tests {
             .expect("the second note");
 
         assert_eq!(store.open_taker_of(session.id).expect("taker"), None);
+    }
+
+    /// A store on disk, so what a deletion leaves in its files can be read.
+    fn on_disk() -> (tempfile::TempDir, Store, ProjectId, WorkspaceId, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(".anamnesis.toml"),
+            "[scope]\nworkspace = \"default\"\nproject = \"widget\"\n",
+        )
+        .expect("marker");
+        let scope = anamnesis_core::scope::resolve_scope(dir.path()).expect("scope");
+        let path = dir.path().join("index.db");
+        let store = Store::open(&path).expect("open");
+        store.migrate().expect("migrate");
+        store.upsert_project(&scope, now()).expect("project");
+        (dir, store, scope.project_id, scope.workspace_id, path)
+    }
+
+    /// How many copies of `needle` the database file and its log hold, read
+    /// as bytes: what somebody with the disk could find.
+    fn copies_on_disk(path: &std::path::Path, needle: &str) -> usize {
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        [path.to_path_buf(), wal]
+            .iter()
+            .map(|file| {
+                std::fs::read(file)
+                    .unwrap_or_default()
+                    .windows(needle.len())
+                    .filter(|window| *window == needle.as_bytes())
+                    .count()
+            })
+            .sum()
+    }
+
+    /// A session with one long prompt, checkpointed so it is in the file.
+    fn said_on_disk(
+        store: &Store,
+        project: ProjectId,
+        workspace: WorkspaceId,
+        said: &str,
+    ) -> SessionId {
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+        // Long enough to spill onto overflow pages, which a delete frees
+        // rather than rewrites.
+        let body = format!("{} {said} {}", "a".repeat(6000), "b".repeat(6000));
+        store
+            .insert_observation(&new_observation(
+                session.id,
+                EventKind::UserPrompt,
+                None,
+                BoundedBody::truncating(body, 20_000),
+                now(),
+            ))
+            .expect("observation");
+        session.id
+    }
+
+    /// Measured on 2026-09-27: after `forget-session --apply` no query found
+    /// the session's prompts, and `anamnesis.db-wal` still held them.
+    /// Forgotten means gone from the disk, not only from the rows.
+    #[test]
+    fn a_forgotten_session_leaves_no_copy_of_what_it_said_on_disk() {
+        let (_dir, store, project, workspace, path) = on_disk();
+        let session = said_on_disk(&store, project, workspace, "ZEBRA-FORGET-4417");
+        assert!(store.checkpoint().expect("checkpoint"));
+        assert!(
+            copies_on_disk(&path, "ZEBRA-FORGET-4417") > 0,
+            "on disk to begin with"
+        );
+
+        assert!(store.delete_session(session).expect("delete"));
+        assert!(
+            store.checkpoint().expect("checkpoint"),
+            "nothing else reads"
+        );
+
+        assert_eq!(copies_on_disk(&path, "ZEBRA-FORGET-4417"), 0);
+    }
+
+    /// A page's words are in the full-text index as well as its row, and the
+    /// index keeps them after a delete until its segments are merged.
+    #[test]
+    fn a_forgotten_page_leaves_no_copy_of_its_words_on_disk() {
+        let (_dir, store, project, _workspace, path) = on_disk();
+        let page = Page::new(
+            project,
+            PagePath::parse("decisions/staging.md").expect("path"),
+            anamnesis_core::page::Frontmatter::new("Staging access", Vec::new())
+                .expect("frontmatter"),
+            "The staging password is zebraforgetfourfourseventeen.",
+        );
+        store
+            .index_page(project, &page, &[], None, now())
+            .expect("index");
+        assert!(store.checkpoint().expect("checkpoint"));
+        assert!(copies_on_disk(&path, "zebraforgetfourfourseventeen") > 0);
+
+        assert!(
+            store
+                .delete_page(PageId::derive(project, &page.path))
+                .expect("delete")
+        );
+        assert!(store.checkpoint().expect("checkpoint"));
+
+        assert_eq!(copies_on_disk(&path, "zebraforgetfourfourseventeen"), 0);
+    }
+
+    /// `purge` removes a project's every row; none of it stays on disk.
+    #[test]
+    fn a_purged_project_leaves_no_copy_on_disk() {
+        let (_dir, store, project, workspace, path) = on_disk();
+        said_on_disk(&store, project, workspace, "ZEBRA-PURGE-4417");
+        let page = Page::new(
+            project,
+            PagePath::parse("decisions/purged.md").expect("path"),
+            anamnesis_core::page::Frontmatter::new("Purged", Vec::new()).expect("frontmatter"),
+            "The words zebrapurgefourfourseventeen go too.",
+        );
+        store
+            .index_page(project, &page, &[], None, now())
+            .expect("index");
+        assert!(store.checkpoint().expect("checkpoint"));
+
+        store.purge_project(project).expect("purge");
+        assert!(store.checkpoint().expect("checkpoint"));
+
+        assert_eq!(copies_on_disk(&path, "ZEBRA-PURGE-4417"), 0);
+        assert_eq!(copies_on_disk(&path, "zebrapurgefourfourseventeen"), 0);
     }
 
     /// Handed over once, oldest first, and only to the session it is for.

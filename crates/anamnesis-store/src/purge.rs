@@ -79,12 +79,15 @@ impl Store {
     /// Remove the project row, and with it everything that cascades from it.
     ///
     /// Returns what was there, counted before it went.
+    ///
+    /// Its bytes go with the rows, not only the rows: what it frees is
+    /// zeroed, and the pages' words are taken out of the full-text index.
     pub fn purge_project(&self, project_id: ProjectId) -> crate::Result<Purged> {
         let counted = self.purge_preview(project_id)?;
-        let conn = self.connection();
-        conn.execute(
+        self.scrubbed(
             "DELETE FROM projects WHERE id = ?1",
-            params![project_id.to_string()],
+            &project_id.to_string(),
+            true,
         )?;
         Ok(counted)
     }

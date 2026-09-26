@@ -552,6 +552,7 @@ pub fn cmd_forget(paths: &[String], data_dir: Option<PathBuf>) -> anyhow::Result
             rows += 1;
         }
     }
+    crate::audit::clear_the_log(&store)?;
 
     let removed: Vec<anamnesis_core::page::PagePath> =
         doomed.iter().map(|(path, _)| path.clone()).collect();

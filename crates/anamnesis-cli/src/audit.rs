@@ -46,6 +46,30 @@ pub fn note(
     }
 }
 
+/// Empty the index's write-ahead log once rows somebody asked to have removed
+/// are gone, and say so when it could not be.
+///
+/// The deletion zeroes what it frees in the database file, but the log keeps
+/// the pages as they were until a checkpoint takes them out: after
+/// `forget-session --apply`, measured on 2026-09-27, `anamnesis.db-wal` still
+/// held the prompts no query could find. A server reading at that moment
+/// keeps the checkpoint from finishing, so it is tried a few times; readers
+/// are short.
+pub fn clear_the_log(store: &Store) -> anyhow::Result<()> {
+    for attempt in 0..5 {
+        if store.checkpoint()? {
+            return Ok(());
+        }
+        if attempt < 4 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+    println!("  The index's log still holds the old pages: the server kept reading.");
+    println!("  Stop the server and run any anamnesis command; the log is emptied when");
+    println!("  the last connection to the index closes.");
+    Ok(())
+}
+
 /// Show what has been changed, newest first.
 pub fn cmd_audit(
     limit: usize,
