@@ -75,6 +75,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Transcripts are still never rewritten.
 
 ### Added
+- **Transcripts that have gone quiet are compressed, with every line kept.**
+  The raw spool is the one part of memory that only grows: every observation
+  is kept for good, because it is what the index is rebuilt from. After a
+  month of heavy use here it held 25 MB of JSON, which gzip takes to 4.5. The
+  server now folds a transcript nothing has been added to for a week into
+  `<id>.jsonl.gz` beside it. Lines are kept byte for byte, only the container
+  changes, and any gzip tool still reads it. A session resumed later starts a
+  plain file again, and `reindex`, `reindex --check`, `redact` and
+  `forget-session` read both as one transcript. `redact` rewrites a
+  compressed transcript compressed, and `forget-session` finds and removes it.
+  A compaction puts its file in place only if neither file changed while it
+  worked, so a `redact` or `forget-session` run beside it is not undone, and
+  `forget-session` looks again once it has deleted, in case one was written
+  back in the instant between.
 - **A page says where what it says came from: `origin: human | agent | repo`.**
   A rule the person stated, a gotcha an agent ran into, and a fact read off
   the git history are different grounds for believing a page, and until now

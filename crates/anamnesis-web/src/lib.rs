@@ -34,6 +34,7 @@ pub mod answering;
 pub mod api;
 pub mod auth;
 mod boundary;
+pub mod compact;
 pub mod enrich;
 mod followup;
 mod handover;
@@ -614,6 +615,12 @@ pub async fn serve_on(
     // filed as missing one, and this sends it again once the embedder answers.
     // It returns at once on a server with no embedder.
     tokio::spawn(revector::run_revectoring(state.clone()));
+
+    // The spool is kept whole for good, so it is the one part of memory that
+    // only grows. A transcript that has gone a week without a line is folded
+    // into a compressed file beside it: every line kept, a fifth of the size.
+    // Returns at once on a server with no spool.
+    tokio::spawn(compact::run_compactor(state.clone()));
 
     // On by default, unlike the scheduler, and the difference is what each one
     // does: auto-improve makes decisions about someone's memory, so it waits to
@@ -1271,6 +1278,46 @@ mod tests {
             operator,
         )
         .expect("ingest")
+    }
+
+    /// The server's pass compacts a transcript that has gone a week without a
+    /// line, leaves one that has not, and the session reads back whole.
+    #[tokio::test]
+    async fn the_compactor_folds_in_a_transcript_that_went_quiet() {
+        let harness = harness();
+        run(&harness, "SessionStart", json!({"source": "startup"}));
+        run(
+            &harness,
+            "UserPromptSubmit",
+            json!({"prompt": "keep this for good"}),
+        );
+        let spool = harness.state.raw.clone().expect("spool");
+        let [transcript] = &spool.files().expect("files")[..] else {
+            panic!("one transcript");
+        };
+        let written = spool.read_file(transcript).expect("read");
+
+        let early = compact::compact(&harness.state, std::time::SystemTime::now()).await;
+        assert_eq!(
+            early.files, 0,
+            "a transcript written to today is left alone"
+        );
+
+        let a_week_on = std::time::SystemTime::now()
+            + anamnesis_store::COMPACT_AFTER
+            + std::time::Duration::from_secs(60);
+        let done = compact::compact(&harness.state, a_week_on).await;
+
+        assert_eq!(done.files, 1);
+        assert!(!transcript.exists());
+        let [packed] = &spool.files().expect("files")[..] else {
+            panic!("one compacted transcript");
+        };
+        assert_eq!(
+            spool.read_file(packed).expect("read").len(),
+            written.len(),
+            "every record is still there"
+        );
     }
 
     #[test]

@@ -1309,6 +1309,37 @@ mod tests {
         .expect("check")
     }
 
+    /// A transcript compacted a week after it went quiet, and then resumed:
+    /// half of it compressed, half plain. It is rebuilt whole, and the index
+    /// it rebuilds to checks clean against it.
+    #[test]
+    fn a_compacted_transcript_is_rebuilt_and_checked_like_a_plain_one() {
+        let harness = harness();
+        let session = spool_session(&harness, "session-1", &["first", "second"]);
+        let plain = harness.raw.locate(&harness.scope.scope, &session);
+        assert!(harness.raw.compact(&plain).expect("compact"));
+        let resumed = new_observation(
+            session.id,
+            EventKind::UserPrompt,
+            None,
+            BoundedBody::truncating("third", 1024),
+            now(),
+        );
+        harness
+            .raw
+            .append(&harness.scope.scope, &session, &resumed)
+            .expect("spool");
+
+        let report = rebuilt(&harness);
+
+        assert_eq!(report.sessions, 1);
+        assert_eq!(report.observations, 3);
+        assert_eq!(report.orphaned_files, 0);
+        let checked = checked(&harness);
+        assert!(checked.is_clean(), "{checked:?}");
+        assert_eq!(checked.drift.observations.live, 3);
+    }
+
     /// The baseline every other check is read against: an index that is
     /// exactly what its sources rebuild to reports nothing. A check that
     /// flagged a healthy memory would be switched off by the first person to
