@@ -331,6 +331,8 @@ pub fn cmd_forget_session(
         }
     }
 
+    crate::audit::clear_the_log(&store)?;
+
     println!("  {rows} session(s), {observations} observation(s), {transcripts} transcript(s).");
     println!();
     println!("  Not recoverable: raw/ is not a git repository.");

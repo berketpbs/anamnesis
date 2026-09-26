@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **What `forget-session`, `forget` and `purge` remove is gone from the disk,
+  not only from queries.** SQLite leaves a deleted row's bytes where they
+  were until something overwrites them. Measured on 2026-09-27: after
+  `forget-session --apply` no query found the session's prompts, and
+  `anamnesis.db-wal` still held them. A page's words also stayed in the
+  full-text index, which records a deletion as a marker and keeps the words
+  until its segments are merged. Deletions now zero what they free, merge the
+  index when pages go, and the three commands empty the log afterwards, as
+  `redact` already did. If a reader keeps the log from emptying, the command
+  says so and how to finish it. Pages deleted by hand from the wiki and pages
+  the sweep removes are scrubbed the same way.
 - **A resumed session is not handed a note about work older than its own.**
   A session that starts again has its whole conversation back, and a note
   about work it had already moved past tells it less than it knows, with the

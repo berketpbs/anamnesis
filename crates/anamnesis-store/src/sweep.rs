@@ -97,11 +97,14 @@ impl Store {
     /// Returns whether a row was actually removed, so a caller sweeping a
     /// page the index no longer holds can tell the difference between doing
     /// work and doing nothing.
+    ///
+    /// The page's bytes go with the row, not only the row: what it frees is
+    /// zeroed, and its words are taken out of the full-text index.
     pub fn delete_page(&self, page_id: PageId) -> Result<bool> {
-        let conn = self.connection();
-        let removed = conn.execute(
+        let removed = self.scrubbed(
             "DELETE FROM pages WHERE id = ?1",
-            params![page_id.to_string()],
+            &page_id.to_string(),
+            true,
         )?;
         Ok(removed > 0)
     }

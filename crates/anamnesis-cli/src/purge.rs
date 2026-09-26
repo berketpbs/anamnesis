@@ -77,6 +77,7 @@ pub fn cmd_purge(apply: bool, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
     // Then the index, which is rebuildable from what is left until the next
     // step removes that too.
     let purged = store.purge_project(scope.project_id)?;
+    crate::audit::clear_the_log(&store)?;
 
     // Last, because this is the part nothing rebuilds.
     let removed_transcripts = if transcripts.exists() {
