@@ -996,10 +996,7 @@ async fn deliver_handoff(
             now,
         );
 
-        let claimed = match store.claim_handoff(scope.project_id, session.id, &slot, now)? {
-            Some(note) => Some(note),
-            None => handover::hand_on(&store, &scope, session.id, &slot, swept)?,
-        };
+        let claimed = handover::handed(&store, &scope, session.id, &slot, swept, now)?;
 
         // What the project decided, beside what the last session did. The
         // handoff carries one session; a decision taken in conversation three

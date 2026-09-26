@@ -1290,6 +1290,17 @@ impl Store {
         Ok(latest)
     }
 
+    /// When a session last did anything before `before`, not counting its
+    /// starts and its end.
+    ///
+    /// What a session already knows when it starts again: one resumed after
+    /// it worked has its conversation back, and a note about work older than
+    /// this is no news to it.
+    pub fn last_work(&self, session_id: SessionId, before: Timestamp) -> Result<Option<Timestamp>> {
+        let conn = self.connection();
+        worked_until(&conn, session_id, before)
+    }
+
     /// The session that took `from_session`'s newest note, while it is still
     /// open.
     ///
