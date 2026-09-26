@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **A note about older work no longer takes the place of a newer one.** A
+  note is written when its session ends, and a session can end long after
+  it last did anything. On 2026-09-26 a Codex terminal left open overnight
+  was closed by the reaper eighteen hours after its last answer. Its note
+  expired the one a Claude session had left an hour after that answer, which
+  said a release had since been merged and installed. The next agent was
+  handed the Codex note instead: the commit before the release, and the
+  instruction to change nothing. A note is now not offered when a note in
+  the same slot — waiting, or already handed out — describes later work.
+  How recent a note is is now read from the last thing its session did, not
+  counting the session's start or end, so a terminal closed a day after its
+  last answer no longer looks a day fresher. A model's note that arrives
+  late now replaces only the note its own session left, never a newer
+  session's.
 - **Switching agents straight away no longer costs the new one the fuller
   note.** A session's note is handed over when the next session starts, and
   the model's note for a session that has just ended arrives a median of 22
