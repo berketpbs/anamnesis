@@ -45,8 +45,8 @@ pub use drift::{Divergence, Drift};
 pub use improve::{Filed, ProjectRow, StoredProposal};
 pub use named::Naming;
 pub use ops::{
-    EmbedFailure, EmbedFault, LatestHandoff, OpenSession, SessionSummary, SummarySource,
-    new_handoff, new_observation, new_session,
+    EmbedFailure, EmbedFault, Followup, LatestHandoff, OpenSession, SessionSummary, SummarySource,
+    Takeover, new_handoff, new_observation, new_session,
 };
 pub use purge::Purged;
 // `StreamBreakdown` travels with `PageHit` because `Store::query_streams` is
@@ -270,14 +270,14 @@ mod tests {
         assert_eq!(store.schema_version().expect("version"), None);
 
         store.migrate().expect("migrate");
-        assert_eq!(store.schema_version().expect("version"), Some(19));
+        assert_eq!(store.schema_version().expect("version"), Some(20));
     }
 
     #[test]
     fn migrating_twice_is_a_no_op() {
         let store = migrated();
         store.migrate().expect("second migrate");
-        assert_eq!(store.schema_version().expect("version"), Some(19));
+        assert_eq!(store.schema_version().expect("version"), Some(20));
     }
 
     #[test]
@@ -294,6 +294,7 @@ mod tests {
             "page_entities",
             "page_links",
             "handoffs",
+            "handoff_followups",
             "page_feedback",
             "page_embeddings",
             "page_abstract_embeddings",

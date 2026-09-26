@@ -35,6 +35,7 @@ pub mod api;
 pub mod auth;
 mod boundary;
 pub mod enrich;
+mod followup;
 mod handover;
 pub mod improve;
 mod pipeline;
@@ -1064,9 +1065,15 @@ async fn deliver_handoff(
 /// Like the handoff, the body goes straight to the hook's stdout and from
 /// there into a model's context, so it is plain text, empty when there is
 /// nothing to say, and framed as evidence by [`anamnesis_core::brief`] rather
-/// than as instruction. Unlike the handoff it takes nothing and claims
-/// nothing: asking twice gives the same answer, and a session that never asks
-/// loses nothing.
+/// than as instruction. The pages it offers are taken from nobody: asking
+/// twice gives the same pages, and a session that never asks loses nothing.
+///
+/// One thing here is taken, once: what arrived about the session this one
+/// took over from after this one started, which its start could not be handed
+/// (see [`followup`]). It comes first, and no switch of recall's turns it off,
+/// because it is the rest of the handoff rather than a guess about the prompt.
+/// It is taken only after the recall half has answered, so a recall that fails
+/// leaves it for the next prompt instead of losing it with this one.
 ///
 /// A prompt is one moment in a session, not hundreds, so this can afford a
 /// query where a tool-call hook could not. It still holds to the same bargain:
@@ -1090,71 +1097,98 @@ async fn deliver_recall(
     if asked.is_empty() || anamnesis_core::observation::is_harness_prompt(&asked) {
         return Ok(String::new());
     }
+    let asking_session = query.session_id.clone();
 
     off_runtime(move || -> Result<String, WebError> {
         let scope = pipeline::scope_for(&cwd)?;
-        let config = scope.recall;
-        if !config.on_prompt || config.pages == 0 {
-            return Ok(String::new());
-        }
-        // Before the embedder, which is the expensive part: a reply too short
-        // to be about anything is not asked about. See `RecallConfig::min_words`.
-        if anamnesis_core::config::words_in(&asked) < config.min_words {
-            return Ok(String::new());
-        }
+        let recalled = recall(&state, &scope, &asked)?;
 
-        // With an embedder, a page is offered when it is close enough to the
-        // prompt. Without one — none configured, or one that failed on this
-        // prompt — it is offered when the prompt names it. The fused query
-        // cannot stand in for either: it ranks by position, so a prompt about
-        // nothing this project knows comes back with the same score at the
-        // top as a prompt about its centre — 0.333 for both, measured on this
-        // machine's 88 pages. `status` already says when the embedder is not
-        // returning vectors.
-        let by_name = || -> Result<Vec<anamnesis_store::PageHit>, WebError> {
-            if !config.by_name {
-                return Ok(Vec::new());
-            }
-            let naming = anamnesis_store::Naming {
-                min_coverage: config.min_coverage,
-                ..anamnesis_store::Naming::default()
-            };
-            Ok(state
-                .store
-                .pages_named_by(scope.project_id, &asked, config.pages, &naming)?)
-        };
-        let hits = match state.embedder.as_ref() {
-            None => by_name()?,
-            Some(embedder) => match embedder.embed(&asked) {
-                Ok(vector) => state.store.pages_like(
-                    scope.project_id,
-                    embedder.model(),
-                    &vector,
-                    config.pages,
-                    config.min_similarity,
-                    // What `memory_query` weighs a page's standing with, so a
-                    // rule counts for the same whichever way it is reached.
-                    &anamnesis_core::retrieval::Tuning::default(),
-                )?,
-                Err(error) => {
-                    tracing::warn!(%error, "recall embedding failed; answering this prompt by name");
-                    by_name()?
-                }
-            },
+        // Failing here costs the follow-up, which stays owed, and not the
+        // recall block already in hand.
+        let owed = match asking_session.as_deref() {
+            Some(asking) => followup::deliver(&state.store, &scope, asking, Timestamp::now())
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "could not hand a session its follow-up");
+                    String::new()
+                }),
+            None => String::new(),
         };
 
-        let pages: Vec<anamnesis_core::brief::Recalled> = hits
-            .into_iter()
-            .map(|hit| anamnesis_core::brief::Recalled {
-                path: hit.path.to_string(),
-                title: hit.title,
-                snippet: hit.snippet,
-                origin: hit.origin,
-            })
-            .collect();
-        Ok(anamnesis_core::brief::brief(&pages, &config))
+        Ok(match (owed.is_empty(), recalled.is_empty()) {
+            (true, _) => recalled,
+            (false, true) => owed,
+            (false, false) => format!("{}\n\n{recalled}", owed.trim_end()),
+        })
     })
     .await
+}
+
+/// The pages this project has on a prompt, as [`deliver_recall`] offers them.
+fn recall(
+    state: &AppState,
+    scope: &anamnesis_core::scope::ResolvedScope,
+    asked: &str,
+) -> Result<String, WebError> {
+    let config = scope.recall;
+    if !config.on_prompt || config.pages == 0 {
+        return Ok(String::new());
+    }
+    // Before the embedder, which is the expensive part: a reply too short
+    // to be about anything is not asked about. See `RecallConfig::min_words`.
+    if anamnesis_core::config::words_in(asked) < config.min_words {
+        return Ok(String::new());
+    }
+
+    // With an embedder, a page is offered when it is close enough to the
+    // prompt. Without one — none configured, or one that failed on this
+    // prompt — it is offered when the prompt names it. The fused query
+    // cannot stand in for either: it ranks by position, so a prompt about
+    // nothing this project knows comes back with the same score at the
+    // top as a prompt about its centre — 0.333 for both, measured on this
+    // machine's 88 pages. `status` already says when the embedder is not
+    // returning vectors.
+    let by_name = || -> Result<Vec<anamnesis_store::PageHit>, WebError> {
+        if !config.by_name {
+            return Ok(Vec::new());
+        }
+        let naming = anamnesis_store::Naming {
+            min_coverage: config.min_coverage,
+            ..anamnesis_store::Naming::default()
+        };
+        Ok(state
+            .store
+            .pages_named_by(scope.project_id, asked, config.pages, &naming)?)
+    };
+    let hits = match state.embedder.as_ref() {
+        None => by_name()?,
+        Some(embedder) => match embedder.embed(asked) {
+            Ok(vector) => state.store.pages_like(
+                scope.project_id,
+                embedder.model(),
+                &vector,
+                config.pages,
+                config.min_similarity,
+                // What `memory_query` weighs a page's standing with, so a
+                // rule counts for the same whichever way it is reached.
+                &anamnesis_core::retrieval::Tuning::default(),
+            )?,
+            Err(error) => {
+                tracing::warn!(%error, "recall embedding failed; answering this prompt by name");
+                by_name()?
+            }
+        },
+    };
+
+    let pages: Vec<anamnesis_core::brief::Recalled> = hits
+        .into_iter()
+        .map(|hit| anamnesis_core::brief::Recalled {
+            path: hit.path.to_string(),
+            title: hit.title,
+            snippet: hit.snippet,
+            origin: hit.origin,
+        })
+        .collect();
+    Ok(anamnesis_core::brief::brief(&pages, &config))
 }
 
 #[cfg(test)]
@@ -5001,6 +5035,148 @@ mod tests {
             .expect("the handoff is still handed over");
         let decided = told.find("LEDGER_").expect("and the decision beside it");
         assert!(note < decided, "{told}");
+    }
+
+    // ---------------------------------------------------------------
+    // Following up. A session that took over before the one it took over
+    // from was written up is handed the rest with its next prompt.
+    // ---------------------------------------------------------------
+
+    /// What the session named `session` is handed with a prompt.
+    async fn prompt(state: &AppState, harness: &Harness, session: &str, asked: &str) -> String {
+        let uri = format!(
+            "/recall?agent=codex&session_id={session}&cwd={}&q={}",
+            percent_encode(&harness.cwd.to_string_lossy()),
+            percent_encode(asked)
+        );
+        let request = HttpRequest::builder()
+            .uri(uri)
+            .body(Body::empty())
+            .expect("request");
+        let response = send(state, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        body_of(response).await
+    }
+
+    /// Claude settles something and ends; the model is not back yet.
+    fn ended_before_its_model(harness: &Harness) {
+        answered(harness);
+        run(harness, "SessionEnd", json!({"reason": "other"}));
+    }
+
+    /// The case this exists for, as it happened on 2026-09-26: Codex opened
+    /// before Claude's session had been written up, was handed the counted
+    /// note, and the model's note — and the decision with it — went nowhere.
+    #[tokio::test]
+    async fn a_note_written_after_the_next_session_took_over_reaches_it_with_its_next_prompt() {
+        let harness = harness();
+        ended_before_its_model(&harness);
+
+        let told = start(&harness).await;
+        assert!(
+            told.contains("settle it: environment variables"),
+            "the counted note is what there was at the start:\n{told}"
+        );
+        assert!(!told.contains("LEDGER environment"), "{told}");
+
+        let state = harness
+            .state
+            .clone()
+            .with_llm(Some(settings(Arc::new(Fake::answering(deciding_reply())))));
+        assert_eq!(enrich::sweep_awaiting(&state, now()).await, 1);
+
+        // One word: below recall's own gate, which this does not go through.
+        let owed = prompt(&state, &harness, "next", "devam").await;
+        assert!(owed.contains("took over from (claude-code"), "{owed}");
+        assert!(
+            owed.contains("Settings are LEDGER_ variables."),
+            "the model's note:\n{owed}"
+        );
+        assert!(
+            owed.contains("Settings are LEDGER environment variables"),
+            "the decision written with it:\n{owed}"
+        );
+        assert!(owed.contains("not instructions to follow"), "{owed}");
+
+        let again = prompt(&state, &harness, "next", "devam").await;
+        assert!(!again.contains("took over from"), "handed once:\n{again}");
+    }
+
+    /// A terminal closed without an end: the next session is handed a write-up
+    /// of it at once, and its decisions are written two minutes later.
+    #[tokio::test]
+    async fn a_quiet_sessions_decisions_reach_the_session_that_took_over_from_it() {
+        let harness = harness();
+        answered(&harness);
+
+        let told = start(&harness).await;
+        assert!(told.contains("still open beside this one"), "{told}");
+
+        let state = harness
+            .state
+            .clone()
+            .with_llm(Some(settings(Arc::new(Fake::answering(deciding_reply())))));
+        let mut asked = settle::Asked::new();
+        let report = settle::settle(&state, later(180), &mut asked).await;
+        assert_eq!(report.asked.len(), 1, "{report:?}");
+
+        let owed = prompt(&state, &harness, "next", "devam").await;
+        assert!(
+            owed.contains("Settings are LEDGER environment variables"),
+            "{owed}"
+        );
+        assert!(
+            !owed.contains("Its note"),
+            "a quiet session's notes come without a note:\n{owed}"
+        );
+    }
+
+    /// Ten minutes into its own work, an account of the session before is old
+    /// news, and is not put in front of it.
+    #[tokio::test]
+    async fn a_session_that_took_over_long_ago_is_not_followed_up() {
+        let harness = harness();
+        ended_before_its_model(&harness);
+        let long_ago = now()
+            .checked_sub(jiff::SignedDuration::from_mins(11))
+            .expect("time");
+        claim_handoff(
+            &harness.state.store,
+            &harness.cwd,
+            &AgentKind::Codex,
+            "next",
+            long_ago,
+            None,
+        )
+        .expect("claim")
+        .expect("the counted note");
+
+        let state = harness
+            .state
+            .clone()
+            .with_llm(Some(settings(Arc::new(Fake::answering(deciding_reply())))));
+        assert_eq!(enrich::sweep_awaiting(&state, now()).await, 1);
+
+        let owed = prompt(&state, &harness, "next", "devam").await;
+        assert!(!owed.contains("took over from"), "{owed}");
+    }
+
+    /// Nobody took over before the model answered: its note waits for the
+    /// next session in the ordinary way, and nobody is followed up.
+    #[tokio::test]
+    async fn a_note_nobody_has_taken_is_handed_over_at_the_start_instead() {
+        let harness = harness();
+        ended_before_its_model(&harness);
+        let state = harness
+            .state
+            .clone()
+            .with_llm(Some(settings(Arc::new(Fake::answering(deciding_reply())))));
+        assert_eq!(enrich::sweep_awaiting(&state, now()).await, 1);
+
+        let told = start(&harness).await;
+        assert!(told.contains("Settings are LEDGER_ variables."), "{told}");
+        let owed = prompt(&state, &harness, "next", "devam").await;
+        assert!(!owed.contains("took over from"), "{owed}");
     }
 
     #[tokio::test]

@@ -166,9 +166,11 @@ The HTTP server hooks deliver to.
   is kept
 - `GET /handoff` — hand the next session what the last one left
 - `GET /recall?q=` — hand a prompt the pages this project already has on it,
-  when any of them is close enough to be worth the interruption. Takes nothing
-  and claims nothing, unlike the handoff, so asking twice answers twice; empty
-  when there is nothing to say. See "Recall at Prompt Time"
+  when any of them is close enough to be worth the interruption. The pages are
+  taken from nobody, so asking twice answers twice; empty when there is
+  nothing to say. The one thing it takes, once, is a follow-up: what arrived
+  about the session this one took over from after this one started. See
+  "Recall at Prompt Time"
 - `GET /whoami` — what the server makes of the caller's token
 - `GET /health`
 - `GET /api/v1/...` — the same facts the browser renders, as JSON: `scopes`,
@@ -625,6 +627,20 @@ prompt rather than once; and it is allowed five seconds where capture is
 allowed one, because it runs once per prompt rather than before every tool
 call, and the server has to embed the question before it can compare it.
 
+**The prompt also finishes a handoff that started too early.** A session's
+note is claimed at the next session's start, and the model's note for a
+session that has just ended lands a median of 22 seconds after it (90% within
+46). An agent opened in that window is handed the counted note, and the
+model's note that follows is not handed to anybody after it — that would be a
+briefing on work already taken over — so it used to be dropped, and with it
+the only mention of the decisions written in the same pass. A terminal closed
+without an end has the same gap: the next agent is handed a write-up of it at
+once, and its decisions are written two minutes into its silence. What arrives
+within ten minutes of a takeover is kept in `handoff_followups`, addressed to
+the session that took over and to no other, and handed to it once, ahead of
+the recall block, on its next prompt. Recall's switches and gates do not
+apply to it: it is the rest of the handoff, not a guess about the prompt.
+
 **The hard part is not finding pages, it is not offering them.** A block that
 appears on every prompt whether or not it has anything to say teaches an agent
 to skip it. The ordinary fused query cannot tell the two apart: Reciprocal
@@ -749,8 +765,8 @@ same row rather than filing a second copy of it.
 `projects` — which also records each project's working copy and when it was
 last improved, so a scheduler can find its settings and honour its interval —
 plus `pages_fts` (FTS5, unicode61), `entities`, `entity_tokens`,
-`page_entities`, `page_links`, `handoffs`, `page_feedback`, `page_embeddings`,
-`page_embed_failures`, `workstreams`.
+`page_entities`, `page_links`, `handoffs`, `handoff_followups`,
+`page_feedback`, `page_embeddings`, `page_embed_failures`, `workstreams`.
 
 `page_embed_failures` says, in one sentence, that a page's vector is missing or
 incomplete, and `kind` says which. It exists because the alternative was a log

@@ -60,6 +60,29 @@ pub struct LatestHandoff {
     pub taken_by: Option<SessionId>,
 }
 
+/// A session that took over from another, as [`Store::open_taker_of`] finds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Takeover {
+    /// The session that took the note, and is still open.
+    pub to_session: SessionId,
+    /// When it took it.
+    pub at: Timestamp,
+}
+
+/// What a session was owed after it started, as [`Store::take_followups`]
+/// hands it over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Followup {
+    /// The session it describes: the one the recipient took over from.
+    pub from_session: SessionId,
+    /// The note written after the takeover, when one was.
+    pub body: Option<String>,
+    /// Durable pages written in the same pass.
+    pub notes: Vec<String>,
+    /// When it was written.
+    pub created_at: Timestamp,
+}
+
 /// One current decision offered to a starting session, with its provenance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StandingDecision {
@@ -1236,6 +1259,133 @@ impl Store {
         Ok(latest)
     }
 
+    /// The session that took `from_session`'s newest note, while it is still
+    /// open.
+    ///
+    /// The newest note that session left, whatever became of it, with the tie
+    /// broken as [`Store::latest_handoff`] breaks it: a counted note and the
+    /// model's prose that replaced it share an instant, and the one that was
+    /// not expired is the newer. A newest note that *was* expired went to
+    /// nobody — another session's note superseded it, or somebody dropped it
+    /// — and then nobody took over from this session, whatever an older note
+    /// of its says.
+    ///
+    /// Compared in Rust for the reason [`Store::open_sessions`] gives.
+    pub fn open_taker_of(&self, from_session: SessionId) -> Result<Option<Takeover>> {
+        struct Note {
+            written: Timestamp,
+            live: bool,
+            taker: Option<String>,
+            taken_at: Option<String>,
+            taker_open: bool,
+        }
+
+        let conn = self.connection();
+        let mut statement = conn.prepare(
+            "SELECT h.created_at, h.state, h.to_session, h.accepted_at, s.state
+             FROM handoffs h LEFT JOIN sessions s ON s.id = h.to_session
+             WHERE h.from_session = ?1",
+        )?;
+        let rows = statement.query_map(params![from_session.to_string()], |row| {
+            Ok(Note {
+                written: parse_time(&row.get::<_, String>(0)?),
+                live: row.get::<_, String>(1)? != "expired",
+                taker: row.get(2)?,
+                taken_at: row.get(3)?,
+                taker_open: row.get::<_, Option<String>>(4)?.as_deref() == Some("open"),
+            })
+        })?;
+        let mut newest: Option<Note> = None;
+        for row in rows {
+            let row = row?;
+            let newer = newest
+                .as_ref()
+                .is_none_or(|seen| (row.written, row.live) > (seen.written, seen.live));
+            if newer {
+                newest = Some(row);
+            }
+        }
+
+        // An expired note never has a taker — only a pending one is expired —
+        // so `live` decides which note is the newest, and nothing after that.
+        Ok(match newest {
+            Some(Note {
+                taker: Some(taker),
+                taken_at: Some(taken_at),
+                taker_open: true,
+                ..
+            }) => Some(Takeover {
+                to_session: parse_id(taker),
+                at: parse_time(&taken_at),
+            }),
+            _ => None,
+        })
+    }
+
+    /// Leave a session what arrived about the one it took over from after it
+    /// started: a note, the durable pages written with it, or both.
+    ///
+    /// Addressed to that session alone and kept apart from `handoffs`, whose
+    /// row for the takeover records what the session was handed at its start
+    /// and stays true to that. Bounded the way a handoff's body is.
+    pub fn record_followup(
+        &self,
+        from_session: SessionId,
+        to_session: SessionId,
+        body: Option<&str>,
+        notes: &[String],
+        now: Timestamp,
+    ) -> Result<()> {
+        let body = body.map(|body| BoundedBody::truncating(body, BoundedBody::DEFAULT_LIMIT));
+        let conn = self.connection();
+        conn.execute(
+            "INSERT INTO handoff_followups
+                 (id, from_session, to_session, body, notes, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                HandoffId::new().to_string(),
+                from_session.to_string(),
+                to_session.to_string(),
+                body.as_ref().map(BoundedBody::as_str),
+                notes.join("\n"),
+                now.to_string(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Hand a session everything left for it since it started, once.
+    ///
+    /// One statement, for the reason [`Store::claim_handoff`] is one: two
+    /// prompts from the same session arriving together must not both be
+    /// handed the same follow-up. Oldest first, so a note that was written
+    /// again reads in the order it was written.
+    pub fn take_followups(&self, to_session: SessionId, now: Timestamp) -> Result<Vec<Followup>> {
+        let conn = self.connection();
+        let mut statement = conn.prepare(
+            "UPDATE handoff_followups SET delivered_at = ?2
+             WHERE to_session = ?1 AND delivered_at IS NULL
+             RETURNING from_session, body, notes, created_at",
+        )?;
+        let rows =
+            statement.query_map(params![to_session.to_string(), now.to_string()], |row| {
+                Ok(Followup {
+                    from_session: parse_id(row.get::<_, String>(0)?),
+                    body: row.get(1)?,
+                    notes: row
+                        .get::<_, String>(2)?
+                        .lines()
+                        .filter(|line| !line.trim().is_empty())
+                        .map(str::to_owned)
+                        .collect(),
+                    created_at: parse_time(&row.get::<_, String>(3)?),
+                })
+            })?;
+        let mut taken = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        taken.sort_by_key(|followup| followup.created_at);
+        Ok(taken)
+    }
+
     /// The kind of a session's newest observation, if it has one.
     ///
     /// Whether an open session is in the middle of a turn or waiting on its
@@ -1493,6 +1643,43 @@ impl Store {
         )?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    /// Those of `paths` that are standing decisions now, in the order given.
+    ///
+    /// The same test as [`Store::standing_decisions`], asked of pages named in
+    /// advance: the notes one pass wrote, which were decisions when written
+    /// and may since have been decided again.
+    pub fn standing_among(
+        &self,
+        project_id: ProjectId,
+        paths: &[String],
+    ) -> Result<Vec<StandingDecision>> {
+        let conn = self.connection();
+        let mut statement = conn.prepare(
+            "SELECT path, title, updated_at, session_id, origin FROM pages
+             WHERE project_id = ?1 AND path = ?2 AND is_latest = 1 AND status = 'active'
+               AND (path LIKE 'decisions/%' OR path LIKE '\\_rules/%' ESCAPE '\\')",
+        )?;
+        let mut found = Vec::new();
+        for path in paths {
+            let decision = statement
+                .query_row(params![project_id.to_string(), path], |row| {
+                    Ok(StandingDecision {
+                        path: row.get(0)?,
+                        title: row.get(1)?,
+                        updated_at: parse_time(&row.get::<_, String>(2)?),
+                        source_session: row.get::<_, Option<String>>(3)?.map(parse_id),
+                        origin: row
+                            .get::<_, Option<String>>(4)?
+                            .as_deref()
+                            .and_then(anamnesis_core::page::Origin::from_storage),
+                    })
+                })
+                .optional()?;
+            found.extend(decision);
+        }
+        Ok(found)
     }
 
     /// When this project last captured anything, if it ever has.
@@ -2369,6 +2556,141 @@ mod tests {
         assert!(!latest.dropped);
         assert_eq!(latest.taken_by, Some(claimant));
         assert_eq!(latest.from_session, session.id);
+    }
+
+    /// The same twins, asked who took over: the one that took the note that
+    /// was not expired, for as long as it is open.
+    #[test]
+    fn the_taker_is_whoever_took_the_newest_note_while_it_is_open() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+        store
+            .record_handoff(&new_handoff(
+                project,
+                session.id,
+                Slot::shared(),
+                "counted",
+                now(),
+            ))
+            .expect("first");
+        store
+            .supersede_pending_handoff(&new_handoff(
+                project,
+                session.id,
+                Slot::shared(),
+                "the model's",
+                now(),
+            ))
+            .expect("supersede");
+        let claimant = next_session(&store, project, workspace);
+        store
+            .claim_handoff(project, claimant, &Slot::shared(), now())
+            .expect("claim");
+
+        assert_eq!(
+            store.open_taker_of(session.id).expect("taker"),
+            Some(Takeover {
+                to_session: claimant,
+                at: now(),
+            })
+        );
+
+        store.close_session(claimant, now()).expect("close");
+        assert_eq!(store.open_taker_of(session.id).expect("taker"), None);
+    }
+
+    /// A session that took an older note did not take over from where the
+    /// session got to after it: the newest note went to nobody.
+    #[test]
+    fn a_session_whose_newest_note_went_to_nobody_has_no_taker() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+        store
+            .record_handoff(&new_handoff(
+                project,
+                session.id,
+                Slot::shared(),
+                "where it had got to",
+                now(),
+            ))
+            .expect("first");
+        let claimant = next_session(&store, project, workspace);
+        store
+            .claim_handoff(project, claimant, &Slot::shared(), now())
+            .expect("claim");
+
+        let later = now()
+            .checked_add(jiff::SignedDuration::from_mins(5))
+            .expect("time");
+        store
+            .record_handoff(&new_handoff(
+                project,
+                session.id,
+                Slot::shared(),
+                "where it got to after that",
+                later,
+            ))
+            .expect("second");
+        store
+            .discard_handoff(project, &Slot::shared())
+            .expect("discard")
+            .expect("the second note");
+
+        assert_eq!(store.open_taker_of(session.id).expect("taker"), None);
+    }
+
+    /// Handed over once, oldest first, and only to the session it is for.
+    #[test]
+    fn a_followup_is_handed_to_its_session_once() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+        let taker = next_session(&store, project, workspace);
+        let mut bystander = session_for(project, workspace);
+        bystander.id = SessionId::derive(project, "a-session-beside-them");
+        store.ensure_session(&bystander).expect("bystander");
+
+        let later = now()
+            .checked_add(jiff::SignedDuration::from_secs(90))
+            .expect("time");
+        store
+            .record_followup(
+                session.id,
+                taker,
+                None,
+                &["decisions/first.md".to_owned()],
+                later,
+            )
+            .expect("second");
+        store
+            .record_followup(session.id, taker, Some("the model's note"), &[], now())
+            .expect("first");
+
+        assert!(
+            store
+                .take_followups(bystander.id, later)
+                .expect("take")
+                .is_empty()
+        );
+        let taken = store.take_followups(taker, later).expect("take");
+        assert_eq!(
+            taken
+                .iter()
+                .map(|followup| (followup.body.as_deref(), followup.notes.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (Some("the model's note"), Vec::new()),
+                (None, vec!["decisions/first.md".to_owned()]),
+            ]
+        );
+        assert!(
+            store
+                .take_followups(taker, later)
+                .expect("take again")
+                .is_empty()
+        );
     }
 
     /// The retry queue: counted means a model was asked and did not answer, or

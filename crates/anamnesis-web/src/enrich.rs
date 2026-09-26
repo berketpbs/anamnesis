@@ -267,10 +267,30 @@ pub async fn enrich(
         );
         match store.supersede_pending_handoff(&handoff) {
             Ok(true) => {}
-            Ok(false) => tracing::debug!(
-                session = %session_id,
-                "the handoff this session left had already been claimed; left it alone"
-            ),
+            // Taken before this was ready. Left alone for everyone after, but
+            // not for the session that took it, which was handed the lesser
+            // note: see [`crate::followup`]. The clock is the real one, not
+            // `now` — that is when the session ended, and the window is about
+            // how long ago the takeover was.
+            Ok(false) => {
+                tracing::debug!(
+                    session = %session_id,
+                    "the handoff this session left had already been claimed; left it alone"
+                );
+                if let Err(error) = crate::followup::follow_up(
+                    &store,
+                    session_id,
+                    Some(&digest.handoff),
+                    &page.notes,
+                    Timestamp::now(),
+                ) {
+                    tracing::warn!(
+                        %error,
+                        session = %session_id,
+                        "could not leave the session that took over its follow-up"
+                    );
+                }
+            }
             // The page is written and the session is closed; a handoff that
             // could not be replaced is worth a line and nothing more.
             Err(error) => tracing::warn!(

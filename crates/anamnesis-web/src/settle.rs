@@ -189,7 +189,7 @@ pub async fn settle(state: &AppState, now: Timestamp, asked: &mut Asked) -> Sett
                 Some(current) if current.is_open() => {}
                 _ => return Ok(Vec::new()),
             }
-            Ok(write_notes(
+            let written = write_notes(
                 &store,
                 &held,
                 &scope,
@@ -199,7 +199,14 @@ pub async fn settle(state: &AppState, now: Timestamp, asked: &mut Asked) -> Sett
                     .as_ref()
                     .map(|embedder| embedder.as_ref() as &dyn Embed),
                 now,
-            ))
+            );
+            // A quiet session is usually quiet because its terminal was
+            // closed, and the agent opened next has been handed a write-up of
+            // it already — before these were written. See `crate::followup`.
+            if let Err(error) = crate::followup::follow_up(&store, id, None, &written, now) {
+                tracing::warn!(%error, session = %id, "could not leave the session that took over its follow-up");
+            }
+            Ok(written)
         })
         .await
         .unwrap_or_default();
