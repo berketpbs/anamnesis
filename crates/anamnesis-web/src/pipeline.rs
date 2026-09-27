@@ -747,6 +747,11 @@ fn write_session_page(
             patch: PagePatch {
                 title: Some(digest.title.clone()),
                 body: Some(attributed(&digest.body, session)),
+                // A page written before pages named their session names none,
+                // and the merge keeps what the page on disk says. This page is
+                // this session's all the same — its path is derived from the
+                // session's id — so an old one learns whose it is here.
+                session: Some(session.id),
                 ..PagePatch::default()
             },
         },

@@ -1055,6 +1055,8 @@ impl AnamnesisMcp {
             // An agent's edit never makes a page the person's: the words that
             // would have to be found are not something this request carries.
             said: None,
+            // Nor says which session wrote it: that is the first writer's.
+            session: None,
             clear,
         };
 
