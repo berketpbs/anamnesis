@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **A session page written before pages named their session names it once
+  it is rewritten.** Pages have recorded the session that wrote them since
+  #150, and a page from before that names none, which reads as a page a
+  person wrote. Rewriting one kept it that way: a session's page is merged
+  into the one on disk, and the merge keeps whatever session the page on disk
+  names, none included. On 2026-09-27 a session from 2026-09-01 was closed and
+  its page rewritten by a model, and the index still could not say whose page
+  it was, so `lint` could not weigh it against its session and
+  `memory_read_page` reported no `source_session`. A session's own page now
+  names its session when the page on disk names none; its path is derived
+  from that session's id, so there is no doubt whose it is. A page that names
+  a session keeps it, and durable notes are untouched, since whoever wrote an
+  old note is not known.
 - **What `forget-session`, `forget` and `purge` remove is gone from the disk,
   not only from queries.** SQLite leaves a deleted row's bytes where they
   were until something overwrites them. Measured on 2026-09-27: after

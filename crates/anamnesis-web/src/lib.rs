@@ -3391,6 +3391,106 @@ mod tests {
         }
     }
 
+    /// A session's page written before pages named their session names none,
+    /// and rewriting it used to keep it that way: the merge keeps what the page
+    /// on disk says, and a session page saying no session wrote it reads as a
+    /// page a person wrote. Found on 2026-09-27, when a session from
+    /// 2026-09-01 was closed, its page rewritten by a model, and the index
+    /// still could not say whose page it was.
+    #[tokio::test]
+    async fn an_old_session_page_rewritten_names_the_session_it_is_about() {
+        let harness = harness();
+        let (scope, session_id) = recorded(&harness);
+        finalize_and_enrich(
+            &harness.state.store,
+            &harness.state.wiki,
+            &scope,
+            session_id,
+            None,
+            now(),
+            &settings(Arc::new(Fake::broken())),
+        )
+        .await
+        .expect("finalized")
+        .expect("the counted page");
+        let closed = harness
+            .state
+            .store
+            .load_session(session_id)
+            .expect("load")
+            .expect("a session");
+        let path = crate::pipeline::session_page_path(&closed.started_at, session_id)
+            .expect("the session's page");
+
+        // The page such a session left: the same page, naming no session, and
+        // indexed as naming none.
+        {
+            let wiki = harness.state.wiki.lock();
+            let parsed = wiki.read_page(&scope.scope, &path).expect("the page");
+            let mut frontmatter = parsed.frontmatter;
+            frontmatter.session = None;
+            let old = anamnesis_core::page::Page::new(
+                scope.project_id,
+                path.clone(),
+                frontmatter,
+                parsed.body,
+            );
+            wiki.write_page(
+                &scope.scope,
+                &old,
+                "written before pages named their session",
+            )
+            .expect("write the old page");
+            harness
+                .state
+                .store
+                .index_page(
+                    scope.project_id,
+                    &old,
+                    &anamnesis_wiki::extract_links(&old.body),
+                    None,
+                    now(),
+                )
+                .expect("index the old page");
+        }
+        let pages = || {
+            harness
+                .state
+                .store
+                .pages_from_session(session_id)
+                .expect("pages")
+        };
+        assert!(!pages().contains(&path), "the old page names no session");
+
+        recompile(
+            &harness.state.store,
+            &harness.state.wiki.lock(),
+            &scope,
+            &closed,
+            &anamnesis_consolidate::SessionDigest {
+                title: "Read again".to_owned(),
+                body: "## What. It was read by a model this time.".to_owned(),
+                handoff: "h".to_owned(),
+                entities: Vec::new(),
+                notes: Vec::new(),
+            },
+            Provenance::counted(),
+            None,
+            now(),
+        )
+        .expect("recompile");
+
+        let parsed = harness
+            .state
+            .wiki
+            .lock()
+            .read_page(&scope.scope, &path)
+            .expect("the rewritten page");
+        assert_eq!(parsed.frontmatter.title, "Read again");
+        assert_eq!(parsed.frontmatter.session, Some(session_id));
+        assert!(pages().contains(&path), "and the index says whose it is");
+    }
+
     /// The case a page naming its session was written for. Recompiling has to
     /// replace the durable pages its own earlier run left, or reading a
     /// session again would either duplicate them under near-identical names or

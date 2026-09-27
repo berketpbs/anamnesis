@@ -145,6 +145,16 @@ pub struct PagePatch {
     /// that edits a page can make it less the person's than it was, since
     /// the words it quoted were said whoever edits it next.
     pub said: Option<String>,
+    /// The session that wrote the page, for a page that names none.
+    ///
+    /// Filled, never replaced: source provenance belongs to the first writer,
+    /// so a page that already names its session keeps it whoever supplies
+    /// this. It exists for pages written before pages recorded their session,
+    /// which name none although a session wrote them. Only a writer that knows
+    /// whose the page is supplies it — a session's own page, whose path is
+    /// derived from that session's id — so a page a person wrote, which rightly
+    /// names none, is never claimed for a session by an edit.
+    pub session: Option<anamnesis_core::ids::SessionId>,
     /// Fields deliberately removed rather than preserved.
     pub clear: BTreeSet<ClearField>,
 }
@@ -942,8 +952,16 @@ fn materialize_patch(
     } else {
         preserved.push("origin".to_owned());
     }
-    // Source provenance belongs to the first writer, never to an editor.
-    preserved.push("session".to_owned());
+    // Source provenance belongs to the first writer, never to an editor. A page
+    // old enough to name no writer at all is the one gap, filled only by a
+    // caller that knows who wrote it (see `PagePatch::session`).
+    match (frontmatter.session, patch.session) {
+        (None, Some(writer)) => {
+            frontmatter.session = Some(writer);
+            changed.push("session".to_owned());
+        }
+        _ => preserved.push("session".to_owned()),
+    }
 
     Ok((
         Page::new(project_id, path, frontmatter, body),
@@ -1182,6 +1200,51 @@ mod tests {
         for name in ["tier", "pinned", "canonical", "entities", "supersedes"] {
             assert!(patched.preserved.iter().any(|field| field == name));
         }
+    }
+
+    /// A page written before pages named their session names none, and the
+    /// writer that knows whose it is may say so once. A page that names its
+    /// session keeps it: the second patch below names another session and
+    /// changes nothing.
+    #[test]
+    fn a_patch_names_a_missing_session_and_never_replaces_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let wiki = Wiki::open(dir.path()).unwrap();
+        let page = sample("body");
+        assert_eq!(page.frontmatter.session, None);
+        wiki.create_page(&scope(), &page, "create").unwrap();
+        let patch = |session| {
+            let read = wiki.read_versioned_page(&scope(), &page.path).unwrap();
+            wiki.patch_page(
+                &scope(),
+                page.project_id,
+                &page.path,
+                &read.revision,
+                &PagePatch {
+                    session: Some(session),
+                    ..PagePatch::default()
+                },
+                "patch",
+            )
+            .unwrap()
+        };
+
+        let writer = anamnesis_core::ids::SessionId::new();
+        let named = patch(writer);
+        assert_eq!(named.page.frontmatter.session, Some(writer));
+        assert!(named.changed.iter().any(|field| field == "session"));
+
+        let kept = patch(anamnesis_core::ids::SessionId::new());
+        assert_eq!(kept.page.frontmatter.session, Some(writer));
+        assert!(kept.preserved.iter().any(|field| field == "session"));
+        assert_eq!(
+            wiki.read_page(&scope(), &page.path)
+                .unwrap()
+                .frontmatter
+                .session,
+            Some(writer),
+            "and the file on disk says the same"
+        );
     }
 
     #[test]
