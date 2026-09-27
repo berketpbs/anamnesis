@@ -734,6 +734,41 @@ capture event. MCP access and a successful `hook --probe` establish other
 parts of the connection, not that Codex has actually emitted an event. See
 [Codex's hook contract](https://developers.openai.com/codex/hooks).
 
+On Windows, if a console window flashes for every Codex prompt and tool call,
+the cause is Codex's shared app-server daemon, not the hooks. In Codex 0.157.1
+a terminal `codex` session starts that daemon and attaches to it by default
+(the `daemon_auto_start` feature). The daemon has no console of its own, so
+every child it starts — hook commands **and Codex's own shell commands** —
+opens a visible PowerShell console. The process tree is
+`codex.exe app-server --managed-daemon` → `powershell.exe -NoProfile -Command ...`;
+the Anamnesis command is only the argument to that PowerShell process.
+`-WindowStyle Hidden`, a hidden wrapper around `anamnesis.exe`, or removing one
+hook cannot hide the parent console. The upstream bug is
+[openai/codex#44768](https://github.com/openai/codex/issues/44768); the same
+session without the daemon opens no windows.
+
+To stop using the daemon for good:
+
+```powershell
+codex features disable daemon_auto_start   # daemon_auto_start = false in ~/.codex/config.toml
+```
+
+That only stops Codex from starting one. A terminal session still attaches to
+a daemon that is already running, so stop it as well. Close the terminal Codex
+sessions first — stopping the daemon from inside a session it serves cuts that
+session off — then run `codex app-server daemon stop`. If that does not
+return, stop the `codex.exe` processes under
+`~/.codex/packages/app-server-daemon/`. Start a new session and check a real
+prompt with `anamnesis status`. For a single session without changing the
+configuration, use `codex --no-daemon`, or `anamnesis run codex -- --no-daemon`
+when launching through Anamnesis. A Codex build older than the CLI, such as the
+one bundled with the VS Code extension, may warn that `daemon_auto_start` is an
+unknown feature key; it ignores the key and carries on.
+
+Do not disable `PreToolUse` or `PostToolUse` merely to reduce the flashes:
+those events preserve failed attempts and tool results, and Codex's own shell
+commands would still open windows.
+
 All five capture the same five moments and one server captures all of them,
 though each spells the events its own way, Cursor names its fields its own way,
 and Gemini CLI and Cursor both want their answers as JSON. Hooks are read when a session starts, so the session you run this from
@@ -1276,6 +1311,11 @@ not, queries carry on without the vector stream and a page written meanwhile
 records an embedding failure that `anamnesis doctor` reports. So start Ollama
 with whatever keeps the server running — before it, in the same script — rather
 than from a terminal that will be closed.
+
+When Ollama answers again, the running Anamnesis server retries those pages in
+batches of 20 on its minute pass; it does not need a restart or `reindex` to
+fill the missing vectors. `anamnesis doctor` shows how many remain. Use
+`anamnesis reindex` only when an immediate full rebuild is wanted.
 
 Two places need these variables, not one: the **server's** environment, and
 the MCP registration, since the agent's `memory_query` embeds the question in
