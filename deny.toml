@@ -1,0 +1,44 @@
+# What `cargo deny check` holds every dependency in Cargo.lock to. CI runs it
+# on every change; run it locally with `cargo deny check`.
+
+[advisories]
+ignore = [
+    # `paste` is archived. It comes in through candle's gemm crates and
+    # tokenizers, which the local embedder is built on, and no release of
+    # either has left it yet. It is a proc-macro, run at build time only.
+    # Remove this once candle and tokenizers drop it.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained proc-macro under candle and tokenizers, no alternative upstream yet" },
+]
+
+[licenses]
+# Licenses that let the binaries ship under MIT. Anything new has to be
+# added here on purpose.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    # notify, the wiki watcher: a public-domain dedication.
+    "CC0-1.0",
+    # option-ext, under dirs: file-level copyleft, and it is used unmodified.
+    "MPL-2.0",
+    # webpki-roots: the Mozilla root certificates, as data.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Duplicate versions are common in a tree this size and cost build time, not
+# correctness, so they are allowed. A wildcard version is not.
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+# crates.io only. A git dependency would have to be allowed here by name.
+unknown-registry = "deny"
+unknown-git = "deny"
