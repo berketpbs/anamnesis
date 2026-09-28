@@ -310,6 +310,42 @@ jobs:
           & "$env:ANAMNESIS_INSTALL_DIR\anamnesis.exe" --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+  # The oldest systems the Linux binary claims. v1.1.0 started on the runner
+  # that built it and nowhere older, and the release workflow now reads the
+  # glibc a binary asks for; this is the other half, starting it on each system
+  # the floor is meant to cover, from the install script as a reader runs it.
+  # RHEL 9's glibc is the floor, so Rocky Linux 9 is the one that fails first.
+  install-oldest:
+    name: install (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["rockylinux:9", "debian:12", "ubuntu:22.04"]
+    steps:
+      - uses: actions/checkout@v5
+
+      # These images leave out what a desktop install has: curl on Debian and
+      # Ubuntu, tar on Rocky.
+      - name: What the script needs
+        run: |
+          if command -v dnf > /dev/null; then
+            dnf install -y --setopt=install_weak_deps=False tar gzip
+          else
+            apt-get update
+            apt-get install -y --no-install-recommends curl ca-certificates
+          fi
+
+      - name: Install, then install over it
+        env:
+          ANAMNESIS_INSTALL_DIR: /usr/local/bin
+        run: |
+          sh < install.sh
+          sh < install.sh
+          anamnesis --version
+          ldd --version | head -1
+
   # The manifests in HomebrewFormula/ and bucket/ are checked the way the
   # install scripts are: by the package manager a reader would use, installing
   # from this checkout as a tap or a bucket. A formula that parses and names a
