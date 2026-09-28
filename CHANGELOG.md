@@ -600,6 +600,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trust review and the need to verify capture in a fresh session.
 
 ### Security
+- **rustls 0.23.45** (RUSTSEC-2026-0285). rustls 0.23.43, the TLS behind
+  every HTTPS request anamnesis makes (to a model provider, a remote
+  embedder, or a server over TLS), accepted TLS 1.3 handshake messages sent
+  at the wrong encryption level. The transcript is still authenticated, so
+  the advisory rates it as letting a peer send in plaintext what should have
+  been encrypted, not as a way to alter a handshake. Only `rustls` moved in
+  `Cargo.lock`.
 - **A password typed on a command line was stored whole.** Redaction knew
   provider keys by their prefix and any other value by the `=` or `:` in front
   of it, and a shell command — most of what a tool call records — has neither:
