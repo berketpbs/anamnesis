@@ -99,6 +99,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Transcripts are still never rewritten.
 
 ### Added
+- **A bug report asks for what answers it.** New issues open on a form that
+  asks for `anamnesis --version`, the harness, how it was installed, the
+  operating system, and the output of `anamnesis status` and
+  `anamnesis doctor`, which between them say what is installed and whether
+  anything is being recorded. A secret that got past redaction is sent to the
+  private security report instead.
 - **The install script is tried on the oldest systems the Linux binary
   claims.** The release workflow reads the glibc a binary asks for and holds
   it at 2.34, but nothing had started the binary on a system at that floor.
