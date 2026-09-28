@@ -99,6 +99,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Transcripts are still never rewritten.
 
 ### Added
+- **Every dependency is checked against the RustSec advisories and a license
+  list.** CI runs `cargo deny check` with `deny.toml`: advisories, licenses the
+  binaries can ship with under MIT, and crates.io as the only source. Its
+  first run found rustls 0.23.43 (see Security). It also found `paste`, which
+  is unmaintained and comes in through candle and tokenizers with nothing to
+  replace it upstream yet; it is ignored by name, with the reason.
 - **Transcripts that have gone quiet are compressed, with every line kept.**
   The raw spool is the one part of memory that only grows: every observation
   is kept for good, because it is what the index is rebuilt from. After a
