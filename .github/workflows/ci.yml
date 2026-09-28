@@ -422,3 +422,19 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+
+  # The release builds for macOS and the install and package jobs start the
+  # binary there, but no test had run on it. It is where the service is a
+  # launchd agent rather than a scheduled task or a systemd unit, where the
+  # default file system ignores case, and where the data directory sits under
+  # a path with a space in it.
+  macos:
+    name: build (macos)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos
+      - run: cargo test --workspace
+
