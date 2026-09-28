@@ -99,6 +99,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Transcripts are still never rewritten.
 
 ### Added
+- **The install script is tried on the oldest systems the Linux binary
+  claims.** The release workflow reads the glibc a binary asks for and holds
+  it at 2.34, but nothing had started the binary on a system at that floor.
+  CI now runs `install.sh` twice in Rocky Linux 9 (glibc 2.34, the floor),
+  Debian 12 and Ubuntu 22.04 containers, the way a reader runs it, and
+  starts what it installed.
 - **Dependencies are proposed for update every week.** Dependabot opens one
   grouped pull request a week for minor and patch releases of the crates in
   `Cargo.lock`, one for each new major version, and one for the actions the
