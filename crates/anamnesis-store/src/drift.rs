@@ -21,6 +21,7 @@
 use std::collections::BTreeMap;
 
 use anamnesis_core::ids::ProjectId;
+use anamnesis_core::page::document_body;
 use rusqlite::params;
 use rusqlite::types::Value;
 
@@ -76,10 +77,12 @@ impl Drift {
 ///
 /// Every query takes the project as `?1` and returns the key first, a label a
 /// person can find the row by second, and then the compared columns in the
-/// order `columns` names them.
+/// order `columns` names them. A column in `documents` holds a page body, and
+/// is compared as the page's file keeps it.
 struct Rows {
     sql: &'static str,
     columns: &'static [&'static str],
+    documents: &'static [&'static str],
 }
 
 const PAGES: Rows = Rows {
@@ -103,6 +106,11 @@ const PAGES: Rows = Rows {
         "session_id",
         "origin",
     ],
+    // The index holds a page's body as it was written, a rebuild as its file
+    // gives it back: a final newline added, leading whitespace gone. Compared
+    // raw, every page written without a final newline was drift, and
+    // `write-page` indexes the body it was given, which seldom ends in one.
+    documents: &["body"],
 };
 
 // Entity ids are integers each database hands out in its own order, so the
@@ -114,6 +122,7 @@ const ENTITIES: Rows = Rows {
           JOIN pages p ON p.id = pe.page_id
           WHERE p.project_id = ?1",
     columns: &[],
+    documents: &[],
 };
 
 const LINKS: Rows = Rows {
@@ -123,6 +132,7 @@ const LINKS: Rows = Rows {
           JOIN pages p ON p.id = l.from_page_id
           WHERE p.project_id = ?1",
     columns: &["to_page_id", "to_project_id"],
+    documents: &[],
 };
 
 // Joined through sessions because an observation names its session, not its
@@ -148,6 +158,7 @@ const OBSERVATIONS: Rows = Rows {
         "truncated",
         "sanitized",
     ],
+    documents: &[],
 };
 
 /// A row as read: its label, and its compared columns in order.
@@ -215,8 +226,19 @@ impl Store {
         let found = statement.query_map(params![project.to_string()], |row| {
             let key: String = row.get(0)?;
             let label: String = row.get(1)?;
-            let values = (0..rows.columns.len())
-                .map(|index| row.get::<_, Value>(index + 2))
+            let values = rows
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(index, column)| {
+                    let value = row.get::<_, Value>(index + 2)?;
+                    Ok(match value {
+                        Value::Text(text) if rows.documents.contains(column) => {
+                            Value::Text(document_body(&text).into_owned())
+                        }
+                        value => value,
+                    })
+                })
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok((key, (label, values)))
         })?;
@@ -382,6 +404,31 @@ mod tests {
             drift.pages.differing,
             [("decisions/a.md".to_owned(), vec!["body"])]
         );
+    }
+
+    /// The index holds the body a page was written with and a rebuild the
+    /// one its file gives back, with a final newline. Found by starting this
+    /// build on memory a release wrote: its `write-page` pages, and this
+    /// build's, were every one of them reported as drift.
+    #[test]
+    fn a_body_differing_only_as_its_file_keeps_it_is_not_drift() {
+        let pair = pair();
+        pair.live
+            .upsert_page(&page(pair.project, "decisions/b.md", "Keep SQLite."), now())
+            .expect("live");
+        pair.rebuilt
+            .upsert_page(
+                &page(pair.project, "decisions/b.md", "Keep SQLite.\n"),
+                now(),
+            )
+            .expect("rebuilt");
+
+        let drift = pair
+            .live
+            .drift_from(&pair.rebuilt, pair.project)
+            .expect("drift");
+
+        assert!(drift.is_empty(), "{drift:?}");
     }
 
     /// Entity ids are numbered by each database in its own order; two

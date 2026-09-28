@@ -578,6 +578,24 @@ pub struct Page {
     pub git_commit: Option<String>,
 }
 
+/// A page body as the page's file keeps it.
+///
+/// A page is written as its frontmatter, a blank line and its body, with the
+/// body's leading whitespace dropped and a final newline added when it has
+/// none, so the file gives back this rather than the body that was written:
+/// `write-page --body "Keep SQLite."` reads back as `"Keep SQLite.\n"`.
+/// Whatever compares a body the index holds with one read from the wiki
+/// compares this form of both, or every page written without a final newline
+/// looks changed to a rebuild.
+pub fn document_body(body: &str) -> std::borrow::Cow<'_, str> {
+    let body = body.trim_start();
+    if body.is_empty() || body.ends_with('\n') {
+        std::borrow::Cow::Borrowed(body)
+    } else {
+        std::borrow::Cow::Owned(format!("{body}\n"))
+    }
+}
+
 impl Page {
     /// Assemble a page, deriving its identifier from project and path.
     pub fn new(
