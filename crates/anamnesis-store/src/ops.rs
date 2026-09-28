@@ -11,7 +11,7 @@ use anamnesis_core::embedding::{Embed, MAX_SECTIONS, Overflow, page_sections, pa
 use anamnesis_core::handoff::{Handoff, HandoffState, Slot};
 use anamnesis_core::ids::{HandoffId, ObservationId, PageId, ProjectId, SessionId, WorkstreamId};
 use anamnesis_core::observation::{BoundedBody, EventKind, Observation, ToolRef};
-use anamnesis_core::page::{Page, PagePath};
+use anamnesis_core::page::{Page, PagePath, document_body};
 use anamnesis_core::session::{AgentKind, Session, SessionState};
 use jiff::Timestamp;
 use rusqlite::{OptionalExtension, Row, params};
@@ -1582,8 +1582,10 @@ impl Store {
     /// as "when the page was last written", so writing it back would renew a
     /// page nobody edited, and a wiki that watched itself would never decay.
     ///
-    /// Compares every column an author can change from the markdown. `false`
-    /// for a page the index has never seen.
+    /// Compares every column an author can change from the markdown, the body
+    /// as its file keeps it: a page written without a final newline reads back
+    /// with one, and that is not an edit. `false` for a page the index has
+    /// never seen.
     pub fn page_is_current(&self, page: &Page) -> Result<bool> {
         let fm = &page.frontmatter;
         let conn = self.connection();
@@ -1636,11 +1638,20 @@ impl Store {
         };
 
         Ok((
-            title, body, tier, status, pinned, canonical, salience, expires, target, session,
+            title,
+            document_body(&body),
+            tier,
+            status,
+            pinned,
+            canonical,
+            salience,
+            expires,
+            target,
+            session,
             origin,
         ) == (
             fm.title.clone(),
-            page.body.clone(),
+            document_body(&page.body),
             fm.tier.as_str().to_owned(),
             fm.status.as_str().to_owned(),
             fm.pinned,
@@ -4555,6 +4566,32 @@ mod tests {
         let (_dir, store, project, _workspace) = fixture();
         let page = write_page(&store, project, "a.md", None);
         assert!(store.page_is_current(&page).expect("check"));
+    }
+
+    /// `write-page --body "Keep SQLite."` indexes the body it was given and
+    /// writes a file that reads back with a final newline. The page is the
+    /// same page; read as edited, every rebuild rewrote it and renewed the
+    /// clock the sweep decays it by. Either side can be the one without the
+    /// newline: the index holds the file's form once a rebuild has written it.
+    #[test]
+    fn a_page_differing_only_by_the_newline_its_file_adds_is_current() {
+        let (_dir, store, project, _workspace) = fixture();
+        let page = write_page(&store, project, "a.md", None);
+        for (indexed, compared) in [
+            ("Keep SQLite.", "Keep SQLite.\n"),
+            ("Keep SQLite.\n", "Keep SQLite."),
+        ] {
+            let mut stored = page.clone();
+            stored.body = indexed.to_owned();
+            store.upsert_page(&stored, now()).expect("upsert");
+
+            let mut other = page.clone();
+            other.body = compared.to_owned();
+            assert!(
+                store.page_is_current(&other).expect("check"),
+                "{indexed:?} indexed, {compared:?} compared"
+            );
+        }
     }
 
     /// One thing an author could change in a page's markdown, by name.

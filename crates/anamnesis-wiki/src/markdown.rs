@@ -11,7 +11,7 @@
 //! We chose SQLite because the index is rebuildable.
 //! ```
 
-use anamnesis_core::page::Frontmatter;
+use anamnesis_core::page::{Frontmatter, document_body};
 
 use crate::{Result, WikiError};
 
@@ -43,10 +43,7 @@ pub fn render_document(frontmatter: &Frontmatter, body: &str) -> Result<String> 
     }
     out.push_str(FENCE);
     out.push_str("\n\n");
-    out.push_str(body.trim_start());
-    if !out.ends_with('\n') {
-        out.push('\n');
-    }
+    out.push_str(&document_body(body));
     Ok(out)
 }
 
@@ -152,6 +149,26 @@ mod tests {
         assert!(parsed.frontmatter.pinned);
         assert_eq!(parsed.frontmatter.entities.len(), 2);
         assert_eq!(parsed.body.trim(), "Body text here.");
+    }
+
+    /// What `document_body` says a file gives back is what it gives back,
+    /// for the bodies whose shape the format changes and for those it keeps.
+    /// The index compares bodies in this form; if the two ever disagreed,
+    /// every page of that shape would look edited to a rebuild.
+    #[test]
+    fn a_body_reads_back_as_document_body_says() {
+        for body in [
+            "Keep SQLite.",
+            "Keep SQLite.\n",
+            "\n\n  Keep SQLite.",
+            "Keep SQLite.\n\n",
+            "",
+            "   ",
+        ] {
+            let text = render_document(&frontmatter(), body).unwrap();
+            let parsed = parse_document("decisions/x.md", &text).unwrap();
+            assert_eq!(parsed.body, document_body(body), "{body:?}");
+        }
     }
 
     #[test]
