@@ -99,6 +99,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Transcripts are still never rewritten.
 
 ### Added
+- **The tests run on macOS.** Releases are built for macOS, and the install
+  and package jobs start the binary there, but the test suite ran only on
+  Linux and Windows. macOS is where the service is a launchd agent, where the
+  default file system ignores case, and where the data directory's path has
+  a space in it. CI now runs `cargo test --workspace` there too.
 - **Every dependency is checked against the RustSec advisories and a license
   list.** CI runs `cargo deny check` with `deny.toml`: advisories, licenses the
   binaries can ship with under MIT, and crates.io as the only source. Its
