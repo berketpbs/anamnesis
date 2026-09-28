@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **`reindex --check` no longer reports a page as drift because its file
+  added a final newline.** A page is written as its frontmatter, a blank line
+  and its body, and the body gains a final newline when it has none, so the
+  file reads back as `Keep SQLite.\n` when `write-page --body "Keep SQLite."`
+  indexed `Keep SQLite.`. The check compared the two raw, so every such page
+  was drift — found by starting this build on a data directory 1.0.0, 1.1.0
+  or 1.1.1 wrote, where the one page written with `write-page` failed the
+  check, and the same happens to a page written with this build. `reindex`
+  and the wiki watcher read the same difference as an edit, and rewrote such
+  a page once, renewing the clock the sweep decays it by. A body is now compared as its
+  file keeps it — a final newline added, leading whitespace gone — on both
+  sides, and nothing stored changes.
 - **A session page written before pages named their session names it once
   it is rewritten.** Pages have recorded the session that wrote them since
   #150, and a page from before that names none, which reads as a page a
