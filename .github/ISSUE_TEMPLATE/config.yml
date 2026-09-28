@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Getting started
+    url: https://github.com/berketpbs/anamnesis/blob/main/docs/GETTING_STARTED.md
+    about: Installation, setup for each harness, models, and keeping the server running
