@@ -1,0 +1,74 @@
+name: Something does not work
+description: Capture, handoff, recall, search or setup behaves differently from what the docs say
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A secret that got past redaction, or anything else that exposes stored memory, is a security report: use **Security → Report a vulnerability** instead of this form.
+
+        Paste command output as it is, but look through it first. It can contain paths and prompt text.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+      description: The command or agent action, what it did, and what you expected it to do.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. anamnesis setup --write
+        2. start Claude Code, ask …
+        3. …
+  - type: input
+    id: version
+    attributes:
+      label: anamnesis --version
+      placeholder: anamnesis 1.2.1 (abc1234)
+    validations:
+      required: true
+  - type: dropdown
+    id: harness
+    attributes:
+      label: Agent harness
+      multiple: true
+      options:
+        - Claude Code
+        - Codex CLI
+        - Gemini CLI
+        - Cursor
+        - OpenCode
+        - None (CLI or MCP only)
+  - type: dropdown
+    id: install
+    attributes:
+      label: Installed with
+      options:
+        - install.sh / install.ps1
+        - Homebrew
+        - Scoop
+        - cargo binstall
+        - Docker image
+        - Built from source
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: Windows 11, macOS 15, Ubuntu 24.04 …
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: anamnesis status
+      description: Run it inside the project.
+      render: text
+  - type: textarea
+    id: doctor
+    attributes:
+      label: anamnesis doctor
+      description: Run it inside the project. It says why memory is thinner than the work that went into it.
+      render: text
