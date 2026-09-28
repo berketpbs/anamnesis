@@ -1,0 +1,30 @@
+# Dependencies move whether or not anybody looks: an advisory against a crate
+# in Cargo.lock, or an action pinned to a major version that GitHub retires.
+# Weekly and grouped, so each ecosystem is one pull request a week that CI
+# either passes or does not, rather than a stream of them.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      # Minor and patch releases together; a new major version gets its own
+      # pull request, because it is the one that can need code changed.
+      cargo:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: "deps"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
