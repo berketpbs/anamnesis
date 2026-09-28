@@ -99,6 +99,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Transcripts are still never rewritten.
 
 ### Added
+- **Dependencies are proposed for update every week.** Dependabot opens one
+  grouped pull request a week for minor and patch releases of the crates in
+  `Cargo.lock`, one for each new major version, and one for the actions the
+  workflows use. Each goes through CI like any other change. Until now a
+  dependency moved only when somebody remembered it.
 - **The tests run on macOS.** Releases are built for macOS, and the install
   and package jobs start the binary there, but the test suite ran only on
   Linux and Windows. macOS is where the service is a launchd agent, where the
