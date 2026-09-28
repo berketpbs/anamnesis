@@ -409,3 +409,16 @@ jobs:
         with:
           key: windows
       - run: cargo test --workspace
+
+  # Every dependency in Cargo.lock against the RustSec advisory database, the
+  # licenses the binaries can ship with, and crates.io as the only source
+  # (deny.toml says which and why). The first run found rustls 0.23.43 behind
+  # every HTTPS request, with an advisory against it.
+  deny:
+    name: dependencies (cargo deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
