@@ -111,6 +111,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Transcripts are still never rewritten.
 
 ### Added
+- **A release page says what the release changed.** Every release so far
+  carried one fixed sentence ending "What changed is in CHANGELOG.md", so the
+  page a person lands on from the install script told them nothing about
+  this release. The release workflow now takes the version's section from
+  `CHANGELOG.md` for the notes (a release candidate takes the section of the
+  version it is a candidate for). It fails before publishing when there is no
+  such section, since changes here have been merged before their changelog
+  entry was written. A dispatched run extracts the section too.
 - **A tag with a hyphen is published as a release candidate.** Pushing
   `v1.2.1-rc.1` used to publish exactly what `v1.2.1` would: the release
   marked latest, the image's `latest` tag moved to it, and a `packaging/`
