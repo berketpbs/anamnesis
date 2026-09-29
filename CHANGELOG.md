@@ -450,6 +450,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI as a test, so a change that makes recall chatty fails there.
 
 ### Changed
+- **Getting started keeps the hand-written service for an appendix.** The
+  quick start's server step carried nearly 150 lines of Task Scheduler scripts, a
+  VBS launcher, a systemd unit and a launchd note, written before
+  `anamnesis service install` did all of it. They now sit in *Appendix: the
+  service by hand*, with a line saying the command's Windows task uses
+  `conhost.exe --headless` instead of either route there. The step itself
+  keeps the four settings that matter and the command. Installing from a
+  release also says what a browser download of an unsigned binary runs into
+  on Windows and macOS, and how to clear it.
 - **A note is what the person settled, and a new one retires the page it
   replaces.** Consolidation is now told that options the agent listed, or a
   change it proposed, are a decision only once the person chose or accepted
