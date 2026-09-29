@@ -111,6 +111,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Transcripts are still never rewritten.
 
 ### Added
+- **A Linux arm64 binary.** Releases were built for x86-64 Linux, both
+  macOS architectures and Windows. Graviton and Ampere servers, a Raspberry
+  Pi on a 64-bit system and Linux on Apple silicon had to build from source,
+  though the Docker image has been published for `linux/arm64` all along.
+  `aarch64-unknown-linux-gnu` is now built on the Ubuntu 22.04 arm runner
+  and held to the same glibc 2.34 floor as x86-64. `install.sh` takes it,
+  and the Homebrew formula names it once a release's `SHA256SUMS` lists it,
+  so rendering an older release still gives the formula it was published
+  with.
 - **CI upgrades memory that every published release wrote.** Every migration
   was tested against the schema just before it, and nothing started from a
   directory a release actually wrote. The upgrade was only tried by hand, on

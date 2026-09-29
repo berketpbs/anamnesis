@@ -80,7 +80,7 @@ esac
 
 target="$arch-$os"
 case "$target" in
-    x86_64-unknown-linux-gnu | aarch64-apple-darwin | x86_64-apple-darwin) ;;
+    x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu | aarch64-apple-darwin | x86_64-apple-darwin) ;;
     *) fail "no release is built for $target; build from source with cargo build --release" ;;
 esac
 
