@@ -474,3 +474,62 @@ jobs:
           key: macos
       - run: cargo test --workspace
 
+  # Every migration is tested against the schema just before it, and none
+  # against a directory a release actually wrote: its transcripts, its wiki, a
+  # note still waiting for the next session. So each published release is
+  # downloaded, records a session and a decision, and this checkout's binary is
+  # started on what it left — the path every upgrade takes, and until now one
+  # only ever taken by hand, on a copy of a backup, before replacing a binary.
+  upgrade:
+    name: upgrade from releases (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: upgrade
+      - name: Download every published release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Listed rather than named, so a release is an upgrade source from
+          # the day it is published without anybody editing this file.
+          tags=$(gh release list --repo "$GITHUB_REPOSITORY" \
+            --exclude-pre-releases --exclude-drafts --limit 100 \
+            --json tagName --jq '.[].tagName')
+          # Bash walks the directories in its own spelling of the path; the
+          # test is a Windows program there, and is handed Windows paths.
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            sep=';'; exe=.exe; root="$(cygpath -u "$RUNNER_TEMP")/releases"
+          else
+            sep=':'; exe=; root="$RUNNER_TEMP/releases"
+          fi
+          named=""
+          for tag in $tags; do
+            name="anamnesis-$tag-${{ matrix.target }}"
+            mkdir -p "$root/$tag"
+            cd "$root/$tag"
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$name.*"
+            if [[ "$RUNNER_OS" == "Windows" ]]; then
+              7z x "$name.zip" > /dev/null
+            else
+              tar -xzf "$name.tar.gz"
+            fi
+            binary="$PWD/$name/anamnesis$exe"
+            "$binary" --version
+            if [[ "$RUNNER_OS" == "Windows" ]]; then binary="$(cygpath -w "$binary")"; fi
+            named="${named:+$named$sep}$binary"
+          done
+          echo "ANAMNESIS_UPGRADE_FROM=$named" >> "$GITHUB_ENV"
+      - run: cargo test -p anamnesis-cli --test upgrade_from_a_release -- --ignored
+

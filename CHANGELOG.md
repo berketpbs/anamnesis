@@ -111,6 +111,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Transcripts are still never rewritten.
 
 ### Added
+- **CI upgrades memory that every published release wrote.** Every migration
+  was tested against the schema just before it, and nothing started from a
+  directory a release actually wrote. The upgrade was only tried by hand, on
+  a copy of a backup, before a binary was replaced. The `upgrade` job now
+  downloads each published release, on Linux and Windows. The release
+  records a session and writes a decision, and this build's server is
+  started on the directory it left. The next session has to be handed the
+  release's note, `search` has to find the decision, `doctor` has to pass,
+  and `reindex --check` has to find the migrated index equal to a rebuild
+  from the wiki and the transcripts. Releases are listed rather than named,
+  so each one becomes an upgrade source when it is published. Its first run
+  found the `reindex --check` false positive fixed above. 1.0.0's banner
+  names the port it was asked for, not the one it bound, so the test picks
+  the port itself.
 - **`SECURITY.md` says what is kept, what leaves the machine, and where to
   report a problem.** Anamnesis holds prompts, tool calls and their output,
   and until now nothing in the repository said where those go. The page lists
