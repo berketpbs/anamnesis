@@ -375,6 +375,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # For the provenance attestation below: a token GitHub's signing service
+      # accepts, and the right to store what it signs.
+      id-token: write
+      attestations: write
     steps:
       # Only the release archives. This run also carries image digests and a
       # build record per image job, and asking for all of them made publishing
@@ -397,6 +401,18 @@ jobs:
           cat *.sha256 > SHA256SUMS
           rm -f *.sha256
           ls -la
+
+      # SHA256SUMS says an archive is the one the release lists; it cannot say
+      # who built it, since whoever could replace an archive could replace the
+      # sums beside it. This signs each archive's digest together with the
+      # workflow, commit and tag that built it, through GitHub's own signing
+      # service, and `gh attestation verify <archive> --repo berketpbs/anamnesis`
+      # checks it on any machine. No key is kept here, and it costs nothing.
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
 
       - name: Publish the release
         env:
