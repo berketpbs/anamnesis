@@ -465,6 +465,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI as a test, so a change that makes recall chatty fails there.
 
 ### Changed
+- **The README says what anamnesis is before listing what it does.** It
+  opens on the problem — every agent session starts from nothing, and
+  switching agents loses it again — and on the answer: one shared memory
+  that every agent on a project reads and writes, as markdown under git, on
+  your machine. Then how it works (capture, consolidate, deliver) with a
+  diagram, a four-step quick start, a table of what each agent receives
+  (recall at each prompt reaches Claude Code, Codex and Gemini CLI, and not
+  Cursor or OpenCode, which give a hook no way into a prompt), the
+  twenty-five-line feature list regrouped by what it is for, a status section
+  that says what is and is not yet shown, platforms and verification,
+  security, and an index of the docs. The crate list moved to Development.
 - **Getting started keeps the hand-written service for an appendix.** The
   quick start's server step carried nearly 150 lines of Task Scheduler scripts, a
   VBS launcher, a systemd unit and a launchd note, written before
