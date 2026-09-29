@@ -111,6 +111,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Transcripts are still never rewritten.
 
 ### Added
+- **Release archives carry a signed record of what built them.** `SHA256SUMS`
+  shows that an archive is the one the release lists. It cannot show who
+  built it, because whoever could replace an archive could replace the sums
+  too. Each archive now gets a build provenance attestation, signed by
+  GitHub's signing service, naming the workflow, commit and tag that built
+  it. Check one with
+  `gh attestation verify anamnesis-v1.2.1-x86_64-unknown-linux-gnu.tar.gz --repo berketpbs/anamnesis`.
 - **A release page says what the release changed.** Every release so far
   carried one fixed sentence ending "What changed is in CHANGELOG.md", so the
   page a person lands on from the install script told them nothing about
