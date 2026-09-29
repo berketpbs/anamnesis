@@ -68,6 +68,21 @@ mac_intel=$(hash_of x86_64-apple-darwin tar.gz)
 linux=$(hash_of x86_64-unknown-linux-gnu tar.gz)
 windows=$(hash_of x86_64-pc-windows-msvc zip)
 
+# Linux arm64 has been built since 1.2.1, and the releases before it have no
+# archive for it. So the formula names one only when the sums list it, and
+# rendering an older release still produces the formula it was published with.
+linux_arm_archive="anamnesis-$tag-aarch64-unknown-linux-gnu.tar.gz"
+if awk -v name="$linux_arm_archive" '{ file = $2; sub(/^\*/, "", file); if (file == name) found = 1 } END { exit !found }' "$sums"; then
+    linux_arm=$(hash_of aarch64-unknown-linux-gnu tar.gz)
+    linux_arm_block="      url \"$base/$linux_arm_archive\"
+      sha256 \"$linux_arm\""
+else
+    linux_arm_block="      # No Linux arm64 build is published. Without this the formula simply has
+      # no url on such a machine, and brew fails on the missing url rather than
+      # on the reason for it.
+      depends_on arch: :x86_64"
+fi
+
 mkdir -p "$out/HomebrewFormula" "$out/bucket"
 
 cat > "$out/HomebrewFormula/anamnesis.rb" <<EOF
@@ -100,10 +115,7 @@ class Anamnesis < Formula
 
   on_linux do
     on_arm do
-      # No Linux arm64 build is published. Without this the formula simply has
-      # no url on such a machine, and brew fails on the missing url rather than
-      # on the reason for it.
-      depends_on arch: :x86_64
+$linux_arm_block
     end
     on_intel do
       url "$base/anamnesis-$tag-x86_64-unknown-linux-gnu.tar.gz"
