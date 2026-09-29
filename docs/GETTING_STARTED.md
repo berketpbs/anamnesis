@@ -50,12 +50,14 @@ Debian 12) and the Windows binary needs nothing Windows does not ship. v1.1.0
 and v1.0.0 were built on the newest runners: their Linux binary needs glibc
 2.39 (Ubuntu 24.04, Debian 13) and their Windows binary the Microsoft Visual
 C++ Redistributable, so pinning `ANAMNESIS_VERSION` to either on a machine
-without them stops at the check above, which says so.
+without them stops at the check above, which says so. Linux on arm64 (Graviton,
+Ampere, a 64-bit Raspberry Pi) has a binary from v1.2.1 on, with the same glibc
+floor.
 
 ### With a package manager
 
 ```bash
-# Homebrew, on macOS or Linux (x86-64)
+# Homebrew, on macOS or Linux (x86-64, and arm64 from v1.2.1)
 brew tap berketpbs/anamnesis https://github.com/berketpbs/anamnesis
 brew install berketpbs/anamnesis/anamnesis
 ```
@@ -87,7 +89,7 @@ binary leaves behind.
 
 Every tagged version has binaries attached to it on the
 [releases page](https://github.com/berketpbs/anamnesis/releases): Linux
-(x86-64), macOS (Intel and Apple silicon) and Windows. Each archive holds the
+(x86-64, and arm64 from v1.2.1), macOS (Intel and Apple silicon) and Windows. Each archive holds the
 binary, the README, the licence and the changelog, and every release carries a
 `SHA256SUMS` file — a release nobody can verify is a release nobody should run.
 

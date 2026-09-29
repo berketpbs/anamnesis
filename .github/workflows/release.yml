@@ -38,6 +38,14 @@ jobs:
             target: x86_64-unknown-linux-gnu
             archive: tar.gz
             native: true
+          # The same floor on arm64: Graviton and Ampere servers, a Raspberry
+          # Pi 4 or 5 on a 64-bit OS, and Linux on Apple silicon. Built on the
+          # 22.04 arm runner for the reason above, and held to the same glibc
+          # by the same check.
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+            native: true
           - os: macos-latest
             target: aarch64-apple-darwin
             archive: tar.gz
