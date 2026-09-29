@@ -306,9 +306,13 @@ jobs:
           version="${GITHUB_REF#refs/tags/}"
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
           cd digests
-          docker buildx imagetools create \
-            --tag "$image:$version" \
-            --tag "$image:latest" \
+          tags=(--tag "$image:$version")
+          # A release candidate is for whoever names it. `latest` stays on the
+          # last release, which is what `docker pull` without a tag promises.
+          if [[ "$version" != *-* ]]; then
+            tags+=(--tag "$image:latest")
+          fi
+          docker buildx imagetools create "${tags[@]}" \
             $(printf "$image@sha256:%s " *)
           docker buildx imagetools inspect "$image:$version"
 
@@ -343,11 +347,21 @@ jobs:
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
+        # A tag with a hyphen, such as v1.2.1-rc.1, is a release candidate and
+        # goes up as a prerelease. GitHub never points /releases/latest at a
+        # prerelease, and both install scripts follow that redirect, so a
+        # candidate is installed only by naming it in ANAMNESIS_VERSION.
         run: |
-          gh release create "${GITHUB_REF#refs/tags/}" \
+          tag="${GITHUB_REF#refs/tags/}"
+          prerelease=()
+          if [[ "$tag" == *-* ]]; then
+            prerelease=(--prerelease)
+          fi
+          gh release create "$tag" \
             --repo "$GITHUB_REPOSITORY" \
-            --title "${GITHUB_REF#refs/tags/}" \
+            --title "$tag" \
             --notes "Binaries for Linux, macOS (Intel and Apple silicon) and Windows. Verify with SHA256SUMS. What changed is in CHANGELOG.md." \
+            "${prerelease[@]}" \
             dist/*
 
   # The Homebrew formula and the Scoop manifest name one release's archives by
@@ -392,8 +406,11 @@ jobs:
           git diff --stat
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      # A release candidate's manifests are rendered, since that is part of
+      # rehearsing the release, but not pushed. `brew upgrade` and
+      # `scoop update` would otherwise install a candidate nobody asked for.
       - name: Push them for a pull request
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref, '-')
         run: |
           set -euo pipefail
           version="${{ steps.render.outputs.version }}"

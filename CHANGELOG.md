@@ -111,6 +111,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Transcripts are still never rewritten.
 
 ### Added
+- **A tag with a hyphen is published as a release candidate.** Pushing
+  `v1.2.1-rc.1` used to publish exactly what `v1.2.1` would: the release
+  marked latest, the image's `latest` tag moved to it, and a `packaging/`
+  branch for Homebrew and Scoop. Both install scripts follow
+  `/releases/latest`, so everyone installing that day would have got the
+  candidate. A hyphenated tag now goes up as a GitHub prerelease, which
+  `/releases/latest` never points at. Its image gets only its own tag, and its
+  manifests are rendered but not pushed. A candidate is installed by naming
+  it: `ANAMNESIS_VERSION=v1.2.1-rc.1`.
 - **A Linux arm64 binary.** Releases were built for x86-64 Linux, both
   macOS architectures and Windows. Graviton and Ampere servers, a Raspberry
   Pi on a 64-bit system and Linux on Apple silicon had to build from source,
