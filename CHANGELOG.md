@@ -111,6 +111,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Transcripts are still never rewritten.
 
 ### Added
+- **`SECURITY.md` says what is kept, what leaves the machine, and where to
+  report a problem.** Anamnesis holds prompts, tool calls and their output,
+  and until now nothing in the repository said where those go. The page lists
+  each directory of the data directory and what it holds. It says what is sent
+  to a model or a remote embedder, and that nothing is sent by default. It
+  lists what the built-in redaction rules recognise and what redaction does
+  not promise, what `forget`, `forget-session` and `purge` remove, and that
+  vulnerabilities are reported privately from the Security tab.
 - **A bug report asks for what answers it.** New issues open on a form that
   asks for `anamnesis --version`, the harness, how it was installed, the
   operating system, and the output of `anamnesis status` and
