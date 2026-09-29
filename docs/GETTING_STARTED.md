@@ -98,6 +98,15 @@ tar -xzf anamnesis-v1.2.1-x86_64-unknown-linux-gnu.tar.gz
 ./anamnesis-v1.2.1-x86_64-unknown-linux-gnu/anamnesis --version
 ```
 
+The binaries are not code-signed. An archive fetched by the install script,
+Homebrew, Scoop or `curl` runs as it is; one downloaded **in a browser** carries
+the mark that makes the system ask first:
+
+- **Windows**: SmartScreen says it protected your PC. *More info → Run anyway*,
+  or clear the mark with `Unblock-File .\anamnesis.exe`.
+- **macOS**: Gatekeeper refuses a binary from an unidentified developer.
+  Clear the mark with `xattr -d com.apple.quarantine ./anamnesis`.
+
 Put the binary where it will stay — on `PATH`, or beside the data directory —
 before wiring anything: hooks, the MCP registration and the service all name
 the binary by its path. Then `anamnesis setup` inside a repository.
@@ -560,151 +569,10 @@ started, and it says so.
 
 #### By hand
 
-What the command writes, and why each piece is there, for a machine where it
-cannot be run or a setup that needs something it does not do.
-
-**Windows.** Register it as a logon task for your own account:
-
-```powershell
-$exe = Join-Path $env:APPDATA 'anamnesis\bin\anamnesis.exe'
-
-# No wrapper around it: the principal below leaves the task no desktop for a
-# console to appear on, so the server is launched directly.
-$action = New-ScheduledTaskAction -Execute $exe -Argument 'serve'
-
-# Two triggers. The first covers the ordinary case. The second is what makes a
-# crash survivable: Task Scheduler's own "restart on failure" does **not**
-# cover the launched program exiting non-zero — killing the server leaves the
-# task in Ready with result 1 and nothing restarts it. A trigger that fires
-# every minute restarts a dead server and, with IgnoreNew below, does nothing
-# at all to a live one.
-#
-# No -RepetitionDuration: an absent <Duration> in the task XML means repeat
-# indefinitely. [TimeSpan]::MaxValue looks like the way to say that and is not
-# - it serialises to P99999999DT23H59M59S, which Task Scheduler rejects as out
-# of range, refusing the whole registration.
-$triggers = @(
-    (New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME),
-    (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
-        -RepetitionInterval (New-TimeSpan -Minutes 1))
-)
-
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
-    -DontStopIfGoingOnBatteries -DontStopOnIdleEnd -StartWhenAvailable `
-    -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
-
-# S4U — "run whether the user is logged on or not" — and this is the setting
-# most people arrive at this section looking for. A task registered without a
-# principal runs interactively, an interactive task has a desktop, and a task
-# with a desktop shows a console window every time it really launches
-# something. With the repeating trigger above that is not once: it is every
-# login and every recovery, each one a window that appears, prints the startup
-# banner, and goes. Hiding it does not work either — wrapping the action in
-# `powershell.exe -WindowStyle Hidden` still flashes, because the console
-# exists before PowerShell has started far enough to hide it. S4U gives the
-# task no desktop, so there is no window to hide.
-$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
-    -LogonType S4U -RunLevel Limited
-
-Register-ScheduledTask -TaskName 'Anamnesis Memory Server' `
-    -Action $action -Trigger $triggers -Settings $settings -Principal $principal -Force
-```
-
-S4U runs the task as you without storing your password, which needs the *log on
-as a batch job* right. If the registration is refused with a message about the
-logon type, that right is what is missing; granting it, or registering the task
-from the Task Scheduler UI with "run whether user is logged on or not" ticked,
-is the same thing by another route.
-
-On a machine where you are not an administrator the refusal is a bare
-`Access is denied`, and it is worth confirming that S4U is what was refused
-rather than the registration as a whole: the same task with
-`-LogonType Interactive` registers without elevation, so if that fails too the
-problem is somewhere else. Granting the right needs elevation either way. From
-an elevated PowerShell, registering the task above is enough — Task Scheduler
-grants the right as part of accepting an S4U principal.
-
-**Without elevation.** Interactive is the only principal left, and an
-interactive task has the desktop that produces the console window. What removes
-it is not hiding the window but never letting one be drawn:
-
-```powershell
-# serve-hidden.vbs, beside the binary
-$vbs = @'
-Dim shell, exe
-Set shell = CreateObject("WScript.Shell")
-exe = shell.ExpandEnvironmentStrings("%APPDATA%") & "\anamnesis\bin\anamnesis.exe"
-shell.Run """" & exe & """ serve", 0, True
-'@
-$vbs | Set-Content -Encoding ascii (Join-Path $env:APPDATA 'anamnesis\bin\serve-hidden.vbs')
-
-$action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\wscript.exe" `
-    -Argument "`"$(Join-Path $env:APPDATA 'anamnesis\bin\serve-hidden.vbs')`""
-$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
-    -LogonType Interactive -RunLevel Limited
-# $triggers and $settings exactly as above.
-```
-
-`wscript.exe` is a GUI-subsystem program, so no console is created for the task
-itself, and `Run`'s second argument — `0`, `SW_HIDE` — means the server's own
-console is created hidden rather than shown and then hidden. That is the
-difference from `powershell.exe -WindowStyle Hidden`, which flashes because the
-console exists before PowerShell has read its own arguments.
-
-The third argument is the one to get right. `True` means *wait*, and without it
-`wscript` returns immediately, the task drops to `Ready` while the server is
-still running, and the repeating trigger starts a **new** server every minute —
-`MultipleInstances IgnoreNew` only protects a task that is still running. It
-costs one extra process in the tree, and the crash-recovery behaviour is
-unchanged: when the server exits, `wscript` exits with it and the next
-repetition starts a fresh one.
-
-Point it at the copy under `%APPDATA%\anamnesis\bin\`, not at one in
-`target/`: Windows will not let `cargo build` overwrite a running executable.
-
-Then check what you registered rather than what you asked for. A failed
-`Register-ScheduledTask` leaves whatever was there before, and the next command
-in a script will happily describe *that*, which reads exactly like success:
-
-```powershell
-$task = Get-ScheduledTask -TaskName 'Anamnesis Memory Server'
-$task.Triggers | Select-Object @{n='type';e={$_.CimClass.CimClassName}},
-                               @{n='repeats';e={$_.Repetition.Interval}}
-$task.Settings.ExecutionTimeLimit   # PT0S, or it is killed in three days
-$task.Principal.LogonType          # S4U, or Interactive via the launcher above
-$task.Settings.MultipleInstances   # IgnoreNew, or the repetition stacks copies
-```
-
-Two triggers, one of them repeating, `PT0S`, and a principal that leaves the
-task no desktop to draw a window on. Killing the server
-should then bring it back within the repetition interval - measured at 50
-seconds here, and the restart is in `logs/`, where the next person can see that
-it happened. The stop before it is in there too, with the reason it stopped,
-whenever the server was asked to stop rather than killed outright: a process
-ended with `Stop-Process -Force` gets no say and leaves no line, which is
-itself worth knowing when reading a gap in the log.
-
-**Linux**, as a user unit in `~/.config/systemd/user/anamnesis.service`:
-
-```ini
-[Unit]
-Description=Anamnesis memory server
-
-[Service]
-ExecStart=%h/.local/bin/anamnesis serve
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-```
-
-Then `systemctl --user enable --now anamnesis`, and
-`loginctl enable-linger $USER` if it should survive logout.
-
-**macOS**, as a launchd agent in
-`~/Library/LaunchAgents/dev.anamnesis.server.plist`, with `RunAtLoad` and
-`KeepAlive` both true.
+For a machine where `anamnesis service install` cannot run, or a setup that
+needs something it does not do, the same service written out by hand, with the
+reason for each setting, is in
+[Appendix: the service by hand](#appendix-the-service-by-hand).
 
 Whichever it is, check it the way you would check anything else that claims to
 be running: `anamnesis status` names the server, says whether it answers, and
@@ -1773,6 +1641,156 @@ that `wiki/` and `raw/` do not already hold:
 rm <data_dir>/db/anamnesis.db
 anamnesis reindex
 ```
+
+## Appendix: the service by hand
+
+What `anamnesis service install` writes, and why each piece is there. The
+command is the way to do this; what follows is for a machine where it cannot be
+run. On Windows the command's task runs `conhost.exe --headless` rather than
+either route below, which keeps the window away without S4U or a launcher.
+
+**Windows.** Register it as a logon task for your own account:
+
+```powershell
+$exe = Join-Path $env:APPDATA 'anamnesis\bin\anamnesis.exe'
+
+# No wrapper around it: the principal below leaves the task no desktop for a
+# console to appear on, so the server is launched directly.
+$action = New-ScheduledTaskAction -Execute $exe -Argument 'serve'
+
+# Two triggers. The first covers the ordinary case. The second is what makes a
+# crash survivable: Task Scheduler's own "restart on failure" does **not**
+# cover the launched program exiting non-zero — killing the server leaves the
+# task in Ready with result 1 and nothing restarts it. A trigger that fires
+# every minute restarts a dead server and, with IgnoreNew below, does nothing
+# at all to a live one.
+#
+# No -RepetitionDuration: an absent <Duration> in the task XML means repeat
+# indefinitely. [TimeSpan]::MaxValue looks like the way to say that and is not
+# - it serialises to P99999999DT23H59M59S, which Task Scheduler rejects as out
+# of range, refusing the whole registration.
+$triggers = @(
+    (New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME),
+    (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
+        -RepetitionInterval (New-TimeSpan -Minutes 1))
+)
+
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries -DontStopOnIdleEnd -StartWhenAvailable `
+    -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+
+# S4U — "run whether the user is logged on or not" — and this is the setting
+# most people arrive at this section looking for. A task registered without a
+# principal runs interactively, an interactive task has a desktop, and a task
+# with a desktop shows a console window every time it really launches
+# something. With the repeating trigger above that is not once: it is every
+# login and every recovery, each one a window that appears, prints the startup
+# banner, and goes. Hiding it does not work either — wrapping the action in
+# `powershell.exe -WindowStyle Hidden` still flashes, because the console
+# exists before PowerShell has started far enough to hide it. S4U gives the
+# task no desktop, so there is no window to hide.
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
+    -LogonType S4U -RunLevel Limited
+
+Register-ScheduledTask -TaskName 'Anamnesis Memory Server' `
+    -Action $action -Trigger $triggers -Settings $settings -Principal $principal -Force
+```
+
+S4U runs the task as you without storing your password, which needs the *log on
+as a batch job* right. If the registration is refused with a message about the
+logon type, that right is what is missing; granting it, or registering the task
+from the Task Scheduler UI with "run whether user is logged on or not" ticked,
+is the same thing by another route.
+
+On a machine where you are not an administrator the refusal is a bare
+`Access is denied`, and it is worth confirming that S4U is what was refused
+rather than the registration as a whole: the same task with
+`-LogonType Interactive` registers without elevation, so if that fails too the
+problem is somewhere else. Granting the right needs elevation either way. From
+an elevated PowerShell, registering the task above is enough — Task Scheduler
+grants the right as part of accepting an S4U principal.
+
+**Without elevation.** Interactive is the only principal left, and an
+interactive task has the desktop that produces the console window. What removes
+it is not hiding the window but never letting one be drawn:
+
+```powershell
+# serve-hidden.vbs, beside the binary
+$vbs = @'
+Dim shell, exe
+Set shell = CreateObject("WScript.Shell")
+exe = shell.ExpandEnvironmentStrings("%APPDATA%") & "\anamnesis\bin\anamnesis.exe"
+shell.Run """" & exe & """ serve", 0, True
+'@
+$vbs | Set-Content -Encoding ascii (Join-Path $env:APPDATA 'anamnesis\bin\serve-hidden.vbs')
+
+$action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\wscript.exe" `
+    -Argument "`"$(Join-Path $env:APPDATA 'anamnesis\bin\serve-hidden.vbs')`""
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
+    -LogonType Interactive -RunLevel Limited
+# $triggers and $settings exactly as above.
+```
+
+`wscript.exe` is a GUI-subsystem program, so no console is created for the task
+itself, and `Run`'s second argument — `0`, `SW_HIDE` — means the server's own
+console is created hidden rather than shown and then hidden. That is the
+difference from `powershell.exe -WindowStyle Hidden`, which flashes because the
+console exists before PowerShell has read its own arguments.
+
+The third argument is the one to get right. `True` means *wait*, and without it
+`wscript` returns immediately, the task drops to `Ready` while the server is
+still running, and the repeating trigger starts a **new** server every minute —
+`MultipleInstances IgnoreNew` only protects a task that is still running. It
+costs one extra process in the tree, and the crash-recovery behaviour is
+unchanged: when the server exits, `wscript` exits with it and the next
+repetition starts a fresh one.
+
+Point it at the copy under `%APPDATA%\anamnesis\bin\`, not at one in
+`target/`: Windows will not let `cargo build` overwrite a running executable.
+
+Then check what you registered rather than what you asked for. A failed
+`Register-ScheduledTask` leaves whatever was there before, and the next command
+in a script will happily describe *that*, which reads exactly like success:
+
+```powershell
+$task = Get-ScheduledTask -TaskName 'Anamnesis Memory Server'
+$task.Triggers | Select-Object @{n='type';e={$_.CimClass.CimClassName}},
+                               @{n='repeats';e={$_.Repetition.Interval}}
+$task.Settings.ExecutionTimeLimit   # PT0S, or it is killed in three days
+$task.Principal.LogonType          # S4U, or Interactive via the launcher above
+$task.Settings.MultipleInstances   # IgnoreNew, or the repetition stacks copies
+```
+
+Two triggers, one of them repeating, `PT0S`, and a principal that leaves the
+task no desktop to draw a window on. Killing the server
+should then bring it back within the repetition interval - measured at 50
+seconds here, and the restart is in `logs/`, where the next person can see that
+it happened. The stop before it is in there too, with the reason it stopped,
+whenever the server was asked to stop rather than killed outright: a process
+ended with `Stop-Process -Force` gets no say and leaves no line, which is
+itself worth knowing when reading a gap in the log.
+
+**Linux**, as a user unit in `~/.config/systemd/user/anamnesis.service`:
+
+```ini
+[Unit]
+Description=Anamnesis memory server
+
+[Service]
+ExecStart=%h/.local/bin/anamnesis serve
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+Then `systemctl --user enable --now anamnesis`, and
+`loginctl enable-linger $USER` if it should survive logout.
+
+**macOS**, as a launchd agent in
+`~/Library/LaunchAgents/dev.anamnesis.server.plist`, with `RunAtLoad` and
+`KeepAlive` both true.
 
 ## Next Steps
 
