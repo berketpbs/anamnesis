@@ -157,7 +157,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so each one becomes an upgrade source when it is published. Its first run
   found the `reindex --check` false positive fixed above. 1.0.0's banner
   names the port it was asked for, not the one it bound, so the test picks
-  the port itself.
+  the port itself. A port picked that way can be taken before the server
+  binds it, and a server that exits without listening is started again on
+  another port, three times at most, with its exit status and stderr in the
+  failure. The first Windows run after the merge lost 1.0.0 without a word
+  on why; 1.0.0 given a port already taken prints its banner and exits 1,
+  which is one way that happens.
 - **`SECURITY.md` says what is kept, what leaves the machine, and where to
   report a problem.** Anamnesis holds prompts, tool calls and their output,
   and until now nothing in the repository said where those go. The page lists

@@ -79,8 +79,29 @@ impl Drop for Server {
 ///
 /// The port is chosen here rather than asked of the server with `--port 0`:
 /// 1.0.0's banner names the port it was given, not the one it bound, so the
-/// banner of the oldest release does not say where it is.
+/// banner of the oldest release does not say where it is. It is chosen by
+/// binding and letting go, so something else can take it before the server
+/// binds it — the port comes from the range outgoing connections use too.
+/// A server that exits without listening is started again on another port,
+/// three times at most, and what it said on stderr is part of the failure.
 fn serve(binary: &Path, data: &Path, cwd: &Path) -> (Server, String) {
+    let mut exits = Vec::new();
+    for _ in 0..3 {
+        match serve_once(binary, data, cwd) {
+            Ok(started) => return started,
+            Err(exit) => exits.push(exit),
+        }
+    }
+    panic!(
+        "{} exited without listening, three times:\n{}",
+        binary.display(),
+        exits.join("\n---\n")
+    );
+}
+
+/// One attempt of [`serve`]: `Err` with the exit status and stderr when the
+/// server exits before it listens.
+fn serve_once(binary: &Path, data: &Path, cwd: &Path) -> Result<(Server, String), String> {
     let port = TcpListener::bind("127.0.0.1:0")
         .and_then(|listener| listener.local_addr())
         .expect("a free port")
@@ -94,29 +115,76 @@ fn serve(binary: &Path, data: &Path, cwd: &Path) -> (Server, String) {
             "--no-ui",
         ])
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("the server starts");
     let stdout = child.stdout.take().expect("stdout");
-    let server = Server(child);
-    assert!(
-        BufReader::new(stdout)
-            .lines()
-            .map_while(Result::ok)
-            .any(|line| line.contains("serving on ")),
-        "{} printed no banner",
-        binary.display()
-    );
+    let stderr = child.stderr.take().expect("stderr");
+    let mut server = Server(child);
+
+    // Both pipes are read to their end on threads of their own, so neither
+    // fills up or closes under a server that is still writing to it.
+    let (seen, banner) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut seen = Some(seen);
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if line.contains("serving on ")
+                && let Some(seen) = seen.take()
+            {
+                let _ = seen.send(());
+            }
+        }
+    });
+    let said = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let collected = std::sync::Arc::clone(&said);
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if let Ok(mut said) = collected.lock() {
+                said.push_str(&line);
+                said.push('\n');
+            }
+        }
+    });
+    let exited = |server: &mut Server| {
+        server.0.try_wait().ok().flatten().map(|status| {
+            // Give the reader a moment to take what the process left.
+            std::thread::sleep(Duration::from_millis(200));
+            let said = said.lock().map(|s| s.clone()).unwrap_or_default();
+            format!("port {port}, {status}; stderr:\n{said}")
+        })
+    };
+
+    if banner.recv_timeout(Duration::from_secs(15)).is_err() {
+        // Its stdout closed, or nothing came for fifteen seconds. A server
+        // that closed its stdout is on its way out but may not have exited
+        // yet, so it is given a moment to be seen exiting.
+        let until = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < until {
+            if let Some(exit) = exited(&mut server) {
+                return Err(exit);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!(
+            "{} printed no banner; stderr:\n{}",
+            binary.display(),
+            said.lock().map(|s| s.clone()).unwrap_or_default()
+        );
+    }
     let deadline = Instant::now() + Duration::from_secs(15);
     while TcpStream::connect(("127.0.0.1", port)).is_err() {
+        if let Some(exit) = exited(&mut server) {
+            return Err(exit);
+        }
         assert!(
             Instant::now() < deadline,
-            "{} is not listening on {port}",
-            binary.display()
+            "{} is still running and not listening on {port}; stderr:\n{}",
+            binary.display(),
+            said.lock().map(|s| s.clone()).unwrap_or_default()
         );
         std::thread::sleep(Duration::from_millis(100));
     }
-    (server, format!("http://127.0.0.1:{port}"))
+    Ok((server, format!("http://127.0.0.1:{port}")))
 }
 
 /// Run one Claude Code hook with `binary`, and return what it printed.
