@@ -84,7 +84,7 @@ parking_lot = "0.12"
 
 # Filesystem watcher + process inspection.
 notify = "8"
-notify-debouncer-full = "0.6"
+notify-debouncer-full = "0.7"
 sysinfo = "0.32"
 fs2 = "0.4"
 
