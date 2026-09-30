@@ -162,7 +162,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   another port, three times at most, with its exit status and stderr in the
   failure. The first Windows run after the merge lost 1.0.0 without a word
   on why; 1.0.0 given a port already taken prints its banner and exits 1,
-  which is one way that happens.
+  which is one way that happens. The next one lost 1.1.0's session: a hook
+  that cannot reach the server within its fraction of a second sets the
+  event aside and exits 0, so the test now runs such a hook again, five
+  times at most, and a failure shows what the hook said.
 - **`SECURITY.md` says what is kept, what leaves the machine, and where to
   report a problem.** Anamnesis holds prompts, tool calls and their output,
   and until now nothing in the repository said where those go. The page lists

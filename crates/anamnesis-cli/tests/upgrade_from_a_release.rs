@@ -188,27 +188,44 @@ fn serve_once(binary: &Path, data: &Path, cwd: &Path) -> Result<(Server, String)
 }
 
 /// Run one Claude Code hook with `binary`, and return what it printed.
+///
+/// A hook gives up on the server after a fraction of a second, sets the event
+/// aside, says `could not reach` on stderr and still exits 0, so a session can
+/// quietly never arrive. A Windows runner starting a release's server can be
+/// that slow, and on main's CI 1.1.0's session once never arrived, with
+/// nothing on record about why. A hook that could not reach the server is run
+/// again, five times at most, and what it said is part of the failure.
 fn hook(binary: &Path, data: &Path, repo: &Path, server: &str, payload: &Value) -> String {
-    let mut child = anamnesis(binary, data, repo)
-        .args(["hook", "--agent", "claude-code", "--server", server])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("the hook starts");
-    child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(payload.to_string().as_bytes())
-        .expect("write the payload");
-    let output = child.wait_with_output().expect("the hook finishes");
-    assert!(
-        output.status.success(),
-        "a hook always exits 0; stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+    let mut said = String::new();
+    for attempt in 1..=5u64 {
+        let mut child = anamnesis(binary, data, repo)
+            .args(["hook", "--agent", "claude-code", "--server", server])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the hook starts");
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(payload.to_string().as_bytes())
+            .expect("write the payload");
+        let output = child.wait_with_output().expect("the hook finishes");
+        said = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            output.status.success(),
+            "a hook always exits 0; stderr: {said}"
+        );
+        if !said.contains("could not reach") {
+            return String::from_utf8(output.stdout).expect("stdout is text");
+        }
+        std::thread::sleep(Duration::from_millis(500 * attempt));
+    }
+    panic!(
+        "{} could not reach {server}, five times: {said}",
+        binary.display()
     );
-    String::from_utf8(output.stdout).expect("stdout is text")
 }
 
 fn event(session: &str, name: &str, repo: &Path, extra: Value) -> Value {
