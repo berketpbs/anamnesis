@@ -22,12 +22,12 @@ establish live hook delivery. This is why status now reports each agent's
 capture separately.
 
 On 2026-10-01 the installed server and CLI were upgraded to the release
-candidate. Two Codex `session-start` events reached raw storage while Codex
-also displayed a `SessionStart Failed` notification. The notification and
-delivered event must be traced together; neither alone establishes the cause.
-The Windows hook command was rewritten from the installed release candidate,
-and changed Codex hooks require review through `/hooks` and a new session.
-A real Claude Code → Codex → Claude Code handoff remains open.
+candidate. The Windows hook command was rewritten from that binary and its
+changed hooks reviewed through `/hooks`. A fresh headless Codex session and a
+fresh interactive one each recorded `session-start` and `user-prompt` in raw
+storage; the interactive session also recorded a tool attempt. This closes
+the fresh-session capture check after the earlier `SessionStart Failed`
+notification. A real Claude Code → Codex → Claude Code handoff remains open.
 
 ## What the measurements say
 
@@ -48,10 +48,22 @@ task performance. In particular, long-page paraphrases remain weak.
 
 The first completed agent run with recall tied control at **2/5 versus 2/5**.
 Four probes were shown a page from their planting session; two of those still
-failed. See the [long-run protocol](../crates/anamnesis-evals/longrun/README.md)
+failed. The later Codex-probe ledger report, through 2026-10-01, contains ten
+attempted repeats, seven complete. Of 67 reported probe pairs, four are left
+out because a planting task failed. Among the remaining 63, memory alone
+passed 28, control alone passed one, both passed 14 and neither passed 20.
+These runs used binaries before the release candidate and repeated one
+synthetic scenario; they do not establish the candidate's effect on held-out
+developer tasks. See the [long-run protocol](../crates/anamnesis-evals/longrun/README.md)
 and [recall measurement](measurements/2026-09-18-recall-on-real-prompts.md).
 Showing a page is distinct from preserving the needed fact and using it.
-Repeated paired runs are needed before claiming a productivity benefit.
+
+The 2026-10-01 nightly attempt stopped before its first paired task because
+Codex's own local memories were enabled on the host. The harness now disables
+that feature for both evaluation arms, and its binary has been updated to
+`v1.2.1-rc.1`. The next complete runs must report Kept, Shown, Opened and
+Passed, writer cost and Codex actions before the result supports a wider
+announcement. Codex does not currently report per-run cost to this harness.
 
 ## Remaining limits
 
@@ -63,11 +75,10 @@ each has a live acceptance trace or a measured workload behind it.
 
 ## Execution order
 
-1. **Close capture and handoff gaps.** Trace the Codex `SessionStart Failed`
-   notification against its process result, server request, raw event and
-   queue. After hook review, fresh real Claude → Codex → Claude sessions must
-   preserve a decision and a rejected approach and deliver the expected scoped
-   page and handoff. Synthetic tests and probes do not replace this trace.
+1. **Close the cross-agent handoff gap.** Fresh Codex capture now passes.
+   Real Claude → Codex → Claude sessions must still preserve a decision and a
+   rejected approach and deliver the expected scoped page and handoff.
+   Synthetic tests and probes do not replace this trace.
 2. **Protect work before the session ends.** `PreCompact` now schedules a
    deterministic checkpoint after capture: it keeps the session open, leaves
    no handoff, and rewrites the one session path that finalization later
