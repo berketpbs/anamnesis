@@ -14,6 +14,7 @@
 //! are the server's answer about this payload, and what a person is told
 //! where they will actually read it.
 
+use std::io::Read;
 use std::path::PathBuf;
 
 use anamnesis_core::datadir::DataDir;
@@ -227,11 +228,34 @@ fn generated_probes_are_prompts_for_every_supported_harness() {
 }
 
 pub fn cmd_hook(agent: &str, server: &str, token: Option<&str>, data_dir: Option<PathBuf>) {
-    let mut payload = String::new();
-    if std::io::Read::read_to_string(&mut std::io::stdin(), &mut payload).is_err() {
+    // The server accepts at most 16 MiB. Stop reading once a payload crosses
+    // that limit too, so an unexpected tool result cannot make every hook
+    // process buffer an arbitrarily large stdin before the server rejects it.
+    const MAX_HOOK_INPUT: usize = 16 * 1024 * 1024;
+    let mut bytes = Vec::new();
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    if input
+        .by_ref()
+        .take(MAX_HOOK_INPUT as u64 + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
         eprintln!("anamnesis: could not read hook payload");
         return;
     }
+    if bytes.len() > MAX_HOOK_INPUT {
+        // Keep reading without storing the rest. Exiting while the harness is
+        // still writing would break its pipe and turn a dropped event into a
+        // visible hook failure.
+        let _ = std::io::copy(&mut input, &mut std::io::sink());
+        eprintln!("anamnesis: hook payload exceeds 16 MiB");
+        return;
+    }
+    let Ok(payload) = String::from_utf8(bytes) else {
+        eprintln!("anamnesis: hook payload is not UTF-8");
+        return;
+    };
 
     // Windows shells prepend a UTF-8 byte order mark when piping text into a
     // native process, and a BOM is not valid JSON. Stripping it here means the

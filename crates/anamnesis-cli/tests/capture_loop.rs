@@ -110,6 +110,94 @@ fn hook_in(dir: Option<&Path>, data: &Path, agent: &str, server: &str, payload: 
     String::from_utf8(output.stdout).expect("stdout is text")
 }
 
+fn hook_bytes(data: &Path, agent: &str, server: &str, payload: &[u8]) -> std::process::Output {
+    let mut child = anamnesis(data)
+        .args(["hook", "--agent", agent, "--server", server])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the hook starts");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(payload)
+        .expect("write the payload");
+    child.wait_with_output().expect("the hook finishes")
+}
+
+#[test]
+fn malformed_hook_input_is_rejected_without_recording_a_session() {
+    let data = tempfile::tempdir().expect("data dir");
+    let repo = project("malformed-hook-input");
+    let (_guard, server) = serve(data.path());
+
+    for agent in ["claude-code", "codex", "gemini-cli", "cursor", "opencode"] {
+        let malformed = hook_bytes(data.path(), agent, &server, b"{\"session_id\":");
+        assert!(malformed.status.success(), "{agent} hook exited non-zero");
+        assert!(
+            String::from_utf8_lossy(&malformed.stderr).contains("server rejected event (400"),
+            "{agent} malformed JSON was not refused: {}",
+            String::from_utf8_lossy(&malformed.stderr)
+        );
+
+        let invalid_utf8 = hook_bytes(data.path(), agent, &server, b"{\"session_id\":\"\xff\"}");
+        assert!(
+            invalid_utf8.status.success(),
+            "{agent} hook exited non-zero"
+        );
+        assert!(
+            String::from_utf8_lossy(&invalid_utf8.stderr).contains("payload is not UTF-8"),
+            "{agent} invalid UTF-8 was not dropped"
+        );
+    }
+
+    assert_eq!(
+        index_rows(data.path(), "SELECT COUNT(*) FROM sessions", |row| {
+            row.get::<_, i64>(0).expect("session count")
+        }),
+        vec![0]
+    );
+
+    let mut with_bom = vec![0xef, 0xbb, 0xbf];
+    with_bom.extend_from_slice(
+        event(
+            "bom-session",
+            "SessionStart",
+            repo.path(),
+            json!({"source": "startup"}),
+        )
+        .to_string()
+        .as_bytes(),
+    );
+    let accepted = hook_bytes(data.path(), "codex", &server, &with_bom);
+    assert!(
+        accepted.status.success(),
+        "BOM hook failed: {}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    assert_eq!(
+        index_rows(data.path(), "SELECT COUNT(*) FROM sessions", |row| {
+            row.get::<_, i64>(0).expect("session count")
+        }),
+        vec![1]
+    );
+}
+
+#[test]
+fn an_oversized_hook_is_dropped_before_delivery() {
+    let data = tempfile::tempdir().expect("data dir");
+    let payload = vec![b'x'; 17 * 1024 * 1024];
+    let output = hook_bytes(data.path(), "codex", "http://127.0.0.1:9", &payload);
+    assert!(output.status.success(), "oversized hook exited non-zero");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("payload exceeds 16 MiB"),
+        "oversized hook was not dropped"
+    );
+    assert!(!data.path().join("spool").exists());
+}
+
 fn event(session: &str, name: &str, cwd: &Path, extra: Value) -> Value {
     let mut payload = json!({
         "session_id": session,
