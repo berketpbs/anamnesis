@@ -8,10 +8,12 @@
 
 ## Installation
 
-This guide describes the `v1.2.1-rc.1` candidate. As of 2026-10-01, the
-unpinned install scripts and package managers still install `v1.1.1`. Set
-`ANAMNESIS_VERSION=v1.2.1-rc.1` before running an install script to try the
-candidate. The `v1.2.1` archive examples below apply after the final release.
+This guide tracks `main`, which can be ahead of the latest stable release.
+Check [Releases](https://github.com/berketpbs/anamnesis/releases) for published
+versions. Unpinned install scripts and package managers use the latest stable
+release. To try a release candidate with an install script, set
+`ANAMNESIS_VERSION` to its tag before running the script. The `v1.2.1` archive
+examples below apply after the final release.
 
 ### With the install script
 
