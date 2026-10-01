@@ -4,6 +4,11 @@
 
 **Shared memory for AI coding agents.**
 
+> **Release status (2026-10-01):** This page describes the `v1.2.1-rc.1`
+> candidate. The unpinned install scripts and package managers still install
+> the latest stable release, `v1.1.1`. To try the candidate with an install
+> script, set `ANAMNESIS_VERSION=v1.2.1-rc.1` before running it.
+
 Every agent session starts from nothing. The decision you settled yesterday,
 the approach that already failed, the reason a file looks the way it does: all
 of it is gone when the terminal closes, and gone again when you switch from
