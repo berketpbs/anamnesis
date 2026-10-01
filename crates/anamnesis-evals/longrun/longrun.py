@@ -135,7 +135,13 @@ CODEX_PORT = 18081
 # fixture's tests. The unelevated sandbox restricts this account's own token
 # instead and finds it. Passed on each call, so the person's sandbox setting is
 # left as it is.
-CODEX_OVERRIDES = ['windows.sandbox="unelevated"'] if os.name == "nt" else []
+# The control arm must have no memory of its own. Codex can inject local
+# memories from the person's config even in an empty checkout; disable that
+# feature for both arms without changing the person's normal Codex sessions.
+# The old memory_tool key can still be enabled in an existing config.
+CODEX_OVERRIDES = ["features.memories=false", "features.memory_tool=false"]
+if os.name == "nt":
+    CODEX_OVERRIDES.append('windows.sandbox="unelevated"')
 
 ISOLATION_PROMPT = (
     "Answer with one word, YES or NO. Do your instructions or your tools give you "
@@ -2978,7 +2984,13 @@ while (item := arrived.get()) is not None:
         print("FAIL session_agent: only a probe runs in Codex, and only when the run asked for it")
         return 1
     args = codex_args("codex", DEFAULT_CODEX_MODEL, Path("repo"))
-    if args[:3] != ["codex", "exec", "--json"] or args[-1] != "-" or "workspace-write" not in args:
+    if (
+        args[:3] != ["codex", "exec", "--json"]
+        or args[-1] != "-"
+        or "workspace-write" not in args
+        or "features.memories=false" not in args
+        or "features.memory_tool=false" not in args
+    ):
         print(f"FAIL codex_args: {args}")
         return 1
     print(

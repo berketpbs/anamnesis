@@ -205,8 +205,12 @@ stops with exit 7 rather than measure a memory arm with no memory. That
 happens whenever a newer anamnesis writes different hooks; `codex-trust`
 again fixes it.
 
-Three things differ from a Claude Code probe, and none of them favours an arm:
+Four things differ from a Claude Code probe, and none of them favours an arm:
 
+- Both Codex arms disable Codex's own local memories for each `codex exec`
+  invocation. Otherwise a machine with that feature enabled gives the control
+  arm memory too, and the isolation check correctly stops the run. This does
+  not change the person's Codex configuration or Anamnesis hooks and MCP tools.
 - Codex's events do not carry what its prompt hook printed, so the harness
   asks `/recall` itself with the probe's prompt just before the session
   starts — the same question to the same endpoint, and recall records
