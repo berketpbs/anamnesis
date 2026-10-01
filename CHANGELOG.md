@@ -906,6 +906,17 @@ binary, release candidates and build provenance.
   objects, including on capture failure. Installation explains Codex's hook
   trust review and the need to verify capture in a fresh session.
 
+- **Hook input is bounded before it reaches the server.** The CLI now stops
+  buffering stdin at the server's 16 MiB limit and drains any remainder so
+  the agent does not see a broken-pipe hook failure. Invalid UTF-8 is dropped
+  without recording a session; malformed JSON is rejected by the server.
+  End-to-end checks cover all five harness names, a Windows BOM and a payload
+  above the limit.
+- **Paired Codex evaluations isolate the control arm.** Each headless Codex
+  probe now disables Codex's own local memories for both arms. A host with
+  that feature enabled previously stopped the run at its isolation check.
+  The person's normal Codex configuration is untouched.
+
 ### Security
 - **rustls 0.23.45** (RUSTSEC-2026-0285). rustls 0.23.43, the TLS behind
   every HTTPS request anamnesis makes (to a model provider, a remote
