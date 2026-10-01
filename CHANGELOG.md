@@ -7,110 +7,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-- **`reindex --check` no longer reports a page as drift because its file
-  added a final newline.** A page is written as its frontmatter, a blank line
-  and its body, and the body gains a final newline when it has none, so the
-  file reads back as `Keep SQLite.\n` when `write-page --body "Keep SQLite."`
-  indexed `Keep SQLite.`. The check compared the two raw, so every such page
-  was drift — found by starting this build on a data directory 1.0.0, 1.1.0
-  or 1.1.1 wrote, where the one page written with `write-page` failed the
-  check, and the same happens to a page written with this build. `reindex`
-  and the wiki watcher read the same difference as an edit, and rewrote such
-  a page once, renewing the clock the sweep decays it by. A body is now compared as its
-  file keeps it — a final newline added, leading whitespace gone — on both
-  sides, and nothing stored changes.
-- **A session page written before pages named their session names it once
-  it is rewritten.** Pages have recorded the session that wrote them since
-  #150, and a page from before that names none, which reads as a page a
-  person wrote. Rewriting one kept it that way: a session's page is merged
-  into the one on disk, and the merge keeps whatever session the page on disk
-  names, none included. On 2026-09-27 a session from 2026-09-01 was closed and
-  its page rewritten by a model, and the index still could not say whose page
-  it was, so `lint` could not weigh it against its session and
-  `memory_read_page` reported no `source_session`. A session's own page now
-  names its session when the page on disk names none; its path is derived
-  from that session's id, so there is no doubt whose it is. A page that names
-  a session keeps it, and durable notes are untouched, since whoever wrote an
-  old note is not known.
-- **What `forget-session`, `forget` and `purge` remove is gone from the disk,
-  not only from queries.** SQLite leaves a deleted row's bytes where they
-  were until something overwrites them. Measured on 2026-09-27: after
-  `forget-session --apply` no query found the session's prompts, and
-  `anamnesis.db-wal` still held them. A page's words also stayed in the
-  full-text index, which records a deletion as a marker and keeps the words
-  until its segments are merged. Deletions now zero what they free, merge the
-  index when pages go, and the three commands empty the log afterwards, as
-  `redact` already did. If a reader keeps the log from emptying, the command
-  says so and how to finish it. Pages deleted by hand from the wiki and pages
-  the sweep removes are scrubbed the same way.
-- **A resumed session is not handed a note about work older than its own.**
-  A session that starts again has its whole conversation back, and a note
-  about work it had already moved past tells it less than it knows, with the
-  authority of a handover. On 2026-09-26 a resumed Claude session, an hour of
-  work past a Codex terminal's last answer, was handed that terminal's note:
-  the commit before the one it had released, and the Codex session's
-  instruction to change nothing. It arrived by the second route there is:
-  `claude --resume` first starts a session that lives for ten seconds, which
-  took the note, and the resumed session was then handed the slot's newest
-  note again. A starting session is now handed a note — waiting or handed
-  on — only when it describes work after the session's own last step. Its
-  starts and its end don't count as steps. A fresh session has no steps and
-  is handed what it always was. The same rule keeps a resumed session from
-  claiming the note it left itself, which the next session to start is owed.
-- **A note about older work no longer takes the place of a newer one.** A
-  note is written when its session ends, and a session can end long after
-  it last did anything. On 2026-09-26 a Codex terminal left open overnight
-  was closed by the reaper eighteen hours after its last answer. Its note
-  expired the one a Claude session had left an hour after that answer, which
-  said a release had since been merged and installed. The next agent was
-  handed the Codex note instead: the commit before the release, and the
-  instruction to change nothing. A note is now not offered when a note in
-  the same slot — waiting, or already handed out — describes later work.
-  How recent a note is is now read from the last thing its session did, not
-  counting the session's start or end, so a terminal closed a day after its
-  last answer no longer looks a day fresher. A model's note that arrives
-  late now replaces only the note its own session left, never a newer
-  session's.
-- **Switching agents straight away no longer costs the new one the fuller
-  note.** A session's note is handed over when the next session starts, and
-  the model's note for a session that has just ended arrives a median of 22
-  seconds after it (90% within 46). An agent opened in that time was handed
-  the counted note — the last request and the last answer, each cut at 400
-  characters — and the model's note that followed was dropped, along with any
-  mention of the decisions written with it: they were in no handoff, and not
-  yet in the wiki when that session's start listed the project's decisions.
-  The same happened to a terminal closed without an end, whose decisions are
-  written two minutes into its silence, after the next agent has started.
-  What arrives within ten minutes of such a takeover — the model's note, the
-  decisions, or both — is now kept for the session that took over, and only
-  for it, and handed over once with its next prompt, framed as an update to
-  the note it started with. It does not go through recall's gates, so a
-  one-word prompt receives it too. It is still not handed to anybody who
-  starts later. Schema V20 adds the table it is kept in. Harnesses with no
-  prompt channel (Cursor, OpenCode) do not receive it.
-- **The long-run eval does not stop because Codex reconnected.** Codex reports
-  a dropped connection it is retrying as an error, and the eval read any error
-  as a session that failed. On the night of 2026-09-25 Codex answered the
-  isolation question NO after four reconnects and a fallback to HTTPS, the
-  answer was read as none, and the run stopped before its first session — the
-  night S28 was first to be measured. A Codex session now failed only when a
-  turn failed or an error came after the last turn that completed, Codex's
-  notice about its own transport is no longer counted as an action, and a run
-  stopped for want of an answer says the error Codex gave.
-- **A renamed project's sessions come back when its index is rebuilt.**
-  `rename` moved sessions to the new project in the index and moved their
-  transcripts to the new directory, but a transcript's header keeps naming
-  the project it was recorded under, and `reindex` read only the header: if
-  the index of a renamed project was lost, every session from before the
-  rename was lost with it. The rename now leaves a `previous-projects` note
-  in the transcript directory, and a rebuild adopts a transcript only when it
-  is filed there *and* names a project the note lists — two repositories with
-  the same name share a directory, and an old name can be started again, so
-  either condition alone would hand one project another's sessions.
-  Transcripts are still never rewritten.
+## [1.2.1] - 2026-10-01
+
+Until this release one thing in memory reached a model without being asked for:
+the handoff, delivered once at the start of a session, saying what the session
+before it did. Everything else waited for `memory_query`, and the long-run eval
+measured how long that wait is — across twenty-four sessions with the MCP
+server connected and its tools allowed, an agent called a memory tool **once**,
+and that call was a write. A question five sessions after its answer was
+written never found it.
+
+So the question is asked for the agent now, at the one moment there is a
+question in hand. A prompt goes to `/recall`, and the pages this project
+already has on it come back where the harness injects them, framed as evidence
+to check rather than instruction to follow.
+
+Most prompts get nothing back, and that is the part that took the measuring. A
+block that fires whether or not it has anything to say teaches an agent to skip
+it, and the ordinary fused query cannot tell those apart: rank fusion keeps
+ranks and throws the scores away, so on this machine's own pages `what is the
+weather in Istanbul` came back with three pages and the same 0.333 at the top
+as a question about the project's centre. Cosine similarity keeps the score,
+and sixteen prompts over two corpora split on it — a prompt the project had
+nothing to say about peaked at 0.542, one it did started at 0.573 — so
+`[recall] min_similarity` sits between them, in the marker rather than the code
+because it is a number about one embedder. A server with no embedder says
+nothing rather than guessing.
+
+The rest is the day that measurement took, and the four fixes already waiting
+for a release. The eval's own allowlist refused 59 of its 338 tool calls, most
+of them a PowerShell tool that was on no list and a way of running the
+fixture's tests that the scenario had planted nothing about; a run whose first
+planting page comes back written by counting now stops there rather than
+spending two hours and $1.59 to measure nothing; and the memory arm can be
+pointed at a model that is not on somebody's daily quota. `install-hooks`
+writes where the harness reads rather than where the command was typed, a key
+stored under a name nothing will read says so, and the nginx check says why it
+stopped.
+
+The index schema goes from 18 to 20: V19 keeps where a page's content came
+from, and V20 what a session that took over early is still owed. A server
+converts the index the first time it starts, and CI starts this build on a
+directory each published release wrote. 1.1.1 reads the new `[recall]` table
+as one it does not understand and says so in `status`, so a project whose
+marker is upgraded before every machine's binary keeps working.
+
+1.2.1 was written up on 2026-09-18 and not published then, and neither was
+1.2.0. This is the first release since 1.1.1, so it carries both: what
+[1.2.0](https://github.com/berketpbs/anamnesis/blob/main/CHANGELOG.md#120---2026-09-16)
+changed, and what landed in the two weeks after, listed below with the rest.
+The larger parts of those two weeks: a closed terminal or a quick switch
+between agents no longer costs the next agent its note, and a starting
+session is told what the project decided; what `forget`, `forget-session` and
+`purge` remove is gone from the disk; quiet transcripts are compressed; a
+password typed on a command line is redacted; and releases gain a Linux arm64
+binary, release candidates and build provenance.
 
 ### Added
+- **A prompt is answered with what this project already knows about it.** The
+  handoff says what the session before this one did, and it was the only thing
+  in memory that ever reached a model without being asked for. Everything else
+  waited for `memory_query`, and the long-run eval measured how often that
+  comes: across **twenty-four sessions with the MCP server connected and its
+  tools allowed, an agent called a memory tool once**, and that call was a
+  write. A question five sessions after its answer was written never found it.
+  So the question is asked for the agent, at the one moment there is a question
+  in hand: the prompt hook — `UserPromptSubmit` and whatever the other three
+  harnesses call it — now also asks `GET /recall`, and prints what comes back
+  where the harness injects it. It takes nothing and claims nothing, unlike the
+  handoff, and it gets five seconds where capture gets one, because it runs
+  once per prompt rather than before every tool call and the server has to
+  embed the question first: measured here, that round trip took 1.03s against a
+  cold Ollama and 0.05s against a warm one, so under the capture budget the
+  first prompt after an idle embedder came back empty and said nothing about
+  why.
+
+  The hard part is not finding pages, it is not offering them — a block that
+  fires on every prompt whether or not it has anything to say teaches an agent
+  to skip it. The ordinary fused query cannot tell those apart: rank fusion
+  keeps ranks and throws the scores away, so on this machine's 88 pages `what
+  is the weather in Istanbul` came back with three pages and the same 0.333 at
+  the top as a question about the project's centre. Cosine similarity keeps the
+  score, and sixteen prompts over two corpora with `nomic-embed-text` split on
+  it: a prompt the project had nothing to say about peaked at 0.542, one it did
+  started at 0.573. `[recall] min_similarity` sits between them, in the marker
+  because it is a number about one embedder, beside `on_prompt`, `pages` and
+  `snippet_chars`. A server with no embedder says nothing rather than guessing.
+  What is offered is framed as evidence rather than instruction in its own
+  first sentence, and being offered does not renew a page against the decay
+  sweep — a block that renewed everything it mentioned would make the top of
+  the ranking immortal without anyone reading a word of it
+
 - **Release archives carry a signed record of what built them.** `SHA256SUMS`
   shows that an archive is the one the release lists. It cannot show who
   built it, because whoever could replace an archive could replace the sums
@@ -524,6 +511,202 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every quiet one.
 
 ### Fixed
+- **`status` reports a hosted embedder that failed during startup.** The first
+  connection attempt happens before the server's failure watcher exists, so a
+  server that continued with its reconnecting embedder exposed
+  `embedding_failure: null` until another embedding request failed. The startup
+  refusal now seeds that watcher and a later successful request still clears it
+
+- **A run whose first planting page was written by counting stops there.** The
+  check before a run asks each model one small question, and a model out of
+  quota can still answer it: on 2026-09-17 `key check` said every model
+  answered, the run started, and its first page came back counted. `report`
+  excludes every probe whose planting session's page was not written by a
+  model, and a model that refused one session refuses the rest of the hour, so
+  the eleven sessions after it would have spent two hours and $1.59 measuring
+  nothing. A run now asks the same question of the work rather than of a ping:
+  when a planting session leaves a counted page, or no page, it says which
+  probe that costs and exits 5. `--keep-going` runs the whole scenario anyway.
+  `settings.local.env.example` is the other half — a repeat is twelve
+  consolidation requests against a free tier of twenty a day, shared with
+  whatever server is already running on the same key, so the memory arm can be
+  pointed at a local model instead; measured here, a session's page came back
+  written by that model and spent no quota
+
+- **The long-run eval stops refusing what its own scenario asks for.** Both
+  arms are started with one `--allowedTools` list, and nobody is there to
+  answer a prompt, so a tool left off it is refused and the session spends a
+  turn finding that out. The first complete run refused **59 of its 338 tool
+  calls**. Most were the list being wrong rather than strict: on Windows a
+  session also has a PowerShell tool, which was on no list, so 31 calls went
+  to it and 27 came back refused — and no rule narrows it, since with only
+  `PowerShell(python:*)` allowed `Get-ChildItem` ran, which would hand an
+  unattended nightly run an unbounded shell. It is taken away with
+  `--disallowedTools` now, so it is not there to reach for. The fixture's
+  tests read `LEDGER_FIXTURES` from the environment, so the natural
+  `LEDGER_FIXTURES=tests/fixtures python -m unittest ...` does not begin with
+  `python` and was refused four more times, while `python tools/check.py`,
+  which sets the variable itself, was allowed; the scenario plants nothing
+  about how the tests are run, so `env`, `export` and that variable are
+  allowed. Refusals do not fall equally on the two arms — in the first run one
+  probe cost the memory arm five and the control arm none — so `results.json`
+  now records them per tool and `report` prints the total and a column per
+  session. Run again on one session, the same prompt went from five refusals
+  to two
+- **A key stored under a provider's own name is no longer stored in silence
+  while the generic one outranks it.** `ANAMNESIS_LLM_API_KEY` is the
+  configured provider's key, so with a provider named it wins over
+  `GEMINI_API_KEY` and the rest. That precedence is deliberate and was
+  invisible. On 2026-09-17 a key revoked three days earlier was still stored
+  under the generic name; a new one was written with `anamnesis key set
+  GEMINI_API_KEY`, `key check` answered with the same `400 Please pass a valid
+  API key`, and nothing anywhere said the new key had not been sent to
+  anything. A refusal that means "the old key is still the live one" is
+  indistinguishable from one that means "your new key is bad", and reading it
+  the second way cost three days. `key set` now says when the name just
+  written is not the name that will be read, `key check` says it above the
+  verdict instead of leaving it to be inferred from the variable it names, and
+  `serve` warns at startup, beside the warning for the opposite case
+
+- **A command that writes a harness's configuration now writes it where the
+  harness reads it.** `install-hooks`, `install-mcp` and `uninstall` anchored
+  those files at the working directory, while identity has always been
+  resolved by walking up to the project's marker, so the two disagreed the
+  moment anything ran from a subdirectory. On 2026-09-17 `doctor`, run in
+  `crates/anamnesis-evals/longrun`, reported `no harness in this project is
+  wired to anamnesis` about the project it was at that moment recording, and
+  sent the person to `install-hooks` — which wrote
+  `.claude/settings.local.json` into that subdirectory, where Claude Code
+  never looks, after which `doctor` called the same project healthy from the
+  same place. Both dry runs printed `.\.claude\settings.local.json`: one
+  sentence for two different files, so there was nothing to notice. All four
+  resolve the project root the way `setup` always has, and the dry runs name
+  the absolute path they would write. `--settings`, `--config` and `--repo`
+  are still taken exactly as given
+
+- **The long-run eval stops when what it writes is not where it says it is.**
+  A Microsoft Store Python runs inside its package's filesystem redirection:
+  everything it writes under %LOCALAPPDATA% lands in that package's LocalCache
+  instead, and nothing says so. The anamnesis binary is not in the package, so
+  it reads the path it was handed and finds it empty. On 2026-09-17 a run
+  stopped at its model check with `no model is configured`, about a
+  settings.env the harness had copied a second earlier. The model check was
+  the only reason that run cost nothing; every later path would have been
+  wrong the same way, and a run whose memory arm has no model measures
+  nothing for two hours. A run now writes one probe into its own directory
+  before anything else and stops if it did not land there, naming both paths
+  and what to use instead
+
+- **The nginx check says why it stopped.** Its first step makes the
+  certificate it runs behind, in a container, and sent both its output and its
+  error to /dev/null. When the image could not be pulled on 2026-09-17 the
+  script ended there under `set -e`, and the job failed with exit 125 and an
+  empty log — which reads like the check itself failing rather than a pull. It
+  now keeps that output and prints it only if the step fails, naming what
+  could not be made
+
+- **`reindex --check` no longer reports a page as drift because its file
+  added a final newline.** A page is written as its frontmatter, a blank line
+  and its body, and the body gains a final newline when it has none, so the
+  file reads back as `Keep SQLite.\n` when `write-page --body "Keep SQLite."`
+  indexed `Keep SQLite.`. The check compared the two raw, so every such page
+  was drift — found by starting this build on a data directory 1.0.0, 1.1.0
+  or 1.1.1 wrote, where the one page written with `write-page` failed the
+  check, and the same happens to a page written with this build. `reindex`
+  and the wiki watcher read the same difference as an edit, and rewrote such
+  a page once, renewing the clock the sweep decays it by. A body is now compared as its
+  file keeps it — a final newline added, leading whitespace gone — on both
+  sides, and nothing stored changes.
+- **A session page written before pages named their session names it once
+  it is rewritten.** Pages have recorded the session that wrote them since
+  #150, and a page from before that names none, which reads as a page a
+  person wrote. Rewriting one kept it that way: a session's page is merged
+  into the one on disk, and the merge keeps whatever session the page on disk
+  names, none included. On 2026-09-27 a session from 2026-09-01 was closed and
+  its page rewritten by a model, and the index still could not say whose page
+  it was, so `lint` could not weigh it against its session and
+  `memory_read_page` reported no `source_session`. A session's own page now
+  names its session when the page on disk names none; its path is derived
+  from that session's id, so there is no doubt whose it is. A page that names
+  a session keeps it, and durable notes are untouched, since whoever wrote an
+  old note is not known.
+- **What `forget-session`, `forget` and `purge` remove is gone from the disk,
+  not only from queries.** SQLite leaves a deleted row's bytes where they
+  were until something overwrites them. Measured on 2026-09-27: after
+  `forget-session --apply` no query found the session's prompts, and
+  `anamnesis.db-wal` still held them. A page's words also stayed in the
+  full-text index, which records a deletion as a marker and keeps the words
+  until its segments are merged. Deletions now zero what they free, merge the
+  index when pages go, and the three commands empty the log afterwards, as
+  `redact` already did. If a reader keeps the log from emptying, the command
+  says so and how to finish it. Pages deleted by hand from the wiki and pages
+  the sweep removes are scrubbed the same way.
+- **A resumed session is not handed a note about work older than its own.**
+  A session that starts again has its whole conversation back, and a note
+  about work it had already moved past tells it less than it knows, with the
+  authority of a handover. On 2026-09-26 a resumed Claude session, an hour of
+  work past a Codex terminal's last answer, was handed that terminal's note:
+  the commit before the one it had released, and the Codex session's
+  instruction to change nothing. It arrived by the second route there is:
+  `claude --resume` first starts a session that lives for ten seconds, which
+  took the note, and the resumed session was then handed the slot's newest
+  note again. A starting session is now handed a note — waiting or handed
+  on — only when it describes work after the session's own last step. Its
+  starts and its end don't count as steps. A fresh session has no steps and
+  is handed what it always was. The same rule keeps a resumed session from
+  claiming the note it left itself, which the next session to start is owed.
+- **A note about older work no longer takes the place of a newer one.** A
+  note is written when its session ends, and a session can end long after
+  it last did anything. On 2026-09-26 a Codex terminal left open overnight
+  was closed by the reaper eighteen hours after its last answer. Its note
+  expired the one a Claude session had left an hour after that answer, which
+  said a release had since been merged and installed. The next agent was
+  handed the Codex note instead: the commit before the release, and the
+  instruction to change nothing. A note is now not offered when a note in
+  the same slot — waiting, or already handed out — describes later work.
+  How recent a note is is now read from the last thing its session did, not
+  counting the session's start or end, so a terminal closed a day after its
+  last answer no longer looks a day fresher. A model's note that arrives
+  late now replaces only the note its own session left, never a newer
+  session's.
+- **Switching agents straight away no longer costs the new one the fuller
+  note.** A session's note is handed over when the next session starts, and
+  the model's note for a session that has just ended arrives a median of 22
+  seconds after it (90% within 46). An agent opened in that time was handed
+  the counted note — the last request and the last answer, each cut at 400
+  characters — and the model's note that followed was dropped, along with any
+  mention of the decisions written with it: they were in no handoff, and not
+  yet in the wiki when that session's start listed the project's decisions.
+  The same happened to a terminal closed without an end, whose decisions are
+  written two minutes into its silence, after the next agent has started.
+  What arrives within ten minutes of such a takeover — the model's note, the
+  decisions, or both — is now kept for the session that took over, and only
+  for it, and handed over once with its next prompt, framed as an update to
+  the note it started with. It does not go through recall's gates, so a
+  one-word prompt receives it too. It is still not handed to anybody who
+  starts later. Schema V20 adds the table it is kept in. Harnesses with no
+  prompt channel (Cursor, OpenCode) do not receive it.
+- **The long-run eval does not stop because Codex reconnected.** Codex reports
+  a dropped connection it is retrying as an error, and the eval read any error
+  as a session that failed. On the night of 2026-09-25 Codex answered the
+  isolation question NO after four reconnects and a fallback to HTTPS, the
+  answer was read as none, and the run stopped before its first session — the
+  night S28 was first to be measured. A Codex session now failed only when a
+  turn failed or an error came after the last turn that completed, Codex's
+  notice about its own transport is no longer counted as an action, and a run
+  stopped for want of an answer says the error Codex gave.
+- **A renamed project's sessions come back when its index is rebuilt.**
+  `rename` moved sessions to the new project in the index and moved their
+  transcripts to the new directory, but a transcript's header keeps naming
+  the project it was recorded under, and `reindex` read only the header: if
+  the index of a renamed project was lost, every session from before the
+  rename was lost with it. The rename now leaves a `previous-projects` note
+  in the transcript directory, and a rebuild adopts a transcript only when it
+  is filed there *and* names a project the note lists — two repositories with
+  the same name share a directory, and an old name can be started again, so
+  either condition alone would hand one project another's sessions.
+  Transcripts are still never rewritten.
+
 - **The long-run eval counts a rule the planting agent wrote itself.** A page
   written with `memory_write_page` names no session, so the report could not
   tie it to the session that wrote it: on 2026-09-22 S17's agent wrote the
@@ -665,7 +848,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   event names for Codex, Gemini and Cursor.
 
 - **Recall answers where the harness can hear it, under the event it
-  answers.** 1.2.1 said the prompt hook asks `/recall` under whatever each
+  answers.** Recall was first written to ask `/recall` under whatever each
   harness calls a prompt, and prints the answer where the harness injects it.
   For Cursor there is no such place: `beforeSubmitPrompt` takes back
   `continue` and `user_message` and nothing else, so every Cursor prompt was
@@ -701,9 +884,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counted by Unicode's boundaries so a sentence in a script written without
   spaces is not one word, before anything is embedded. The measurement, what
   else was tried, and what is still open are in
-  `docs/measurements/2026-09-18-recall-on-real-prompts.md`. A marker that sets
-  `min_words` is refused by a 1.2.1 build, whose `[recall]` table does not know
-  the key — upgrade the binary before the marker.
+  `docs/measurements/2026-09-18-recall-on-real-prompts.md`. A build from
+  source between 2026-09-18 and this change refuses a marker that sets
+  `min_words`, because its `[recall]` table does not know the key; 1.1.1
+  knows no `[recall]` table at all, says so in `status`, and keeps working.
 
 - **A notification the harness submitted is not asked about.** A background
   task finishing reaches a Claude Code session as a prompt, through the same
@@ -750,181 +934,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   What was captured before this is untouched until `anamnesis redact --apply`
   runs the current rules over it
 
-## [1.2.1] - 2026-09-18
-
-Until this release one thing in memory reached a model without being asked for:
-the handoff, delivered once at the start of a session, saying what the session
-before it did. Everything else waited for `memory_query`, and the long-run eval
-measured how long that wait is — across twenty-four sessions with the MCP
-server connected and its tools allowed, an agent called a memory tool **once**,
-and that call was a write. A question five sessions after its answer was
-written never found it.
-
-So the question is asked for the agent now, at the one moment there is a
-question in hand. A prompt goes to `/recall`, and the pages this project
-already has on it come back where the harness injects them, framed as evidence
-to check rather than instruction to follow.
-
-Most prompts get nothing back, and that is the part that took the measuring. A
-block that fires whether or not it has anything to say teaches an agent to skip
-it, and the ordinary fused query cannot tell those apart: rank fusion keeps
-ranks and throws the scores away, so on this machine's own pages `what is the
-weather in Istanbul` came back with three pages and the same 0.333 at the top
-as a question about the project's centre. Cosine similarity keeps the score,
-and sixteen prompts over two corpora split on it — a prompt the project had
-nothing to say about peaked at 0.542, one it did started at 0.573 — so
-`[recall] min_similarity` sits between them, in the marker rather than the code
-because it is a number about one embedder. A server with no embedder says
-nothing rather than guessing.
-
-The rest is the day that measurement took, and the four fixes already waiting
-for a release. The eval's own allowlist refused 59 of its 338 tool calls, most
-of them a PowerShell tool that was on no list and a way of running the
-fixture's tests that the scenario had planted nothing about; a run whose first
-planting page comes back written by counting now stops there rather than
-spending two hours and $1.59 to measure nothing; and the memory arm can be
-pointed at a model that is not on somebody's daily quota. `install-hooks`
-writes where the harness reads rather than where the command was typed, a key
-stored under a name nothing will read says so, and the nginx check says why it
-stopped.
-
-The index schema is unchanged at 18; nothing written by 1.2.0, 1.1 or 1.0 needs
-converting. A 1.2.0 build reads the new `[recall]` table as one it does not
-understand and says so in `status`, so a machine whose marker is upgraded
-before its binary keeps working.
-
-### Added
-- **A prompt is answered with what this project already knows about it.** The
-  handoff says what the session before this one did, and it was the only thing
-  in memory that ever reached a model without being asked for. Everything else
-  waited for `memory_query`, and the long-run eval measured how often that
-  comes: across **twenty-four sessions with the MCP server connected and its
-  tools allowed, an agent called a memory tool once**, and that call was a
-  write. A question five sessions after its answer was written never found it.
-  So the question is asked for the agent, at the one moment there is a question
-  in hand: the prompt hook — `UserPromptSubmit` and whatever the other three
-  harnesses call it — now also asks `GET /recall`, and prints what comes back
-  where the harness injects it. It takes nothing and claims nothing, unlike the
-  handoff, and it gets five seconds where capture gets one, because it runs
-  once per prompt rather than before every tool call and the server has to
-  embed the question first: measured here, that round trip took 1.03s against a
-  cold Ollama and 0.05s against a warm one, so under the capture budget the
-  first prompt after an idle embedder came back empty and said nothing about
-  why.
-
-  The hard part is not finding pages, it is not offering them — a block that
-  fires on every prompt whether or not it has anything to say teaches an agent
-  to skip it. The ordinary fused query cannot tell those apart: rank fusion
-  keeps ranks and throws the scores away, so on this machine's 88 pages `what
-  is the weather in Istanbul` came back with three pages and the same 0.333 at
-  the top as a question about the project's centre. Cosine similarity keeps the
-  score, and sixteen prompts over two corpora with `nomic-embed-text` split on
-  it: a prompt the project had nothing to say about peaked at 0.542, one it did
-  started at 0.573. `[recall] min_similarity` sits between them, in the marker
-  because it is a number about one embedder, beside `on_prompt`, `pages` and
-  `snippet_chars`. A server with no embedder says nothing rather than guessing.
-  What is offered is framed as evidence rather than instruction in its own
-  first sentence, and being offered does not renew a page against the decay
-  sweep — a block that renewed everything it mentioned would make the top of
-  the ranking immortal without anyone reading a word of it
-
-
-### Fixed
-- **`status` reports a hosted embedder that failed during startup.** The first
-  connection attempt happens before the server's failure watcher exists, so a
-  server that continued with its reconnecting embedder exposed
-  `embedding_failure: null` until another embedding request failed. The startup
-  refusal now seeds that watcher and a later successful request still clears it
-
-- **A run whose first planting page was written by counting stops there.** The
-  check before a run asks each model one small question, and a model out of
-  quota can still answer it: on 2026-09-17 `key check` said every model
-  answered, the run started, and its first page came back counted. `report`
-  excludes every probe whose planting session's page was not written by a
-  model, and a model that refused one session refuses the rest of the hour, so
-  the eleven sessions after it would have spent two hours and $1.59 measuring
-  nothing. A run now asks the same question of the work rather than of a ping:
-  when a planting session leaves a counted page, or no page, it says which
-  probe that costs and exits 5. `--keep-going` runs the whole scenario anyway.
-  `settings.local.env.example` is the other half — a repeat is twelve
-  consolidation requests against a free tier of twenty a day, shared with
-  whatever server is already running on the same key, so the memory arm can be
-  pointed at a local model instead; measured here, a session's page came back
-  written by that model and spent no quota
-
-- **The long-run eval stops refusing what its own scenario asks for.** Both
-  arms are started with one `--allowedTools` list, and nobody is there to
-  answer a prompt, so a tool left off it is refused and the session spends a
-  turn finding that out. The first complete run refused **59 of its 338 tool
-  calls**. Most were the list being wrong rather than strict: on Windows a
-  session also has a PowerShell tool, which was on no list, so 31 calls went
-  to it and 27 came back refused — and no rule narrows it, since with only
-  `PowerShell(python:*)` allowed `Get-ChildItem` ran, which would hand an
-  unattended nightly run an unbounded shell. It is taken away with
-  `--disallowedTools` now, so it is not there to reach for. The fixture's
-  tests read `LEDGER_FIXTURES` from the environment, so the natural
-  `LEDGER_FIXTURES=tests/fixtures python -m unittest ...` does not begin with
-  `python` and was refused four more times, while `python tools/check.py`,
-  which sets the variable itself, was allowed; the scenario plants nothing
-  about how the tests are run, so `env`, `export` and that variable are
-  allowed. Refusals do not fall equally on the two arms — in the first run one
-  probe cost the memory arm five and the control arm none — so `results.json`
-  now records them per tool and `report` prints the total and a column per
-  session. Run again on one session, the same prompt went from five refusals
-  to two
-- **A key stored under a provider's own name is no longer stored in silence
-  while the generic one outranks it.** `ANAMNESIS_LLM_API_KEY` is the
-  configured provider's key, so with a provider named it wins over
-  `GEMINI_API_KEY` and the rest. That precedence is deliberate and was
-  invisible. On 2026-09-17 a key revoked three days earlier was still stored
-  under the generic name; a new one was written with `anamnesis key set
-  GEMINI_API_KEY`, `key check` answered with the same `400 Please pass a valid
-  API key`, and nothing anywhere said the new key had not been sent to
-  anything. A refusal that means "the old key is still the live one" is
-  indistinguishable from one that means "your new key is bad", and reading it
-  the second way cost three days. `key set` now says when the name just
-  written is not the name that will be read, `key check` says it above the
-  verdict instead of leaving it to be inferred from the variable it names, and
-  `serve` warns at startup, beside the warning for the opposite case
-
-- **A command that writes a harness's configuration now writes it where the
-  harness reads it.** `install-hooks`, `install-mcp` and `uninstall` anchored
-  those files at the working directory, while identity has always been
-  resolved by walking up to the project's marker, so the two disagreed the
-  moment anything ran from a subdirectory. On 2026-09-17 `doctor`, run in
-  `crates/anamnesis-evals/longrun`, reported `no harness in this project is
-  wired to anamnesis` about the project it was at that moment recording, and
-  sent the person to `install-hooks` — which wrote
-  `.claude/settings.local.json` into that subdirectory, where Claude Code
-  never looks, after which `doctor` called the same project healthy from the
-  same place. Both dry runs printed `.\.claude\settings.local.json`: one
-  sentence for two different files, so there was nothing to notice. All four
-  resolve the project root the way `setup` always has, and the dry runs name
-  the absolute path they would write. `--settings`, `--config` and `--repo`
-  are still taken exactly as given
-
-- **The long-run eval stops when what it writes is not where it says it is.**
-  A Microsoft Store Python runs inside its package's filesystem redirection:
-  everything it writes under %LOCALAPPDATA% lands in that package's LocalCache
-  instead, and nothing says so. The anamnesis binary is not in the package, so
-  it reads the path it was handed and finds it empty. On 2026-09-17 a run
-  stopped at its model check with `no model is configured`, about a
-  settings.env the harness had copied a second earlier. The model check was
-  the only reason that run cost nothing; every later path would have been
-  wrong the same way, and a run whose memory arm has no model measures
-  nothing for two hours. A run now writes one probe into its own directory
-  before anything else and stops if it did not land there, naming both paths
-  and what to use instead
-
-- **The nginx check says why it stopped.** Its first step makes the
-  certificate it runs behind, in a container, and sent both its output and its
-  error to /dev/null. When the image could not be pulled on 2026-09-17 the
-  script ended there under `set -e`, and the job failed with exit 125 and an
-  empty log — which reads like the check itself failing rather than a pull. It
-  now keeps that output and prints it only if the step fails, naming what
-  could not be made
-
 ## [1.2.0] - 2026-09-16
+
+Not published on its own: no tag or binaries were made for 1.2.0, and what
+it changed reaches a download in 1.2.1, whose notes are above.
 
 On 2026-09-14 the model key this project's own memory runs on stopped being
 accepted. Every session that day was written by counting tool calls instead of
