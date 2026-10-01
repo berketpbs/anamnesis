@@ -65,22 +65,30 @@ RUST_LOG=debug cargo run -p anamnesis-cli -- status
 
 ## Releasing
 
-A tag publishes; nothing else does.
+Aim for a stable release about once a month, or soon after a significant
+user-visible change, once checks and field use support it. Keep the README's
+install instructions honest while the main branch is ahead of the latest
+stable release.
 
-```bash
-# 1. The version lives in one place.
-#    Cargo.toml -> [workspace.package] version = "0.2.0"
-# 2. Move what is under Unreleased in CHANGELOG.md to a heading of its own.
-# 3. Tag it.
-git tag v0.2.0
-git push origin v0.2.0
-```
+The maintainer pushes release tags. A `-rc` tag publishes a prerelease; a
+final tag publishes the stable release. Before tagging, update the version in
+`Cargo.toml` under `[workspace.package]` and move the relevant entries from
+`Unreleased` to a dated heading in `CHANGELOG.md`. If the final release lands
+on a later day than its candidate, update that heading's date first.
 
-The `release` workflow builds `anamnesis` for four targets — Linux x86-64,
-macOS on Intel and on Apple silicon, and Windows — checks that each binary
-starts, packages it with the README, the licence and the changelog, and
-attaches the archives and a `SHA256SUMS` file to a GitHub release named after
-the tag.
+The release workflow builds five archives: Linux x86-64 and arm64, macOS Intel
+and Apple silicon, and Windows x86-64. It checks that each binary starts and
+publishes the archives with `SHA256SUMS` and build provenance attestations.
+Check an extracted binary, its SHA-256 checksum, and its attestation before
+using a candidate for daily work. Pin install-script rehearsals with
+`ANAMNESIS_VERSION=vX.Y.Z-rc.N`; an unpinned install should still select the
+previous stable release during the candidate period.
+
+Use the candidate for several days, including real handoffs between agents,
+and check `doctor` and `reindex --check`. After final publication, the workflow
+pushes a `packaging/vX.Y.Z` branch with Homebrew and Scoop manifests. Review
+and merge that branch through a PR so package installs catch up with the new
+stable release.
 
 To rehearse without publishing anything, run the same workflow by hand:
 
