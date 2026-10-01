@@ -1,0 +1,43 @@
+name: Weekly mutation audit
+
+on:
+  schedule:
+    - cron: '17 3 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutation-audit-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: targeted mutants (${{ matrix.shard }}/3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Mutate handoff, retrieval, and store operations
+        run: >-
+          cargo mutants --in-place --shard ${{ matrix.shard }}/3
+          --sharding round-robin
+          --file crates/anamnesis-core/src/handoff.rs
+          --file crates/anamnesis-core/src/retrieval.rs
+          --file crates/anamnesis-store/src/ops.rs
+      - name: Preserve survivors and test output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-${{ matrix.shard }}
+          path: mutants.out
+          if-no-files-found: ignore
+          retention-days: 30
