@@ -5,6 +5,14 @@ This separates implemented mechanisms from evidence that they help an actual
 developer. It supersedes the old feature checklist as the execution roadmap;
 [DIRECTION.md](DIRECTION.md) explains the product rationale.
 
+Execution update, 2026-10-03: the [continuity roadmap](CONTINUITY-ROADMAP.md)
+puts O1 migration/reindex parity first, then the genuine two-way handoff and a
+three-arm usefulness comparison. Claude runs are paused while its account limit
+is exhausted. The comparison preparation is a controlled smoke harness, not
+held-out developer-task evidence. Early privacy fixes proceed independently;
+the final release and team pilot keep their separate acceptance gates. The
+assessment and measurements below retain their original baseline and dates.
+
 ## What is usable
 
 Anamnesis is usable for supervised, single-developer memory: capture, durable
