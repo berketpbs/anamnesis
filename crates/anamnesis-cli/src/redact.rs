@@ -215,7 +215,10 @@ fn unmasked(redactor: &Redactor, text: &str) -> Option<Vec<&'static str>> {
 }
 
 /// Wiki pages holding something the rules mask, and per-rule page counts.
-fn scan_wiki(root: &Path, redactor: &Redactor) -> (Vec<PathBuf>, BTreeMap<&'static str, usize>) {
+pub(crate) fn scan_wiki(
+    root: &Path,
+    redactor: &Redactor,
+) -> (Vec<PathBuf>, BTreeMap<&'static str, usize>) {
     let mut pages = Vec::new();
     let mut rules = Redaction::default();
     let mut stack = vec![root.to_path_buf()];

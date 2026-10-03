@@ -892,7 +892,19 @@ impl AnamnesisMcp {
         }
     }
 
-    fn write_page(&self, request: WritePageRequest) -> Result<WritePageResponse, McpError> {
+    fn write_page(&self, mut request: WritePageRequest) -> Result<WritePageResponse, McpError> {
+        let redactor = anamnesis_core::sanitize::Redactor::new();
+        reject_secret_reference(&redactor, &request.path)?;
+        if let Some(reference) = &request.supersedes {
+            reject_secret_reference(&redactor, reference)?;
+        }
+        request.title = redactor.redact(&request.title).into_text();
+        request.body = redactor.redact(&request.body).into_text();
+        if let Some(entities) = &mut request.entities {
+            for entity in entities {
+                *entity = redactor.redact(entity).into_text();
+            }
+        }
         let path = PagePath::parse(&request.path)?;
         let entities = request
             .entities
@@ -986,7 +998,27 @@ impl AnamnesisMcp {
         })
     }
 
-    fn patch_page(&self, request: PatchPageRequest) -> Result<PatchPageResponse, McpError> {
+    fn patch_page(&self, mut request: PatchPageRequest) -> Result<PatchPageResponse, McpError> {
+        let redactor = anamnesis_core::sanitize::Redactor::new();
+        reject_secret_reference(&redactor, &request.path)?;
+        if let Some(reference) = &request.supersedes {
+            reject_secret_reference(&redactor, reference)?;
+        }
+        for text in [
+            &mut request.title,
+            &mut request.body,
+            &mut request.page_abstract,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            *text = redactor.redact(text).into_text();
+        }
+        if let Some(entities) = &mut request.entities {
+            for entity in entities {
+                *entity = redactor.redact(entity).into_text();
+            }
+        }
         let path = PagePath::parse(&request.path)?;
         let target = if request.global.unwrap_or(false) {
             self.global_scope()
@@ -1425,6 +1457,18 @@ impl AnamnesisMcp {
 /// Parse a tier name from a request, rejecting anything unrecognised rather
 /// than silently falling back — a typo in a tool call should fail loudly, not
 /// file the page under the wrong tier.
+fn reject_secret_reference(
+    redactor: &anamnesis_core::sanitize::Redactor,
+    value: &str,
+) -> Result<(), McpError> {
+    if redactor.redact(value).text() != value {
+        return Err(McpError::Invalid(
+            "page path or supersedes contains a credential; choose a safe reference".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn parse_tier(value: Option<&str>) -> Result<Tier, McpError> {
     match value {
         None => Ok(Tier::default()),
@@ -1445,6 +1489,84 @@ fn parse_status(value: Option<&str>) -> Result<PageStatus, McpError> {
 mod tests {
     use super::*;
     use anamnesis_core::scope::resolve_scope;
+
+    struct RejectSecretsEmbedder;
+    impl Embedder for RejectSecretsEmbedder {
+        fn dimension(&self) -> usize {
+            2
+        }
+    }
+    impl anamnesis_core::embedding::Embed for RejectSecretsEmbedder {
+        fn model(&self) -> &str {
+            "redaction-test"
+        }
+        fn embed(&self, text: &str) -> Result<Vec<f32>, String> {
+            assert!(!text.contains("ghp_"), "credential reached embedding");
+            Ok(vec![1.0, 0.0])
+        }
+    }
+
+    #[test]
+    fn page_create_and_patch_redact_before_wiki_index_and_embedding() {
+        let (_repo, _data, server) = harness();
+        let server = server.with_embedder(Some(Arc::new(RejectSecretsEmbedder)));
+        let secret = format!("ghp_{}", "a".repeat(36));
+        let created = server
+            .write_page(
+                serde_json::from_value(serde_json::json!({
+                    "path": "notes/safe.md", "title": secret, "body": secret,
+                    "entities": [secret], "pinned": true,
+                }))
+                .unwrap(),
+            )
+            .expect("create");
+        let patched = server
+            .patch_page(
+                serde_json::from_value(serde_json::json!({
+                    "path": "notes/safe.md", "expected_revision": created.revision,
+                    "title": format!("Updated {secret}"), "body": format!("Body {secret}"),
+                    "entities": [secret], "page_abstract": format!("Abstract {secret}"),
+                }))
+                .unwrap(),
+            )
+            .expect("patch");
+        let path = PagePath::parse("notes/safe.md").unwrap();
+        let page = server
+            .wiki
+            .lock()
+            .read_versioned_page(&server.scope.scope, &path)
+            .unwrap();
+        let text =
+            anamnesis_wiki::render_document(&page.parsed.frontmatter, &page.parsed.body).unwrap();
+        assert!(!text.contains(&secret));
+        assert!(text.contains("[redacted"));
+        let stored: (String, String) = server
+            .store
+            .connection()
+            .query_row(
+                "SELECT title, body FROM pages WHERE path = ?1",
+                [path.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(!serde_json::to_string(&stored).unwrap().contains(&secret));
+        assert!(
+            page.parsed.frontmatter.pinned,
+            "omitted metadata stays intact"
+        );
+        assert_eq!(patched.revision, page.revision);
+        let error = server
+            .write_page(
+                serde_json::from_value(serde_json::json!({
+                    "path": format!("notes/{secret}.md"), "title": "safe", "body": "safe",
+                }))
+                .unwrap(),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("credential"));
+        assert!(!error.contains(&secret));
+    }
 
     fn harness() -> (tempfile::TempDir, tempfile::TempDir, AnamnesisMcp) {
         let repo = tempfile::tempdir().expect("repo dir");

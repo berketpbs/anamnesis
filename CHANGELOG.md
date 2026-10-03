@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Redact MCP and CLI page creation and patch text before Git, indexing and
+  embedding, including titles, entities and abstracts. Reject credential-bearing
+  paths and supersedes references without echoing them. `doctor` also scans
+  current wiki pages for text today's rules would mask; existing history and
+  backups still require the explicit `redact` recovery procedure.
+
+### Fixed
 - **`rename` no longer takes another process's commits out of the wiki's
   history.** Every write commits onto HEAD as it is at that moment, since
   2026-09-09, when a server committing the index it had read that morning

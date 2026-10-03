@@ -152,6 +152,8 @@ pub struct Symptoms {
     /// never reaches what came before it. This is the count of what it did not
     /// reach.
     pub stored_secrets: anamnesis_store::Redaction,
+    /// Current wiki pages with text today's redaction rules would change.
+    pub wiki_secrets: usize,
 }
 
 /// What one recent session shows about what capture is producing.
@@ -202,9 +204,18 @@ pub fn diagnose(symptoms: &Symptoms) -> Vec<Finding> {
 /// Silent when nothing does: redaction working is the ordinary case, and a line
 /// saying so on every run is a line people learn to skip.
 fn judge_stored_secrets(symptoms: &Symptoms) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    if symptoms.wiki_secrets > 0 {
+        findings.push(Finding {
+            severity: Severity::Exposed,
+            subject: "wiki secrets",
+            verdict: format!("{} current wiki page(s) hold text today's redaction rules mask", symptoms.wiki_secrets),
+            remedy: Some("`anamnesis redact` to inspect current pages and history; `anamnesis redact --apply` to mask them. Revoke exposed credentials and replace older backups.".into()),
+        });
+    }
     let found = &symptoms.stored_secrets;
     if found.changed == 0 {
-        return Vec::new();
+        return findings;
     }
     let rules = found
         .rules
@@ -212,7 +223,7 @@ fn judge_stored_secrets(symptoms: &Symptoms) -> Vec<Finding> {
         .map(|(rule, count)| format!("{rule} ×{count}"))
         .collect::<Vec<_>>()
         .join(", ");
-    vec![Finding {
+    findings.push(Finding {
         severity: Severity::Exposed,
         subject: "secrets",
         verdict: format!(
@@ -225,7 +236,8 @@ fn judge_stored_secrets(symptoms: &Symptoms) -> Vec<Finding> {
              revoke the credential, since it has been on disk, and replace older backups"
                 .to_owned(),
         ),
-    }]
+    });
+    findings
 }
 
 /// Whether every page that should carry a vector carries a whole one.
@@ -826,6 +838,10 @@ pub fn cmd_doctor(server: &str, data_dir: Option<PathBuf>) -> anyhow::Result<()>
     symptoms.sections_compared = Tuning::default().vector_sections;
     symptoms.stored_secrets =
         store.redact_observations(&anamnesis_core::sanitize::Redactor::new(), false)?;
+    symptoms.wiki_secrets =
+        crate::redact::scan_wiki(&data.wiki(), &anamnesis_core::sanitize::Redactor::new())
+            .0
+            .len();
 
     println!("🩺 Anamnesis Memory Diagnosis");
     println!();
@@ -953,6 +969,20 @@ fn wired_moments(settings: &std::path::Path) -> Vec<EventKind> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wiki_secrets_are_reported_even_without_secret_observations() {
+        let symptoms = super::Symptoms {
+            wiki_secrets: 1,
+            ..Default::default()
+        };
+        let findings = super::diagnose(&symptoms);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.subject == "wiki secrets"
+                    && finding.severity == super::Severity::Exposed)
+        );
+    }
     use super::*;
 
     fn session(kinds: &[(EventKind, usize)]) -> SessionFacts {
