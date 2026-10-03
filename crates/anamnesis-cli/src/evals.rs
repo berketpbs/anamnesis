@@ -117,7 +117,8 @@ pub fn cmd_eval(
     // SQL streams should have to wait for.
     let embedder = if embed {
         let data = DataDir::resolve(data_dir)?;
-        let built = anamnesis_llm::EmbedConfig::enabled().build(&data.models())?;
+        let built =
+            anamnesis_llm::EmbedConfig::enabled(crate::settings::var).build(&data.models())?;
         match &built {
             Some(embedder) => println!(
                 "Embedding with {}.

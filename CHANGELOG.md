@@ -18,6 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   until something wrote them again. It now commits the move the same way as
   every other write, again on top of HEAD when another process commits in
   between.
+- **`eval --embed` embeds with the model this install is set to.** It read
+  the embedder from the process environment alone, while every other command
+  reads the environment and then `settings.env`. On a machine set up the way
+  `setup` and `service` leave it, with the embedder in `settings.env`, it
+  found nothing, downloaded the local default model into `models/`, about
+  90 MB, and reported numbers for a model the server never uses. It now reads
+  the same settings as the server it is measuring.
+- **A model download that cannot be put in place leaves nothing behind.** A
+  file is downloaded under a temporary name and renamed into place; when the
+  write or the rename failed, the temporary copy stayed in `models/`.
 
 ## [1.2.1] - 2026-10-01
 
