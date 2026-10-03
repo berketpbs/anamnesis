@@ -44,6 +44,7 @@ mod spool;
 mod status;
 mod sweep;
 mod uninstall;
+mod vectors;
 
 use abstracts::cmd_abstracts;
 use archive::{cmd_backup, cmd_restore};
@@ -561,6 +562,16 @@ fn run() -> anyhow::Result<()> {
                 json,
                 cli.data_dir.clone(),
             )?;
+        }
+        Commands::Vectors {
+            action:
+                cli::VectorAction::Prune {
+                    model,
+                    apply,
+                    server,
+                },
+        } => {
+            vectors::cmd_prune(model.as_deref(), apply, &server, cli.data_dir.clone())?;
         }
     }
 

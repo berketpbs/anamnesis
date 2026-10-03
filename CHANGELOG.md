@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`doctor` names vectors an earlier embedding model left behind, and
+  `anamnesis vectors prune` removes them.** Switching embedders left the old
+  model's vectors and failure rows in the index for good, compared by no
+  query. `doctor` names those models once the server says which one it
+  uses. `vectors prune` lists their rows per model and deletes only with
+  `--apply`, refusing the configured and the running model and asking the
+  server again just before it deletes. Only this project's index rows go;
+  pages, transcripts and downloaded model files stay.
 - **`memory_read_session` and `show-session` read what a session actually
   captured.** A page names the session it came from in `source_session`,
   and nothing could open it: what was said, as opposed to what a summary

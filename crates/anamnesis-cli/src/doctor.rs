@@ -149,6 +149,8 @@ pub struct Symptoms {
     /// system does not have. `None` — nothing answered, or a server too old to
     /// say — judges every row, as before, rather than guessing which is live.
     pub server_embedding: Option<String>,
+    /// Index material retained under each model in this project.
+    pub vector_models: Vec<anamnesis_store::VectorModel>,
     /// What today's redaction rules would still mask in stored observations,
     /// across every project in the index.
     ///
@@ -202,11 +204,30 @@ pub fn diagnose(symptoms: &Symptoms) -> Vec<Finding> {
     findings.extend(judge_capture(symptoms));
     findings.extend(judge_pages(symptoms));
     findings.extend(judge_embeddings(symptoms));
+    findings.extend(judge_vector_remnants(symptoms));
     findings.extend(judge_build(symptoms));
     findings.extend(judge_stored_secrets(symptoms));
     findings.extend(judge_model_provider(symptoms));
     findings.sort_by_key(|finding| std::cmp::Reverse(finding.severity));
     findings
+}
+
+fn judge_vector_remnants(symptoms: &Symptoms) -> Vec<Finding> {
+    let Some(active) = symptoms.server_embedding.as_deref() else {
+        return Vec::new();
+    };
+    let older: Vec<_> = symptoms
+        .vector_models
+        .iter()
+        .filter(|model| model.model != active)
+        .collect();
+    if older.is_empty() {
+        return Vec::new();
+    }
+    vec![Finding { severity: Severity::Thin, subject: "older embedding models",
+        verdict: format!("{} model(s) retain index rows the running embedder does not use: {}", older.len(),
+            older.iter().map(|model| model.model.as_str()).collect::<Vec<_>>().join(", ")),
+        remedy: Some("`anamnesis vectors prune` previews these rows; --apply removes selected rows while protecting configured and live models".into()) }]
 }
 
 /// Whether anything stored holds a secret today's rules would mask.
@@ -877,6 +898,7 @@ pub fn cmd_doctor(server: &str, data_dir: Option<PathBuf>) -> anyhow::Result<()>
         .map(|(agent, _)| agent)
         .collect();
     symptoms.embed_failures = store.embed_failures(scope.project_id)?;
+    symptoms.vector_models = store.vector_models(scope.project_id)?;
     symptoms.sections_compared = Tuning::default().vector_sections;
     symptoms.stored_secrets =
         store.redact_observations(&anamnesis_core::sanitize::Redactor::new(), false)?;
@@ -1013,6 +1035,33 @@ fn wired_moments(settings: &std::path::Path) -> Vec<EventKind> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn older_model_rows_are_visible_only_when_the_live_model_is_known() {
+        let mut symptoms = super::Symptoms {
+            server_embedding: Some("active".into()),
+            vector_models: vec![anamnesis_store::VectorModel {
+                model: "old".into(),
+                page_vectors: 1,
+                abstract_vectors: 1,
+                failures: 1,
+                bytes: 8,
+            }],
+            ..Default::default()
+        };
+        let findings = super::diagnose(&symptoms);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.subject == "older embedding models"
+                    && finding.verdict.contains("old"))
+        );
+        symptoms.server_embedding = None;
+        assert!(
+            !super::diagnose(&symptoms)
+                .iter()
+                .any(|finding| finding.subject == "older embedding models")
+        );
+    }
     use super::*;
 
     fn session(kinds: &[(EventKind, usize)]) -> SessionFacts {
