@@ -255,6 +255,9 @@ const BACKGROUND_MAX_RETRIES: u32 = 8;
 /// Everything needed to build a provider.
 #[derive(Debug, Clone)]
 pub struct LlmConfig {
+    /// Provider inferred from an Anthropic key rather than explicitly named.
+    /// Kept for diagnostics; does not contain any credential material.
+    pub provider_inferred: bool,
     /// Which backend.
     pub provider: ProviderKind,
     /// Credential, when the backend needs one.
@@ -299,6 +302,7 @@ pub struct LlmConfig {
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
+            provider_inferred: false,
             provider: ProviderKind::None,
             api_key: None,
             model: DEFAULT_MODEL.to_owned(),
@@ -381,6 +385,7 @@ impl LlmConfig {
             None if own_key(ProviderKind::Anthropic, &var).is_some() => ProviderKind::Anthropic,
             None => ProviderKind::None,
         };
+        config.provider_inferred = named.is_none() && config.provider == ProviderKind::Anthropic;
         config.api_key = match (&named, stored) {
             (Some(_), Some(stored)) => {
                 config.shadowed_key = own_key_named(config.provider, &var).map(|(name, _)| name);
@@ -787,6 +792,7 @@ mod tests {
     fn an_empty_environment_means_no_model_not_an_error() {
         let config = LlmConfig::from_vars(vars(&[])).expect("no error");
         assert_eq!(config.provider, ProviderKind::None);
+        assert!(!config.provider_inferred);
         assert!(config.build().expect("builds").is_none());
     }
 
@@ -795,11 +801,23 @@ mod tests {
         let config =
             LlmConfig::from_vars(vars(&[("ANTHROPIC_API_KEY", "sk-ant-test")])).expect("no error");
         assert_eq!(config.provider, ProviderKind::Anthropic);
+        assert!(config.provider_inferred);
         assert_eq!(config.model, DEFAULT_MODEL);
         assert_eq!(
             config.api_key.expect("key kept").expose_secret(),
             "sk-ant-test"
         );
+    }
+
+    #[test]
+    fn naming_anthropic_makes_the_selection_explicit() {
+        let config = LlmConfig::from_vars(vars(&[
+            ("ANAMNESIS_LLM_PROVIDER", "anthropic"),
+            ("ANTHROPIC_API_KEY", "sk-ant-test"),
+        ]))
+        .expect("config");
+        assert_eq!(config.provider, ProviderKind::Anthropic);
+        assert!(!config.provider_inferred);
     }
 
     /// The key `anamnesis key set` keeps for whichever provider settings.env
@@ -919,6 +937,7 @@ mod tests {
         ]))
         .expect("no error");
         assert_eq!(config.provider, ProviderKind::None);
+        assert!(!config.provider_inferred);
         assert!(config.build().expect("builds").is_none());
     }
 

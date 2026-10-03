@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Expose provider inference from `ANTHROPIC_API_KEY` in server startup logs,
+  `status` and `doctor`. The local diagnostics distinguish this process's
+  settings from a separately started server. Existing provider-selection
+  behavior is retained; explicit `ANAMNESIS_LLM_PROVIDER=none` disables it.
+
+### Fixed
 - **`rename` no longer takes another process's commits out of the wiki's
   history.** Every write commits onto HEAD as it is at that moment, since
   2026-09-09, when a server committing the index it had read that morning
