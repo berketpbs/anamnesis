@@ -64,7 +64,7 @@ use reindex::{cmd_reindex, cmd_reindex_check};
 use rename::cmd_rename;
 use run::{cmd_continue, cmd_run};
 use serve::{cmd_mcp, cmd_serve};
-use sessions::{cmd_forget_session, cmd_handoff, cmd_sessions};
+use sessions::{cmd_forget_session, cmd_handoff, cmd_sessions, cmd_show_session};
 use setup::{cmd_init, cmd_install_hooks, cmd_install_mcp, cmd_token};
 use status::cmd_status;
 use sweep::cmd_sweep;
@@ -545,6 +545,22 @@ fn run() -> anyhow::Result<()> {
         }
         Commands::ShowPage { path } => {
             cmd_show_page(&path, cli.data_dir.clone())?;
+        }
+        Commands::ShowSession {
+            session_id,
+            kind,
+            offset,
+            limit,
+            json,
+        } => {
+            cmd_show_session(
+                &session_id,
+                kind.as_deref(),
+                offset,
+                limit,
+                json,
+                cli.data_dir.clone(),
+            )?;
         }
     }
 
