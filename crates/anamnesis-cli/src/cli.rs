@@ -858,6 +858,22 @@ pub enum Commands {
         history: bool,
     },
 
+    /// Write a local continuation brief without consuming the handoff
+    Brief {
+        /// Local Markdown file to write
+        #[arg(long)]
+        out: PathBuf,
+        /// Workstream whose captured work to export
+        #[arg(long)]
+        workstream: Option<String>,
+        /// Operator whose slot to export in a per-user project
+        #[arg(long)]
+        operator: Option<String>,
+        /// Replace an existing output file
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Show the handoff waiting for the next session, without consuming it
     Handoff {
         /// Workstream to look in. Omitted shows the project-wide handoff.

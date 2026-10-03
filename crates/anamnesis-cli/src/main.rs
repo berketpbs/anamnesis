@@ -13,6 +13,7 @@ mod audit;
 mod bench;
 mod binary;
 mod bootstrap;
+mod brief;
 mod capture;
 mod cli;
 mod doctor;
@@ -539,6 +540,20 @@ fn run() -> anyhow::Result<()> {
             discard,
         } => {
             cmd_handoff(workstream, operator, discard, cli.data_dir.clone())?;
+        }
+        Commands::Brief {
+            out,
+            workstream,
+            operator,
+            force,
+        } => {
+            brief::cmd_brief(
+                &out,
+                workstream.as_deref(),
+                operator.as_deref(),
+                force,
+                cli.data_dir.clone(),
+            )?;
         }
         Commands::Sessions { limit } => {
             cmd_sessions(limit, cli.data_dir.clone())?;
