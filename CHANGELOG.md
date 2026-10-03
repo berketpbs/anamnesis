@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `doctor` reports index remnants under older embedding models when the live
+  model is known. `vectors prune` previews project-scoped vectors and failure
+  rows by default; `--apply` confirms live selection and protects configured
+  and active models before removing inactive index material.
+
 ### Fixed
 - **`rename` no longer takes another process's commits out of the wiki's
   history.** Every write commits onto HEAD as it is at that moment, since

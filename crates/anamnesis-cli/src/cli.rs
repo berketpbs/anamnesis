@@ -881,6 +881,12 @@ pub enum Commands {
         discard: bool,
     },
 
+    /// Inspect and prune inactive embedding index material
+    Vectors {
+        #[command(subcommand)]
+        action: VectorAction,
+    },
+
     /// List recent sessions, newest first
     Sessions {
         /// Limit number of results
@@ -892,6 +898,23 @@ pub enum Commands {
     ShowPage {
         /// Page path
         path: String,
+    },
+}
+
+/// Embedding index maintenance.
+#[derive(Subcommand)]
+pub enum VectorAction {
+    /// Preview inactive model rows; remove them only with --apply
+    Prune {
+        /// Select one inactive model; omitted selects every inactive model
+        #[arg(long)]
+        model: Option<String>,
+        /// Remove selected index rows after confirming live model selection
+        #[arg(long)]
+        apply: bool,
+        /// Matching local server whose active embedder to protect
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        server: String,
     },
 }
 
