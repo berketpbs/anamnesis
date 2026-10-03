@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pages are reused; migration does not shrink the database file with VACUUM.
 
 ### Fixed
+- Frame session-start and MCP handoff delivery as stored evidence to check,
+  possibly out of date, rather than current instructions. Stored handoff text
+  and single-use claim behavior are preserved.
+
+### Fixed
 - **`rename` no longer takes another process's commits out of the wiki's
   history.** Every write commits onto HEAD as it is at that moment, since
   2026-09-09, when a server committing the index it had read that morning

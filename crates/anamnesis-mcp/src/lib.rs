@@ -1329,7 +1329,9 @@ impl AnamnesisMcp {
             );
         }
 
-        Ok(HandoffAcceptResponse { handoff })
+        Ok(HandoffAcceptResponse {
+            handoff: handoff.map(|note| anamnesis_core::brief::handoff(&note)),
+        })
     }
 
     fn start_workstream(
@@ -1562,7 +1564,10 @@ mod tests {
                 operator: None,
             })
             .unwrap();
-        assert_eq!(first.handoff.as_deref(), Some("carry on"));
+        assert_eq!(
+            first.handoff,
+            Some(anamnesis_core::brief::handoff("carry on"))
+        );
 
         let second = server
             .accept_handoff(HandoffAcceptRequest {
@@ -1694,8 +1699,10 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            claimed.handoff.as_deref(),
-            Some("postgres chosen for auth storage")
+            claimed.handoff,
+            Some(anamnesis_core::brief::handoff(
+                "postgres chosen for auth storage"
+            ))
         );
 
         let status = server
