@@ -30,7 +30,7 @@ class ClientTests(unittest.TestCase):
             plan = client_plan(self.root, trial["id"], "codex")
             self.assertNotIn("OPENAI_API_KEY", plan["env"])
             self.assertEqual(plan["env"]["ANAMNESIS_LLM_PROVIDER"], "none")
-            self.assertTrue(Path(plan["env"]["CODEX_HOME"]).is_relative_to(self.root))
+            self.assertTrue(Path(plan["env"]["CODEX_HOME"]).resolve().is_relative_to(self.root.resolve()))
             self.assertEqual(os.environ["CODEX_HOME"], "host-profile")
         self.assertIn("--no-daemon", plan["argv"])
         self.assertIn("--ignore-user-config", plan["argv"])
