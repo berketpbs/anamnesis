@@ -12,17 +12,19 @@ must change what the next agent does, with fewer reminders from the person.
    [measurement](https://github.com/berketpbs/anamnesis/blob/5590cd4/docs/measurements/2026-10-03-tool-input-stored-once.md)
    on that branch.
 2. **Verify a genuine handoff.** Claude limit is exhausted; actual Claude tasks
-   are paused by the person. A different model is not a substitute for Claude.
+   are paused by the person until today's 19:00 Istanbul renewal and an actual
+   availability check. A different model is not a substitute for Claude.
 3. **Prepare and run the comparison.** The
    [preparation harness](../crates/anamnesis-evals/continuity/README.md) supplies
-   a smoke matrix and accounting foundation. Client adapters, distinct held-out
-   developer scenarios and real runs are still required. There is no usefulness
+   a smoke matrix, private-corpus importer, preparation accounting and optional
+   single-trial adapters. Distinct held-out developer scenarios, verified client
+   isolation, prepared treatments and real runs are still required. There is no usefulness
    result yet.
 4. **Improve the personal product from evidence.** Source-message reading via
-   `memory_read_session` / `show-session` must show stored events only, with
+   `memory_read_session` / `show-session` (#376) show stored events only, with
    project scope, current redaction, pagination (20 events by default), event
    filters and explicit missing/truncated-content reporting. Portable
-   `brief --out durum.md` must preserve the handoff slot, retain decisions,
+   `brief --out durum.md` (#377) preserves the handoff slot, retaining decisions,
    rejected approaches and source references, and only write a local file.
 5. **Prepare enterprise local use.** Data controls, upgrade backup/downgrade,
    `config check`, data-free support bundles, uninstall/admin guides, CA/proxy,
@@ -40,9 +42,9 @@ must change what the next agent does, with fewer reminders from the person.
 
 Early privacy fixes do not wait for the comparison: MCP/CLI page-write
 redaction (#372), framing a received handoff as historical evidence (#373),
-and making implicit provider selection visible have independent branches.
+and making implicit provider selection visible (#374) have independent branches.
 Old model leftovers in `doctor` and preview-first `vectors prune` protecting
-the active model remain on the roadmap. Git packing O3b waits behind correctness
+configured and live models are implemented in #378. Git packing O3b waits behind correctness
 and demonstrated usefulness; size savings alone do not move it forward.
 
 ## Genuine handoff acceptance trace
@@ -65,8 +67,8 @@ stage fails, report the failing stage rather than assuming an embedding defect.
 
 Separate negative tests must cover another project, missing/truncated source,
 redaction, a superseded decision, parallel workstreams and a server restart.
-When portable brief generation is implemented, test that it does not consume
-the pending handoff. Existing `supersedes` is retained; fix demonstrated gaps
+Portable brief generation's tests verify that it does not consume the pending
+handoff. Existing `supersedes` is retained; fix demonstrated gaps
 rather than replacing it. Synthetic hooks or manufactured traces do not close
 this gate.
 

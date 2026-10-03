@@ -18,6 +18,7 @@ from collections import Counter
 from pathlib import Path
 
 from budget import Budget
+from corpus import import_corpus, check_artifact
 
 METHODS = ("history", "brief", "anamnesis")
 CATEGORIES = ("accepted", "rejected", "superseded", "failed-attempt", "long-middle", "parallel")
@@ -108,8 +109,8 @@ def validate_cases(items):
 
 
 def prepare(root: Path, claude_model: str, codex_model: str, *, split="evaluation", local_memory=None,
-            budget_path=None):
-    items = cases(split)
+            budget_path=None, corpus_path=None):
+    items, corpus_info = import_corpus(corpus_path, split) if corpus_path else (cases(split), None)
     validate_cases(items)
     if root.exists():
         raise ValueError("run root exists; preparation never overwrites a run")
@@ -142,11 +143,14 @@ def prepare(root: Path, claude_model: str, codex_model: str, *, split="evaluatio
                     target.write_text(text, encoding="utf-8")
                 (repo / "archive" / "history.jsonl").write_text(
                     "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in case["archive"]), encoding="utf-8")
-                (repo / "policy.json").write_text("{}\n", encoding="utf-8")
+                for name, text in case.get("seed", {"policy.json": "{}\n"}).items():
+                    target = repo / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(text, encoding="utf-8")
                 trial = dict(id=identity, scenario=case["id"], repeat=repeat + 1, method=method,
                              reader=case["reader"], model=models[case["reader"]], direction=case["direction"],
                              archive_sha256=fingerprint(case["archive"]), memory_sha256=fingerprint(memory),
-                             prompt=COMMON_PROMPT.format(stream=case["workstream"]),
+                             prompt=case.get("prompt", COMMON_PROMPT.format(stream=case["workstream"])),
                              permissions=PERMISSIONS, budget=dict(seconds=900, actions=40),
                              profile=f"trials/{identity}/profile", repo=f"trials/{identity}/repo")
                 # Profiles and Anamnesis stores belong to one trial, not one
@@ -155,7 +159,7 @@ def prepare(root: Path, claude_model: str, codex_model: str, *, split="evaluatio
                     (root / trial["profile"] / name).mkdir(parents=True)
                 write_json(root / "trials" / identity / "trial.json", trial)
                 trials.append(trial)
-    manifest = dict(format=1, split=split, corpus="controlled-fixture-v1", repeats=REPEATS,
+    manifest = dict(format=1, split=split, corpus="externally-supplied-v1" if corpus_info else "controlled-fixture-v1", repeats=REPEATS,
                     scenarios=items, trials=trials, models=models,
                     pricing=dict(model="gemini-3.6-flash", input_usd_per_million="0.75",
                                  output_usd_per_million="3.75", includes_thinking=True,
@@ -164,6 +168,8 @@ def prepare(root: Path, claude_model: str, codex_model: str, *, split="evaluatio
                                  source="https://ai.google.dev/gemini-api/docs/pricing"),
                     gemini_budget_usd="50.00", budget_ledger=str(budget_path), claude_paused=True,
                     evidence_status="prepared; no agent task or API call has run")
+    if corpus_info:
+        manifest["corpus_review"] = corpus_info
     manifest["fingerprint"] = fingerprint(manifest)
     write_json(root / "manifest.json", manifest)
     ledger = Budget(budget_path, manifest["pricing"])
@@ -223,19 +229,29 @@ def record(root, trial_id, evidence):
     if fingerprint(memory) != trial["memory_sha256"]:
         raise ValueError("local memory snapshot changed during the task")
     case = next(c for c in manifest["scenarios"] if c["id"] == trial["scenario"])
+    expected = case.get("expected", {})
     try:
         actual = json.loads((repo / "policy.json").read_text(encoding="utf-8"))
     except (ValueError, OSError):
         actual = None
     # Completion alone never means success: check the produced artifact.
     passed = status == "complete" and isinstance(actual, dict) and all(
-        actual.get(key) == value for key, value in case["expected"].items())
+        actual.get(key) == value for key, value in expected.items())
     result = dict(evidence, trial=trial_id, passed=passed, artifact=actual,
                   trace_sha256=trace_hashes,
                   decision_correct=status == "complete" and isinstance(actual, dict)
-                  and actual.get("backend") == case["expected"]["backend"],
+                  and actual.get("backend") == expected.get("backend"),
                   wrong_decision=status == "complete" and isinstance(actual, dict)
-                  and actual.get("backend") == case["expected"]["rejected"])
+                  and actual.get("backend") == expected.get("rejected"))
+    if "checks" in case:
+        checked = [check_artifact(repo, check) for check in case["checks"]]
+        artifacts = {check["file"]: hashlib.sha256((repo / check["file"]).read_bytes()).hexdigest()
+                     for check in case["checks"] if (repo / check["file"]).resolve().is_relative_to(repo.resolve())
+                     and (repo / check["file"]).is_file()}
+        result.update(passed=status == "complete" and all(checked), artifact_checks=checked,
+                      artifact_sha256=artifacts,
+                      decision_correct=status == "complete" and check_artifact(repo, case["decision_check"]),
+                      wrong_decision=status == "complete" and check_artifact(repo, case["stale_decision_check"]))
     write_json(root / "trials" / trial_id / "result.json", result)
     return result
 
@@ -318,6 +334,8 @@ def report(root):
         output["gate"] = "development only; not an evaluation gate"
     elif manifest["corpus"] == "controlled-fixture-v1":
         output["gate"] = "controlled fixtures only; not held-out developer-task evidence"
+    else:
+        output["gate"] = "external corpus and client isolation require independent acceptance review"
     return output
 
 
@@ -330,6 +348,7 @@ def main():
     prep.add_argument("--codex-model", required=True)
     prep.add_argument("--split", choices=("development", "evaluation"), default="evaluation")
     prep.add_argument("--local-memory", type=Path)
+    prep.add_argument("--corpus", type=Path, help="private frozen corpus: six development and thirty distinct evaluation tasks")
     prep.add_argument("--budget-ledger", type=Path, required=True,
                       help="same shared ledger for development, evaluation, retries and replacement runs")
     add = sub.add_parser("record")
@@ -353,7 +372,8 @@ def main():
     args = parser.parse_args()
     if args.command == "prepare":
         manifest = prepare(args.root, args.claude_model, args.codex_model,
-                           split=args.split, local_memory=args.local_memory, budget_path=args.budget_ledger)
+                           split=args.split, local_memory=args.local_memory, budget_path=args.budget_ledger,
+                           corpus_path=args.corpus)
         print(f"Prepared {len(manifest['scenarios'])} scenarios, {len(manifest['trials'])} trials; no agents started.")
     elif args.command == "record":
         print(json.dumps(record(args.root, args.trial, json.loads(args.evidence.read_text(encoding="utf-8")))))

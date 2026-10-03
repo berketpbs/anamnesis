@@ -47,8 +47,9 @@ The adapters must give every method the same archived history and instruction
 to research it. `history` gets native history research; `brief` additionally
 gets the current `durum.md`; `anamnesis` additionally gets automatic handoff,
 recall and MCP. The current script creates the common inputs only. It does not
-yet generate the brief, import histories into Anamnesis, install hooks, replay
-delivery or launch readers. Installing a second memory plugin on the host is
+yet generate the brief, import histories into Anamnesis, install hooks or replay
+delivery. The optional client adapter below executes one explicitly released,
+verified trial; it does not establish those treatment prerequisites. Installing a second memory plugin on the host is
 not a valid way to construct a comparison arm.
 
 Build 30 distinct, frozen developer-task histories before evaluating usefulness,
@@ -56,8 +57,8 @@ with 15 Claude-to-Codex and 15 Codex-to-Claude cases. Cover accepted and rejecte
 decisions, superseded rules, failed attempts, facts in the middle of long
 sessions and independent parallel workstreams. Use six *different* development
 cases for tuning. Do not tune retrieval or summarization against evaluation
-answers. This preparation script needs an external-corpus importer and
-task-specific artifact checks before those histories can replace the smoke set.
+answers. `--corpus` imports private, frozen tasks and task-specific artifact
+checks. No captured developer-task corpus has been supplied or run yet.
 
 ## Recording and reporting
 
@@ -76,6 +77,8 @@ Presence of a trace file does not independently prove its semantic claim:
 review the relevant event, source page, delivered block and reader action.
 The final stage is checked against the produced `policy.json`, and the graded
 artifact is stored in the result. A `complete` label alone never means success.
+
+External corpora use their frozen artifact checks instead of `policy.json`.
 
 Reports retain the planned denominator, incomplete statuses and success bounds.
 Time, tool calls, reminders and known costs of unsuccessful attempts remain in
@@ -113,9 +116,96 @@ prices or insufficient remaining budget refuse reservation. An overrun records
 the actual bill and stops further reservations. Concurrent reservations and
 restart recovery are covered by tests.
 
-This is an accounting boundary for forthcoming request adapters, not an
-account-wide cloud spending limit. An adapter must bound input and maximum
-output, reserve before calling, disable automatic model fallbacks, and settle
-the complete usage response. Unmanaged live-server calls bypass the ledger;
+`gemini.py` implements a text-only preparation adapter, using a credential from
+`GEMINI_API_KEY` solely in the HTTP header. It first reads the pinned model's
+metadata, then reserves its full advertised input/output ceilings before
+generation. Reserving the full output ceiling also protects against unexpected
+thinking beyond the requested output setting. It records actual total output
+including thinking, retains uncertain holds, refuses redirects/model-version
+changes and never retries automatically. A blocked or truncated response still
+incurs its measured cost and is marked incomplete. The reservation may require
+more remaining budget than the expected bill. Model metadata reads generate no
+tokens; their returned limits are retained in the request trace.
+
+```powershell
+python crates/anamnesis-evals/continuity/gemini.py --root C:/private/run `
+  --prompt C:/private/preparation-prompt.txt --out C:/private/durum.md `
+  --purpose brief --max-output 4096
+```
+
+This is an adapter accounting boundary, not an account-wide cloud spending
+limit. API access and the configured model's exact response identity remain
+unverified until a budgeted access check succeeds. Sources: Google's
+[REST reference](https://ai.google.dev/api/generate-content) and
+[thinking token documentation](https://ai.google.dev/gemini-api/docs/generate-content/thinking).
+Unmanaged live-server calls bypass the ledger;
 do not route this experiment through them. The $50 cap does not guarantee
 completion of 450 tasks. Preserve incomplete trials when limits are reached.
+
+## Private corpus contract
+
+Pass `prepare --corpus C:/private/corpus.json`. The top-level JSON fields are
+`format: 1`, `kind: "captured-developer-tasks"`, and `scenarios`. Include six
+development and thirty evaluation cases, balanced 3/3 and 15/15 by direction.
+Each scenario needs `id`, `split`, `category`, `direction`, `writer`, `reader`,
+`workstream`, timezone-qualified `task_at`, its original `archive`, a
+task-specific `prompt`, and `seed` mapping relative repository filenames to
+their initial UTF-8 text. Archive events retain `id`, `at`, `agent`, `speaker`,
+`text`, `source_session` and `source_event`. Omit all events at or after the
+task cutoff; the importer refuses leakage rather than silently truncating it.
+
+`checks` is a nonempty list of task acceptance checks. `decision_check` and
+`stale_decision_check` separately identify use of the current and obsolete
+decision. Supported checks are `{"kind":"json-equals","file":"result.json",
+"keys":["backend"],"value":"sqlite"}`, `{"kind":"contains","file":"next.txt",
+"text":"verify restore"}`, and `{"kind":"absent","file":"obsolete.txt"}`.
+Checks stay outside the reader repository; no arbitrary shell checker is run.
+Produced artifact hashes and individual check outcomes are retained. These
+static artifact checks do not establish functional correctness for arbitrary
+coding tasks; such tasks still require independently frozen functional checks.
+
+Duplicate IDs, identical task prompt/snapshot pairs, reused identical source
+sets, missing provenance, direction mismatches and path escapes are rejected.
+This validates structure, not authenticity: review actual capture provenance,
+independent task selection, redaction and acceptance check adequacy separately.
+Import does not certify that someone has not fabricated a history. External
+corpora remain behind the acceptance-review gate even after all trials finish.
+Keep corpus files, native memory snapshots and traces outside the Git checkout.
+
+## Single-trial client adapter
+
+`clients.py --root ... --trial ... --client codex` prints a plan without starting
+a client. `--execute --readiness C:/private/readiness.json` executes one trial.
+The readiness record must name the frozen `reader` and `model`, set
+`access_verified`, `profile_isolation_verified`, `permissions_verified` and
+`treatment_verified` to true, and cite fresh-process `evidence`. These are
+external acceptance claims, not proof generated by the adapter. Authenticate
+the independent profile beforehand; no host credential/config copying occurs.
+Profile environment changes apply only to children. Host API variables are
+excluded; local native-memory features are disabled equally, and each reader
+receives the common frozen `local-memory/` snapshot. Codex bypasses the shared
+daemon and user config. Claude uses restricted mode, explicit tools and strict
+MCP selection. See [Codex non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode)
+and [configuration](https://learn.chatgpt.com/docs/config-file/config-reference).
+
+Brief and Anamnesis arms require a prepared `durum.md`; Anamnesis also requires
+`--anamnesis` pointing to the intended binary, its independent populated store
+and verified capture/delivery hooks. Claude receives only its explicitly
+prepared local hook settings. MCP initialization, hook trust/delivery, native
+memory isolation and filesystem read confinement still require real client
+checks. A separate profile and write sandbox alone do not prove that a reader
+cannot open held-out checks or other run directories. No evaluation usefulness
+claim is permitted before that confinement is established.
+
+Claude execution additionally requires `--claude-ready` and refuses starts
+before 2026-10-03 19:00 Istanbul. Time alone does not establish quota availability.
+Wall time and distinct streamed actions are monitored; a limit stops the owned
+process tree and records budget exhaustion. This observes emitted actions,
+not a provider-side hard token/tool limit; parallel dispatch can already be in
+flight when the transcript reaches the limit. Retain overruns in the result.
+Client stdout/stderr, launch metadata and available tokens/costs stay local.
+`client.measurements.json` deliberately leaves preparation, reminders and
+capture/summary/delivery/source-open stages unknown. Add their measured values
+and trace references before `record`; never infer successful delivery merely
+from registering MCP or seeing a tool name. Check client quota failures in the
+retained transcript and record them as quota outcomes, not silent exclusions.
