@@ -623,11 +623,7 @@ pub fn cmd_forget(paths: &[String], data_dir: Option<PathBuf>) -> anyhow::Result
     Ok(())
 }
 
-/// What the wiki's history says about a deliberate removal.
-///
-/// Named pages and a person's decision, rather than the sweep's decay scores:
-/// once the pages are gone this message is the only remaining account of what
-/// was here, and "someone decided" is the part that would otherwise be lost.
+/// Reject credentials in references without echoing their contents in errors.
 fn reject_secret_reference(
     redactor: &anamnesis_core::sanitize::Redactor,
     value: &str,
@@ -638,6 +634,11 @@ fn reject_secret_reference(
     Ok(())
 }
 
+/// What the wiki's history says about a deliberate removal.
+///
+/// Named pages and a person's decision, rather than the sweep's decay scores:
+/// once the pages are gone this message is the only remaining account of what
+/// was here, and "someone decided" is the part that would otherwise be lost.
 fn forget_commit_message(doomed: &[(anamnesis_core::page::PagePath, String)]) -> String {
     let mut message = format!("forget: {} page(s) removed on request\n", doomed.len());
     for (path, title) in doomed {

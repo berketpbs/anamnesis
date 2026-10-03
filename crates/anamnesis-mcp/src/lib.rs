@@ -1454,9 +1454,7 @@ impl AnamnesisMcp {
     }
 }
 
-/// Parse a tier name from a request, rejecting anything unrecognised rather
-/// than silently falling back — a typo in a tool call should fail loudly, not
-/// file the page under the wrong tier.
+/// Reject credentials in references without echoing their contents in errors.
 fn reject_secret_reference(
     redactor: &anamnesis_core::sanitize::Redactor,
     value: &str,
@@ -1469,6 +1467,9 @@ fn reject_secret_reference(
     Ok(())
 }
 
+/// Parse a tier name from a request, rejecting anything unrecognised rather
+/// than silently falling back — a typo in a tool call should fail loudly, not
+/// file the page under the wrong tier.
 fn parse_tier(value: Option<&str>) -> Result<Tier, McpError> {
     match value {
         None => Ok(Tier::default()),
