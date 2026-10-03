@@ -266,6 +266,19 @@ jobs:
           python-version: "3.12"
       - run: python crates/anamnesis-evals/longrun/longrun.py selftest
 
+  continuity:
+    name: continuity comparison checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m unittest discover -s crates/anamnesis-evals/continuity -v
+
   # The install scripts name archives the release workflow produces, and the two
   # can drift apart without either file changing in a way that looks wrong. So
   # the scripts in this checkout are run against the latest published release,
