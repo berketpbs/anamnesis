@@ -41,7 +41,9 @@ def client_plan(root: Path, trial_id: str, executable: str, *, anamnesis=None):
     mcp = {}
     if anamnesis is not None:
         mcp = {"anamnesis": dict(command=str(Path(anamnesis).resolve()),
-            args=["--data-dir", str(profile / "anamnesis-data"), "mcp", "--repo", str(repo)])}
+            args=["--data-dir", str(profile / "anamnesis-data"), "mcp", "--repo", str(repo)],
+            env=dict(ANAMNESIS_LLM_PROVIDER="none", ANAMNESIS_EMBED_ENABLED="0",
+                     ANAMNESIS_KEY_SERVICE="anamnesis-continuity-isolated"))}
     if trial["reader"] == "codex":
         argv = [executable, "--no-daemon", "exec", "--json", "--skip-git-repo-check",
                 "--ignore-user-config", "--ignore-rules", "-m", trial["model"],
@@ -54,6 +56,8 @@ def client_plan(root: Path, trial_id: str, executable: str, *, anamnesis=None):
             overrides += [f"mcp_servers.{name}.command={json.dumps(server['command'])}",
                           f"mcp_servers.{name}.args={json.dumps(server['args'])}",
                           f"mcp_servers.{name}.required=true"]
+            overrides += [f"mcp_servers.{name}.env.{key}={json.dumps(value)}"
+                          for key, value in server["env"].items()]
         for option in overrides:
             argv += ["-c", option]
         argv += ["-"]

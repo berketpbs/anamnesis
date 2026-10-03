@@ -40,6 +40,12 @@ class ClientTests(unittest.TestCase):
         brief = self.trial("codex", "brief")
         with self.assertRaises(ValueError):
             client_plan(self.root, brief["id"], "codex")
+        treatment = self.trial("codex", "anamnesis")
+        (self.root / treatment["repo"] / "durum.md").write_text("contract test brief", encoding="utf-8")
+        memory_plan = client_plan(self.root, treatment["id"], "codex", anamnesis=Path("anamnesis.exe"))
+        self.assertIn('mcp_servers.anamnesis.env.ANAMNESIS_LLM_PROVIDER="none"', memory_plan["argv"])
+        self.assertIn('mcp_servers.anamnesis.env.ANAMNESIS_EMBED_ENABLED="0"', memory_plan["argv"])
+        self.assertTrue(any('--data-dir' in arg for arg in memory_plan["argv"]))
 
     def test_claude_pause_and_missing_readiness_refuse_before_starting_process(self):
         trial = self.trial("claude")
