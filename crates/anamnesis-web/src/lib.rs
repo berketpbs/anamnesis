@@ -1049,8 +1049,8 @@ async fn deliver_handoff(
         }
 
         Ok(match (claimed, decided.is_empty()) {
-            (Some(note), false) => format!("{}\n\n{decided}", note.trim_end()),
-            (Some(note), true) => note,
+            (Some(note), false) => format!("{}\n\n{decided}", anamnesis_core::brief::handoff(&note)),
+            (Some(note), true) => anamnesis_core::brief::handoff(&note),
             (None, _) => decided,
         })
     })
