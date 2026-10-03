@@ -39,6 +39,7 @@ mod raw;
 mod redact;
 mod rename;
 mod sweep;
+mod vector_maintenance;
 mod workstream;
 
 pub use drift::{Divergence, Drift};
@@ -57,6 +58,7 @@ pub use raw::{COMPACT_AFTER, Compaction, RawError, RawRecord, RawSpool};
 pub use redact::Redaction;
 pub use rename::{RenameError, Renamed};
 pub use sweep::SweepRow;
+pub use vector_maintenance::VectorModel;
 pub use workstream::{WorkstreamHandoff, WorkstreamSession};
 
 /// Errors produced by the storage layer.
