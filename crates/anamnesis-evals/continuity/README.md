@@ -184,7 +184,11 @@ the independent profile beforehand; no host credential/config copying occurs.
 Profile environment changes apply only to children. Host API variables are
 excluded; local native-memory features are disabled equally, and each reader
 receives the common frozen `local-memory/` snapshot. Codex bypasses the shared
-daemon and user config. Claude uses restricted mode, explicit tools and strict
+daemon; controls skip user config, while Anamnesis loads its owned isolated
+profile to activate prepared `CODEX_HOME/hooks.json`. Ignoring that config
+layer also skips those hooks. Review and activate hook trust in that profile;
+do not claim a working treatment merely because MCP initializes. Control
+profiles containing hooks are refused. Claude uses restricted mode, explicit tools and strict
 MCP selection. See [Codex non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode)
 and [configuration](https://learn.chatgpt.com/docs/config-file/config-reference).
 

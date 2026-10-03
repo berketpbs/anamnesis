@@ -45,11 +45,20 @@ def client_plan(root: Path, trial_id: str, executable: str, *, anamnesis=None):
             env=dict(ANAMNESIS_LLM_PROVIDER="none", ANAMNESIS_EMBED_ENABLED="0",
                      ANAMNESIS_KEY_SERVICE="anamnesis-continuity-isolated"))}
     if trial["reader"] == "codex":
+        profile_hooks = profile / "codex/hooks.json"
+        if trial["method"] != "anamnesis" and profile_hooks.exists():
+            raise ValueError("a control profile may not contain Anamnesis or other lifecycle hooks")
         argv = [executable, "--no-daemon", "exec", "--json", "--skip-git-repo-check",
                 "--ignore-user-config", "--ignore-rules", "-m", trial["model"],
                 "-s", "workspace-write", "-C", str(repo)]
+        if trial["method"] == "anamnesis":
+            if not profile_hooks.is_file():
+                raise ValueError("Codex Anamnesis arm requires prepared hooks in its isolated CODEX_HOME")
+            # Ignoring this owned layer also skips its lifecycle hooks. Host
+            # configuration remains excluded by the separate CODEX_HOME.
+            argv.remove("--ignore-user-config")
         overrides = ["features.memories=false", "features.memory_tool=false", "agents.enabled=false",
-                     'approval_policy="never"']
+                     'approval_policy="never"', "features.hooks=true"]
         if os.name == "nt":
             overrides.append('windows.sandbox="unelevated"')
         for name, server in mcp.items():
