@@ -38,6 +38,7 @@ mod query;
 mod raw;
 mod redact;
 mod rename;
+mod session_read;
 mod sweep;
 mod workstream;
 
@@ -56,6 +57,7 @@ pub use query::{PageHit, StreamBreakdown};
 pub use raw::{COMPACT_AFTER, Compaction, RawError, RawRecord, RawSpool};
 pub use redact::Redaction;
 pub use rename::{RenameError, Renamed};
+pub use session_read::{SessionEvents, StoredEvent};
 pub use sweep::SweepRow;
 pub use workstream::{WorkstreamHandoff, WorkstreamSession};
 

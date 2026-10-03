@@ -893,6 +893,24 @@ pub enum Commands {
         /// Page path
         path: String,
     },
+
+    /// Read captured source events from a session in this project
+    ShowSession {
+        /// Full session id or an unambiguous prefix from sessions
+        session_id: String,
+        /// Event type, for example user-prompt or assistant-message
+        #[arg(long)]
+        kind: Option<String>,
+        /// Offset within events of the selected type
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        /// Events per page (1–100)
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Print structured source events
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// What `anamnesis key` can do.
