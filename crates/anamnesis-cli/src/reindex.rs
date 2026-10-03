@@ -279,6 +279,11 @@ fn rebuild_sessions(
             }
         }
 
+        // The rule capture applies as each tool call's second half arrives,
+        // applied once the session is replayed: the transcript holds both
+        // bodies whole, and the index the live server keeps does not.
+        store.settle_tool_calls(session.id, None)?;
+
         // Closed after the observations are in, so the row is complete
         // before it is marked finished.
         if let Some(ended_at) = ended_at {

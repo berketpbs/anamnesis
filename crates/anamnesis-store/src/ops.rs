@@ -512,6 +512,47 @@ impl Store {
         Ok(inserted == 1)
     }
 
+    /// Keep a tool call's input once.
+    ///
+    /// A harness that reports a call before and after it runs sends the input
+    /// twice: the attempt carries it, and the completion carries it again with
+    /// the tail of the result behind it. Once the completion is in, nothing
+    /// reads the attempt's copy — what is asked of an attempt then is that it
+    /// exists, which call it was and when — and on a real install those copies
+    /// were a third of all observation text. So the attempt keeps its row and
+    /// gives up its body, but only where the completion begins with exactly
+    /// that body: an attempt whose input the completion does not repeat keeps
+    /// what it said, and so does an attempt whose call never came back, which
+    /// is the one a summary needs to read.
+    ///
+    /// The transcript keeps both bodies whole. This is a rule about the index,
+    /// applied wherever the index is written — on capture, in either order of
+    /// arrival, and by `reindex` after it replays a session — so a rebuild
+    /// arrives at the rows the live index holds.
+    ///
+    /// `call_id` narrows it to one call, and `None` settles a whole session.
+    /// Returns how many attempts gave up their body.
+    pub fn settle_tool_calls(&self, session_id: SessionId, call_id: Option<&str>) -> Result<usize> {
+        let conn = self.connection();
+        let settled = conn.execute(
+            "UPDATE observations SET body = '', truncated = 0
+             WHERE session_id = ?1
+               AND kind = 'tool-attempt'
+               AND tool_call_id IS NOT NULL
+               AND (?2 IS NULL OR tool_call_id = ?2)
+               AND body <> ''
+               AND EXISTS (
+                   SELECT 1 FROM observations AS done
+                   WHERE done.session_id = observations.session_id
+                     AND done.tool_call_id = observations.tool_call_id
+                     AND done.kind = 'tool-use'
+                     AND substr(done.body, 1, length(observations.body)) = observations.body
+               )",
+            params![session_id.to_string(), call_id],
+        )?;
+        Ok(settled)
+    }
+
     /// Every observation in a session, oldest first.
     pub fn observations(&self, session_id: SessionId) -> Result<Vec<Observation>> {
         let conn = self.connection();
@@ -2516,6 +2557,276 @@ mod tests {
         let loaded = store.observations(session.id).expect("load");
         assert!(loaded[0].body.is_truncated());
         assert_eq!(loaded[0].body.len(), 10);
+    }
+
+    fn tool_event(
+        store: &Store,
+        session: SessionId,
+        kind: EventKind,
+        call_id: Option<&str>,
+        body: BoundedBody,
+    ) {
+        store
+            .insert_observation(&new_observation(
+                session,
+                kind,
+                Some(ToolRef {
+                    name: "Bash".to_owned(),
+                    ok: None,
+                    call_id: call_id.map(str::to_owned),
+                }),
+                body,
+                now(),
+            ))
+            .expect("insert");
+    }
+
+    fn body_of(store: &Store, session: SessionId, kind: EventKind, call: &str) -> (String, bool) {
+        let found = store
+            .observations(session)
+            .expect("load")
+            .into_iter()
+            .find(|o| {
+                o.kind == kind && o.tool.as_ref().and_then(|t| t.call_id.as_deref()) == Some(call)
+            })
+            .expect("the observation");
+        (found.body.as_str().to_owned(), found.body.is_truncated())
+    }
+
+    #[test]
+    fn a_completed_calls_attempt_gives_up_the_input_its_completion_repeats() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+
+        let input = r#"{"command":"cargo test"}"#;
+        let completion = format!(
+            "{input}{}test result: ok",
+            anamnesis_core::observation::RESULT_MARKER
+        );
+        tool_event(
+            &store,
+            session.id,
+            EventKind::ToolAttempt,
+            Some("c1"),
+            BoundedBody::truncating(input, 1024),
+        );
+        tool_event(
+            &store,
+            session.id,
+            EventKind::ToolUse,
+            Some("c1"),
+            BoundedBody::truncating(completion.clone(), 1024),
+        );
+
+        assert_eq!(
+            store.settle_tool_calls(session.id, None).expect("settle"),
+            1
+        );
+
+        assert_eq!(
+            body_of(&store, session.id, EventKind::ToolAttempt, "c1"),
+            (String::new(), false)
+        );
+        assert_eq!(
+            body_of(&store, session.id, EventKind::ToolUse, "c1").0,
+            completion,
+            "the completion keeps the input and the result"
+        );
+        assert_eq!(
+            store.observations(session.id).expect("load").len(),
+            2,
+            "the attempt's row stays"
+        );
+        assert_eq!(
+            store.settle_tool_calls(session.id, None).expect("again"),
+            0,
+            "settling twice changes nothing the second time"
+        );
+    }
+
+    /// A queued event replayed after the server came back can arrive after
+    /// the event that followed it.
+    #[test]
+    fn a_completion_that_arrived_first_settles_the_attempt_behind_it() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+
+        tool_event(
+            &store,
+            session.id,
+            EventKind::ToolUse,
+            Some("c1"),
+            BoundedBody::truncating("ls\n→ src", 1024),
+        );
+        tool_event(
+            &store,
+            session.id,
+            EventKind::ToolAttempt,
+            Some("c1"),
+            BoundedBody::truncating("ls", 1024),
+        );
+
+        assert_eq!(
+            store
+                .settle_tool_calls(session.id, Some("c1"))
+                .expect("settle"),
+            1
+        );
+        assert_eq!(
+            body_of(&store, session.id, EventKind::ToolAttempt, "c1").0,
+            ""
+        );
+    }
+
+    #[test]
+    fn an_attempt_nothing_repeats_keeps_what_it_said() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+
+        // The completion says something else: neither copy is redundant.
+        tool_event(
+            &store,
+            session.id,
+            EventKind::ToolAttempt,
+            Some("c1"),
+            BoundedBody::truncating("rm -rf build", 1024),
+        );
+        tool_event(
+            &store,
+            session.id,
+            EventKind::ToolUse,
+            Some("c1"),
+            BoundedBody::truncating("rm -rf dist\n→ ", 1024),
+        );
+        // A call that never came back: its input is what a summary reads.
+        tool_event(
+            &store,
+            session.id,
+            EventKind::ToolAttempt,
+            Some("c2"),
+            BoundedBody::truncating("cargo build", 1024),
+        );
+        // And one from a harness that names no call.
+        tool_event(
+            &store,
+            session.id,
+            EventKind::ToolAttempt,
+            None,
+            BoundedBody::truncating("make", 1024),
+        );
+        tool_event(
+            &store,
+            session.id,
+            EventKind::ToolUse,
+            None,
+            BoundedBody::truncating("make\n→ done", 1024),
+        );
+
+        assert_eq!(
+            store.settle_tool_calls(session.id, None).expect("settle"),
+            0
+        );
+        assert_eq!(
+            body_of(&store, session.id, EventKind::ToolAttempt, "c1").0,
+            "rm -rf build"
+        );
+        assert_eq!(
+            body_of(&store, session.id, EventKind::ToolAttempt, "c2").0,
+            "cargo build"
+        );
+        assert!(
+            store
+                .observations(session.id)
+                .expect("load")
+                .iter()
+                .any(|o| o.kind == EventKind::ToolAttempt && o.body.as_str() == "make"),
+            "an attempt without a call id is never paired"
+        );
+    }
+
+    /// An input past the limit is cut the same way in both events, so the
+    /// completion repeats it exactly and lost its result — the attempt was the
+    /// second copy of one truncation, counted twice.
+    #[test]
+    fn a_truncated_input_is_settled_and_stops_counting_as_truncated() {
+        let (_dir, store, project, workspace) = fixture();
+        let session = session_for(project, workspace);
+        store.ensure_session(&session).expect("session");
+
+        let long = "x".repeat(100);
+        tool_event(
+            &store,
+            session.id,
+            EventKind::ToolAttempt,
+            Some("c1"),
+            BoundedBody::truncating(long.clone(), 10),
+        );
+        tool_event(
+            &store,
+            session.id,
+            EventKind::ToolUse,
+            Some("c1"),
+            BoundedBody::truncating(format!("{long}\n→ ok"), 10),
+        );
+
+        assert_eq!(
+            store.settle_tool_calls(session.id, None).expect("settle"),
+            1
+        );
+        assert_eq!(
+            body_of(&store, session.id, EventKind::ToolAttempt, "c1"),
+            (String::new(), false)
+        );
+        assert!(
+            body_of(&store, session.id, EventKind::ToolUse, "c1").1,
+            "the completion is still the truncated one"
+        );
+    }
+
+    #[test]
+    fn settling_one_call_leaves_other_calls_and_sessions_alone() {
+        let (_dir, store, project, workspace) = fixture();
+        let one = session_for(project, workspace);
+        let mut other = session_for(project, workspace);
+        other.id = SessionId::derive(project, "agent-session-2");
+        store.ensure_session(&one).expect("session");
+        store.ensure_session(&other).expect("session");
+
+        for session in [one.id, other.id] {
+            for call in ["c1", "c2"] {
+                tool_event(
+                    &store,
+                    session,
+                    EventKind::ToolAttempt,
+                    Some(call),
+                    BoundedBody::truncating("pwd", 1024),
+                );
+                tool_event(
+                    &store,
+                    session,
+                    EventKind::ToolUse,
+                    Some(call),
+                    BoundedBody::truncating("pwd\n→ /", 1024),
+                );
+            }
+        }
+
+        assert_eq!(
+            store.settle_tool_calls(one.id, Some("c1")).expect("settle"),
+            1
+        );
+        assert_eq!(body_of(&store, one.id, EventKind::ToolAttempt, "c1").0, "");
+        assert_eq!(
+            body_of(&store, one.id, EventKind::ToolAttempt, "c2").0,
+            "pwd"
+        );
+        assert_eq!(
+            body_of(&store, other.id, EventKind::ToolAttempt, "c1").0,
+            "pwd"
+        );
     }
 
     /// Record a second session, as the SessionStart hook does before claiming.

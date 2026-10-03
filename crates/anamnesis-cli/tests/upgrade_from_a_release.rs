@@ -303,12 +303,45 @@ fn upgrade_from(released: &Path) {
             &server,
             &event(
                 session,
+                "PreToolUse",
+                repo,
+                json!({
+                    "tool_name": "Bash",
+                    "tool_use_id": "upgrade-completed",
+                    "tool_input": {"command": "cargo test -p importer"},
+                }),
+            ),
+        );
+        hook(
+            released,
+            data,
+            repo,
+            &server,
+            &event(
+                session,
                 "PostToolUse",
                 repo,
                 json!({
                     "tool_name": "Bash",
+                    "tool_use_id": "upgrade-completed",
                     "tool_input": {"command": "cargo test -p importer"},
                     "tool_response": {"stdout": "test result: ok. 9 passed", "exit_code": 0},
+                }),
+            ),
+        );
+        hook(
+            released,
+            data,
+            repo,
+            &server,
+            &event(
+                session,
+                "PreToolUse",
+                repo,
+                json!({
+                    "tool_name": "Bash",
+                    "tool_use_id": "upgrade-unfinished",
+                    "tool_input": {"command": "cargo build -p importer"},
                 }),
             ),
         );
@@ -380,6 +413,32 @@ fn upgrade_from(released: &Path) {
         text(&doctor)
     );
     drop(server);
+
+    // Older releases without call identifiers cannot be paired; their
+    // observations must still rebuild. Releases that captured identifiers
+    // exercise V21 as well as the rest of the upgrade path.
+    {
+        let scope = anamnesis_core::scope::resolve_scope(repo).expect("scope");
+        let id =
+            anamnesis_core::ids::SessionId::derive(scope.project_id, "worked-before-the-upgrade");
+        let store = anamnesis_store::Store::open(data.join("db/anamnesis.db")).expect("index");
+        let observations = store.observations(id).expect("observations");
+        for o in observations
+            .iter()
+            .filter(|o| o.kind == anamnesis_core::observation::EventKind::ToolAttempt)
+        {
+            match o.tool.as_ref().and_then(|t| t.call_id.as_deref()) {
+                Some("upgrade-completed") => {
+                    assert_eq!(o.body.as_str(), "", "{version}: paired input")
+                }
+                Some("upgrade-unfinished") => assert!(
+                    o.body.as_str().contains("cargo build"),
+                    "{version}: unfinished input lost"
+                ),
+                _ => {}
+            }
+        }
+    }
 
     let check = run(current, data, repo, ["reindex", "--check"]);
     assert!(

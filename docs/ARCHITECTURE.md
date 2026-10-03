@@ -325,13 +325,16 @@ retrieval, where it would be answered differently each time.
 | --- | --- | --- |
 | `session-start` | A session opened | `SessionStart` |
 | `user-prompt` | The operator submitted a prompt | `UserPromptSubmit`, `BeforeAgent`, `BeforeSubmitPrompt` |
-| `tool-use` | A tool ran, and whether it succeeded | `PreToolUse`, `PostToolUse`, `BeforeTool`, `AfterTool` |
+| `tool-attempt` | A tool is about to run | `PreToolUse`, `BeforeTool` |
+| `tool-use` | A tool ran, and whether it succeeded | `PostToolUse`, `AfterTool` |
+| `assistant-message` | The agent finished answering, in its own words | `Stop` |
+| `subagent-report` | A subagent finished, with its report | `SubagentStop` |
 | `pre-compact` | The model is about to compact its context | `PreCompact`, `PreCompress` |
 | `post-compact` | Compaction produced a summary | `PostCompact` |
 | `session-end` | The session closed | `SessionEnd` |
 | `notification` | Anything else the harness said | — |
 
-Two consequences worth stating rather than discovering.
+Three consequences worth stating rather than discovering.
 
 **A name this table does not list becomes `notification`**, not an error and
 not a new variant. A harness that adds an event keeps being captured, and what
@@ -344,6 +347,16 @@ a session carried anything besides `session-start`, `pre-compact`,
 `post-compact`, and `session-end` before writing a page. A lifecycle-only
 session leaves none: a wiki full of empty session stubs makes every later
 search worse.
+
+**A tool call's input is indexed once.** A `tool-use` body is the call's
+input, the result marker, and the tail of the result, so it repeats the
+`tool-attempt` before it word for word. Once both halves of a call are in
+(matched by the harness's call id, in either order), the attempt's row stays
+and its body is stored empty, provided the completion begins with exactly
+that body. An attempt whose call never came back keeps its input: that is
+the call a summary has to describe. The transcript keeps both bodies whole,
+and `reindex` applies the same rule after replaying a session, so a rebuild
+arrives at the rows the live index holds.
 
 `pre-compact` has one additional effect after its observation is durable: the
 server refreshes the open session's deterministic wiki page in the background.

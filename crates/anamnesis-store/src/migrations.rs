@@ -125,6 +125,10 @@ const SOURCES: &[(&str, &str)] = &[
         "V20__handoff_followups",
         include_str!("../migrations/V20__handoff_followups.sql"),
     ),
+    (
+        "V21__tool_input_stored_once",
+        include_str!("../migrations/V21__tool_input_stored_once.sql"),
+    ),
 ];
 
 /// The name refinery gives its own bookkeeping table.
@@ -212,6 +216,190 @@ pub(crate) fn repair_line_endings(conn: &Connection) -> rusqlite::Result<Vec<u32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Upgrade a consistent backup of V20, then compare every observation
+    /// with the live settlement rule. The source stays at V20 and unchanged.
+    #[test]
+    fn v21_on_a_backup_matches_live_settlement_without_losing_attempts() {
+        use crate::{Store, new_observation, new_session};
+        use anamnesis_core::ids::SessionId;
+        use anamnesis_core::observation::{BoundedBody, EventKind, ToolRef};
+        use anamnesis_core::scope::resolve_scope;
+        use anamnesis_core::session::AgentKind;
+
+        let dir = tempfile::tempdir().expect("fixture");
+        std::fs::write(
+            dir.path().join(".anamnesis.toml"),
+            "[scope]\nworkspace = \"test\"\nproject = \"v21\"\n",
+        )
+        .expect("marker");
+        let scope = resolve_scope(dir.path()).expect("scope");
+        let store = Store::open_in_memory().expect("source");
+        {
+            let migrations: Vec<_> = SOURCES
+                .iter()
+                .filter(|(stem, sql)| migration(stem, sql).version() <= 20)
+                .map(|(stem, sql)| migration(stem, &canonical(sql)))
+                .collect();
+            Runner::new(&migrations)
+                .run(&mut *store.connection())
+                .expect("V20");
+        }
+        let now = "2026-10-03T09:00:00Z".parse().expect("time");
+        store.upsert_project(&scope, now).expect("project");
+        let one = SessionId::derive(scope.project_id, "one");
+        let other = SessionId::derive(scope.project_id, "other");
+        for id in [one, other] {
+            store
+                .ensure_session(&new_session(
+                    id,
+                    scope.project_id,
+                    scope.workspace_id,
+                    AgentKind::ClaudeCode,
+                    dir.path().to_owned(),
+                    now,
+                    None,
+                ))
+                .expect("session");
+        }
+        let rows = [
+            (
+                one,
+                EventKind::ToolAttempt,
+                Some("prefix"),
+                "çalıştır 🦀",
+                true,
+            ),
+            (
+                one,
+                EventKind::ToolUse,
+                Some("prefix"),
+                "çalıştır 🦀\n→ ok",
+                false,
+            ),
+            (one, EventKind::ToolAttempt, Some("equal"), "same", false),
+            (one, EventKind::ToolUse, Some("equal"), "same", false),
+            (
+                one,
+                EventKind::ToolAttempt,
+                Some("different"),
+                "keep input",
+                true,
+            ),
+            (
+                one,
+                EventKind::ToolUse,
+                Some("different"),
+                "different input",
+                false,
+            ),
+            (
+                one,
+                EventKind::ToolAttempt,
+                Some("unfinished"),
+                "failed call",
+                false,
+            ),
+            (one, EventKind::ToolAttempt, None, "no identifier", false),
+            (one, EventKind::ToolUse, None, "no identifier\n→ ok", false),
+            (
+                one,
+                EventKind::ToolAttempt,
+                Some("other-session"),
+                "scoped",
+                false,
+            ),
+            (
+                other,
+                EventKind::ToolUse,
+                Some("other-session"),
+                "scoped\n→ ok",
+                false,
+            ),
+            (
+                one,
+                EventKind::ToolAttempt,
+                Some("other-kind"),
+                "wrong kind",
+                false,
+            ),
+            (
+                one,
+                EventKind::Notification,
+                Some("other-kind"),
+                "wrong kind\n→ ok",
+                false,
+            ),
+        ];
+        for (session, kind, call, text, truncated) in rows {
+            store
+                .insert_observation(&new_observation(
+                    session,
+                    kind,
+                    Some(ToolRef {
+                        name: "Bash".into(),
+                        ok: None,
+                        call_id: call.map(str::to_owned),
+                    }),
+                    BoundedBody::from_stored(text.to_owned(), truncated),
+                    now,
+                ))
+                .expect("observation");
+        }
+        let contents = |store: &Store| {
+            [one, other].map(|session| {
+                serde_json::to_value(store.observations(session).expect("read")).expect("serialize")
+            })
+        };
+        let original = contents(&store);
+        let backup = dir.path().join("backup.db");
+        store.snapshot_to(&backup).expect("consistent backup");
+        let upgraded = Store::open(&backup).expect("backup copy");
+        upgraded.migrate().expect("upgrade copy");
+        assert_eq!(upgraded.schema_version().expect("version"), Some(21));
+        assert_eq!(store.schema_version().expect("version"), Some(20));
+        assert_eq!(
+            contents(&store),
+            original,
+            "upgrade must not touch the source"
+        );
+
+        assert_eq!(store.settle_tool_calls(one, None).expect("live rule"), 2);
+        assert_eq!(
+            store.settle_tool_calls(other, None).expect("other session"),
+            0
+        );
+        assert_eq!(
+            contents(&upgraded),
+            contents(&store),
+            "migration and capture disagree"
+        );
+        let observations = upgraded.observations(one).expect("read upgraded");
+        for (call, expected, truncated) in [
+            ("prefix", "", false),
+            ("equal", "", false),
+            ("different", "keep input", true),
+            ("unfinished", "failed call", false),
+            ("other-session", "scoped", false),
+            ("other-kind", "wrong kind", false),
+        ] {
+            let attempt = observations
+                .iter()
+                .find(|o| {
+                    o.kind == EventKind::ToolAttempt
+                        && o.tool.as_ref().and_then(|t| t.call_id.as_deref()) == Some(call)
+                })
+                .expect("attempt row survives");
+            assert_eq!(
+                (attempt.body.as_str(), attempt.body.is_truncated()),
+                (expected, truncated)
+            );
+        }
+        assert_eq!(observations.len(), 12, "no rows disappear");
+        let once = contents(&upgraded);
+        upgraded.migrate().expect("second open");
+        assert_eq!(contents(&upgraded), once, "upgrade is idempotent");
+    }
 
     /// Record `version` in the history table with a checksum somebody else
     /// computed, which is the only interesting starting state here.
