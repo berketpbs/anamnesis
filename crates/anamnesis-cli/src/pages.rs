@@ -165,9 +165,20 @@ pub fn cmd_write_page(
     path: &str,
     title: &str,
     body: &str,
-    options: PageOptions,
+    mut options: PageOptions,
     data_dir: Option<PathBuf>,
 ) -> anyhow::Result<()> {
+    let redactor = anamnesis_core::sanitize::Redactor::new();
+    reject_secret_reference(&redactor, path)?;
+    if let Some(reference) = &options.supersedes {
+        reject_secret_reference(&redactor, reference)?;
+    }
+    let title = redactor.redact(title).into_text();
+    let body = redactor.redact(body).into_text();
+    let (title, body) = (title.as_str(), body.as_str());
+    for entity in &mut options.entities {
+        *entity = redactor.redact(entity).into_text();
+    }
     let (project, data, store) = open_project(data_dir)?;
     // Resolved from the project either way: the shared scope belongs to the
     // workspace this project is in, so standing somewhere else writes to a
@@ -286,9 +297,29 @@ pub fn cmd_write_page(
 /// Patch one existing page while preserving every field the caller omitted.
 pub fn cmd_patch_page(
     path: &str,
-    options: PatchPageOptions,
+    mut options: PatchPageOptions,
     data_dir: Option<PathBuf>,
 ) -> anyhow::Result<()> {
+    let redactor = anamnesis_core::sanitize::Redactor::new();
+    reject_secret_reference(&redactor, path)?;
+    if let Some(reference) = &options.supersedes {
+        reject_secret_reference(&redactor, reference)?;
+    }
+    for text in [
+        &mut options.title,
+        &mut options.body,
+        &mut options.page_abstract,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        *text = redactor.redact(text).into_text();
+    }
+    if let Some(entities) = &mut options.entities {
+        for entity in entities {
+            *entity = redactor.redact(entity).into_text();
+        }
+    }
     let (project, data, store) = open_project(data_dir)?;
     let scope = if options.global {
         global_scope(&project, &data)
@@ -588,6 +619,17 @@ pub fn cmd_forget(paths: &[String], data_dir: Option<PathBuf>) -> anyhow::Result
             println!("    git -C {} show {commit}", data.wiki().display());
         }
         None => println!("  Nothing for git to record."),
+    }
+    Ok(())
+}
+
+/// Reject credentials in references without echoing their contents in errors.
+fn reject_secret_reference(
+    redactor: &anamnesis_core::sanitize::Redactor,
+    value: &str,
+) -> anyhow::Result<()> {
+    if redactor.redact(value).text() != value {
+        anyhow::bail!("page path or supersedes contains a credential; choose a safe reference");
     }
     Ok(())
 }
