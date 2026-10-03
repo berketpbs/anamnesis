@@ -202,14 +202,24 @@ fn fetch_cached(
         return Err(fetch_err(format!("http {}", response.status())));
     }
     let bytes = response.bytes().map_err(|e| fetch_err(e.to_string()))?;
+    put_in_place(&dest_dir, file, &bytes).map_err(|e| fetch_err(e.to_string()))
+}
 
-    // Downloaded under a temporary name and renamed into place, so a process
-    // killed mid-download leaves no file at `dest` for a later `load` to find
-    // and mistake for a complete one.
+/// Write a downloaded file under a temporary name and rename it into place.
+///
+/// So a process killed mid-download leaves no file at the final name for a
+/// later `load` to find and mistake for a complete one. A write or rename
+/// that fails takes its temporary file with it: left behind, it is a copy of
+/// a model nobody will read, and the largest of these files is most of a
+/// hundred megabytes.
+fn put_in_place(dest_dir: &Path, file: &str, bytes: &[u8]) -> std::io::Result<std::path::PathBuf> {
+    let dest = dest_dir.join(file);
     let temp = dest_dir.join(format!(".{file}.tmp"));
-    std::fs::write(&temp, &bytes).map_err(|e| fetch_err(e.to_string()))?;
-    std::fs::rename(&temp, &dest).map_err(|e| fetch_err(e.to_string()))?;
-    Ok(dest)
+    let placed = std::fs::write(&temp, bytes).and_then(|()| std::fs::rename(&temp, &dest));
+    if placed.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    placed.map(|()| dest)
 }
 
 impl Embedder for LocalEmbedder {
@@ -369,15 +379,19 @@ impl EmbedConfig {
         Self::from_vars(|key| std::env::var(key).ok())
     }
 
-    /// Enabled, taking the model from the environment if it names one.
+    /// Enabled, taking provider and model from `var` when it names them.
     ///
     /// For a caller that has already been asked for the embedder in its own
-    /// words — `anamnesis eval --embed` — where making them also set the
-    /// environment variable would be asking twice.
-    pub fn enabled() -> Self {
+    /// words — `anamnesis eval --embed` — where making them also set
+    /// `ANAMNESIS_EMBED_ENABLED` would be asking twice. The lookup is the
+    /// caller's to give, and not the process environment, because a machine
+    /// configured through `settings.env` has nothing in its environment: read
+    /// from there, `eval --embed` downloaded and scored the local default
+    /// while the server beside it embedded with the model it was set to.
+    pub fn enabled(var: impl Fn(&str) -> Option<String>) -> Self {
         Self {
             enabled: true,
-            ..Self::from_env()
+            ..Self::from_vars(var)
         }
     }
 
@@ -541,6 +555,51 @@ mod tests {
 
         let none = EmbedConfig::from_vars(vars(&[("OPENAI_API_KEY", "   ")]));
         assert!(none.key.is_none(), "a blank key was carried as a key");
+    }
+
+    /// `eval --embed` on a machine set up through `settings.env`: nothing in
+    /// the environment, the hosted model in the lookup. Taken from the
+    /// environment instead, this was the local default and a download.
+    #[test]
+    fn asking_for_an_embedder_takes_the_one_the_settings_name() {
+        let config = EmbedConfig::enabled(vars(&[
+            ("ANAMNESIS_EMBED_PROVIDER", "openai"),
+            (
+                "ANAMNESIS_EMBED_URL",
+                "http://127.0.0.1:11434/v1/embeddings",
+            ),
+            ("ANAMNESIS_EMBED_MODEL", "nomic-embed-text"),
+        ]));
+        assert!(config.enabled, "asking for it is enough to turn it on");
+        assert_eq!(config.provider, EmbedProvider::Hosted);
+        assert_eq!(config.model, "nomic-embed-text");
+        assert_eq!(config.url, "http://127.0.0.1:11434/v1/embeddings");
+
+        let unset = EmbedConfig::enabled(vars(&[]));
+        assert!(unset.enabled);
+        assert_eq!(unset.provider, EmbedProvider::Local);
+        assert_eq!(unset.model, DEFAULT_MODEL);
+    }
+
+    #[test]
+    fn a_download_that_cannot_be_put_in_place_leaves_no_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where the file should go: the rename fails on every
+        // platform, after the temporary file has been written in full.
+        std::fs::create_dir(dir.path().join("model.safetensors")).unwrap();
+        std::fs::write(dir.path().join("model.safetensors").join("x"), b"x").unwrap();
+
+        let placed = put_in_place(dir.path(), "model.safetensors", b"weights");
+
+        assert!(placed.is_err());
+        assert!(
+            !dir.path().join(".model.safetensors.tmp").exists(),
+            "the temporary copy was left behind"
+        );
+
+        let fine = put_in_place(dir.path(), "tokenizer.json", b"{}").unwrap();
+        assert_eq!(std::fs::read(&fine).unwrap(), b"{}");
+        assert!(!dir.path().join(".tokenizer.json.tmp").exists());
     }
 
     #[test]
