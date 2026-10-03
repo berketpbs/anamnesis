@@ -616,41 +616,23 @@ impl Wiki {
                 source: source_error,
             })?;
 
-            let mut index = self.repo.index()?;
-            for relative in &removals {
-                let _ = index.remove_path(relative);
-            }
-            for path in &paths {
-                index.add_path(&self.relative(to, path))?;
-            }
-            index.write()?;
-            let tree_id = index.write_tree()?;
+            let additions: Vec<PathBuf> =
+                paths.iter().map(|path| self.relative(to, path)).collect();
 
-            let parents = match self.repo.head() {
-                Ok(head) => vec![head.peel_to_commit()?],
-                Err(_) => Vec::new(),
-            };
-            // Nothing moved that git was tracking — a scope whose pages were never
-            // committed. The files are where they should be either way, and an
-            // empty commit would claim otherwise.
-            if let Some(parent) = parents.first()
-                && parent.tree_id() == tree_id
-            {
-                return Ok(None);
-            }
-
-            let tree = self.repo.find_tree(tree_id)?;
-            let signature = git2::Signature::now(COMMIT_NAME, COMMIT_EMAIL)?;
-            let parent_refs: Vec<&git2::Commit<'_>> = parents.iter().collect();
-            let id = self.repo.commit(
-                Some("HEAD"),
-                &signature,
-                &signature,
-                message,
-                &tree,
-                &parent_refs,
-            )?;
-            Ok(Some(id.to_string()))
+            // Onto HEAD as it is now, like every other write: the index this
+            // process last read can be missing whatever the server committed
+            // since. Nothing moved that git was tracking — a scope whose pages
+            // were never committed — makes no commit, since the files are
+            // where they should be and an empty commit would claim otherwise.
+            self.commit_onto_head(message, false, |index| {
+                for relative in &removals {
+                    let _ = index.remove_path(relative);
+                }
+                for relative in &additions {
+                    index.add_path(relative)?;
+                }
+                Ok(())
+            })
         })
     }
 
@@ -1380,6 +1362,55 @@ mod tests {
             "a page the other process removed does not come back either"
         );
         assert!(committed(&server, "sessions/three.md").is_some());
+    }
+
+    /// The blob HEAD holds for a page in any scope.
+    fn committed_in(wiki: &Wiki, scope: &Scope, path: &str) -> Option<String> {
+        let tree = wiki.repo.head().ok()?.peel_to_tree().ok()?;
+        let entry = tree
+            .get_path(&wiki.relative(scope, &PagePath::parse(path).unwrap()))
+            .ok()?;
+        let blob = wiki.repo.find_blob(entry.id()).ok()?;
+        Some(String::from_utf8_lossy(blob.content()).into_owned())
+    }
+
+    /// `rename` moves a scope with the server running beside it. A move that
+    /// committed the index this process last read dropped whatever another
+    /// process had committed since, in any project: the 2026-09-09 loss,
+    /// through the one write that still took the index as it found it.
+    #[test]
+    fn a_moved_scope_keeps_what_another_process_committed_elsewhere() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = Scope {
+            workspace: WorkspaceName::parse("default").unwrap(),
+            project: ProjectName::parse("elsewhere").unwrap(),
+        };
+        let renamed = Scope {
+            workspace: WorkspaceName::parse("default").unwrap(),
+            project: ProjectName::parse("renamed").unwrap(),
+        };
+
+        let cli = Wiki::open(dir.path()).unwrap();
+        cli.write_page(
+            &scope(),
+            &at("decisions/keep.md", "moves with its project"),
+            "write",
+        )
+        .unwrap();
+
+        let server = Wiki::open(dir.path()).unwrap();
+        server
+            .write_page(&elsewhere, &at("sessions/one.md", "a session"), "session")
+            .unwrap();
+
+        cli.move_scope(&scope(), &renamed, "rename").unwrap();
+
+        assert!(
+            committed_in(&cli, &elsewhere, "sessions/one.md").is_some(),
+            "the page the server committed after the rename's process last looked is still in the history"
+        );
+        assert!(committed_in(&cli, &renamed, "decisions/keep.md").is_some());
+        assert_eq!(committed_in(&cli, &scope(), "decisions/keep.md"), None);
     }
 
     #[test]

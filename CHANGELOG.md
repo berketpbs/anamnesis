@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`rename` no longer takes another process's commits out of the wiki's
+  history.** Every write commits onto HEAD as it is at that moment, since
+  2026-09-09, when a server committing the index it had read that morning
+  removed a gotcha another process had committed. Moving a project's pages
+  was the one write left that committed the index as this process last read
+  it, so a `rename` run beside the server dropped whatever the server had
+  committed since, in any project. The files stayed on disk and out of HEAD
+  until something wrote them again. It now commits the move the same way as
+  every other write, again on top of HEAD when another process commits in
+  between.
+
 ## [1.2.1] - 2026-10-01
 
 Until this release one thing in memory reached a model without being asked for:
