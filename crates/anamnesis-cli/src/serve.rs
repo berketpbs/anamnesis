@@ -95,6 +95,11 @@ pub fn cmd_serve(
     // summary, spawned and detached, with nothing holding a connection open
     // behind it. See `BACKGROUND_MAX_RETRIES`.
     let llm = llm_config(crate::settings::var)?;
+    if llm.provider_inferred {
+        tracing::warn!(
+            "Anthropic was inferred from ANTHROPIC_API_KEY: redacted session text will be sent to this provider. Set ANAMNESIS_LLM_PROVIDER=anthropic explicitly, or none to disable model calls"
+        );
+    }
     if let Some(key) = llm.ignored_key {
         tracing::warn!(
             "{key} is set and ANAMNESIS_LLM_PROVIDER does not name the provider it belongs to, \

@@ -81,6 +81,8 @@ pub struct Finding {
 /// outcomes, a wiki of counted pages — is still a test.
 #[derive(Debug, Clone, Default)]
 pub struct Symptoms {
+    /// This process's settings infer Anthropic from a key, without a provider.
+    pub provider_inferred_here: bool,
     /// Lifecycle moments wired for each harness this project has settings for,
     /// as the parser classifies the names actually registered.
     pub wired: BTreeMap<String, Vec<EventKind>>,
@@ -200,6 +202,14 @@ pub fn diagnose(symptoms: &Symptoms) -> Vec<Finding> {
     findings.extend(judge_embeddings(symptoms));
     findings.extend(judge_build(symptoms));
     findings.extend(judge_stored_secrets(symptoms));
+    if symptoms.provider_inferred_here {
+        findings.push(Finding {
+            severity: Severity::Thin,
+            subject: "model selection here",
+            verdict: "Anthropic is inferred from ANTHROPIC_API_KEY; a server started with these settings sends redacted session text to it".into(),
+            remedy: Some("Set ANAMNESIS_LLM_PROVIDER=anthropic explicitly, or none to disable model calls; the running server may have different settings.".into()),
+        });
+    }
     findings.sort_by_key(|finding| std::cmp::Reverse(finding.severity));
     findings
 }
@@ -856,6 +866,8 @@ pub fn cmd_doctor(server: &str, data_dir: Option<PathBuf>) -> anyhow::Result<()>
         crate::redact::scan_wiki(&data.wiki(), &anamnesis_core::sanitize::Redactor::new())
             .0
             .len();
+    symptoms.provider_inferred_here = anamnesis_llm::LlmConfig::from_vars(crate::settings::var)
+        .is_ok_and(|config| config.provider_inferred);
 
     println!("🩺 Anamnesis Memory Diagnosis");
     println!();
@@ -983,6 +995,25 @@ fn wired_moments(settings: &std::path::Path) -> Vec<EventKind> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn inferred_local_provider_is_visible_without_claiming_the_server_uses_it() {
+        let symptoms = super::Symptoms {
+            provider_inferred_here: true,
+            ..Default::default()
+        };
+        let findings = super::diagnose(&symptoms);
+        let finding = findings
+            .iter()
+            .find(|f| f.subject == "model selection here")
+            .unwrap();
+        assert!(
+            finding
+                .remedy
+                .as_deref()
+                .unwrap()
+                .contains("running server may have different settings")
+        );
+    }
     use super::*;
 
     fn session(kinds: &[(EventKind, usize)]) -> SessionFacts {
