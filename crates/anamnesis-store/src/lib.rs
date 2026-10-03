@@ -27,6 +27,7 @@ use parking_lot::{Mutex, MutexGuard};
 use rusqlite::Connection;
 
 mod audit;
+mod checkpoint;
 mod convert;
 mod drift;
 mod improve;

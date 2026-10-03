@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `brief --out durum.md` writes a local, redacted continuation file with scoped
+  captured work, retained handoff, current decisions, recorded rejections and
+  source references. Generation makes no model call and preserves the pending
+  handoff; replacing an existing output requires `--force`.
+
 ### Fixed
 - **`rename` no longer takes another process's commits out of the wiki's
   history.** Every write commits onto HEAD as it is at that moment, since
