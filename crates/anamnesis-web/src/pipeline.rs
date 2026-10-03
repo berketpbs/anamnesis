@@ -278,6 +278,25 @@ pub fn record(
     }
     let first_arrival = store.insert_observation(&observation)?;
 
+    // A tool call reported before and after it ran keeps its input once, in
+    // the index: settled as either half arrives, since a replayed queue can
+    // deliver the completion first. The transcript below keeps both whole.
+    if first_arrival
+        && matches!(
+            observation.kind,
+            EventKind::ToolAttempt | EventKind::ToolUse
+        )
+        && let Some(call_id) = observation
+            .tool
+            .as_ref()
+            .and_then(|tool| tool.call_id.as_deref())
+        && let Err(error) = store.settle_tool_calls(session_id, Some(call_id))
+    {
+        // The event is recorded; what this costs is the duplicate staying
+        // until a rebuild settles the session.
+        tracing::warn!(%error, %session_id, "could not settle a tool call's input");
+    }
+
     // The index is the authority for this request; the spool is the durable
     // copy behind it. A spool that cannot be written is logged and stepped
     // over rather than failing the event: losing the durable copy is bad,

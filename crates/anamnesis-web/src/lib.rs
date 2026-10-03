@@ -1426,6 +1426,75 @@ mod tests {
         );
     }
 
+    /// Claude Code reports a tool call before and after it runs, and the
+    /// completion repeats the input. The index keeps it once, whichever half
+    /// arrives first; the transcript keeps both halves as they came.
+    #[test]
+    fn a_tool_calls_input_is_kept_once_whichever_half_arrives_first() {
+        for completion_first in [false, true] {
+            let harness = harness();
+            let attempt = json!({
+                "tool_name": "Bash",
+                "tool_use_id": "toolu_01",
+                "tool_input": {"command": "cargo test --workspace"},
+            });
+            let completion = json!({
+                "tool_name": "Bash",
+                "tool_use_id": "toolu_01",
+                "tool_input": {"command": "cargo test --workspace"},
+                "tool_response": {"stdout": "test result: ok. 82 passed"},
+            });
+            let ingested = if completion_first {
+                run(&harness, "PostToolUse", completion);
+                run(&harness, "PreToolUse", attempt)
+            } else {
+                run(&harness, "PreToolUse", attempt);
+                run(&harness, "PostToolUse", completion)
+            };
+
+            let observations = harness
+                .state
+                .store
+                .observations(ingested.session_id)
+                .expect("observations");
+            let stored = |kind| {
+                observations
+                    .iter()
+                    .find(|o| o.kind == kind)
+                    .map(|o| o.body.as_str().to_owned())
+                    .expect("the row is there")
+            };
+            assert_eq!(
+                stored(EventKind::ToolAttempt),
+                "",
+                "the attempt still repeats the input (completion first: {completion_first})"
+            );
+            let done = stored(EventKind::ToolUse);
+            assert!(done.contains("cargo test --workspace") && done.contains("82 passed"));
+
+            let raw = harness.state.raw.as_deref().expect("spool");
+            let transcribed: Vec<String> = raw
+                .files()
+                .expect("files")
+                .iter()
+                .flat_map(|file| raw.read_file(file).expect("read"))
+                .filter_map(|record| match record {
+                    anamnesis_store::RawRecord::Observation(o)
+                        if o.kind == EventKind::ToolAttempt =>
+                    {
+                        Some(o.body.as_str().to_owned())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                transcribed,
+                [r#"{"command":"cargo test --workspace"}"#],
+                "the transcript keeps the attempt whole"
+            );
+        }
+    }
+
     /// The safety property behind summarising a session nobody closed: doing
     /// it early is survivable. An agent that goes quiet long enough to be
     /// summarised and then carries on gets its session back, so nothing after
