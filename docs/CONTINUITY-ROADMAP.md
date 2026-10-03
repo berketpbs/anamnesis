@@ -11,9 +11,12 @@ must change what the next agent does, with fewer reminders from the person.
    attempts, and verify an upgrade on a backup copy. See the
    [measurement](https://github.com/berketpbs/anamnesis/blob/5590cd4/docs/measurements/2026-10-03-tool-input-stored-once.md)
    on that branch.
-2. **Verify a genuine handoff.** Claude limit is exhausted; actual Claude tasks
-   are paused by the person until today's 19:00 Istanbul renewal and an actual
-   availability check. A different model is not a substitute for Claude.
+2. **Verify a genuine handoff.** Claude access was verified after the person's
+   19:00 Istanbul renewal. A controlled Claude -> Codex -> Claude probe retained
+   both delivery edges and continued the accepted decision with zero task
+   reminders. The first attempt's missing Codex capture and startup retries
+   remain recorded. This does not establish daily usefulness or the 450-trial
+   comparison; no different model substituted for Claude.
 3. **Prepare and run the comparison.** The
    [preparation harness](../crates/anamnesis-evals/continuity/README.md) supplies
    a smoke matrix, private-corpus importer, preparation accounting and optional
@@ -64,6 +67,15 @@ a new checkpoint. Start a fresh Claude process and repeat the continuation
 check. The acceptance condition is correct continuation by both readers without
 extra reminders, with a complete source-to-delivery-to-action chain. If any
 stage fails, report the failing stage rather than assuming an embedding defect.
+
+The controlled probe used `claude-opus-5-5`, `gpt-6.1-sol` and the assembled
+verification binary `31bcea2`, with isolated profiles/data and deterministic
+consolidation. An independent artifact check verified SQLite WAL, close/reopen
+persistence and absence of a Redis dependency. A local continuation file was
+also available to the final reader, so success cannot be attributed exclusively
+to Anamnesis. Captures, failed attempts, database snapshots, delivery IDs and
+measurements remain private. General installation, parallel workstream/operator
+coverage and the usefulness gate remain separate.
 
 Separate negative tests must cover another project, missing/truncated source,
 redaction, a superseded decision, parallel workstreams and a server restart.
