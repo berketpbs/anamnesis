@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `memory_read_session` and `show-session` expose captured source events in the
+  current project, with event filtering, 20-event default pagination, current
+  redaction and explicit missing-message/truncation information. Source reads
+  never reconstruct absent text from a summary or consume a handoff.
+
 ### Fixed
 - **`rename` no longer takes another process's commits out of the wiki's
   history.** Every write commits onto HEAD as it is at that moment, since
