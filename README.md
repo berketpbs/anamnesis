@@ -152,7 +152,8 @@ Cursor → Claude Code, through the real hook commands.
 - `anamnesis audit`: who changed memory, and what they changed.
 - A read-only JSON API under `/api/v1`, and
   [a server other machines can reach](docs/REMOTE.md), with tokens, TLS and
-  per-operator handoffs.
+  per-operator handoffs. That mode is experimental: the page says what it
+  does not do yet.
 
 **Measured, not argued**
 - `anamnesis eval` scores retrieval against a checked-in corpus and runs in CI,

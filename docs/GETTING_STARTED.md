@@ -2,9 +2,8 @@
 
 ## Prerequisites
 
-- Rust 1.95 or later
-- Git
-- SQLite (bundled with project)
+None for a release binary: SQLite and git are built into it. Building from
+source needs Rust 1.95 or later and Git.
 
 ## Installation
 

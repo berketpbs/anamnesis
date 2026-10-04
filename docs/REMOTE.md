@@ -7,6 +7,25 @@ homelab box, a VPS, a team of three pointing their editors at one memory.
 Read it before you bind anything but loopback. The server holds every prompt
 anybody typed, every path they opened, and every summary written from them.
 
+**This mode is experimental.** The hooks record to a remote server, and the
+handoff and recall at prompt time come back from it, but three things a team
+would expect do not work yet:
+
+- **The MCP tools read the developer's own machine, not the server.**
+  `anamnesis mcp` opens the local data directory, so `memory_query` and the
+  page and session tools see nothing the remote server holds.
+- **A project is worked out on the server's disk.** A hook sends the path it
+  ran in, and the server looks for `.anamnesis.toml` and a git remote at that
+  path on its own disk. Off the developer's machine the path is not there, so
+  the project falls back to the folder's name: one repository checked out in
+  two differently named folders is two projects, and two repositories in
+  folders of the same name are one.
+- **A token says who is writing, not what they may read.** Every token reads
+  every project on the server.
+
+It suits one person's machines, or a small team that wants shared handoffs and
+accepts sharing everything else.
+
 ---
 
 ## What changes off loopback
