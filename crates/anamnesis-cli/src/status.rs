@@ -37,11 +37,16 @@ pub fn cmd_status(
     println!("  Workspace: {}", scope.scope.workspace);
     println!("  Project:   {}", scope.scope.project);
     println!("  Identity:  {}", describe_source(&scope.source));
+    // Said without --verbose: of everything a server started here would do,
+    // sending text off the machine to a provider nobody named is the one a
+    // person should not have to ask about.
     if anamnesis_llm::LlmConfig::from_vars(crate::settings::var)
         .is_ok_and(|config| config.provider_inferred)
     {
+        println!("  Provider:  Anthropic, picked by ANTHROPIC_API_KEY alone — a server started");
+        println!("             here sends redacted session text there. Name it with");
         println!(
-            "  Model here: Anthropic inferred from ANTHROPIC_API_KEY; a server started here sends redacted session text to it. Set ANAMNESIS_LLM_PROVIDER=anthropic explicitly, or none to disable model calls."
+            "             ANAMNESIS_LLM_PROVIDER=anthropic, or set it to none to send nothing."
         );
     }
     if let Some(line) = describe_unrecognized(&scope.unrecognized) {

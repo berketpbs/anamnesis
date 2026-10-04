@@ -81,7 +81,9 @@ pub struct Finding {
 /// outcomes, a wiki of counted pages — is still a test.
 #[derive(Debug, Clone, Default)]
 pub struct Symptoms {
-    /// This process's settings infer Anthropic from a key, without a provider.
+    /// Whether this shell's settings pick Anthropic from `ANTHROPIC_API_KEY`
+    /// alone, with no provider named. A server started with them would; the
+    /// running one may have been started with others.
     pub provider_inferred_here: bool,
     /// Lifecycle moments wired for each harness this project has settings for,
     /// as the parser classifies the names actually registered.
@@ -202,14 +204,7 @@ pub fn diagnose(symptoms: &Symptoms) -> Vec<Finding> {
     findings.extend(judge_embeddings(symptoms));
     findings.extend(judge_build(symptoms));
     findings.extend(judge_stored_secrets(symptoms));
-    if symptoms.provider_inferred_here {
-        findings.push(Finding {
-            severity: Severity::Thin,
-            subject: "model selection here",
-            verdict: "Anthropic is inferred from ANTHROPIC_API_KEY; a server started with these settings sends redacted session text to it".into(),
-            remedy: Some("Set ANAMNESIS_LLM_PROVIDER=anthropic explicitly, or none to disable model calls; the running server may have different settings.".into()),
-        });
-    }
+    findings.extend(judge_model_provider(symptoms));
     findings.sort_by_key(|finding| std::cmp::Reverse(finding.severity));
     findings
 }
@@ -699,6 +694,29 @@ fn judge_build(symptoms: &Symptoms) -> Vec<Finding> {
     }]
 }
 
+/// Whether a server started here would send text to a provider nobody named.
+///
+/// `ANTHROPIC_API_KEY` on its own selects Anthropic, and Claude Code users
+/// often have it exported for reasons of their own, so the first sign that
+/// redacted transcripts go there can be the bill. Judged on this shell's
+/// settings rather than the running server's, which may have been started with
+/// others, and the finding says that instead of claiming what the server does.
+fn judge_model_provider(symptoms: &Symptoms) -> Vec<Finding> {
+    if !symptoms.provider_inferred_here {
+        return Vec::new();
+    }
+    vec![Finding {
+        severity: Severity::Thin,
+        subject: "model provider",
+        verdict: "ANTHROPIC_API_KEY alone picks Anthropic here: a server started with these                   settings sends redacted session text there without a provider being named"
+            .to_owned(),
+        remedy: Some(
+            "set ANAMNESIS_LLM_PROVIDER=anthropic to keep it, or none to send nothing; the              running server may have been started with other settings"
+                .to_owned(),
+        ),
+    }]
+}
+
 /// What to do about a server running another build.
 const INSTALL_AND_RESTART: &str = "install this build where the hooks and the server run, then \
                                    restart the server with `anamnesis service restart`";
@@ -995,25 +1013,6 @@ fn wired_moments(settings: &std::path::Path) -> Vec<EventKind> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn inferred_local_provider_is_visible_without_claiming_the_server_uses_it() {
-        let symptoms = super::Symptoms {
-            provider_inferred_here: true,
-            ..Default::default()
-        };
-        let findings = super::diagnose(&symptoms);
-        let finding = findings
-            .iter()
-            .find(|f| f.subject == "model selection here")
-            .unwrap();
-        assert!(
-            finding
-                .remedy
-                .as_deref()
-                .unwrap()
-                .contains("running server may have different settings")
-        );
-    }
     use super::*;
 
     fn session(kinds: &[(EventKind, usize)]) -> SessionFacts {
@@ -1881,5 +1880,36 @@ mod tests {
 
         assert_eq!(findings[0].severity, Severity::Broken);
         assert!(findings[0].verdict.contains("no harness"));
+    }
+
+    /// A key that picked the provider on its own is said, with how to name
+    /// one, and without claiming the running server was started the same way.
+    #[test]
+    fn a_provider_picked_by_a_key_alone_is_said_without_claiming_the_server() {
+        let mut symptoms = wired("claude-code", &EVERY_MOMENT);
+        symptoms.provider_inferred_here = true;
+
+        let finding = diagnose(&symptoms)
+            .into_iter()
+            .find(|f| f.subject == "model provider")
+            .expect("a provider finding");
+        assert_eq!(finding.severity, Severity::Thin);
+        let remedy = finding.remedy.expect("a remedy");
+        assert!(
+            remedy.contains("ANAMNESIS_LLM_PROVIDER=anthropic"),
+            "{remedy}"
+        );
+        assert!(
+            remedy.contains("running server may have been started"),
+            "{remedy}"
+        );
+
+        symptoms.provider_inferred_here = false;
+        assert!(
+            diagnose(&symptoms)
+                .iter()
+                .all(|f| f.subject != "model provider"),
+            "silent when a provider is named"
+        );
     }
 }

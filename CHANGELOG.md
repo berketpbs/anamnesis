@@ -21,12 +21,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from `memory_handoff_accept`, came as bare prose, so an earlier agent's
   note read like an instruction from the person. It now carries the same
   frame. The stored note and its single-use claim are unchanged.
-
-### Fixed
-- Expose provider inference from `ANTHROPIC_API_KEY` in server startup logs,
-  `status` and `doctor`. The local diagnostics distinguish this process's
-  settings from a separately started server. Existing provider-selection
-  behavior is retained; explicit `ANAMNESIS_LLM_PROVIDER=none` disables it.
+- **A key that picks the model provider on its own now says so.** With
+  `ANTHROPIC_API_KEY` set and no `ANAMNESIS_LLM_PROVIDER`, a server sends
+  redacted session text to Anthropic, and Claude Code users often have that
+  key exported for reasons of their own. The server's startup log, `status`
+  and `doctor` now say when that is how the provider was chosen, and how to
+  name it (`ANAMNESIS_LLM_PROVIDER=anthropic`) or turn it off (`none`).
+  `status` and `doctor` read this shell's settings, and say so, since the
+  running server may have been started with others. The choice itself is
+  unchanged.
 
 ### Fixed
 - **`rename` no longer takes another process's commits out of the wiki's
