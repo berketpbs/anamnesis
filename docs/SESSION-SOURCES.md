@@ -13,7 +13,8 @@ and optional `limit` (default 20, maximum 100). The CLI also accepts an
 unambiguous prefix printed by `sessions`. A filter names one captured event
 type, such as `user-prompt`, `assistant-message`, `tool-use` or `tool-attempt`.
 Offsets refer to the filtered, chronological sequence. `next_offset` is null
-when that sequence ends.
+when that sequence ends. A `tool-attempt` whose call completed has empty text:
+its input is stored once, in the `tool-use` that follows it.
 
 Every returned event contains its stable observation `id`, timestamp `at`,
 `kind`, stored `text`, `truncated` flag and `redacted_on_read` flag. The response

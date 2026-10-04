@@ -1,9 +1,9 @@
 //! MCP server implementation for anamnesis.
 //!
-//! Exposes tools over the Model Context Protocol: `memory_query`,
-//! `memory_read_session`,
-//! `memory_read_page`, `memory_write_page`, `memory_patch_page`, `memory_handoff_accept`,
-//! `workstream_start`, and `workstream_status`. All of them operate against
+//! Exposes eight tools over the Model Context Protocol: `memory_query`,
+//! `memory_read_page`, `memory_read_session`, `memory_write_page`,
+//! `memory_patch_page`, `memory_handoff_accept`, `workstream_start`, and
+//! `workstream_status`. All of them operate against
 //! one resolved scope — the project the server was started against — the same
 //! way `anamnesis serve` binds to one project's store and wiki rather than
 //! discovering scope per request.
@@ -12,7 +12,10 @@
 //! returns snippets, which is what deciding *which* page needs; reading the
 //! page it picked is `memory_read_page`, which returns the body whole. Folding
 //! the second into the first would mean either truncating every hit or
-//! returning ten full pages to answer one question.
+//! returning ten full pages to answer one question. Below both sits
+//! `memory_read_session`: a page names the session it was written from, and
+//! that session's captured events are what was actually said, where the page
+//! is what a summary kept of it.
 //!
 //! Transport is the caller's choice (stdio is what `anamnesis mcp` uses); this
 //! crate only implements [`ServerHandler`].
@@ -771,7 +774,7 @@ impl ServerHandler for AnamnesisMcp {
              might already have prior decisions, gotchas, or context recorded. It returns \
              snippets: when a hit looks like the answer, call memory_read_page with its path and global flag \
              to read the page in full rather than querying again with different words — a \
-             snippet is enough to choose a page and not enough to act on one. Call \
+             snippet is enough to choose a page and not enough to act on one. A page's              source_session names the session it was written from; memory_read_session              reads what that session captured, when what was actually said matters. Call \
              memory_write_page to create durable knowledge — decisions, gotchas, procedures — \
              worth keeping past this session. To update an existing page, read its revision and \
              call memory_patch_page; omitted fields are preserved there. Ordinary session summaries are written \
