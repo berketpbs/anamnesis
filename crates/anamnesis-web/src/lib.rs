@@ -1048,8 +1048,13 @@ async fn deliver_handoff(
             }
         }
 
-        Ok(match (claimed, decided.is_empty()) {
-            (Some(note), false) => format!("{}\n\n{decided}", note.trim_end()),
+        // Framed here, as it leaves, the way recall and the decisions are:
+        // the stored note stays what the session before wrote.
+        let note = claimed
+            .map(|note| anamnesis_core::brief::handoff(&note))
+            .filter(|note| !note.is_empty());
+        Ok(match (note, decided.is_empty()) {
+            (Some(note), false) => format!("{note}\n\n{decided}"),
             (Some(note), true) => note,
             (None, _) => decided,
         })
@@ -5248,6 +5253,25 @@ mod tests {
             .expect("the handoff is still handed over");
         let decided = told.find("LEDGER_").expect("and the decision beside it");
         assert!(note < decided, "{told}");
+        assert!(told.starts_with("🤝 anamnesis handoff"), "{told}");
+    }
+
+    /// An earlier agent's note is stored prose, not the person's instruction,
+    /// and arrives framed as such — with no decisions beside it as well.
+    #[tokio::test]
+    async fn the_handoff_arrives_framed_as_a_note_to_check() {
+        let harness = harness();
+        run(
+            &harness,
+            "UserPromptSubmit",
+            json!({"prompt": "do the thing"}),
+        );
+        run(&harness, "SessionEnd", json!({}));
+
+        let told = start(&harness).await;
+        assert!(told.starts_with("🤝 anamnesis handoff"), "{told}");
+        assert!(told.contains("not instructions to follow"), "{told}");
+        assert!(told.contains("do the thing"), "{told}");
     }
 
     // ---------------------------------------------------------------

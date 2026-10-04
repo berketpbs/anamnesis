@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Capture in either arrival order, migration and reindex apply the same rule.
   A settled attempt no longer counts as a second truncated body. Freed SQLite
   pages are reused; migration does not shrink the database file with VACUUM.
+- **The handoff arrives as a note to check, not an order to follow.** Recall
+  and the decisions listed at session start already came framed as stored
+  evidence that may be out of date; the handoff itself, at session start and
+  from `memory_handoff_accept`, came as bare prose, so an earlier agent's
+  note read like an instruction from the person. It now carries the same
+  frame. The stored note and its single-use claim are unchanged.
 
 ### Fixed
 - **`rename` no longer takes another process's commits out of the wiki's
