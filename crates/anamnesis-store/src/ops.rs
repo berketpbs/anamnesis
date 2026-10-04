@@ -1992,7 +1992,7 @@ fn read_session(row: &Row<'_>) -> rusqlite::Result<Session> {
 }
 
 /// Build an [`Observation`] from a row.
-fn read_observation(row: &Row<'_>) -> rusqlite::Result<Observation> {
+pub(crate) fn read_observation(row: &Row<'_>) -> rusqlite::Result<Observation> {
     let tool_name: Option<String> = row.get(3)?;
     Ok(Observation {
         id: parse_id(row.get::<_, String>(0)?),

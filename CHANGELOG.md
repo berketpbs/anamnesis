@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   today's redaction applied as they are read. A message that was never
   captured, or was cut at capture, is reported as such and never rebuilt
   from a summary, and reading claims no handoff.
+- **`anamnesis brief --out FILE` hands the work to an agent without hooks.**
+  A handoff reaches only an agent whose harness runs the hooks or the MCP
+  server. This writes the same continuation as a local Markdown file: the
+  last captured request and answer, the waiting handoff note, the decisions
+  that still stand with the rejections they record, and the session, event
+  and page each came from. It is built without a model call and redacted,
+  and leaves the handoff waiting for the next session; an existing file is
+  replaced only with `--force`.
 
 ### Changed
 - Store a completed tool call's input once in the SQLite index. V21 clears
