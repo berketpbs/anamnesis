@@ -149,6 +149,8 @@ pub struct Symptoms {
     /// system does not have. `None` — nothing answered, or a server too old to
     /// say — judges every row, as before, rather than guessing which is live.
     pub server_embedding: Option<String>,
+    /// Index material retained under each model in this project.
+    pub vector_models: Vec<anamnesis_store::VectorModel>,
     /// What today's redaction rules would still mask in stored observations,
     /// across every project in the index.
     ///
@@ -202,11 +204,46 @@ pub fn diagnose(symptoms: &Symptoms) -> Vec<Finding> {
     findings.extend(judge_capture(symptoms));
     findings.extend(judge_pages(symptoms));
     findings.extend(judge_embeddings(symptoms));
+    findings.extend(judge_vector_remnants(symptoms));
     findings.extend(judge_build(symptoms));
     findings.extend(judge_stored_secrets(symptoms));
     findings.extend(judge_model_provider(symptoms));
     findings.sort_by_key(|finding| std::cmp::Reverse(finding.severity));
     findings
+}
+
+/// Models other than the server's that still hold rows in the index.
+///
+/// Switching embedders leaves the old model's vectors and failure rows
+/// behind: nothing deletes them and no query compares them. Judged only when
+/// the server says which model it embeds with; without that, any stored model
+/// might be the live one, and naming the others would be a guess.
+fn judge_vector_remnants(symptoms: &Symptoms) -> Vec<Finding> {
+    let Some(active) = symptoms.server_embedding.as_deref() else {
+        return Vec::new();
+    };
+    let older: Vec<&str> = symptoms
+        .vector_models
+        .iter()
+        .map(|model| model.model.as_str())
+        .filter(|model| *model != active)
+        .collect();
+    if older.is_empty() {
+        return Vec::new();
+    }
+    vec![Finding {
+        severity: Severity::Thin,
+        subject: "older embedding models",
+        verdict: format!(
+            "{} model(s) the server no longer embeds with still hold index rows: {}",
+            older.len(),
+            older.join(", ")
+        ),
+        remedy: Some(
+            "`anamnesis vectors prune` lists their rows; `--apply` removes them, never the              configured or the running model's"
+                .to_owned(),
+        ),
+    }]
 }
 
 /// Whether anything stored holds a secret today's rules would mask.
@@ -877,6 +914,7 @@ pub fn cmd_doctor(server: &str, data_dir: Option<PathBuf>) -> anyhow::Result<()>
         .map(|(agent, _)| agent)
         .collect();
     symptoms.embed_failures = store.embed_failures(scope.project_id)?;
+    symptoms.vector_models = store.vector_models(scope.project_id)?;
     symptoms.sections_compared = Tuning::default().vector_sections;
     symptoms.stored_secrets =
         store.redact_observations(&anamnesis_core::sanitize::Redactor::new(), false)?;
@@ -1489,6 +1527,41 @@ mod tests {
         assert!(
             embeddings_finding(&symptoms).is_some(),
             "a server that did not say which model is not a reason to hide every row"
+        );
+    }
+
+    /// What that switch left behind: the MiniLM rows, which nothing compares
+    /// any more. Named only when the server says which model is live, and the
+    /// live one is never on the list.
+    #[test]
+    fn rows_under_a_model_the_server_no_longer_uses_are_named() {
+        let mut symptoms = wired("claude-code", &EVERY_MOMENT);
+        let rows = |model: &str| anamnesis_store::VectorModel {
+            model: model.to_owned(),
+            page_vectors: 3,
+            abstract_vectors: 1,
+            failures: 1,
+            bytes: 12,
+        };
+        symptoms.vector_models = vec![
+            rows("nomic-embed-text"),
+            rows("sentence-transformers/all-MiniLM-L6-v2"),
+        ];
+
+        symptoms.server_embedding = Some("nomic-embed-text".to_owned());
+        let finding = diagnose(&symptoms)
+            .into_iter()
+            .find(|f| f.subject == "older embedding models")
+            .expect("the MiniLM rows are named");
+        assert!(finding.verdict.contains("all-MiniLM-L6-v2"), "{finding:#?}");
+        assert!(!finding.verdict.contains("nomic"), "{finding:#?}");
+
+        symptoms.server_embedding = None;
+        assert!(
+            diagnose(&symptoms)
+                .iter()
+                .all(|f| f.subject != "older embedding models"),
+            "without the live model, any stored one might be it"
         );
     }
 

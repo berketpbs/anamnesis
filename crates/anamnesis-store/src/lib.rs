@@ -41,6 +41,7 @@ mod redact;
 mod rename;
 mod session_read;
 mod sweep;
+mod vector_maintenance;
 mod workstream;
 
 pub use drift::{Divergence, Drift};
@@ -60,6 +61,7 @@ pub use redact::Redaction;
 pub use rename::{RenameError, Renamed};
 pub use session_read::{SessionEvents, StoredEvent};
 pub use sweep::SweepRow;
+pub use vector_maintenance::VectorModel;
 pub use workstream::{WorkstreamHandoff, WorkstreamSession};
 
 /// Errors produced by the storage layer.
