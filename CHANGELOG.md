@@ -17,13 +17,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pages are reused; migration does not shrink the database file with VACUUM.
 
 ### Fixed
-- Redact MCP and CLI page creation and patch text before Git, indexing and
-  embedding, including titles, entities and abstracts. Reject credential-bearing
-  paths and supersedes references without echoing them. `doctor` also scans
-  current wiki pages for text today's rules would mask; existing history and
-  backups still require the explicit `redact` recovery procedure.
-
-### Fixed
 - **`rename` no longer takes another process's commits out of the wiki's
   history.** Every write commits onto HEAD as it is at that moment, since
   2026-09-09, when a server committing the index it had read that morning
@@ -44,6 +37,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A model download that cannot be put in place leaves nothing behind.** A
   file is downloaded under a temporary name and renamed into place; when the
   write or the rename failed, the temporary copy stayed in `models/`.
+
+### Security
+- **A page an agent writes is redacted before it is kept.** Capture redacts
+  every event, but `memory_write_page`, `memory_patch_page` and the CLI's
+  `write-page` and `patch-page` stored what they were given: a key pasted
+  into a title, body, entity or abstract went into the wiki's git history,
+  the index and the request to the embedder. They now apply the same rules
+  first, and a path or `supersedes` holding a credential is refused without
+  the error repeating it. `doctor` reports wiki pages that hold something
+  today's rules mask; `anamnesis redact` names them, and older versions stay
+  in git history and backups until they are rewritten or deleted.
 
 ## [1.2.1] - 2026-10-01
 

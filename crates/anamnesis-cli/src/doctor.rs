@@ -152,7 +152,12 @@ pub struct Symptoms {
     /// never reaches what came before it. This is the count of what it did not
     /// reach.
     pub stored_secrets: anamnesis_store::Redaction,
-    /// Current wiki pages with text today's redaction rules would change.
+    /// Wiki pages, in every project, holding something today's redaction
+    /// rules mask.
+    ///
+    /// A page is not an observation: no rewrite of the index reaches it, and a
+    /// page an agent wrote by hand was never redacted at all before page
+    /// writes were.
     pub wiki_secrets: usize,
 }
 
@@ -205,12 +210,21 @@ pub fn diagnose(symptoms: &Symptoms) -> Vec<Finding> {
 /// saying so on every run is a line people learn to skip.
 fn judge_stored_secrets(symptoms: &Symptoms) -> Vec<Finding> {
     let mut findings = Vec::new();
+    // Named, not rewritten: `redact --apply` masks the spool and the index,
+    // and leaves a page — and the history git keeps of it — to a person.
     if symptoms.wiki_secrets > 0 {
         findings.push(Finding {
             severity: Severity::Exposed,
             subject: "wiki secrets",
-            verdict: format!("{} current wiki page(s) hold text today's redaction rules mask", symptoms.wiki_secrets),
-            remedy: Some("`anamnesis redact` to inspect current pages and history; `anamnesis redact --apply` to mask them. Revoke exposed credentials and replace older backups.".into()),
+            verdict: format!(
+                "{} wiki page(s) hold something today's redaction rules mask",
+                symptoms.wiki_secrets
+            ),
+            remedy: Some(
+                "`anamnesis redact` names them; edit or forget each one, then revoke the \
+                 credential, since git history and older backups keep the version that held it"
+                    .to_owned(),
+            ),
         });
     }
     let found = &symptoms.stored_secrets;
@@ -969,20 +983,6 @@ fn wired_moments(settings: &std::path::Path) -> Vec<EventKind> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn wiki_secrets_are_reported_even_without_secret_observations() {
-        let symptoms = super::Symptoms {
-            wiki_secrets: 1,
-            ..Default::default()
-        };
-        let findings = super::diagnose(&symptoms);
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.subject == "wiki secrets"
-                    && finding.severity == super::Severity::Exposed)
-        );
-    }
     use super::*;
 
     fn session(kinds: &[(EventKind, usize)]) -> SessionFacts {
@@ -1713,6 +1713,35 @@ mod tests {
         assert!(
             diagnose(&symptoms).iter().all(|f| f.subject != "secrets"),
             "silent when nothing is stored"
+        );
+    }
+
+    /// A page holding a key is as exposed as an observation, and observations
+    /// that are all clean say nothing about it.
+    #[test]
+    fn a_secret_in_a_wiki_page_is_exposed_even_when_observations_are_clean() {
+        let mut symptoms = wired("claude-code", &EVERY_MOMENT);
+        symptoms.wiki_secrets = 1;
+
+        let findings = diagnose(&symptoms);
+        let first = findings.first().expect("a finding");
+        assert_eq!(first.severity, Severity::Exposed);
+        assert_eq!(first.subject, "wiki secrets");
+        assert!(
+            first
+                .remedy
+                .as_deref()
+                .is_some_and(|r| r.contains("edit or forget") && !r.contains("--apply")),
+            "redact --apply does not rewrite pages: {:?}",
+            first.remedy
+        );
+
+        symptoms.wiki_secrets = 0;
+        assert!(
+            diagnose(&symptoms)
+                .iter()
+                .all(|f| f.subject != "wiki secrets"),
+            "silent when no page holds one"
         );
     }
 
