@@ -31,11 +31,15 @@ harness.
 | `raw/` | Every captured observation, redacted, as append-only JSONL. A transcript that has been quiet for a week is compressed and keeps every line | Until `forget-session` or `purge` |
 | `db/` | The SQLite index: sessions, observations, pages, handoffs, audit log. It can be rebuilt from `raw/` and `wiki/` | Until removed |
 | `wiki/` | Markdown pages in a git repository | Removed pages stay in its history |
-| `logs/` | The server's rolling log | Until removed |
+| `pending/` | Events a hook could not deliver while the server was down, redacted before they are written; `pending/refused/` holds the ones the server turned away | Until delivered; refused ones until removed |
+| `logs/` | The server's log, a file a day | 14 days |
 | `models/` | A local embedding model, when one is used | Until removed |
+| `settings.env` | Model and embedding settings for a server nobody starts by hand. It refuses keys | Until removed |
 
-`backup` writes all of the above into one archive. Treat that archive the way
-you would treat the data directory itself.
+`backup` writes `db/`, `raw/` and `wiki/` into one archive. `models/` is a
+download any machine can repeat, and `logs/`, `pending/` and `settings.env`
+belong to one machine, so they are left out. Treat the archive the way you
+would treat the data directory itself.
 
 ## What leaves the machine
 
@@ -48,9 +52,10 @@ you would treat the data directory itself.
   the machine.
 - **With a remote embedder**, page text goes to that endpoint.
 - **Keys** are read from the operating system's credential store (`anamnesis
-  key set`; Credential Manager on Windows, the Keychain on macOS), from
-  `settings.env` in the data directory, or from the environment. `anamnesis
-  key list` names the stored keys and never shows their values.
+  key set`; Credential Manager on Windows, the Keychain on macOS) or from the
+  environment. `settings.env` refuses them by name: it is a plain file, and it
+  goes wherever a copy of the directory goes. `anamnesis key list` names the
+  stored keys and never shows their values.
 
 A server reachable from other machines needs tokens and TLS. See
 [docs/REMOTE.md](docs/REMOTE.md).

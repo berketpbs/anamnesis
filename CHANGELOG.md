@@ -84,6 +84,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A model download that cannot be put in place leaves nothing behind.** A
   file is downloaded under a temporary name and renamed into place; when the
   write or the rename failed, the temporary copy stayed in `models/`.
+- **The documents say what the code does.** `SECURITY.md` said `backup`
+  takes everything in the data directory, and that keys can be kept in
+  `settings.env`; `backup` takes `db/`, `raw/` and `wiki/` only, and
+  `settings.env` refuses keys by name. It also said logs are kept until
+  removed (they are kept 14 days) and did not list `pending/` or
+  `settings.env` at all. `ARCHITECTURE.md` still listed as missing a tool to
+  read a page whole and a way to score retrieval against the memory that
+  exists, both shipped; `USE_CASES.md` counted migrations to V11; and Getting
+  Started listed Rust as a prerequisite of a release binary.
+- **`docs/REMOTE.md` says the remote mode is experimental, and why.** The MCP
+  tools on a developer's machine read that machine's memory, not the
+  server's; the server works out each project on its own disk, where a
+  developer's path does not exist; and every token reads every project.
 
 ### Security
 - **A page an agent writes is redacted before it is kept.** Capture redacts

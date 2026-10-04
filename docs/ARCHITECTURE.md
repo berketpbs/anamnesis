@@ -1033,34 +1033,27 @@ data directory.
 
 Shipped since this list was first written: vector embeddings, the raw spool,
 `reindex`, `bootstrap`, the decay sweep, auto-improve and its scheduler, the
-audit log, and hosted providers for both completion and embeddings.
+audit log, hosted providers for both completion and embeddings, reading a page
+whole (`memory_read_page`) and a session as it was captured
+(`memory_read_session`), recall at prompt time, and retrieval scored against a
+copy of the memory that exists (`eval --pages-from`).
 
 What is still missing is listed by what it costs, measured against a working
 memory rather than guessed at.
 
-1. **Nothing measures the memory that actually exists.** `anamnesis eval`
-   scores three checked-in corpora, rebuilt into a temporary directory under a
-   pinned clock. That is what makes a suite reproducible, and it is also what
-   keeps the live wiki invisible to every figure this project publishes.
-   `archive.rs` restores a snapshot carefully and nothing in `anamnesis-evals`
-   references it. Until that is connected, a retrieval change can only be
-   defended against fixtures.
-2. **`memory_query` returns snippets, not pages.** An agent that finds the
-   right page has no tool to read the rest of it, and works from three
-   sentences.
-3. **Auto-improve is rule-based.** It notices what the index can prove — a
+1. **Auto-improve is rule-based.** It notices what the index can prove — a
    page fetched often enough to promote, a link with no target — and nothing
    that requires reading the pages.
-4. **Links stop at the project boundary.** A page cannot point at one in
+2. **Links stop at the project boundary.** A page cannot point at one in
    another project, so knowledge that spans two repositories is duplicated or
    lost.
-5. **One writer, no backpressure.** SQLite is written from whatever task holds
+3. **One writer, no backpressure.** SQLite is written from whatever task holds
    it; a saturated server has no way to say "later" other than by being slow.
-6. **Five harnesses.** The pattern is proven and each new one is small — but
+4. **Five harnesses.** The pattern is proven and each new one is small — but
    each also needs its event names and file format checked against that
    harness's own documentation before anything is written, which is the part
    that takes the time.
-7. **A page written in one language answers questions asked in that
+5. **A page written in one language answers questions asked in that
    language.** Full text is language-bound by nature and the default embedding
    model is English-centric, so the vector stream is what carries a query
    across the gap — measured here, and the reason a registration that omits it

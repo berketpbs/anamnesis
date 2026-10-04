@@ -177,7 +177,7 @@ than a hopeful one.
 
 ### Phase 1: Core Capture & Retrieval
 - [x] Workspace structure
-- [x] Database schema & migrations (`V01`–`V11`)
+- [x] Database schema & migrations (`V01`–`V21`)
 - [x] Basic CLI commands — `status`, `search`, `write-page`, `show-page`,
       `sessions`, `handoff`
 - [x] Memory wiki file operations
