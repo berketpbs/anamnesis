@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`memory_read_session` and `show-session` read what a session actually
+  captured.** A page names the session it came from in `source_session`,
+  and nothing could open it: what was said, as opposed to what a summary
+  kept, meant searching a harness's own files by hand. The MCP tool and the
+  CLI command return that session's stored events — id, time, kind, text —
+  in this project only, 20 at a time (up to 100), filtered by kind, with
+  today's redaction applied as they are read. A message that was never
+  captured, or was cut at capture, is reported as such and never rebuilt
+  from a summary, and reading claims no handoff.
+
 ### Changed
 - Store a completed tool call's input once in the SQLite index. V21 clears
   an attempt's body only when a completion in the same session, with the same

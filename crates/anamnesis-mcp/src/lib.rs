@@ -1,8 +1,9 @@
 //! MCP server implementation for anamnesis.
 //!
-//! Exposes seven tools over the Model Context Protocol: `memory_query`,
-//! `memory_read_page`, `memory_write_page`, `memory_patch_page`, `memory_handoff_accept`,
-//! `workstream_start`, and `workstream_status`. All of them operate against
+//! Exposes eight tools over the Model Context Protocol: `memory_query`,
+//! `memory_read_page`, `memory_read_session`, `memory_write_page`,
+//! `memory_patch_page`, `memory_handoff_accept`, `workstream_start`, and
+//! `workstream_status`. All of them operate against
 //! one resolved scope — the project the server was started against — the same
 //! way `anamnesis serve` binds to one project's store and wiki rather than
 //! discovering scope per request.
@@ -11,7 +12,10 @@
 //! returns snippets, which is what deciding *which* page needs; reading the
 //! page it picked is `memory_read_page`, which returns the body whole. Folding
 //! the second into the first would mean either truncating every hit or
-//! returning ten full pages to answer one question.
+//! returning ten full pages to answer one question. Below both sits
+//! `memory_read_session`: a page names the session it was written from, and
+//! that session's captured events are what was actually said, where the page
+//! is what a summary kept of it.
 //!
 //! Transport is the caller's choice (stdio is what `anamnesis mcp` uses); this
 //! crate only implements [`ServerHandler`].
@@ -19,7 +23,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -356,6 +360,19 @@ pub struct PatchPageResponse {
     pub warnings: Vec<String>,
 }
 
+/// Request for [`AnamnesisMcp::memory_read_session`].
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReadSessionRequest {
+    /// Source session id or an unambiguous prefix, restricted to this project.
+    pub session_id: String,
+    /// Filter by one stored event type, e.g. assistant-message or user-prompt.
+    pub kind: Option<String>,
+    /// Offset within the filtered, chronological event sequence. Defaults to 0.
+    pub offset: Option<usize>,
+    /// Events to return (1–100). Defaults to 20.
+    pub limit: Option<usize>,
+}
+
 /// Request for [`AnamnesisMcp::memory_read_page`].
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReadPageRequest {
@@ -663,6 +680,21 @@ impl AnamnesisMcp {
             .map_err(|error| error.to_string())
     }
 
+    /// Read only captured source events; never reconstruct text from a summary.
+    #[tool(
+        name = "memory_read_session",
+        description = "Read captured source events for a source_session in this project. Returns stored event id, timestamp, type, redacted text, truncation and pagination. Missing messages cannot be reconstructed from summaries.",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    pub async fn memory_read_session(
+        &self,
+        params: Parameters<ReadSessionRequest>,
+    ) -> Result<Json<BTreeMap<String, serde_json::Value>>, String> {
+        self.read_session(params.0)
+            .map(Json)
+            .map_err(|error| error.to_string())
+    }
+
     /// Claim the pending handoff left by the previous session, if there is one.
     ///
     /// A handoff is single-use: the first session to accept it consumes it, so
@@ -742,7 +774,7 @@ impl ServerHandler for AnamnesisMcp {
              might already have prior decisions, gotchas, or context recorded. It returns \
              snippets: when a hit looks like the answer, call memory_read_page with its path and global flag \
              to read the page in full rather than querying again with different words — a \
-             snippet is enough to choose a page and not enough to act on one. Call \
+             snippet is enough to choose a page and not enough to act on one. A page's              source_session names the session it was written from; memory_read_session              reads what that session captured, when what was actually said matters. Call \
              memory_write_page to create durable knowledge — decisions, gotchas, procedures — \
              worth keeping past this session. To update an existing page, read its revision and \
              call memory_patch_page; omitted fields are preserved there. Ordinary session summaries are written \
@@ -1182,6 +1214,53 @@ impl AnamnesisMcp {
             chain_effects,
             warnings,
         })
+    }
+
+    fn read_session(
+        &self,
+        request: ReadSessionRequest,
+    ) -> Result<BTreeMap<String, serde_json::Value>, McpError> {
+        use anamnesis_core::observation::EventKind;
+        let limit = request.limit.unwrap_or(20);
+        if !(1..=100).contains(&limit) {
+            return Err(McpError::Invalid("limit must be between 1 and 100".into()));
+        }
+        if request.session_id.trim().is_empty() {
+            return Err(McpError::Invalid("name a captured session".into()));
+        }
+        let kind = request
+            .kind
+            .as_deref()
+            .map(|name| {
+                let kind = EventKind::from_storage(name);
+                if kind.as_str() != name {
+                    return Err(McpError::Invalid("unknown event type".into()));
+                }
+                Ok(kind)
+            })
+            .transpose()?;
+        let mut matches = self
+            .store
+            .sessions_matching(self.scope.project_id, &request.session_id)?;
+        if matches.len() != 1 {
+            return Err(McpError::Invalid(
+                "source session missing in this project or prefix is ambiguous".into(),
+            ));
+        }
+        let session = matches.remove(0);
+        let page = self
+            .store
+            .read_session_events(
+                self.scope.project_id,
+                session.id,
+                kind,
+                request.offset.unwrap_or(0),
+                limit,
+            )?
+            .ok_or_else(|| McpError::Invalid("source session missing in this project".into()))?;
+        serde_json::to_value(page)
+            .and_then(serde_json::from_value)
+            .map_err(|error| McpError::Invalid(error.to_string()))
     }
 
     fn read_page(&self, request: ReadPageRequest) -> Result<ReadPageResponse, McpError> {
@@ -1624,6 +1703,98 @@ mod tests {
     }
 
     #[test]
+    fn source_read_is_scoped_filtered_redacted_and_never_claims_a_handoff() {
+        use anamnesis_core::observation::{BoundedBody, EventKind};
+        let (_repo, _data, server) = harness();
+        let now = Timestamp::now();
+        server.store.upsert_project(&server.scope, now).unwrap();
+        let id = SessionId::derive(server.scope.project_id, "source-writer");
+        server
+            .store
+            .ensure_session(&new_session(
+                id,
+                server.scope.project_id,
+                server.scope.workspace_id,
+                AgentKind::ClaudeCode,
+                server.root.clone(),
+                now,
+                None,
+            ))
+            .unwrap();
+        let original = format!("stored message ghp_{}", "d".repeat(36));
+        server
+            .store
+            .insert_observation(&anamnesis_store::new_observation(
+                id,
+                EventKind::AssistantMessage,
+                None,
+                BoundedBody::from_stored(original.clone(), true),
+                now,
+            ))
+            .unwrap();
+        server
+            .store
+            .record_handoff(&anamnesis_store::new_handoff(
+                server.scope.project_id,
+                id,
+                Slot::shared(),
+                "continue",
+                now,
+            ))
+            .unwrap();
+        let request = |kind: Option<&str>| ReadSessionRequest {
+            session_id: id.to_string(),
+            kind: kind.map(str::to_owned),
+            offset: None,
+            limit: None,
+        };
+        let read = server
+            .read_session(request(Some("assistant-message")))
+            .unwrap();
+        assert_eq!(read["events"].as_array().unwrap().len(), 1);
+        assert_eq!(read["events"][0]["truncated"], true);
+        assert_eq!(read["events"][0]["redacted_on_read"], true);
+        assert!(!serde_json::to_string(&read).unwrap().contains(&original));
+        let empty = server.read_session(request(Some("user-prompt"))).unwrap();
+        assert!(empty["events"].as_array().unwrap().is_empty());
+        assert_eq!(empty["user_messages_available"], false);
+        assert!(server.read_session(request(Some("invented"))).is_err());
+        assert_eq!(
+            server
+                .store
+                .peek_handoff(server.scope.project_id, &Slot::shared())
+                .unwrap()
+                .as_deref(),
+            Some("continue")
+        );
+        assert_eq!(
+            server.store.observations(id).unwrap()[0].body.as_str(),
+            original
+        );
+        let other = anamnesis_core::scope::ResolvedScope::global(
+            &server.scope.scope.workspace,
+            server.root.clone(),
+        );
+        assert!(
+            server
+                .store
+                .read_session_events(other.project_id, id, None, 0, 20)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            server
+                .read_session(ReadSessionRequest {
+                    session_id: "missing-source".into(),
+                    kind: None,
+                    offset: None,
+                    limit: None
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
     fn an_unknown_tier_is_rejected_rather_than_defaulted() {
         let (_repo, _data, server) = harness();
         let result = server.write_page(WritePageRequest {
@@ -1720,6 +1891,7 @@ mod tests {
                 "memory_patch_page",
                 "memory_query",
                 "memory_read_page",
+                "memory_read_session",
                 "memory_write_page",
                 "workstream_start",
                 "workstream_status",

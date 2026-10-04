@@ -178,6 +178,7 @@ fn a_harness_can_list_write_find_and_read_over_stdio() {
         "memory_write_page",
         "memory_patch_page",
         "memory_read_page",
+        "memory_read_session",
         "memory_handoff_accept",
         "workstream_start",
         "workstream_status",
@@ -289,7 +290,12 @@ fn every_tool_says_whether_it_changes_memory() {
     let listed = server.answer(2);
     let tools = listed["result"]["tools"].as_array().expect("a tool list");
 
-    let reads = ["memory_query", "memory_read_page", "workstream_status"];
+    let reads = [
+        "memory_query",
+        "memory_read_page",
+        "memory_read_session",
+        "workstream_status",
+    ];
     let writes = [
         "memory_write_page",
         "memory_patch_page",

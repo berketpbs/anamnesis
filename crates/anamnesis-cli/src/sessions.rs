@@ -165,6 +165,67 @@ pub fn cmd_sessions(limit: Option<usize>, data_dir: Option<PathBuf>) -> anyhow::
     Ok(())
 }
 
+/// Read captured events without claiming a handoff or reconstructing missing text.
+pub fn cmd_show_session(
+    prefix: &str,
+    kind: Option<&str>,
+    offset: usize,
+    limit: usize,
+    json: bool,
+    data_dir: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    use anamnesis_core::observation::EventKind;
+    anyhow::ensure!(
+        (1..=100).contains(&limit),
+        "limit must be between 1 and 100"
+    );
+    let kind = kind
+        .map(|name| {
+            let kind = EventKind::from_storage(name);
+            anyhow::ensure!(kind.as_str() == name, "unknown event type");
+            Ok(kind)
+        })
+        .transpose()?;
+    let (scope, _data, store) = open_project(data_dir)?;
+    let session = one_session(&store, &scope, prefix)?;
+    let page = store
+        .read_session_events(scope.project_id, session.id, kind, offset, limit)?
+        .ok_or_else(|| anyhow::anyhow!("no captured session in this project"))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&page)?);
+    } else {
+        println!("Captured session {} ({})", page.session_id, page.agent);
+        println!("Only stored events are shown; absent or truncated text cannot be reconstructed.");
+        if !page.source_available {
+            println!("No captured source events remain.");
+        }
+        if !page.assistant_messages_available {
+            println!("No assistant message was captured.");
+        }
+        if page.events.is_empty() {
+            println!("No events match this filter and offset.");
+        }
+        for event in &page.events {
+            println!(
+                "\n{}  {}  {}{}",
+                event.id,
+                event.at,
+                event.kind,
+                if event.truncated {
+                    " [truncated at capture]"
+                } else {
+                    ""
+                }
+            );
+            println!("{}", event.text);
+        }
+        if let Some(next) = page.next_offset {
+            println!("\nMore events: --offset {next}");
+        }
+    }
+    Ok(())
+}
+
 /// Resolve an id prefix to exactly one session.
 ///
 /// Refuses an ambiguous prefix rather than acting on whichever row sorted
