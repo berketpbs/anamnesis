@@ -35,13 +35,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replaced only with `--force`.
 
 ### Changed
-- Store a completed tool call's input once in the SQLite index. V21 clears
-  an attempt's body only when a completion in the same session, with the same
-  call identifier, repeats it exactly as a prefix. Unmatched attempts and
-  differing inputs keep their text; rows and raw transcripts remain intact.
-  Capture in either arrival order, migration and reindex apply the same rule.
-  A settled attempt no longer counts as a second truncated body. Freed SQLite
-  pages are reused; migration does not shrink the database file with VACUUM.
+- **A tool call's input is indexed once.** Claude Code and Codex report a
+  call before and after it runs, and the completion repeats the input ahead
+  of the result; on a real install those copies were a third of all
+  observation text. Once both halves of a call are in, the attempt's row
+  stays and its body is stored empty, provided the completion begins with
+  exactly that body. An attempt whose input the completion does not repeat,
+  or whose call never came back, keeps its text, and the transcripts under
+  `raw/` keep both. Capture (in either order of arrival), `reindex` and the
+  V21 migration apply the same rule; on a copy of that install's backup,
+  observation text fell by 34%. A long input no longer counts twice in a
+  counted page's "Truncated bodies". The migration does not VACUUM: the
+  database file keeps its size and reuses the pages it freed.
 - **The handoff arrives as a note to check, not an order to follow.** Recall
   and the decisions listed at session start already came framed as stored
   evidence that may be out of date; the handoff itself, at session start and

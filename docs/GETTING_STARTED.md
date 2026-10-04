@@ -898,11 +898,29 @@ who can reach it.
 anamnesis handoff        # peek, without consuming it
 anamnesis sessions       # recent sessions, newest first
 anamnesis show-page bootstrap/repository.md
+anamnesis show-session <id> --kind assistant-message   # what a session said
 ```
 
 Peeking never consumes it: looking is what a person does, claiming is what a
 starting session does, and conflating the two would mean checking on a note
 costs the next session its context.
+
+A page's `source_session` names the session it was written from, and
+`show-session` (or `memory_read_session`, for an agent) reads what that session
+captured, 20 events at a time, rather than what its summary kept. A message
+that was never captured or was cut at capture says so; see
+[Reading captured session sources](SESSION-SOURCES.md).
+
+An agent whose harness runs no hooks and no MCP server never receives the
+handoff. The same continuation can be written to a file instead, without
+claiming it, and handed over however that agent reads files:
+
+```bash
+anamnesis brief --out durum.md
+anamnesis brief --workstream auth-refactor --out auth.md
+```
+
+See [A portable continuation file](PORTABLE-BRIEF.md) for what goes in it.
 
 A note that is wrong — written from a bad model reply, or about work that was
 abandoned — can be thrown away instead:
@@ -1223,7 +1241,10 @@ log line, so read it when `doctor` keeps naming the same pages.
 anything.** Every vector is stored beside the name of the model that produced
 it, because two models put vectors in unrelated spaces and cosine similarity
 between them is a number with no meaning. Pages embedded by the old model are
-simply not consulted until `anamnesis reindex` writes new ones.
+simply not consulted until `anamnesis reindex` writes new ones. The old model's
+rows stay in the index after that; `doctor` names them once the server says
+which model it uses, and `anamnesis vectors prune` lists them and, with
+`--apply`, removes them ([details](VECTOR-MAINTENANCE.md)).
 
 **Pages written before you turned it on have no vector**, and nothing
 backfills them on its own. One command does:
