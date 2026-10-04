@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Store a completed tool call's input once in the SQLite index. V21 clears
+  an attempt's body only when a completion in the same session, with the same
+  call identifier, repeats it exactly as a prefix. Unmatched attempts and
+  differing inputs keep their text; rows and raw transcripts remain intact.
+  Capture in either arrival order, migration and reindex apply the same rule.
+  A settled attempt no longer counts as a second truncated body. Freed SQLite
+  pages are reused; migration does not shrink the database file with VACUUM.
+
 ### Fixed
 - **`rename` no longer takes another process's commits out of the wiki's
   history.** Every write commits onto HEAD as it is at that moment, since
