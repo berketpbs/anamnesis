@@ -38,6 +38,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file is downloaded under a temporary name and renamed into place; when the
   write or the rename failed, the temporary copy stayed in `models/`.
 
+### Security
+- **A page an agent writes is redacted before it is kept.** Capture redacts
+  every event, but `memory_write_page`, `memory_patch_page` and the CLI's
+  `write-page` and `patch-page` stored what they were given: a key pasted
+  into a title, body, entity or abstract went into the wiki's git history,
+  the index and the request to the embedder. They now apply the same rules
+  first, and a path or `supersedes` holding a credential is refused without
+  the error repeating it. `doctor` reports wiki pages that hold something
+  today's rules mask; `anamnesis redact` names them, and older versions stay
+  in git history and backups until they are rewritten or deleted.
+
 ## [1.2.1] - 2026-10-01
 
 Until this release one thing in memory reached a model without being asked for:

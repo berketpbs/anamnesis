@@ -152,6 +152,13 @@ pub struct Symptoms {
     /// never reaches what came before it. This is the count of what it did not
     /// reach.
     pub stored_secrets: anamnesis_store::Redaction,
+    /// Wiki pages, in every project, holding something today's redaction
+    /// rules mask.
+    ///
+    /// A page is not an observation: no rewrite of the index reaches it, and a
+    /// page an agent wrote by hand was never redacted at all before page
+    /// writes were.
+    pub wiki_secrets: usize,
 }
 
 /// What one recent session shows about what capture is producing.
@@ -202,9 +209,27 @@ pub fn diagnose(symptoms: &Symptoms) -> Vec<Finding> {
 /// Silent when nothing does: redaction working is the ordinary case, and a line
 /// saying so on every run is a line people learn to skip.
 fn judge_stored_secrets(symptoms: &Symptoms) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    // Named, not rewritten: `redact --apply` masks the spool and the index,
+    // and leaves a page — and the history git keeps of it — to a person.
+    if symptoms.wiki_secrets > 0 {
+        findings.push(Finding {
+            severity: Severity::Exposed,
+            subject: "wiki secrets",
+            verdict: format!(
+                "{} wiki page(s) hold something today's redaction rules mask",
+                symptoms.wiki_secrets
+            ),
+            remedy: Some(
+                "`anamnesis redact` names them; edit or forget each one, then revoke the \
+                 credential, since git history and older backups keep the version that held it"
+                    .to_owned(),
+            ),
+        });
+    }
     let found = &symptoms.stored_secrets;
     if found.changed == 0 {
-        return Vec::new();
+        return findings;
     }
     let rules = found
         .rules
@@ -212,7 +237,7 @@ fn judge_stored_secrets(symptoms: &Symptoms) -> Vec<Finding> {
         .map(|(rule, count)| format!("{rule} ×{count}"))
         .collect::<Vec<_>>()
         .join(", ");
-    vec![Finding {
+    findings.push(Finding {
         severity: Severity::Exposed,
         subject: "secrets",
         verdict: format!(
@@ -225,7 +250,8 @@ fn judge_stored_secrets(symptoms: &Symptoms) -> Vec<Finding> {
              revoke the credential, since it has been on disk, and replace older backups"
                 .to_owned(),
         ),
-    }]
+    });
+    findings
 }
 
 /// Whether every page that should carry a vector carries a whole one.
@@ -826,6 +852,10 @@ pub fn cmd_doctor(server: &str, data_dir: Option<PathBuf>) -> anyhow::Result<()>
     symptoms.sections_compared = Tuning::default().vector_sections;
     symptoms.stored_secrets =
         store.redact_observations(&anamnesis_core::sanitize::Redactor::new(), false)?;
+    symptoms.wiki_secrets =
+        crate::redact::scan_wiki(&data.wiki(), &anamnesis_core::sanitize::Redactor::new())
+            .0
+            .len();
 
     println!("🩺 Anamnesis Memory Diagnosis");
     println!();
@@ -1683,6 +1713,35 @@ mod tests {
         assert!(
             diagnose(&symptoms).iter().all(|f| f.subject != "secrets"),
             "silent when nothing is stored"
+        );
+    }
+
+    /// A page holding a key is as exposed as an observation, and observations
+    /// that are all clean say nothing about it.
+    #[test]
+    fn a_secret_in_a_wiki_page_is_exposed_even_when_observations_are_clean() {
+        let mut symptoms = wired("claude-code", &EVERY_MOMENT);
+        symptoms.wiki_secrets = 1;
+
+        let findings = diagnose(&symptoms);
+        let first = findings.first().expect("a finding");
+        assert_eq!(first.severity, Severity::Exposed);
+        assert_eq!(first.subject, "wiki secrets");
+        assert!(
+            first
+                .remedy
+                .as_deref()
+                .is_some_and(|r| r.contains("edit or forget") && !r.contains("--apply")),
+            "redact --apply does not rewrite pages: {:?}",
+            first.remedy
+        );
+
+        symptoms.wiki_secrets = 0;
+        assert!(
+            diagnose(&symptoms)
+                .iter()
+                .all(|f| f.subject != "wiki secrets"),
+            "silent when no page holds one"
         );
     }
 
