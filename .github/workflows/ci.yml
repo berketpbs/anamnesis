@@ -385,11 +385,16 @@ jobs:
           brew install berketpbs/anamnesis/anamnesis
           brew test berketpbs/anamnesis/anamnesis
           anamnesis --version
-          # The path a hook would be wired to. Printed rather than asserted
-          # until the release this formula names carries the fix that keeps
-          # it at brew's link instead of the versioned Cellar directory.
+          # The path a hook is wired to has to be brew's link. The versioned
+          # Cellar directory behind it is removed by the next `brew upgrade`,
+          # which is what v1.1.1 wrote on Linux and v1.2.1 no longer does.
           repo=$(mktemp -d) && cd "$repo" && git init -q
-          anamnesis install-hooks | grep -m1 'hook --agent'
+          hook=$(anamnesis install-hooks | grep -m1 'hook --agent')
+          echo "$hook"
+          if ! grep -qF "\\\"$(brew --prefix)/bin/anamnesis\\\" hook" <<< "$hook"; then
+            echo "::error::hooks name the binary somewhere other than $(brew --prefix)/bin, which brew upgrade can remove"
+            exit 1
+          fi
 
       - name: Install from the bucket
         if: runner.os == 'Windows'
