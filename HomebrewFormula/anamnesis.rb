@@ -1,9 +1,9 @@
-# Written by packaging/render.sh from the v1.1.1 release's SHA256SUMS.
+# Written by packaging/render.sh from the v1.2.1 release's SHA256SUMS.
 # Edit the script, not this file: the next release rewrites it.
 class Anamnesis < Formula
   desc "Long-term memory for AI coding agents"
   homepage "https://github.com/berketpbs/anamnesis"
-  version "1.1.1"
+  version "1.2.1"
   license "MIT"
 
   # The counterpart of the bucket's checkver: what brew livecheck and
@@ -16,25 +16,23 @@ class Anamnesis < Formula
 
   on_macos do
     on_arm do
-      url "https://github.com/berketpbs/anamnesis/releases/download/v1.1.1/anamnesis-v1.1.1-aarch64-apple-darwin.tar.gz"
-      sha256 "9cf0277aa74bdd97bd6e86e42eb61276ef9102c60b85e87dcd028889ceb579aa"
+      url "https://github.com/berketpbs/anamnesis/releases/download/v1.2.1/anamnesis-v1.2.1-aarch64-apple-darwin.tar.gz"
+      sha256 "a7500856f8851993811b64826324bcbd3337c3cf589b33f5c8ca3239cbb65983"
     end
     on_intel do
-      url "https://github.com/berketpbs/anamnesis/releases/download/v1.1.1/anamnesis-v1.1.1-x86_64-apple-darwin.tar.gz"
-      sha256 "ec559580bd38c00e5d117422ff5cc31fe3096693988e23bdca88d48698833c0a"
+      url "https://github.com/berketpbs/anamnesis/releases/download/v1.2.1/anamnesis-v1.2.1-x86_64-apple-darwin.tar.gz"
+      sha256 "7f0a10ee3df8d314ae83dd843a000845436d81a8a01e1e608e510c4cf11bcd37"
     end
   end
 
   on_linux do
     on_arm do
-      # No Linux arm64 build is published. Without this the formula simply has
-      # no url on such a machine, and brew fails on the missing url rather than
-      # on the reason for it.
-      depends_on arch: :x86_64
+      url "https://github.com/berketpbs/anamnesis/releases/download/v1.2.1/anamnesis-v1.2.1-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "57c2a05b18d4d9e027015c5911e8a27aa56bb0a4d48d79ba959dc2f9906cc616"
     end
     on_intel do
-      url "https://github.com/berketpbs/anamnesis/releases/download/v1.1.1/anamnesis-v1.1.1-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "bb4d24cad2a8aef656bd929ed9366e40bba1a23aa03dea754d17fd030028349d"
+      url "https://github.com/berketpbs/anamnesis/releases/download/v1.2.1/anamnesis-v1.2.1-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "123ec4299b6ee915ba6850b14afded6ce4dd82f374aa0d73a9b782a682de93fe"
     end
   end
 
