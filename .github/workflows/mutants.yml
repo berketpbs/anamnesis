@@ -22,7 +22,7 @@ jobs:
       matrix:
         shard: [0, 1, 2]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants@27.1.0
@@ -35,7 +35,7 @@ jobs:
           --file crates/anamnesis-store/src/ops.rs
       - name: Preserve survivors and test output
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mutants-${{ matrix.shard }}
           path: mutants.out
