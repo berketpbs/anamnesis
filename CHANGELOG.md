@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.2.1] - 2026-10-01
+## [1.2.1] - 2026-10-06
 
 Until this release one thing in memory reached a model without being asked for:
 the handoff, delivered once at the start of a session, saying what the session
