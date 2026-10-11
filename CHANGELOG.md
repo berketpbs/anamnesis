@@ -64,6 +64,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged.
 
 ### Fixed
+- **The index's write-ahead log shrinks back after a burst.** SQLite reuses
+  `anamnesis.db-wal` instead of truncating it, so the file stayed as large as
+  the biggest backlog it had ever held: while another process (the server, an
+  MCP server, a CLI command) holds an old snapshot, checkpoints wait and the
+  log grows. On a seven-week install the index was 40 MB and the log beside it
+  another 23 MB. The log is now cut back to 4 MiB by the first commit after a
+  completed checkpoint.
 - **`rename` no longer takes another process's commits out of the wiki's
   history.** Every write commits onto HEAD as it is at that moment, since
   2026-09-09, when a server committing the index it had read that morning
