@@ -88,6 +88,19 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 /// How long a blocked writer waits before giving up.
 const BUSY_TIMEOUT_MS: u32 = 5_000;
 
+/// How large the write-ahead log may stay on disk once a checkpoint has
+/// moved its contents into the database.
+///
+/// SQLite reuses the `-wal` file rather than shrinking it, so without a limit
+/// the file stays as large as the biggest burst it ever held. Checkpoints run
+/// every 1,000 pages, about 4 MiB, but a reader holding an old snapshot (the
+/// server, an MCP process and a CLI command each open their own connection)
+/// makes them wait, and the log grows meanwhile. On the machine this was
+/// written for, the index was 40 MB and `anamnesis.db-wal` beside it another
+/// 23 MB, and the log would have stayed that size. With the limit, the first
+/// commit after a completed checkpoint cuts it back to the normal size.
+const JOURNAL_SIZE_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
+
 /// An open SQLite index.
 pub struct Store {
     conn: Mutex<Connection>,
@@ -114,6 +127,12 @@ impl Store {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.pragma_update(None, "cache_size", -64_000)?;
+        // Like `journal_mode`, this answers with the value it settled on.
+        conn.query_row(
+            &format!("PRAGMA journal_size_limit = {JOURNAL_SIZE_LIMIT_BYTES}"),
+            [],
+            |_| Ok(()),
+        )?;
         conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS.into()))?;
 
         Ok(Self {
@@ -569,5 +588,40 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM projects", [], |row| row.get(0))
             .expect("count");
         assert_eq!(projects, 1);
+    }
+
+    #[test]
+    fn the_write_ahead_log_shrinks_back_after_a_burst() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("anamnesis.db");
+        let wal = dir.path().join("anamnesis.db-wal");
+        let store = Store::open(&path).expect("open");
+        let conn = store.connection();
+        conn.execute("CREATE TABLE ballast (body BLOB NOT NULL)", [])
+            .expect("create");
+
+        // One transaction three times the size of the limit, as a long
+        // session's events arriving while a reader holds the log open.
+        conn.execute(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 4000)
+             INSERT INTO ballast SELECT zeroblob(4000) FROM n",
+            [],
+        )
+        .expect("burst");
+        let burst = std::fs::metadata(&wal).expect("wal after burst").len();
+        assert!(
+            burst > 3 * JOURNAL_SIZE_LIMIT_BYTES,
+            "the burst should have grown the log well past the limit, it is {burst} bytes"
+        );
+
+        // The commit above ran the automatic checkpoint; the next write
+        // starts the log over, and its commit is where the file is cut.
+        conn.execute("INSERT INTO ballast VALUES (x'00')", [])
+            .expect("small write");
+        let after = std::fs::metadata(&wal).expect("wal after").len();
+        assert!(
+            after <= JOURNAL_SIZE_LIMIT_BYTES,
+            "the log stayed at {after} bytes after a checkpoint, over the {JOURNAL_SIZE_LIMIT_BYTES}-byte limit"
+        );
     }
 }
