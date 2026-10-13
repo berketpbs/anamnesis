@@ -67,7 +67,7 @@ jobs:
             native: true
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # rust-toolchain.toml pins the version, the same way the CI workflow
       # leaves it alone; only the target has to be added.
@@ -203,7 +203,7 @@ jobs:
               ;;
           esac
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: anamnesis-${{ matrix.target }}
           path: |
@@ -221,7 +221,7 @@ jobs:
     name: release notes
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           sparse-checkout: |
             CHANGELOG.md
@@ -255,7 +255,7 @@ jobs:
           } >> notes.md
           echo "$(wc -l < notes.md) lines of notes for $tag"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-notes
           path: notes.md
@@ -283,13 +283,13 @@ jobs:
             runner: ubuntu-24.04-arm
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       # A dispatched run builds both architectures and pushes neither, the
       # same rehearsal the binaries get.
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         if: startsWith(github.ref, 'refs/tags/')
         with:
           registry: ghcr.io
@@ -298,7 +298,7 @@ jobs:
 
       - name: Build
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: ${{ matrix.platform }}
@@ -318,7 +318,7 @@ jobs:
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: startsWith(github.ref, 'refs/tags/')
         with:
           name: digest-${{ strategy.job-index }}
@@ -336,15 +336,15 @@ jobs:
     permissions:
       packages: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: digests
           pattern: digest-*
           merge-multiple: true
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -385,13 +385,13 @@ jobs:
       # depend on artifacts it never opens: v1.0.0 built four binaries and two
       # images, then failed here because two buildx build records would not
       # come down.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           pattern: anamnesis-*
           merge-multiple: true
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: release-notes
 
@@ -408,7 +408,7 @@ jobs:
       # workflow, commit and tag that built it, through GitHub's own signing
       # service, and `gh attestation verify <archive> --repo berketpbs/anamnesis`
       # checks it on any machine. No key is kept here, and it costs nothing.
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             dist/*.tar.gz
@@ -452,11 +452,11 @@ jobs:
     steps:
       # On a tag, main: the branch this pushes is for a pull request into it.
       # On a dispatched run, the branch being rehearsed.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ startsWith(github.ref, 'refs/tags/') && 'main' || github.ref }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           pattern: anamnesis-*
